@@ -2,6 +2,7 @@ use crate::settings::controllers::SettingsView;
 use gpui::*;
 
 use gpui_component::{
+    ActiveTheme, Icon, IconName, Sizable, Size, Theme, ThemeMode,
     button::Button,
     group_box::GroupBoxVariant,
     h_flex,
@@ -10,7 +11,7 @@ use gpui_component::{
         NumberFieldOptions, RenderOptions, SettingField, SettingFieldElement, SettingGroup,
         SettingItem, SettingPage, Settings,
     },
-    v_flex, ActiveTheme, Icon, IconName, Sizable, Size, Theme, ThemeMode,
+    v_flex,
 };
 
 impl Render for SettingsView {
@@ -20,11 +21,12 @@ impl Render for SettingsView {
         Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
-            .pages(vec![SettingPage::new("General")
-                .resettable(true)
-                .default_open(true)
-                .groups(vec![SettingGroup::new().title("Appearance").items(
-                    vec![SettingItem::new(
+            .pages(vec![
+                SettingPage::new("General")
+                    .resettable(true)
+                    .default_open(true)
+                    .groups(vec![SettingGroup::new().title("Appearance").items(
+                        vec![SettingItem::new(
                         "Dark Mode",
                         SettingField::switch(
                             |cx: &App| cx.theme().mode.is_dark(),
@@ -36,11 +38,13 @@ impl Render for SettingsView {
                                 };
                                 Theme::global_mut(cx).mode = mode;
                                 Theme::change(mode, None, cx);
+                                cx.refresh_windows();
                             },
                         )
                         .default_value(false),
                     )
                     .description("Switch between light and dark themes.")],
-                )])])
+                    )]),
+            ])
     }
 }
