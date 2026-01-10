@@ -1,8 +1,9 @@
 use gpui::*;
+use gpui_component::Root;
 
 // Global state to track the settings window handle
 pub struct GlobalSettingsWindow {
-    handle: Option<WindowHandle<SettingsView>>,
+    handle: Option<WindowHandle<Root>>,
 }
 
 impl Default for GlobalSettingsWindow {
@@ -64,7 +65,8 @@ impl SettingsView {
         };
 
         if let Ok(window_handle) = cx.open_window(options, |window, cx| {
-            cx.new(|cx| SettingsView::new(window, cx))
+            let view = cx.new(|cx| SettingsView::new(window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
         }) {
             println!(
                 "Stored window handle (window_id: {:?})",
