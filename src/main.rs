@@ -28,6 +28,9 @@ fn main() {
         // Initialize the theme
         init(cx);
 
+        // Initialize general settings
+        cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
+
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
 
