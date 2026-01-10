@@ -50,6 +50,7 @@ impl Render for SettingsView {
                                     |cx: &App| cx.global::<GeneralSettingsModel>().font_size,
                                     |val: f64, cx: &mut App| {
                                         cx.global_mut::<GeneralSettingsModel>().font_size = val;
+                                        cx.refresh_windows();
                                     },
                                 )
                                 .default_value(14.0),
