@@ -1,4 +1,4 @@
-use crate::controllers::ChattyApp;
+use crate::chatty::controllers::ChattyApp;
 use gpui::*;
 
 impl Render for ChattyApp {

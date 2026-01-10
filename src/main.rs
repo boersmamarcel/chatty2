@@ -1,10 +1,10 @@
 use gpui::*;
 use gpui_component::*;
 
-mod controllers;
-mod views;
+mod chatty;
+mod settings;
 
-use controllers::ChattyApp;
+use chatty::ChattyApp;
 
 fn main() {
     let app = Application::new();
