@@ -2,12 +2,12 @@ use gpui::Global;
 
 #[derive(Clone)]
 pub struct GeneralSettingsModel {
-    pub font_size: f64,
-    pub line_height: f64,
+    pub font_size: f32,
+    pub line_height: f32,
 }
 
 impl GeneralSettingsModel {
-    pub fn new(font_size: f64, line_height: f64) -> Self {
+    pub fn new(font_size: f32, line_height: f32) -> Self {
         Self {
             font_size,
             line_height,

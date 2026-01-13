@@ -47,9 +47,10 @@ impl Render for SettingsView {
                                         max: 32.0,
                                         ..Default::default()
                                     },
-                                    |cx: &App| cx.global::<GeneralSettingsModel>().font_size,
+                                    |cx: &App| cx.global::<GeneralSettingsModel>().font_size.into(),
                                     |val: f64, cx: &mut App| {
-                                        cx.global_mut::<GeneralSettingsModel>().font_size = val;
+                                        cx.global_mut::<GeneralSettingsModel>().font_size =
+                                            val as f32;
                                         cx.refresh_windows();
                                     },
                                 )
@@ -64,9 +65,12 @@ impl Render for SettingsView {
                                         max: 48.0,
                                         ..Default::default()
                                     },
-                                    |cx: &App| cx.global::<GeneralSettingsModel>().line_height,
+                                    |cx: &App| {
+                                        cx.global::<GeneralSettingsModel>().line_height.into()
+                                    },
                                     |val: f64, cx: &mut App| {
-                                        cx.global_mut::<GeneralSettingsModel>().line_height = val;
+                                        cx.global_mut::<GeneralSettingsModel>().line_height =
+                                            val as f32;
                                     },
                                 )
                                 .default_value(20.0),
