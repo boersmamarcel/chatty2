@@ -31,6 +31,9 @@ fn main() {
         // Initialize general settings
         cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
 
+        // Initialize providers model
+        cx.set_global(settings::models::providers_model::ProviderModel::new());
+
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
 
