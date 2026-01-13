@@ -19,79 +19,79 @@ pub fn providers_page() -> SettingPage {
 fn create_openai_group() -> SettingGroup {
     create_provider_group(
         "OpenAI",
-        "Configure OpenAI API access",
+        "Configure OpenAI API access - GPT-4, GPT-3.5, ChatGPT, DALL-E",
         ProviderType::OpenAI,
-        "Enter your OpenAI API key (starts with sk-)",
+        "Enter your OpenAI API key (starts with sk-) for GPT models",
     )
 }
 
 fn create_anthropic_group() -> SettingGroup {
     create_provider_group(
         "Anthropic (Claude)",
-        "Configure Anthropic API access",
+        "Configure Anthropic API access - Claude 3.5 Sonnet, Claude 3 Opus, Claude 3 Haiku",
         ProviderType::Anthropic,
-        "Enter your Anthropic API key (starts with sk-ant-)",
+        "Enter your Anthropic API key (starts with sk-ant-) for Claude models",
     )
 }
 
 fn create_gemini_group() -> SettingGroup {
     create_provider_group(
         "Google Gemini",
-        "Configure Google Gemini API access",
+        "Configure Google Gemini API access - Gemini Pro, Gemini Ultra, Google AI",
         ProviderType::Gemini,
-        "Enter your Google AI API key",
+        "Enter your Google AI API key for Gemini models",
     )
 }
 
 fn create_cohere_group() -> SettingGroup {
     create_provider_group(
         "Cohere",
-        "Configure Cohere API access",
+        "Configure Cohere API access - Command R, Command R+, embeddings",
         ProviderType::Cohere,
-        "Enter your Cohere API key",
+        "Enter your Cohere API key for Command models",
     )
 }
 
 fn create_perplexity_group() -> SettingGroup {
     create_provider_group(
         "Perplexity",
-        "Configure Perplexity API access",
+        "Configure Perplexity API access - online search-powered AI responses",
         ProviderType::Perplexity,
-        "Enter your Perplexity API key",
+        "Enter your Perplexity API key for search-enhanced responses",
     )
 }
 
 fn create_xai_group() -> SettingGroup {
     create_provider_group(
         "xAI",
-        "Configure xAI (Grok) API access",
+        "Configure xAI (Grok) API access - Grok models by Elon Musk",
         ProviderType::XAI,
-        "Enter your xAI API key",
+        "Enter your xAI API key for Grok models",
     )
 }
 
 fn create_azure_openai_group() -> SettingGroup {
     create_provider_group(
         "Azure OpenAI",
-        "Configure Azure OpenAI API access",
+        "Configure Azure OpenAI API access - Enterprise GPT-4, GPT-3.5 on Microsoft Azure",
         ProviderType::AzureOpenAI,
-        "Enter your Azure OpenAI API key",
+        "Enter your Azure OpenAI API key for enterprise deployments",
     )
 }
 
 fn create_huggingface_group() -> SettingGroup {
     create_provider_group(
         "HuggingFace",
-        "Configure HuggingFace API access",
+        "Configure HuggingFace API access - open-source models, Inference API",
         ProviderType::HuggingFace,
-        "Enter your HuggingFace API token",
+        "Enter your HuggingFace API token for model access",
     )
 }
 
 fn create_ollama_group() -> SettingGroup {
     SettingGroup::new()
         .title("Ollama")
-        .description("Configure local Ollama instance")
+        .description("Configure local Ollama instance - run LLaMA, Mistral, Mixtral locally")
         .items(vec![
             SettingItem::new(
                 "Base URL",
