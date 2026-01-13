@@ -1,10 +1,23 @@
 use gpui::*;
 use gpui_component::*;
 
-mod controllers;
-mod views;
+mod chatty;
+mod settings;
 
-use controllers::ChattyApp;
+use chatty::ChattyApp;
+use settings::SettingsView;
+
+actions!(chatty, [OpenSettings]);
+
+fn register_actions(cx: &mut App) {
+    // Register open settings action
+    println!("Action registered");
+    cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None)]);
+    cx.on_action(|_: &OpenSettings, cx: &mut App| {
+        println!("Action triggered");
+        SettingsView::open_or_focus_settings_window(cx);
+    });
+}
 
 fn main() {
     let app = Application::new();
@@ -14,6 +27,15 @@ fn main() {
 
         // Initialize the theme
         init(cx);
+
+        // Initialize general settings
+        cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
+
+        // Initialize global settings window state
+        cx.set_global(settings::controllers::GlobalSettingsWindow::default());
+
+        // register actions
+        register_actions(cx);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
