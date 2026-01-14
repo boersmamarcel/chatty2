@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::persistence_error::ProviderPersistenceError;
-use super::providers_store::ProviderConfig;
+use crate::settings::models::providers_store::ProviderConfig;
 
 pub type RepositoryResult<T> = Result<T, ProviderPersistenceError>;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

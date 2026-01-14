@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::persistence_error::ProviderPersistenceError;
-use super::providers_store::{ProviderConfig, ProviderType};
+use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
