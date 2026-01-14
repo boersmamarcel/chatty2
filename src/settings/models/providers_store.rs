@@ -1,14 +1,17 @@
 use gpui::Global;
 use rig::client::{Nothing, ProviderClient};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderType {
     OpenAI,
     Anthropic,
     Gemini,
     Cohere,
     Perplexity,
+    #[serde(rename = "xai")]
     XAI,
     AzureOpenAI,
     HuggingFace,
@@ -35,12 +38,15 @@ impl ProviderType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub name: String,
     pub provider_type: ProviderType,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_config: HashMap<String, String>,
 }
 

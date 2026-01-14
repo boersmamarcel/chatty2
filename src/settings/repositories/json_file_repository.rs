@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use super::persistence_error::ProviderPersistenceError;
 use super::provider_repository::{BoxFuture, ProviderRepository, RepositoryResult};
-use super::serializable_provider::SerializableProviderConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
 pub struct JsonFileRepository {
@@ -50,14 +49,10 @@ impl ProviderRepository for JsonFileRepository {
                 .await
                 .map_err(ProviderPersistenceError::IoError)?;
 
-            let configs: Vec<SerializableProviderConfig> = serde_json::from_str(&contents)
+            let configs: Vec<ProviderConfig> = serde_json::from_str(&contents)
                 .map_err(ProviderPersistenceError::SerializationError)?;
 
-            // Convert from serializable to runtime format
-            configs
-                .into_iter()
-                .map(|c| c.try_into())
-                .collect::<Result<Vec<_>, _>>()
+            Ok(configs)
         })
     }
 
@@ -72,11 +67,8 @@ impl ProviderRepository for JsonFileRepository {
                     .map_err(ProviderPersistenceError::IoError)?;
             }
 
-            // Convert to serializable format
-            let serializable: Vec<SerializableProviderConfig> =
-                providers.into_iter().map(|c| c.into()).collect();
-
-            let json = serde_json::to_string_pretty(&serializable)
+            // Serialize directly to JSON
+            let json = serde_json::to_string_pretty(&providers)
                 .map_err(ProviderPersistenceError::SerializationError)?;
 
             // Write atomically using temp file + rename
