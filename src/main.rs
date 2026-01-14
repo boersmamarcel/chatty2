@@ -6,8 +6,19 @@ mod settings;
 
 use chatty::ChattyApp;
 use settings::SettingsView;
+use settings::models::{JsonFileRepository, ProviderPersistenceCoordinator};
+use std::sync::Arc;
 
 actions!(chatty, [OpenSettings]);
+
+// Global persistence coordinator
+lazy_static::lazy_static! {
+    static ref PERSISTENCE_COORDINATOR: ProviderPersistenceCoordinator = {
+        let repo = JsonFileRepository::new()
+            .expect("Failed to initialize provider repository");
+        ProviderPersistenceCoordinator::new(Arc::new(repo))
+    };
+}
 
 fn register_actions(cx: &mut App) {
     // Register open settings action
@@ -31,8 +42,17 @@ fn main() {
         // Initialize general settings
         cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
 
-        // Initialize providers model
-        cx.set_global(settings::models::providers_model::ProviderModel::new());
+        // Initialize providers model - load from disk
+        let providers = PERSISTENCE_COORDINATOR
+            .load_providers_blocking()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to load providers: {}, using empty list", e);
+                Vec::new()
+            });
+
+        let mut model = settings::models::ProviderModel::new();
+        model.replace_all(providers);
+        cx.set_global(model);
 
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());

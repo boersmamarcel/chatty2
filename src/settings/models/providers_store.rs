@@ -189,3 +189,20 @@ impl Default for ProviderModel {
         Self::new()
     }
 }
+
+impl ProviderModel {
+    /// Take a snapshot of current state (for rollback)
+    pub fn snapshot(&self) -> Vec<ProviderConfig> {
+        self.providers.clone()
+    }
+
+    /// Restore from a snapshot
+    pub fn restore(&mut self, snapshot: Vec<ProviderConfig>) {
+        self.providers = snapshot;
+    }
+
+    /// Replace all providers (used when loading from disk)
+    pub fn replace_all(&mut self, providers: Vec<ProviderConfig>) {
+        self.providers = providers;
+    }
+}
