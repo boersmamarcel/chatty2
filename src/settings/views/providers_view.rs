@@ -114,7 +114,7 @@ fn create_ollama_group() -> SettingGroup {
         ])
 }
 
-// Generic helper to create a provider group with API key and Base URL
+// Generic helper to create a provider group with API key (only shows API key, not base URL)
 fn create_provider_group(
     title: &'static str,
     description: &'static str,
@@ -122,9 +122,7 @@ fn create_provider_group(
     api_key_description: &'static str,
 ) -> SettingGroup {
     let provider_type_for_api = provider_type.clone();
-    let provider_type_for_api_set = provider_type.clone();
-    let provider_type_for_url = provider_type.clone();
-    let provider_type_for_url_set = provider_type;
+    let provider_type_for_api_set = provider_type;
 
     SettingGroup::new()
         .title(title)
@@ -152,28 +150,6 @@ fn create_provider_group(
                 ),
             )
             .description(api_key_description),
-            SettingItem::new(
-                "Base URL",
-                SettingField::input(
-                    move |cx: &App| {
-                        cx.global::<ProviderModel>()
-                            .providers()
-                            .iter()
-                            .find(|p| p.provider_type == provider_type_for_url)
-                            .and_then(|p| p.base_url.clone())
-                            .unwrap_or_default()
-                            .into()
-                    },
-                    move |val: SharedString, cx: &mut App| {
-                        update_provider_base_url(
-                            cx,
-                            provider_type_for_url_set.clone(),
-                            val.to_string(),
-                        );
-                    },
-                ),
-            )
-            .description("Optional: Custom API endpoint"),
         ])
 }
 
@@ -201,24 +177,6 @@ fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_key:
     }
 
     cx.refresh_windows();
-}
-
-// Helper function to update provider base URL
-fn update_provider_base_url(cx: &mut App, provider_type: ProviderType, base_url: String) {
-    let model = cx.global_mut::<ProviderModel>();
-
-    if let Some(provider) = model
-        .providers_mut()
-        .iter_mut()
-        .find(|p| p.provider_type == provider_type)
-    {
-        if base_url.is_empty() {
-            provider.base_url = None;
-        } else {
-            provider.base_url = Some(base_url);
-        }
-        cx.refresh_windows();
-    }
 }
 
 // Special helper for Ollama (doesn't require API key)
