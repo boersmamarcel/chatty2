@@ -33,7 +33,4 @@ pub trait ProviderRepository: Send + Sync + 'static {
 
     /// Save all provider configurations to storage
     fn save_all(&self, providers: Vec<ProviderConfig>) -> BoxFuture<'static, RepositoryResult<()>>;
-
-    /// Get the storage path (for diagnostics)
-    fn storage_path(&self) -> String;
 }

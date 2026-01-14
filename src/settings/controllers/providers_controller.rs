@@ -49,44 +49,6 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
     });
 }
 
-/// Update provider base URL
-pub fn update_provider_base_url(cx: &mut App, provider_type: ProviderType, base_url: String) {
-    // 1. Take snapshot BEFORE any changes (for potential rollback)
-    let _snapshot = cx.global::<ProviderModel>().snapshot();
-
-    // 2. Apply update immediately (optimistic update)
-    let model = cx.global_mut::<ProviderModel>();
-
-    if let Some(provider) = model
-        .providers_mut()
-        .iter_mut()
-        .find(|p| p.provider_type == provider_type)
-    {
-        if base_url.is_empty() {
-            provider.base_url = None;
-        } else {
-            provider.base_url = Some(base_url);
-        }
-    }
-
-    // 3. Get updated state for async save
-    let providers_to_save = cx.global::<ProviderModel>().providers().to_vec();
-
-    // 4. Refresh UI immediately (optimistic update)
-    cx.refresh_windows();
-
-    // 5. Save async with error handling
-    let repo = PROVIDER_REPOSITORY.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async move {
-            if let Err(e) = repo.save_all(providers_to_save).await {
-                eprintln!("Failed to save providers: {}", e);
-            }
-        });
-    });
-}
-
 /// Update or create Ollama provider (doesn't require API key)
 pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
     // 1. Take snapshot BEFORE any changes (for potential rollback)

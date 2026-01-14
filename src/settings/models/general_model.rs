@@ -6,15 +6,6 @@ pub struct GeneralSettingsModel {
     pub line_height: f32,
 }
 
-impl GeneralSettingsModel {
-    pub fn new(font_size: f32, line_height: f32) -> Self {
-        Self {
-            font_size,
-            line_height,
-        }
-    }
-}
-
 impl Default for GeneralSettingsModel {
     fn default() -> Self {
         Self {

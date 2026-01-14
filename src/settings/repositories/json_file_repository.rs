@@ -21,11 +21,6 @@ impl JsonFileRepository {
 
         Ok(Self { file_path })
     }
-
-    /// Create repository with custom path (for testing)
-    pub fn with_path(file_path: PathBuf) -> Self {
-        Self { file_path }
-    }
 }
 
 impl ProviderRepository for JsonFileRepository {
@@ -76,9 +71,5 @@ impl ProviderRepository for JsonFileRepository {
 
             Ok(())
         })
-    }
-
-    fn storage_path(&self) -> String {
-        self.file_path.to_string_lossy().to_string()
     }
 }
