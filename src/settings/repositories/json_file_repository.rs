@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use super::persistence_error::ProviderPersistenceError;
 use super::provider_repository::{BoxFuture, ProviderRepository, RepositoryResult};
-use super::providers_store::ProviderConfig;
 use super::serializable_provider::SerializableProviderConfig;
+use crate::settings::models::providers_store::ProviderConfig;
 
 pub struct JsonFileRepository {
     file_path: PathBuf,

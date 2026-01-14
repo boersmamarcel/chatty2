@@ -6,17 +6,17 @@ mod settings;
 
 use chatty::ChattyApp;
 use settings::SettingsView;
-use settings::models::{JsonFileRepository, ProviderPersistenceCoordinator};
+use settings::repositories::{JsonFileRepository, ProviderRepository};
 use std::sync::Arc;
 
 actions!(chatty, [OpenSettings]);
 
-// Global persistence coordinator
+// Global repository
 lazy_static::lazy_static! {
-    static ref PERSISTENCE_COORDINATOR: ProviderPersistenceCoordinator = {
+    static ref PROVIDER_REPOSITORY: Arc<dyn ProviderRepository> = {
         let repo = JsonFileRepository::new()
             .expect("Failed to initialize provider repository");
-        ProviderPersistenceCoordinator::new(Arc::new(repo))
+        Arc::new(repo)
     };
 }
 
@@ -43,12 +43,19 @@ fn main() {
         cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
 
         // Initialize providers model - load from disk
-        let providers = PERSISTENCE_COORDINATOR
-            .load_providers_blocking()
+        let providers = {
+            let repo = PROVIDER_REPOSITORY.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move { repo.load_all().await })
+            })
+            .join()
+            .unwrap()
             .unwrap_or_else(|e| {
                 eprintln!("Failed to load providers: {}, using empty list", e);
                 Vec::new()
-            });
+            })
+        };
 
         let mut model = settings::models::ProviderModel::new();
         model.replace_all(providers);
