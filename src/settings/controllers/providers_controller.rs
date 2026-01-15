@@ -38,7 +38,8 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
     // 5. Save async with error handling
     let repo = PROVIDER_REPOSITORY.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create tokio runtime for saving providers");
         rt.block_on(async move {
             if let Err(e) = repo.save_all(providers_to_save).await {
                 eprintln!("Failed to save providers: {}", e);
@@ -85,7 +86,8 @@ pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
     // 5. Save async with error handling
     let repo = PROVIDER_REPOSITORY.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create tokio runtime for saving Ollama provider");
         rt.block_on(async move {
             if let Err(e) = repo.save_all(providers_to_save).await {
                 eprintln!("Failed to save providers: {}", e);
