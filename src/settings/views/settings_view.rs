@@ -1,5 +1,7 @@
 use crate::settings::controllers::SettingsView;
-use crate::settings::models::general_model::GeneralSettingsModel;
+use crate::settings::models::GeneralSettingsModel;
+use crate::settings::views::providers_view::providers_page;
+
 use gpui::*;
 
 use gpui_component::{
@@ -78,6 +80,7 @@ impl Render for SettingsView {
                             .description("Adjust the line height for text."),
                         ]),
                     ]),
+                providers_page(),
             ])
     }
 }
