@@ -1,3 +1,4 @@
+pub mod general_settings_controller;
 pub mod providers_controller;
 pub mod settings_controller;
 
