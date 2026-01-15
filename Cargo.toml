@@ -7,3 +7,11 @@ edition = "2024"
 gpui = "0.2.2"
 gpui-component = "0.5.0"
 gpui-component-assets = "0.5.0"
+rig-core = "0.28.0"
+
+# Persistence layer dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "fs", "macros"] }
+dirs = "5.0"
+lazy_static = "1.4"
