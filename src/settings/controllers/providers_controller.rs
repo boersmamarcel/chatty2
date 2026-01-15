@@ -1,6 +1,6 @@
 use crate::PROVIDER_REPOSITORY;
 use crate::settings::models::providers_store::{ProviderConfig, ProviderModel, ProviderType};
-use gpui::App;
+use gpui::{App, AsyncApp};
 
 /// Update or create a provider with an API key
 pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_key: String) {
@@ -32,18 +32,15 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
-    let repo = PROVIDER_REPOSITORY.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new()
-            .expect("Failed to create tokio runtime for saving providers");
-        rt.block_on(async move {
-            if let Err(e) = repo.save_all(providers_to_save).await {
-                eprintln!("Failed to save providers: {}", e);
-                eprintln!("Changes will be lost on restart - please try again");
-            }
-        });
-    });
+    // 4. Save async with error handling using GPUI's async runtime
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = PROVIDER_REPOSITORY.clone();
+        if let Err(e) = repo.save_all(providers_to_save).await {
+            eprintln!("Failed to save providers: {}", e);
+            eprintln!("Changes will be lost on restart - please try again");
+        }
+    })
+    .detach();
 }
 
 /// Update or create Ollama provider (doesn't require API key)
@@ -76,16 +73,13 @@ pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
-    let repo = PROVIDER_REPOSITORY.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new()
-            .expect("Failed to create tokio runtime for saving Ollama provider");
-        rt.block_on(async move {
-            if let Err(e) = repo.save_all(providers_to_save).await {
-                eprintln!("Failed to save providers: {}", e);
-                eprintln!("Changes will be lost on restart - please try again");
-            }
-        });
-    });
+    // 4. Save async with error handling using GPUI's async runtime
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = PROVIDER_REPOSITORY.clone();
+        if let Err(e) = repo.save_all(providers_to_save).await {
+            eprintln!("Failed to save providers: {}", e);
+            eprintln!("Changes will be lost on restart - please try again");
+        }
+    })
+    .detach();
 }
