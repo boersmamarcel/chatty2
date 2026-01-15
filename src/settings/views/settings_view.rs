@@ -1,4 +1,5 @@
 use crate::settings::controllers::SettingsView;
+use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
 use crate::settings::views::providers_view::providers_page;
 
@@ -51,9 +52,9 @@ impl Render for SettingsView {
                                     },
                                     |cx: &App| cx.global::<GeneralSettingsModel>().font_size.into(),
                                     |val: f64, cx: &mut App| {
-                                        cx.global_mut::<GeneralSettingsModel>().font_size =
-                                            val as f32;
-                                        cx.refresh_windows();
+                                        general_settings_controller::update_font_size(
+                                            cx, val as f32,
+                                        );
                                     },
                                 )
                                 .default_value(14.0),
@@ -71,8 +72,9 @@ impl Render for SettingsView {
                                         cx.global::<GeneralSettingsModel>().line_height.into()
                                     },
                                     |val: f64, cx: &mut App| {
-                                        cx.global_mut::<GeneralSettingsModel>().line_height =
-                                            val as f32;
+                                        general_settings_controller::update_line_height(
+                                            cx, val as f32,
+                                        );
                                     },
                                 )
                                 .default_value(20.0),

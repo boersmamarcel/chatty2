@@ -6,16 +6,25 @@ mod settings;
 
 use chatty::ChattyApp;
 use settings::SettingsView;
-use settings::repositories::{JsonFileRepository, ProviderRepository};
+use settings::repositories::{
+    GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
+    ProviderRepository,
+};
 use std::sync::Arc;
 
 actions!(chatty, [OpenSettings]);
 
-// Global repository
+// Global repositories
 lazy_static::lazy_static! {
     static ref PROVIDER_REPOSITORY: Arc<dyn ProviderRepository> = {
         let repo = JsonFileRepository::new()
             .expect("Failed to initialize provider repository");
+        Arc::new(repo)
+    };
+
+    static ref GENERAL_SETTINGS_REPOSITORY: Arc<dyn GeneralSettingsRepository> = {
+        let repo = GeneralSettingsJsonRepository::new()
+            .expect("Failed to initialize general settings repository");
         Arc::new(repo)
     };
 }
@@ -39,8 +48,27 @@ fn main() {
         // Initialize the theme
         init(cx);
 
-        // Initialize general settings
+        // Initialize general settings with default - will be populated async
         cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
+
+        // Load general settings asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = GENERAL_SETTINGS_REPOSITORY.clone();
+            match repo.load().await {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        cx.set_global(settings);
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    eprintln!("Failed to load general settings: {}", e);
+                    eprintln!("Using default settings");
+                    // Already initialized with defaults above, so no action needed
+                }
+            }
+        })
+        .detach();
 
         // Initialize providers model with empty state - will be populated async
         cx.set_global(settings::models::ProviderModel::new());
