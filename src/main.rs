@@ -42,27 +42,30 @@ fn main() {
         // Initialize general settings
         cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
 
-        // Initialize providers model - load from disk
-        let providers = {
-            let repo = PROVIDER_REPOSITORY.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async move { repo.load_all().await })
-            })
-            .join()
-            .unwrap()
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to load providers: {}, using empty list", e);
-                Vec::new()
-            })
-        };
-
-        let mut model = settings::models::ProviderModel::new();
-        model.replace_all(providers);
-        cx.set_global(model);
+        // Initialize providers model with empty state - will be populated async
+        cx.set_global(settings::models::ProviderModel::new());
 
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
+
+        // Load providers asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = PROVIDER_REPOSITORY.clone();
+            match repo.load_all().await {
+                Ok(providers) => {
+                    cx.update(|cx| {
+                        cx.update_global::<settings::models::ProviderModel, _>(|model, _cx| {
+                            model.replace_all(providers);
+                        });
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    eprintln!("Failed to load providers: {}", e);
+                }
+            }
+        })
+        .detach();
 
         // register actions
         register_actions(cx);
