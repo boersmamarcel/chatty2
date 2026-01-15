@@ -6,13 +6,42 @@ use crate::settings::views::providers_view::providers_page;
 use gpui::*;
 
 use gpui_component::{
-    ActiveTheme, Sizable, Size, Theme, ThemeMode,
+    ActiveTheme, Sizable, Size, Theme, ThemeMode, ThemeRegistry,
     group_box::GroupBoxVariant,
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Build theme options list - extract unique base names
+        let all_themes: Vec<SharedString> =
+            ThemeRegistry::global(cx).themes().keys().cloned().collect();
+
+        // Extract base theme names (remove " Light" and " Dark" suffixes)
+        let mut theme_bases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for theme_name in &all_themes {
+            let name_str = theme_name.to_string();
+            let base_name = if name_str.ends_with(" Light") {
+                name_str.strip_suffix(" Light").unwrap().to_string()
+            } else if name_str.ends_with(" Dark") {
+                name_str.strip_suffix(" Dark").unwrap().to_string()
+            } else {
+                name_str
+            };
+            theme_bases.insert(base_name);
+        }
+
+        // Convert to sorted Vec for dropdown
+        let mut theme_options: Vec<(SharedString, SharedString)> = theme_bases
+            .into_iter()
+            .map(|name| {
+                let shared: SharedString = name.clone().into();
+                (shared.clone(), shared)
+            })
+            .collect();
+
+        theme_options.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+
         Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
@@ -22,6 +51,24 @@ impl Render for SettingsView {
                     .default_open(true)
                     .groups(vec![
                         SettingGroup::new().title("Appearance").items(vec![
+                            SettingItem::new(
+                                "Theme",
+                                SettingField::dropdown(
+                                    theme_options.clone(),
+                                    |cx: &App| {
+                                        cx.global::<GeneralSettingsModel>()
+                                            .theme_name
+                                            .clone()
+                                            .unwrap_or_else(|| "Ayu".to_string())
+                                            .into()
+                                    },
+                                    |val: SharedString, cx: &mut App| {
+                                        general_settings_controller::update_theme(cx, val);
+                                    },
+                                )
+                                .default_value(SharedString::from("Ayu")),
+                            )
+                            .description("Select a theme family (use Dark Mode toggle for light/dark variant)"),
                             SettingItem::new(
                                 "Dark Mode",
                                 SettingField::switch(
@@ -34,12 +81,24 @@ impl Render for SettingsView {
                                         };
                                         Theme::global_mut(cx).mode = mode;
                                         Theme::change(mode, None, cx);
-                                        cx.refresh_windows();
+
+                                        // Re-apply current theme with new mode
+                                        let base_theme = cx
+                                            .global::<GeneralSettingsModel>()
+                                            .theme_name
+                                            .clone()
+                                            .unwrap_or_else(|| "Ayu".to_string());
+                                        general_settings_controller::update_theme(
+                                            cx,
+                                            base_theme.into(),
+                                        );
                                     },
                                 )
                                 .default_value(false),
                             )
-                            .description("Switch between light and dark themes."),
+                            .description(
+                                "Switch between light and dark variants of the selected theme.",
+                            ),
                         ]),
                         SettingGroup::new().title("Text Settings").items(vec![
                             SettingItem::new(
