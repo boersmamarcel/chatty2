@@ -33,8 +33,7 @@ impl ProviderRepository for JsonFileRepository {
                 return Ok(Vec::new());
             }
 
-            let contents = tokio::fs::read_to_string(&path)
-                .await
+            let contents = std::fs::read_to_string(&path)
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
             let configs: Vec<ProviderConfig> = serde_json::from_str(&contents)
@@ -50,8 +49,7 @@ impl ProviderRepository for JsonFileRepository {
         Box::pin(async move {
             // Ensure directory exists first
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
+                std::fs::create_dir_all(parent)
                     .map_err(|e| RepositoryError::IoError(e.to_string()))?;
             }
 
@@ -61,12 +59,10 @@ impl ProviderRepository for JsonFileRepository {
 
             // Write atomically using temp file + rename
             let temp_path = path.with_extension("json.tmp");
-            tokio::fs::write(&temp_path, json)
-                .await
+            std::fs::write(&temp_path, json)
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-            tokio::fs::rename(&temp_path, &path)
-                .await
+            std::fs::rename(&temp_path, &path)
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
             Ok(())
