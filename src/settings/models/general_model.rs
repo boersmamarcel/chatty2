@@ -1,6 +1,7 @@
 use gpui::Global;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GeneralSettingsModel {
     pub font_size: f32,
     pub line_height: f32,
