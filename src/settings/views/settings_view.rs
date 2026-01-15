@@ -7,7 +7,9 @@ use gpui::*;
 
 use gpui_component::{
     ActiveTheme, Sizable, Size, Theme, ThemeMode, ThemeRegistry,
+    button::Button,
     group_box::GroupBoxVariant,
+    menu::{DropdownMenu, PopupMenuItem},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
 
@@ -53,20 +55,44 @@ impl Render for SettingsView {
                         SettingGroup::new().title("Appearance").items(vec![
                             SettingItem::new(
                                 "Theme",
-                                SettingField::dropdown(
-                                    theme_options.clone(),
-                                    |cx: &App| {
-                                        cx.global::<GeneralSettingsModel>()
-                                            .theme_name
-                                            .clone()
-                                            .unwrap_or_else(|| "Ayu".to_string())
-                                            .into()
-                                    },
-                                    |val: SharedString, cx: &mut App| {
-                                        general_settings_controller::update_theme(cx, val);
-                                    },
-                                )
-                                .default_value(SharedString::from("Ayu")),
+                                SettingField::render(move |_options, _window, cx| {
+                                    let theme_opts = theme_options.clone();
+                                    let current_theme = cx
+                                        .global::<GeneralSettingsModel>()
+                                        .theme_name
+                                        .clone()
+                                        .unwrap_or_else(|| "Ayu".to_string());
+
+                                    let current_label = current_theme.clone();
+
+                                    Button::new("theme-dropdown")
+                                        .label(current_label)
+                                        .dropdown_caret(true)
+                                        .outline()
+                                        .w_full()
+                                        .dropdown_menu_with_anchor(Corner::BottomLeft, move |menu, _, _| {
+                                            let mut scrollable_menu = menu.max_h(px(300.0)).scrollable(true);
+
+                                            for (value, label) in &theme_opts {
+                                                let is_selected = value.to_string() == current_theme;
+                                                let val_clone = value.clone();
+
+                                                scrollable_menu = scrollable_menu.item(
+                                                    PopupMenuItem::new(label.clone())
+                                                        .checked(is_selected)
+                                                        .on_click(move |_, _, cx| {
+                                                            general_settings_controller::update_theme(
+                                                                cx,
+                                                                val_clone.clone(),
+                                                            );
+                                                        }),
+                                                );
+                                            }
+
+                                            scrollable_menu
+                                        })
+                                        .into_any_element()
+                                }),
                             )
                             .description("Select a theme family (use Dark Mode toggle for light/dark variant)"),
                             SettingItem::new(
