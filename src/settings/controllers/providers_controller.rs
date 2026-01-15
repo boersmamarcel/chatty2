@@ -4,10 +4,7 @@ use gpui::App;
 
 /// Update or create a provider with an API key
 pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_key: String) {
-    // 1. Take snapshot BEFORE any changes (for potential rollback)
-    let _snapshot = cx.global::<ProviderModel>().snapshot();
-
-    // 2. Apply update immediately (optimistic update)
+    // 1. Apply update immediately (optimistic update)
     let model = cx.global_mut::<ProviderModel>();
 
     // Find existing provider
@@ -29,13 +26,13 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
         model.add_provider(config);
     }
 
-    // 3. Get updated state for async save
+    // 2. Get updated state for async save
     let providers_to_save = cx.global::<ProviderModel>().providers().to_vec();
 
-    // 4. Refresh UI immediately (optimistic update)
+    // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 5. Save async with error handling
+    // 4. Save async with error handling
     let repo = PROVIDER_REPOSITORY.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()
@@ -43,8 +40,7 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
         rt.block_on(async move {
             if let Err(e) = repo.save_all(providers_to_save).await {
                 eprintln!("Failed to save providers: {}", e);
-                // TODO: Send rollback message to UI thread
-                // For now, just log the error - user will see old state on restart
+                eprintln!("Changes will be lost on restart - please try again");
             }
         });
     });
@@ -52,10 +48,7 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
 
 /// Update or create Ollama provider (doesn't require API key)
 pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
-    // 1. Take snapshot BEFORE any changes (for potential rollback)
-    let _snapshot = cx.global::<ProviderModel>().snapshot();
-
-    // 2. Apply update immediately (optimistic update)
+    // 1. Apply update immediately (optimistic update)
     let model = cx.global_mut::<ProviderModel>();
 
     // Find existing Ollama provider
@@ -77,13 +70,13 @@ pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
         model.add_provider(config);
     }
 
-    // 3. Get updated state for async save
+    // 2. Get updated state for async save
     let providers_to_save = cx.global::<ProviderModel>().providers().to_vec();
 
-    // 4. Refresh UI immediately (optimistic update)
+    // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 5. Save async with error handling
+    // 4. Save async with error handling
     let repo = PROVIDER_REPOSITORY.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()
@@ -91,8 +84,7 @@ pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
         rt.block_on(async move {
             if let Err(e) = repo.save_all(providers_to_save).await {
                 eprintln!("Failed to save providers: {}", e);
-                // TODO: Send rollback message to UI thread
-                // For now, just log the error - user will see old state on restart
+                eprintln!("Changes will be lost on restart - please try again");
             }
         });
     });
