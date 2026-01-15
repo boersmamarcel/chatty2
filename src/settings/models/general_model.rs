@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct GeneralSettingsModel {
     pub font_size: f32,
     pub line_height: f32,
+    pub theme_name: Option<String>,
 }
 
 impl Default for GeneralSettingsModel {
@@ -12,6 +13,7 @@ impl Default for GeneralSettingsModel {
         Self {
             font_size: 14.0,
             line_height: 20.0,
+            theme_name: None,
         }
     }
 }

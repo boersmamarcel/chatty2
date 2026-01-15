@@ -1,6 +1,7 @@
 use crate::GENERAL_SETTINGS_REPOSITORY;
 use crate::settings::models::GeneralSettingsModel;
-use gpui::{App, AsyncApp};
+use gpui::{App, AsyncApp, SharedString};
+use gpui_component::{ActiveTheme, Theme, ThemeRegistry};
 
 /// Update font size and persist to disk
 pub fn update_font_size(cx: &mut App, font_size: f32) {
@@ -44,4 +45,47 @@ pub fn update_line_height(cx: &mut App, line_height: f32) {
         }
     })
     .detach();
+}
+
+/// Update selected theme (persistence automatic via observer)
+pub fn update_theme(cx: &mut App, base_theme_name: SharedString) {
+    // Determine full theme name based on current dark mode
+    let is_dark = cx.theme().mode.is_dark();
+    let full_theme_name = find_theme_variant(cx, &base_theme_name, is_dark);
+
+    // Apply theme - this will trigger the observer in init_themes()
+    if let Some(theme) = ThemeRegistry::global(cx)
+        .themes()
+        .get(&full_theme_name)
+        .cloned()
+    {
+        Theme::global_mut(cx).apply_config(&theme);
+        cx.refresh_windows();
+    } else {
+        eprintln!("Warning: Theme '{}' not found", full_theme_name);
+    }
+}
+
+/// Find the appropriate theme variant based on base name and dark mode
+fn find_theme_variant(cx: &App, base_name: &SharedString, is_dark: bool) -> SharedString {
+    let base_str = base_name.to_string();
+    let all_themes = ThemeRegistry::global(cx).themes();
+
+    // Try common patterns: "Base Dark", "Base Light", or just "Base"
+    let candidates = if is_dark {
+        vec![format!("{} Dark", base_str), base_str.clone()]
+    } else {
+        vec![format!("{} Light", base_str), base_str.clone()]
+    };
+
+    // Find first matching theme
+    for candidate in candidates {
+        let candidate_shared: SharedString = candidate.into();
+        if all_themes.contains_key(&candidate_shared) {
+            return candidate_shared;
+        }
+    }
+
+    // Fallback to base name
+    base_name.clone()
 }
