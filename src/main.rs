@@ -10,6 +10,7 @@ use settings::repositories::{
     GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
     ProviderRepository,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 
 actions!(chatty, [OpenSettings]);
@@ -27,6 +28,82 @@ lazy_static::lazy_static! {
             .expect("Failed to initialize general settings repository");
         Arc::new(repo)
     };
+}
+
+fn init_themes(cx: &mut App) {
+    // Just watch themes directory to load the registry
+    if let Err(err) = ThemeRegistry::watch_dir(PathBuf::from("./themes"), cx, |_cx| {
+        // Empty callback - just loading themes into registry
+    }) {
+        eprintln!("Failed to watch themes directory: {}", err);
+    }
+
+    // Observe theme changes and persist base theme name + dark mode to GeneralSettingsModel
+    // This will only trigger when user makes changes, not on initial load
+    cx.observe_global::<Theme>(|cx| {
+        let full_theme_name = cx.theme().theme_name().to_string();
+        let is_dark = cx.theme().mode.is_dark();
+
+        // Extract base theme name using shared utility
+        let base_theme_name = settings::utils::extract_base_theme_name(&full_theme_name);
+
+        // Update model with base name and dark mode
+        {
+            let settings = cx.global_mut::<settings::models::general_model::GeneralSettingsModel>();
+            settings.theme_name = Some(base_theme_name);
+            settings.dark_mode = Some(is_dark);
+        }
+
+        // Save async
+        let settings = cx
+            .global::<settings::models::general_model::GeneralSettingsModel>()
+            .clone();
+        cx.spawn(|_cx: &mut AsyncApp| async move {
+            let repo = GENERAL_SETTINGS_REPOSITORY.clone();
+            if let Err(e) = repo.save(settings).await {
+                eprintln!("Failed to save theme preference: {}", e);
+            }
+        })
+        .detach();
+    })
+    .detach();
+
+    cx.refresh_windows();
+}
+
+/// Apply theme from saved settings (called after settings are loaded from JSON)
+fn apply_theme_from_settings(cx: &mut App) {
+    let base_theme_name = cx
+        .global::<settings::models::general_model::GeneralSettingsModel>()
+        .theme_name
+        .clone()
+        .unwrap_or_else(|| "Ayu".to_string());
+
+    let is_dark = cx
+        .global::<settings::models::general_model::GeneralSettingsModel>()
+        .dark_mode
+        .unwrap_or(false);
+
+    // Find the appropriate theme variant using shared utility
+    let full_theme_name = settings::utils::find_theme_variant(cx, &base_theme_name, is_dark);
+
+    if let Some(theme) = ThemeRegistry::global(cx)
+        .themes()
+        .get(&full_theme_name)
+        .cloned()
+    {
+        // Set the mode first
+        let mode = if is_dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        };
+        Theme::global_mut(cx).mode = mode;
+
+        // Then apply the theme
+        Theme::global_mut(cx).apply_config(&theme);
+        cx.refresh_windows();
+    }
 }
 
 fn register_actions(cx: &mut App) {
@@ -51,13 +128,20 @@ fn main() {
         // Initialize general settings with default - will be populated async
         cx.set_global(settings::models::general_model::GeneralSettingsModel::default());
 
+        // Initialize theme system
+        init_themes(cx);
+
         // Load general settings asynchronously without blocking startup
         cx.spawn(async move |cx: &mut AsyncApp| {
             let repo = GENERAL_SETTINGS_REPOSITORY.clone();
             match repo.load().await {
                 Ok(settings) => {
                     cx.update(|cx| {
+                        // Update global settings
                         cx.set_global(settings);
+
+                        // Apply theme from loaded settings
+                        apply_theme_from_settings(cx);
                     })
                     .ok();
                 }

@@ -28,14 +28,26 @@ impl ProviderRepository for JsonFileRepository {
         let path = self.file_path.clone();
 
         Box::pin(async move {
-            // If file doesn't exist, return empty list (first run)
-            if !path.exists() {
+            // Check file existence on blocking pool
+            let exists = smol::unblock({
+                let path = path.clone();
+                move || path.exists()
+            })
+            .await;
+
+            if !exists {
                 return Ok(Vec::new());
             }
 
-            let contents = std::fs::read_to_string(&path)
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            // Read file on blocking pool
+            let contents = smol::unblock({
+                let path = path.clone();
+                move || std::fs::read_to_string(&path)
+            })
+            .await
+            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
+            // JSON parsing is CPU-bound, keep on async thread (it's fast)
             let configs: Vec<ProviderConfig> = serde_json::from_str(&contents)
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
@@ -47,23 +59,32 @@ impl ProviderRepository for JsonFileRepository {
         let path = self.file_path.clone();
 
         Box::pin(async move {
-            // Ensure directory exists first
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-            }
-
-            // Serialize directly to JSON
+            // JSON serialization is CPU-bound, keep on async thread (it's fast)
             let json = serde_json::to_string_pretty(&providers)
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
-            // Write atomically using temp file + rename
-            let temp_path = path.with_extension("json.tmp");
-            std::fs::write(&temp_path, json)
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            // All file I/O on blocking pool
+            smol::unblock({
+                let path = path.clone();
+                move || {
+                    // Create directory if needed
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+                    }
 
-            std::fs::rename(&temp_path, &path)
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+                    // Write atomically using temp file + rename
+                    let temp_path = path.with_extension("json.tmp");
+                    std::fs::write(&temp_path, &json)
+                        .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+
+                    std::fs::rename(&temp_path, &path)
+                        .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+
+                    Ok::<(), RepositoryError>(())
+                }
+            })
+            .await?;
 
             Ok(())
         })
