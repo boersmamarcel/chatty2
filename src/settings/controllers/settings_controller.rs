@@ -1,3 +1,4 @@
+use crate::settings::utils::get_all_base_theme_names;
 use gpui::*;
 use gpui_component::Root;
 
@@ -14,7 +15,10 @@ impl Default for GlobalSettingsWindow {
 
 impl Global for GlobalSettingsWindow {}
 
-pub struct SettingsView {}
+pub struct SettingsView {
+    /// Cached theme options (base theme names) to avoid recomputing on every render
+    pub cached_theme_options: Vec<(SharedString, SharedString)>,
+}
 
 impl SettingsView {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -25,7 +29,12 @@ impl SettingsView {
         })
         .detach();
 
-        Self {}
+        // Compute theme options once at initialization
+        let cached_theme_options = get_all_base_theme_names(cx);
+
+        Self {
+            cached_theme_options,
+        }
     }
 
     pub fn open_or_focus_settings_window(cx: &mut App) {

@@ -1,6 +1,8 @@
 use crate::GENERAL_SETTINGS_REPOSITORY;
 use crate::settings::models::GeneralSettingsModel;
-use gpui::{App, AsyncApp};
+use crate::settings::utils::find_theme_variant;
+use gpui::{App, AsyncApp, SharedString};
+use gpui_component::{ActiveTheme, Theme, ThemeRegistry};
 
 /// Update font size and persist to disk
 pub fn update_font_size(cx: &mut App, font_size: f32) {
@@ -44,4 +46,23 @@ pub fn update_line_height(cx: &mut App, line_height: f32) {
         }
     })
     .detach();
+}
+
+/// Update selected theme (persistence automatic via observer)
+pub fn update_theme(cx: &mut App, base_theme_name: SharedString) {
+    // Determine full theme name based on current dark mode
+    let is_dark = cx.theme().mode.is_dark();
+    let full_theme_name = find_theme_variant(cx, base_theme_name.as_ref(), is_dark);
+
+    // Apply theme - this will trigger the observer in init_themes()
+    if let Some(theme) = ThemeRegistry::global(cx)
+        .themes()
+        .get(&full_theme_name)
+        .cloned()
+    {
+        Theme::global_mut(cx).apply_config(&theme);
+        cx.refresh_windows();
+    } else {
+        eprintln!("Warning: Theme '{}' not found", full_theme_name);
+    }
 }

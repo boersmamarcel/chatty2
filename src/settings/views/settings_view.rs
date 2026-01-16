@@ -7,12 +7,17 @@ use gpui::*;
 
 use gpui_component::{
     ActiveTheme, Sizable, Size, Theme, ThemeMode,
+    button::Button,
     group_box::GroupBoxVariant,
+    menu::{DropdownMenu, PopupMenuItem},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // Use cached theme options instead of recomputing on every render
+        let theme_options = self.cached_theme_options.clone();
+
         Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
@@ -22,6 +27,48 @@ impl Render for SettingsView {
                     .default_open(true)
                     .groups(vec![
                         SettingGroup::new().title("Appearance").items(vec![
+                            SettingItem::new(
+                                "Theme",
+                                SettingField::render(move |_options, _window, cx| {
+                                    let theme_opts = theme_options.clone();
+                                    let current_theme = cx
+                                        .global::<GeneralSettingsModel>()
+                                        .theme_name
+                                        .clone()
+                                        .unwrap_or_else(|| "Ayu".to_string());
+
+                                    let current_label = current_theme.clone();
+
+                                    Button::new("theme-dropdown")
+                                        .label(current_label)
+                                        .dropdown_caret(true)
+                                        .outline()
+                                        .w_full()
+                                        .dropdown_menu_with_anchor(Corner::BottomLeft, move |menu, _, _| {
+                                            let mut scrollable_menu = menu.max_h(px(300.0)).scrollable(true);
+
+                                            for (value, label) in &theme_opts {
+                                                let is_selected = value.to_string() == current_theme;
+                                                let val_clone = value.clone();
+
+                                                scrollable_menu = scrollable_menu.item(
+                                                    PopupMenuItem::new(label.clone())
+                                                        .checked(is_selected)
+                                                        .on_click(move |_, _, cx| {
+                                                            general_settings_controller::update_theme(
+                                                                cx,
+                                                                val_clone.clone(),
+                                                            );
+                                                        }),
+                                                );
+                                            }
+
+                                            scrollable_menu
+                                        })
+                                        .into_any_element()
+                                }),
+                            )
+                            .description("Select a theme family (use Dark Mode toggle for light/dark variant)"),
                             SettingItem::new(
                                 "Dark Mode",
                                 SettingField::switch(
@@ -34,12 +81,24 @@ impl Render for SettingsView {
                                         };
                                         Theme::global_mut(cx).mode = mode;
                                         Theme::change(mode, None, cx);
-                                        cx.refresh_windows();
+
+                                        // Re-apply current theme with new mode
+                                        let base_theme = cx
+                                            .global::<GeneralSettingsModel>()
+                                            .theme_name
+                                            .clone()
+                                            .unwrap_or_else(|| "Ayu".to_string());
+                                        general_settings_controller::update_theme(
+                                            cx,
+                                            base_theme.into(),
+                                        );
                                     },
                                 )
                                 .default_value(false),
                             )
-                            .description("Switch between light and dark themes."),
+                            .description(
+                                "Switch between light and dark variants of the selected theme.",
+                            ),
                         ]),
                         SettingGroup::new().title("Text Settings").items(vec![
                             SettingItem::new(
