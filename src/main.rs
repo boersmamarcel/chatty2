@@ -44,14 +44,8 @@ fn init_themes(cx: &mut App) {
         let full_theme_name = cx.theme().theme_name().to_string();
         let is_dark = cx.theme().mode.is_dark();
 
-        // Extract base theme name (remove " Light" or " Dark" suffix)
-        let base_theme_name = if full_theme_name.ends_with(" Light") {
-            full_theme_name.strip_suffix(" Light").unwrap().to_string()
-        } else if full_theme_name.ends_with(" Dark") {
-            full_theme_name.strip_suffix(" Dark").unwrap().to_string()
-        } else {
-            full_theme_name
-        };
+        // Extract base theme name using shared utility
+        let base_theme_name = settings::utils::extract_base_theme_name(&full_theme_name);
 
         // Update model with base name and dark mode
         {
@@ -77,7 +71,6 @@ fn init_themes(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Helper function to find theme variant during initialization
 /// Apply theme from saved settings (called after settings are loaded from JSON)
 fn apply_theme_from_settings(cx: &mut App) {
     let base_theme_name = cx
@@ -91,40 +84,25 @@ fn apply_theme_from_settings(cx: &mut App) {
         .dark_mode
         .unwrap_or(false);
 
-    // Find the appropriate theme variant
-    let all_themes = ThemeRegistry::global(cx).themes();
-    let candidates = if is_dark {
-        vec![format!("{} Dark", base_theme_name), base_theme_name.clone()]
-    } else {
-        vec![
-            format!("{} Light", base_theme_name),
-            base_theme_name.clone(),
-        ]
-    };
+    // Find the appropriate theme variant using shared utility
+    let full_theme_name = settings::utils::find_theme_variant(cx, &base_theme_name, is_dark);
 
-    let mut full_theme_name: Option<SharedString> = None;
-    for candidate in candidates {
-        let candidate_shared: SharedString = candidate.into();
-        if all_themes.contains_key(&candidate_shared) {
-            full_theme_name = Some(candidate_shared);
-            break;
-        }
-    }
+    if let Some(theme) = ThemeRegistry::global(cx)
+        .themes()
+        .get(&full_theme_name)
+        .cloned()
+    {
+        // Set the mode first
+        let mode = if is_dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        };
+        Theme::global_mut(cx).mode = mode;
 
-    if let Some(theme_name) = full_theme_name {
-        if let Some(theme) = all_themes.get(&theme_name).cloned() {
-            // Set the mode first
-            let mode = if is_dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            };
-            Theme::global_mut(cx).mode = mode;
-
-            // Then apply the theme
-            Theme::global_mut(cx).apply_config(&theme);
-            cx.refresh_windows();
-        }
+        // Then apply the theme
+        Theme::global_mut(cx).apply_config(&theme);
+        cx.refresh_windows();
     }
 }
 
