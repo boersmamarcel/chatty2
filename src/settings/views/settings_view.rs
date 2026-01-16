@@ -6,7 +6,7 @@ use crate::settings::views::providers_view::providers_page;
 use gpui::*;
 
 use gpui_component::{
-    ActiveTheme, Sizable, Size, Theme, ThemeMode, ThemeRegistry,
+    ActiveTheme, Sizable, Size, Theme, ThemeMode,
     button::Button,
     group_box::GroupBoxVariant,
     menu::{DropdownMenu, PopupMenuItem},
@@ -14,35 +14,9 @@ use gpui_component::{
 };
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Build theme options list - extract unique base names
-        let all_themes: Vec<SharedString> =
-            ThemeRegistry::global(cx).themes().keys().cloned().collect();
-
-        // Extract base theme names (remove " Light" and " Dark" suffixes)
-        let mut theme_bases: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for theme_name in &all_themes {
-            let name_str = theme_name.to_string();
-            let base_name = if name_str.ends_with(" Light") {
-                name_str.strip_suffix(" Light").unwrap().to_string()
-            } else if name_str.ends_with(" Dark") {
-                name_str.strip_suffix(" Dark").unwrap().to_string()
-            } else {
-                name_str
-            };
-            theme_bases.insert(base_name);
-        }
-
-        // Convert to sorted Vec for dropdown
-        let mut theme_options: Vec<(SharedString, SharedString)> = theme_bases
-            .into_iter()
-            .map(|name| {
-                let shared: SharedString = name.clone().into();
-                (shared.clone(), shared)
-            })
-            .collect();
-
-        theme_options.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // Use cached theme options instead of recomputing on every render
+        let theme_options = self.cached_theme_options.clone();
 
         Settings::new("app-settings")
             .with_size(Size::default())
