@@ -169,8 +169,11 @@ fn main() {
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
 
-        // Initialize global model form window state
-        cx.set_global(settings::controllers::models_controller::GlobalModelFormWindow::default());
+        // Initialize global edit model ID state
+        cx.set_global(settings::controllers::models_controller::GlobalEditModelId::default());
+
+        // Initialize global models list view state
+        cx.set_global(settings::views::models_page::GlobalModelsListView::default());
 
         // Load providers asynchronously without blocking startup
         cx.spawn(async move |cx: &mut AsyncApp| {

@@ -7,7 +7,7 @@ use crate::settings::views::providers_view::providers_page;
 use gpui::*;
 
 use gpui_component::{
-    ActiveTheme, Sizable, Size, Theme, ThemeMode,
+    ActiveTheme, Root, Sizable, Size, Theme, ThemeMode,
     button::Button,
     group_box::GroupBoxVariant,
     menu::{DropdownMenu, PopupMenuItem},
@@ -15,11 +15,14 @@ use gpui_component::{
 };
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Use cached theme options instead of recomputing on every render
         let theme_options = self.cached_theme_options.clone();
+        let dialog_layer = Root::render_dialog_layer(window, cx);
 
-        Settings::new("app-settings")
+        div()
+            .size_full()
+            .child(Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
             .pages(vec![
@@ -144,6 +147,7 @@ impl Render for SettingsView {
                     ]),
                 models_page(),
                 providers_page(),
-            ])
+            ]))
+            .children(dialog_layer)
     }
 }
