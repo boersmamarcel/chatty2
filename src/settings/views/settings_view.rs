@@ -1,7 +1,7 @@
 use crate::settings::controllers::SettingsView;
 use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
-use crate::settings::views::models_page::models_page;
+use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
 
 use gpui::*;
@@ -145,7 +145,43 @@ impl Render for SettingsView {
                             .description("Adjust the line height for text."),
                         ]),
                     ]),
-                models_page(),
+                SettingPage::new("Models")
+                    .description("Configure AI models and their parameters")
+                    .resettable(false)
+                    .groups(vec![
+                        SettingGroup::new()
+                            .title("Models List")
+                            .description("All configured AI models")
+                            .items(vec![SettingItem::new(
+                                "models-list",
+                                SettingField::render(|_options, window, cx| {
+                                    // Get or create the global singleton view
+                                    let view = if let Some(existing_view) = cx.try_global::<GlobalModelsListView>() {
+                                        if let Some(view) = existing_view.view.clone() {
+                                            view
+                                        } else {
+                                            let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                            cx.set_global(GlobalModelsListView {
+                                                view: Some(new_view.clone()),
+                                            });
+                                            new_view
+                                        }
+                                    } else {
+                                        let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                        cx.set_global(GlobalModelsListView {
+                                            view: Some(new_view.clone()),
+                                        });
+                                        new_view
+                                    };
+
+                                    div()
+                                        .size_full()
+                                        .min_h(px(400.))
+                                        .child(view)
+                                        .into_any_element()
+                                }),
+                            )]),
+                    ]),
                 providers_page(),
             ]))
             .children(dialog_layer)
