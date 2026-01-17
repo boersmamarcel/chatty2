@@ -53,8 +53,7 @@ fn create_add_model_group() -> SettingGroup {
                     .label("+ Add Model")
                     .primary()
                     .on_click(|_, _, cx| {
-                        // TODO: Open modal for adding model
-                        println!("Add model clicked - modal to be implemented");
+                        models_controller::open_create_model_modal(cx);
                     })
                     .into_any_element()
             }),
@@ -116,10 +115,9 @@ fn create_provider_models_group(provider_type: ProviderType) -> SettingGroup {
                                                 .small()
                                                 .outline()
                                                 .on_click(move |_, _, cx| {
-                                                    // TODO: Open modal for editing model
-                                                    println!(
-                                                        "Edit model {} clicked - modal to be implemented",
-                                                        model_id
+                                                    models_controller::open_edit_model_modal(
+                                                        model_id.clone(),
+                                                        cx,
                                                     );
                                                 }),
                                         )
