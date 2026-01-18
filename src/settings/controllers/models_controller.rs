@@ -1,30 +1,10 @@
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
-use gpui::{App, AsyncApp, Global};
-
-// Global state to store the model ID to edit
-pub struct GlobalEditModelId {
-    pub model_id: Option<String>,
-}
-
-impl Default for GlobalEditModelId {
-    fn default() -> Self {
-        Self { model_id: None }
-    }
-}
-
-impl Global for GlobalEditModelId {}
+use gpui::{App, AsyncApp};
 
 /// Signal to open create model dialog (to be picked up by ModelsListView)
 pub fn open_create_model_modal(_cx: &mut App) {
     // This is now a no-op - the Add button directly opens the dialog
     // Kept for backwards compatibility during refactoring
-}
-
-/// Signal to open edit model dialog (to be picked up by ModelsListView)
-pub fn open_edit_model_modal(model_id: String, cx: &mut App) {
-    // Store the model ID globally so it can be picked up
-    cx.global_mut::<GlobalEditModelId>().model_id = Some(model_id);
-    cx.refresh_windows();
 }
 
 /// Create a new model
