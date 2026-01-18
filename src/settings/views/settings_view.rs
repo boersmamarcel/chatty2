@@ -153,7 +153,7 @@ impl Render for SettingsView {
                             .title("Models List")
                             .description("All configured AI models")
                             .items(vec![SettingItem::new(
-                                "models-list",
+                                "",
                                 SettingField::render(|_options, window, cx| {
                                     // Get or create the global singleton view
                                     let view = if let Some(existing_view) = cx.try_global::<GlobalModelsListView>() {

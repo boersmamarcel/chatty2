@@ -1,6 +1,6 @@
 use crate::settings::controllers::models_controller;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
-use crate::settings::models::providers_store::ProviderType;
+use crate::settings::models::providers_store::{ProviderModel, ProviderType};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Global, IntoElement, Render, Styled, Window, div,
     prelude::*, px,
@@ -11,7 +11,9 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     list::{List, ListDelegate, ListItem, ListState},
+    scroll::ScrollableElement,
     select::{Select, SelectState},
+    tab::{Tab, TabBar},
     v_flex,
 };
 
@@ -70,6 +72,10 @@ impl ModelsListView {
 
     fn show_add_model_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         println!("Opening Add Model dialog...");
+
+        // Track active tab (0 = Basic, 1 = Advanced)
+        let active_tab = std::rc::Rc::new(std::cell::Cell::new(0usize));
+
         // Create fresh input states for the dialog
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., GPT-4 Turbo"));
         let model_id_input =
@@ -84,17 +90,23 @@ impl ModelsListView {
         let max_tokens_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 4096"));
         let top_p_input = cx.new(|cx| InputState::new(window, cx).placeholder("0.0 - 1.0"));
 
-        let providers = vec![
-            "OpenAI".to_string(),
-            "Anthropic".to_string(),
-            "Gemini".to_string(),
-            "Cohere".to_string(),
-            "Perplexity".to_string(),
-            "XAI".to_string(),
-            "Azure OpenAI".to_string(),
-            "Hugging Face".to_string(),
-            "Ollama".to_string(),
-        ];
+        // Get configured providers from the global store
+        let providers: Vec<String> = cx
+            .global::<ProviderModel>()
+            .configured_providers()
+            .iter()
+            .map(|p| p.provider_type.display_name().to_string())
+            .collect();
+
+        // Handle empty provider list
+        if providers.is_empty() {
+            window.push_notification(
+                "Please configure at least one provider in Settings > Providers before adding models",
+                cx,
+            );
+            return;
+        }
+
         let provider_select =
             cx.new(|cx| SelectState::new(providers, Some(IndexPath::new(0)), window, cx));
 
@@ -109,164 +121,215 @@ impl ModelsListView {
                 .overlay_closable(true)
                 .w(px(600.))
                 .child(
-                    v_flex()
-                        .gap_3()
-                        .p_4()
+                    div()
+                        .id("add-model-form")
+                        .overflow_y_scrollbar()
+                        .max_h(px(350.))
                         .child(
                             v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Model Name *"))
-                                .child(Input::new(&name_input)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Provider *"))
-                                .child(Select::new(&provider_select)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Model Identifier *"))
-                                .child(Input::new(&model_id_input)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Temperature"))
-                                .child(Input::new(&temperature_input)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Preamble / System Prompt"))
-                                .child(Input::new(&preamble_input)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Max Tokens (optional)"))
-                                .child(Input::new(&max_tokens_input)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Top P (optional)"))
-                                .child(Input::new(&top_p_input)),
+                                .gap_3()
+                                .p_4()
+                                .child({
+                                    let active_tab = active_tab.clone();
+                                    TabBar::new("model-tabs")
+                                        .selected_index(active_tab.get())
+                                        .on_click({
+                                            let active_tab = active_tab.clone();
+                                            move |index, _, _| {
+                                                active_tab.set(*index);
+                                            }
+                                        })
+                                        .child(Tab::new().label("Basic"))
+                                        .child(Tab::new().label("Advanced"))
+                                })
+                                .child({
+                                    let current_tab = active_tab.get();
+                                    if current_tab == 0 {
+                                        // Basic tab
+                                        v_flex()
+                                            .gap_3()
+                                            .p_2()
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child("Model Name *"))
+                                                    .child(Input::new(&name_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child("Provider *"))
+                                                    .child(Select::new(&provider_select)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        div().text_sm().child("Model Identifier *"),
+                                                    )
+                                                    .child(Input::new(&model_id_input)),
+                                            )
+                                    } else {
+                                        // Advanced tab
+                                        v_flex()
+                                            .gap_3()
+                                            .p_2()
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child("Temperature"))
+                                                    .child(Input::new(&temperature_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .child("Preamble / System Prompt"),
+                                                    )
+                                                    .child(Input::new(&preamble_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .child("Max Tokens (optional)"),
+                                                    )
+                                                    .child(Input::new(&max_tokens_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        div().text_sm().child("Top P (optional)"),
+                                                    )
+                                                    .child(Input::new(&top_p_input)),
+                                            )
+                                    }
+                                })
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .justify_end()
+                                        .pt_4()
+                                        .child(Button::new("cancel").label("Cancel").on_click(
+                                            move |_, window, cx| {
+                                                window.close_dialog(cx);
+                                            },
+                                        ))
+                                        .child(
+                                            Button::new("save").primary().label("Save").on_click({
+                                                let view = view.clone();
+                                                let name_input = name_input.clone();
+                                                let model_id_input = model_id_input.clone();
+                                                let temperature_input = temperature_input.clone();
+                                                let preamble_input = preamble_input.clone();
+                                                let max_tokens_input = max_tokens_input.clone();
+                                                let top_p_input = top_p_input.clone();
+                                                let provider_select = provider_select.clone();
+
+                                                move |_, window, cx| {
+                                                    // Validate and collect form data
+                                                    let name = name_input.read(cx).value();
+                                                    let model_identifier =
+                                                        model_id_input.read(cx).value();
+                                                    let temperature_str =
+                                                        temperature_input.read(cx).value();
+                                                    let preamble = preamble_input.read(cx).value();
+                                                    let max_tokens_str =
+                                                        max_tokens_input.read(cx).value();
+                                                    let top_p_str = top_p_input.read(cx).value();
+                                                    let provider_index =
+                                                        provider_select.read(cx).selected_index(cx);
+
+                                                    // Validation
+                                                    if name.trim().is_empty() {
+                                                        window.push_notification(
+                                                            "Model name is required",
+                                                            cx,
+                                                        );
+                                                        return;
+                                                    }
+                                                    if model_identifier.trim().is_empty() {
+                                                        window.push_notification(
+                                                            "Model identifier is required",
+                                                            cx,
+                                                        );
+                                                        return;
+                                                    }
+
+                                                    let temperature = temperature_str
+                                                        .parse::<f32>()
+                                                        .unwrap_or(1.0)
+                                                        .clamp(0.0, 2.0);
+
+                                                    let max_tokens =
+                                                        if max_tokens_str.trim().is_empty() {
+                                                            None
+                                                        } else {
+                                                            max_tokens_str
+                                                                .parse::<i32>()
+                                                                .ok()
+                                                                .filter(|&v| v > 0)
+                                                        };
+
+                                                    let top_p = if top_p_str.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        top_p_str
+                                                            .parse::<f32>()
+                                                            .ok()
+                                                            .filter(|&v| (0.0..=1.0).contains(&v))
+                                                    };
+
+                                                    let all_providers: Vec<&str> = cx
+                                                        .global::<ProviderModel>()
+                                                        .configured_providers()
+                                                        .iter()
+                                                        .map(|p| p.provider_type.display_name())
+                                                        .collect();
+                                                    let provider_str = provider_index
+                                                        .and_then(|idx| {
+                                                            all_providers.get(idx.row).copied()
+                                                        })
+                                                        .unwrap_or(&"OpenAI");
+                                                    let provider_type =
+                                                        string_to_provider_type(provider_str);
+
+                                                    let config = ModelConfig {
+                                                        id: uuid::Uuid::new_v4().to_string(),
+                                                        name: name.trim().to_string(),
+                                                        provider_type,
+                                                        model_identifier: model_identifier
+                                                            .trim()
+                                                            .to_string(),
+                                                        temperature,
+                                                        preamble: preamble.to_string(),
+                                                        max_tokens,
+                                                        top_p,
+                                                        extra_params:
+                                                            std::collections::HashMap::new(),
+                                                    };
+
+                                                    // Save the model
+                                                    models_controller::create_model(config, cx);
+
+                                                    // Close dialog
+                                                    window.close_dialog(cx);
+
+                                                    // Refresh list
+                                                    view.update(cx, |view, cx| {
+                                                        view.refresh(cx);
+                                                    });
+                                                }
+                                            }),
+                                        ),
+                                ),
                         ),
                 )
-                .footer({
-                    let view = view.clone();
-                    let name_input = name_input.clone();
-                    let model_id_input = model_id_input.clone();
-                    let temperature_input = temperature_input.clone();
-                    let preamble_input = preamble_input.clone();
-                    let max_tokens_input = max_tokens_input.clone();
-                    let top_p_input = top_p_input.clone();
-                    let provider_select = provider_select.clone();
-
-                    move |_, _, _, _cx| {
-                        vec![
-                            Button::new("save").primary().label("Save").on_click({
-                                let view = view.clone();
-                                let name_input = name_input.clone();
-                                let model_id_input = model_id_input.clone();
-                                let temperature_input = temperature_input.clone();
-                                let preamble_input = preamble_input.clone();
-                                let max_tokens_input = max_tokens_input.clone();
-                                let top_p_input = top_p_input.clone();
-                                let provider_select = provider_select.clone();
-
-                                move |_, window, cx| {
-                                    // Validate and collect form data
-                                    let name = name_input.read(cx).value();
-                                    let model_identifier = model_id_input.read(cx).value();
-                                    let temperature_str = temperature_input.read(cx).value();
-                                    let preamble = preamble_input.read(cx).value();
-                                    let max_tokens_str = max_tokens_input.read(cx).value();
-                                    let top_p_str = top_p_input.read(cx).value();
-                                    let provider_index =
-                                        provider_select.read(cx).selected_index(cx);
-
-                                    // Validation
-                                    if name.trim().is_empty() {
-                                        window.push_notification("Model name is required", cx);
-                                        return;
-                                    }
-                                    if model_identifier.trim().is_empty() {
-                                        window
-                                            .push_notification("Model identifier is required", cx);
-                                        return;
-                                    }
-
-                                    let temperature = temperature_str
-                                        .parse::<f32>()
-                                        .unwrap_or(1.0)
-                                        .clamp(0.0, 2.0);
-
-                                    let max_tokens = if max_tokens_str.trim().is_empty() {
-                                        None
-                                    } else {
-                                        max_tokens_str.parse::<i32>().ok().filter(|&v| v > 0)
-                                    };
-
-                                    let top_p = if top_p_str.trim().is_empty() {
-                                        None
-                                    } else {
-                                        top_p_str
-                                            .parse::<f32>()
-                                            .ok()
-                                            .filter(|&v| (0.0..=1.0).contains(&v))
-                                    };
-
-                                    let providers = vec![
-                                        "OpenAI",
-                                        "Anthropic",
-                                        "Gemini",
-                                        "Cohere",
-                                        "Perplexity",
-                                        "XAI",
-                                        "Azure OpenAI",
-                                        "Hugging Face",
-                                        "Ollama",
-                                    ];
-                                    let provider_str = provider_index
-                                        .and_then(|idx| providers.get(idx.row))
-                                        .unwrap_or(&"OpenAI");
-                                    let provider_type = string_to_provider_type(provider_str);
-
-                                    let config = ModelConfig {
-                                        id: uuid::Uuid::new_v4().to_string(),
-                                        name: name.trim().to_string(),
-                                        provider_type,
-                                        model_identifier: model_identifier.trim().to_string(),
-                                        temperature,
-                                        preamble: preamble.to_string(),
-                                        max_tokens,
-                                        top_p,
-                                        extra_params: std::collections::HashMap::new(),
-                                    };
-
-                                    // Save the model
-                                    models_controller::create_model(config, cx);
-
-                                    // Close dialog
-                                    window.close_dialog(cx);
-
-                                    // Refresh list
-                                    view.update(cx, |view, cx| {
-                                        view.refresh(cx);
-                                    });
-                                }
-                            }),
-                            Button::new("cancel")
-                                .label("Cancel")
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                }),
-                        ]
-                    }
-                })
         });
     }
 }
@@ -294,22 +357,19 @@ impl Render for ModelsListView {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_2xl()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child("AI Models"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(
-                                        "Configure AI models with their parameters (temperature, preamble, etc.)",
-                                    ),
-                            ),
+                        v_flex().gap_1().child(
+                            div()
+                                .text_2xl()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child("AI Models"),
+                        ), // .child(
+                           //     div()
+                           //         .text_sm()
+                           //         .text_color(theme.muted_foreground)
+                           //         .child(
+                           //             "Configure AI models with their parameters (temperature, preamble, etc.)",
+                           //         ),
+                           // ),
                     )
                     .child(
                         Button::new("add-model-btn")
@@ -325,7 +385,8 @@ impl Render for ModelsListView {
                 // List container
                 div()
                     .flex_1()
-                    .child(List::new(&self.list_state).max_h(px(600.))),
+                    .w_full()
+                    .child(List::new(&self.list_state).max_h(px(600.)).min_w(px(500.))),
             )
     }
 }
