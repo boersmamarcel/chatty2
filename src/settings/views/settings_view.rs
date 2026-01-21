@@ -1,12 +1,13 @@
 use crate::settings::controllers::SettingsView;
 use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
+use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
 
 use gpui::*;
 
 use gpui_component::{
-    ActiveTheme, Sizable, Size, Theme, ThemeMode,
+    ActiveTheme, Root, Sizable, Size, Theme, ThemeMode,
     button::Button,
     group_box::GroupBoxVariant,
     menu::{DropdownMenu, PopupMenuItem},
@@ -14,11 +15,14 @@ use gpui_component::{
 };
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Use cached theme options instead of recomputing on every render
         let theme_options = self.cached_theme_options.clone();
+        let dialog_layer = Root::render_dialog_layer(window, cx);
 
-        Settings::new("app-settings")
+        div()
+            .size_full()
+            .child(Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
             .pages(vec![
@@ -141,7 +145,45 @@ impl Render for SettingsView {
                             .description("Adjust the line height for text."),
                         ]),
                     ]),
+                SettingPage::new("Models")
+                    .description("Configure AI models and their parameters")
+                    .resettable(false)
+                    .groups(vec![
+                        SettingGroup::new()
+                            .title("Models List")
+                            .description("All configured AI models")
+                            .items(vec![SettingItem::new(
+                                "",
+                                SettingField::render(|_options, window, cx| {
+                                    // Get or create the global singleton view
+                                    let view = if let Some(existing_view) = cx.try_global::<GlobalModelsListView>() {
+                                        if let Some(view) = existing_view.view.clone() {
+                                            view
+                                        } else {
+                                            let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                            cx.set_global(GlobalModelsListView {
+                                                view: Some(new_view.clone()),
+                                            });
+                                            new_view
+                                        }
+                                    } else {
+                                        let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                        cx.set_global(GlobalModelsListView {
+                                            view: Some(new_view.clone()),
+                                        });
+                                        new_view
+                                    };
+
+                                    div()
+                                        .size_full()
+                                        .min_h(px(400.))
+                                        .child(view)
+                                        .into_any_element()
+                                }),
+                            )]),
+                    ]),
                 providers_page(),
-            ])
+            ]))
+            .children(dialog_layer)
     }
 }

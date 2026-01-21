@@ -861,6 +861,7 @@ dependencies = [
  "serde_json",
  "smol",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
