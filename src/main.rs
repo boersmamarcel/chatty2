@@ -8,7 +8,7 @@ use chatty::ChattyApp;
 use settings::SettingsView;
 use settings::repositories::{
     GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
-    ProviderRepository,
+    JsonModelsRepository, ModelsRepository, ProviderRepository,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +26,12 @@ lazy_static::lazy_static! {
     static ref GENERAL_SETTINGS_REPOSITORY: Arc<dyn GeneralSettingsRepository> = {
         let repo = GeneralSettingsJsonRepository::new()
             .expect("Failed to initialize general settings repository");
+        Arc::new(repo)
+    };
+
+    static ref MODELS_REPOSITORY: Arc<dyn ModelsRepository> = {
+        let repo = JsonModelsRepository::new()
+            .expect("Failed to initialize models repository");
         Arc::new(repo)
     };
 }
@@ -157,8 +163,14 @@ fn main() {
         // Initialize providers model with empty state - will be populated async
         cx.set_global(settings::models::ProviderModel::new());
 
+        // Initialize models model with empty state - will be populated async
+        cx.set_global(settings::models::ModelsModel::new());
+
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
+
+        // Initialize global models list view state
+        cx.set_global(settings::views::models_page::GlobalModelsListView::default());
 
         // Load providers asynchronously without blocking startup
         cx.spawn(async move |cx: &mut AsyncApp| {
@@ -174,6 +186,25 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("Failed to load providers: {}", e);
+                }
+            }
+        })
+        .detach();
+
+        // Load models asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = MODELS_REPOSITORY.clone();
+            match repo.load_all().await {
+                Ok(models) => {
+                    cx.update(|cx| {
+                        cx.update_global::<settings::models::ModelsModel, _>(|model, _cx| {
+                            model.replace_all(models);
+                        });
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    eprintln!("Failed to load models: {}", e);
                 }
             }
         })

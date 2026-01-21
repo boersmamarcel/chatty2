@@ -67,9 +67,9 @@ impl SettingsView {
             window_decorations: None,
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: Point::default(),
-                size: size(px(700.0), px(600.0)),
+                size: size(px(850.0), px(600.0)),
             })),
-            window_min_size: Some(size(px(500.0), px(400.0))),
+            window_min_size: Some(size(px(700.0), px(400.0))),
             ..Default::default()
         };
 

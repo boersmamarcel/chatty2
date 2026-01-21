@@ -105,4 +105,17 @@ impl ProviderModel {
     pub fn replace_all(&mut self, providers: Vec<ProviderConfig>) {
         self.providers = providers;
     }
+
+    /// Get providers that are configured (have API key or are Ollama)
+    pub fn configured_providers(&self) -> Vec<&ProviderConfig> {
+        self.providers
+            .iter()
+            .filter(|p| {
+                // Include Ollama regardless of API key
+                matches!(p.provider_type, ProviderType::Ollama) ||
+                // Include others only if they have a non-empty API key
+                p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty())
+            })
+            .collect()
+    }
 }
