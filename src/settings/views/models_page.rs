@@ -659,14 +659,7 @@ impl Render for ModelsListView {
                                 .text_2xl()
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child("AI Models"),
-                        ), // .child(
-                           //     div()
-                           //         .text_sm()
-                           //         .text_color(theme.muted_foreground)
-                           //         .child(
-                           //             "Configure AI models with their parameters (temperature, preamble, etc.)",
-                           //         ),
-                           // ),
+                        ),
                     )
                     .child(
                         Button::new("add-model-btn")
