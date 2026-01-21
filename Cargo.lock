@@ -851,6 +851,7 @@ dependencies = [
 name = "chatty"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dirs 5.0.1",
  "gpui",
  "gpui-component",
@@ -861,6 +862,7 @@ dependencies = [
  "serde_json",
  "smol",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -872,6 +874,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
