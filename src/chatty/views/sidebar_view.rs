@@ -136,48 +136,52 @@ impl Render for SidebarView {
             )
             .child(
                 // Content: Conversation list
-                v_flex().id("content").flex_1().min_h_0().child(
-                    v_flex()
-                        .id("inner")
-                        .px_3()
-                        .gap_y_1()
-                        .when(self.is_collapsed, |this| this.p_2())
-                        .children(
-                            self.conversations
-                                .iter()
-                                .enumerate()
-                                .map(|(ix, (id, title))| {
-                                    let is_active = active_id.as_ref() == Some(id);
-                                    let on_select_clone = on_select.clone();
-                                    let on_delete_clone = on_delete.clone();
+                v_flex()
+                    .id("content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .id("inner")
+                            .px_3()
+                            .gap_y_1()
+                            .when(self.is_collapsed, |this| this.p_2())
+                            .children(
+                                self.conversations
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(ix, (id, title))| {
+                                        let is_active = active_id.as_ref() == Some(id);
+                                        let on_select_clone = on_select.clone();
+                                        let on_delete_clone = on_delete.clone();
 
-                                    div()
-                                        .id(ix)
-                                        .child(
-                                            ConversationItem::new(id.clone(), title.clone())
-                                                .active(is_active)
-                                                .collapsed(self.is_collapsed)
-                                                .on_click(move |conv_id, cx| {
-                                                    if let Some(callback) = &on_select_clone {
-                                                        callback(conv_id, cx);
-                                                    }
-                                                })
-                                                .on_delete(move |conv_id, cx| {
-                                                    if let Some(callback) = &on_delete_clone {
-                                                        callback(conv_id, cx);
-                                                    }
-                                                }),
-                                        )
-                                        .when(ix == 0, |this| this.mt_3())
-                                        .when(
-                                            ix == self.conversations.len().saturating_sub(1),
-                                            |this| this.mb_3(),
-                                        )
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                        .overflow_y_scroll(),
-                ),
+                                        div()
+                                            .id(ix)
+                                            .child(
+                                                ConversationItem::new(id.clone(), title.clone())
+                                                    .active(is_active)
+                                                    .collapsed(self.is_collapsed)
+                                                    .on_click(move |conv_id, cx| {
+                                                        if let Some(callback) = &on_select_clone {
+                                                            callback(conv_id, cx);
+                                                        }
+                                                    })
+                                                    .on_delete(move |conv_id, cx| {
+                                                        if let Some(callback) = &on_delete_clone {
+                                                            callback(conv_id, cx);
+                                                        }
+                                                    }),
+                                            )
+                                            .when(ix == 0, |this| this.mt_3())
+                                            .when(
+                                                ix == self.conversations.len().saturating_sub(1),
+                                                |this| this.mb_3(),
+                                            )
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ),
+                    ),
             )
             .child(
                 // Footer: Settings button

@@ -64,10 +64,6 @@ impl ChattyApp {
         // Initialize chat input with available models
         app.initialize_models(cx);
 
-        // Note: We defer loading conversations until after models/providers are loaded
-        // This is handled by a separate method called from main.rs
-        // app.load_conversations(cx); // MOVED to load_conversations_after_models_ready
-
         // Auto-create first conversation if none exist
         let has_convs = cx
             .try_global::<ConversationsModel>()
@@ -190,6 +186,7 @@ impl ChattyApp {
         // Chat input send message callback
         chat_view.update(cx, |view, cx| {
             let input_state = view.chat_input_state().clone();
+            let app_for_send = app_entity.clone();
             input_state.update(cx, |state, _cx| {
                 eprintln!("🔧 [AppController] Setting up on_send callback for chat input");
                 state.set_on_send(move |message, cx| {
@@ -197,13 +194,34 @@ impl ChattyApp {
                         "📨 [AppController] on_send callback triggered with: '{}'",
                         message
                     );
-                    let app = app_entity.clone();
+                    let app = app_for_send.clone();
                     let msg = message.clone();
 
                     // Update directly without defer
                     eprintln!("✅ [AppController] Calling send_message directly via entity");
                     app.update(cx, |app, cx| {
                         app.send_message(msg, cx);
+                    });
+                });
+            });
+        });
+
+        // Chat input model change callback
+        chat_view.update(cx, |view, cx| {
+            let input_state = view.chat_input_state().clone();
+            let app_for_model = app_entity.clone();
+            input_state.update(cx, |state, _cx| {
+                eprintln!("🔧 [AppController] Setting up on_model_change callback for chat input");
+                state.set_on_model_change(move |model_id, cx| {
+                    eprintln!(
+                        "🔄 [AppController] on_model_change callback triggered with model: '{}'",
+                        model_id
+                    );
+                    let app = app_for_model.clone();
+                    let model_id = model_id.clone();
+
+                    app.update(cx, |app, cx| {
+                        app.change_conversation_model(model_id, cx);
                     });
                 });
             });
@@ -489,16 +507,124 @@ impl ChattyApp {
         });
 
         // Update chat view
-        let history_data = cx
-            .global::<ConversationsModel>()
-            .get_conversation(id)
-            .map(|conv| (conv.history().to_vec(), conv.system_traces().to_vec()));
+        let conversation_data =
+            cx.global::<ConversationsModel>()
+                .get_conversation(id)
+                .map(|conv| {
+                    (
+                        conv.history().to_vec(),
+                        conv.system_traces().to_vec(),
+                        conv.model_id().to_string(),
+                    )
+                });
 
-        if let Some((history, traces)) = history_data {
+        if let Some((history, traces, model_id)) = conversation_data {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone());
                 view.load_history(&history, &traces, cx);
+
+                // Update the selected model in the chat input
+                view.chat_input_state().update(cx, |state, _cx| {
+                    state.set_selected_model_id(model_id);
+                });
             });
+        }
+    }
+
+    /// Change the model for the active conversation
+    fn change_conversation_model(&mut self, model_id: String, cx: &mut Context<Self>) {
+        eprintln!(
+            "🔄 [AppController::change_conversation_model] Changing to model: '{}'",
+            model_id
+        );
+
+        // Get the active conversation ID
+        let conv_id = cx
+            .global::<ConversationsModel>()
+            .active_id()
+            .map(|s| s.to_string());
+
+        if let Some(conv_id) = conv_id {
+            // Get model and provider configs
+            let models = cx.global::<ModelsModel>();
+            let providers = cx.global::<ProviderModel>();
+
+            if let Some(model_config) = models.get_model(&model_id) {
+                if let Some(provider_config) = providers
+                    .providers()
+                    .iter()
+                    .find(|p| p.provider_type == model_config.provider_type)
+                {
+                    let model_config = model_config.clone();
+                    let provider_config = provider_config.clone();
+                    let repo = self.conversation_repo.clone();
+
+                    eprintln!(
+                        "✅ [AppController::change_conversation_model] Found model and provider config"
+                    );
+
+                    // Update the conversation model
+                    cx.spawn(async move |_weak, mut cx| -> anyhow::Result<()> {
+                        // Update the conversation's model and agent
+                        cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                eprintln!("🔄 [AppController async] Updating conversation model");
+                                smol::block_on(conv.update_model(&model_config, &provider_config))
+                            } else {
+                                Err(anyhow::anyhow!("Conversation not found"))
+                            }
+                        })
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))??;
+
+                        eprintln!("✅ [AppController async] Model updated successfully");
+
+                        // Save to disk
+                        let conv_data_res =
+                            cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                                store.get_conversation(&conv_id).and_then(|conv| {
+                                    let history = conv.serialize_history().ok()?;
+                                    let traces = conv.serialize_traces().ok()?;
+                                    let now = SystemTime::now()
+                                        .duration_since(SystemTime::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs()
+                                        as i64;
+
+                                    Some(ConversationData {
+                                        id: conv.id().to_string(),
+                                        title: conv.title().to_string(),
+                                        model_id: conv.model_id().to_string(),
+                                        message_history: history,
+                                        system_traces: traces,
+                                        created_at: conv
+                                            .created_at()
+                                            .duration_since(SystemTime::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs()
+                                            as i64,
+                                        updated_at: now,
+                                    })
+                                })
+                            });
+
+                        if let Ok(Some(conv_data)) = conv_data_res {
+                            repo.save(&conv_id, conv_data)
+                                .await
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                            eprintln!("💾 [AppController async] Conversation saved to disk");
+                        }
+
+                        Ok(())
+                    })
+                    .detach();
+                } else {
+                    eprintln!("❌ [AppController::change_conversation_model] Provider not found");
+                }
+            } else {
+                eprintln!("❌ [AppController::change_conversation_model] Model not found");
+            }
+        } else {
+            eprintln!("❌ [AppController::change_conversation_model] No active conversation");
         }
     }
 
