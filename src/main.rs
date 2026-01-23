@@ -4,7 +4,7 @@ use gpui_component::*;
 mod chatty;
 mod settings;
 
-use chatty::ChattyApp;
+use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
     GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
@@ -123,6 +123,14 @@ fn register_actions(cx: &mut App) {
 }
 
 fn main() {
+    // Initialize Tokio runtime for rig LLM operations
+    // rig requires Tokio 1.x runtime for async operations
+    let _tokio_runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+    // Enter the runtime context for the entire application
+    // This allows rig to use Tokio even though GPUI uses smol
+    let _guard = _tokio_runtime.enter();
+
     let app = Application::new();
 
     app.run(move |cx| {
@@ -172,7 +180,41 @@ fn main() {
         // Initialize global models list view state
         cx.set_global(settings::views::models_page::GlobalModelsListView::default());
 
+        // Use Arc<AtomicBool> to track when both providers and models are loaded
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let providers_loaded = Arc::new(AtomicBool::new(false));
+        let models_loaded = Arc::new(AtomicBool::new(false));
+
+        // Helper function to check if both are loaded and trigger conversation loading
+        let check_and_load_conversations = {
+            let providers_loaded = providers_loaded.clone();
+            let models_loaded = models_loaded.clone();
+            move |cx: &mut App| {
+                if providers_loaded.load(Ordering::SeqCst) && models_loaded.load(Ordering::SeqCst) {
+                    eprintln!(
+                        "✅ [main] Both models and providers loaded, triggering conversation load"
+                    );
+
+                    // Get the ChattyApp entity and call load_conversations_after_models_ready
+                    if let Some(weak_entity) = cx
+                        .try_global::<GlobalChattyApp>()
+                        .and_then(|global| global.entity.clone())
+                    {
+                        if let Some(entity) = weak_entity.upgrade() {
+                            entity.update(cx, |app, cx| {
+                                app.load_conversations_after_models_ready(cx);
+                            });
+                        }
+                    }
+                }
+            }
+        };
+
         // Load providers asynchronously without blocking startup
+        let check_fn_1 = check_and_load_conversations.clone();
+        let providers_loaded_clone = providers_loaded.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             let repo = PROVIDER_REPOSITORY.clone();
             match repo.load_all().await {
@@ -181,6 +223,10 @@ fn main() {
                         cx.update_global::<settings::models::ProviderModel, _>(|model, _cx| {
                             model.replace_all(providers);
                         });
+
+                        providers_loaded_clone.store(true, Ordering::SeqCst);
+                        eprintln!("✅ [main] Providers loaded");
+                        check_fn_1(cx);
                     })
                     .ok();
                 }
@@ -192,6 +238,8 @@ fn main() {
         .detach();
 
         // Load models asynchronously without blocking startup
+        let check_fn_2 = check_and_load_conversations;
+        let models_loaded_clone = models_loaded.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             let repo = MODELS_REPOSITORY.clone();
             match repo.load_all().await {
@@ -200,6 +248,14 @@ fn main() {
                         cx.update_global::<settings::models::ModelsModel, _>(|model, _cx| {
                             model.replace_all(models);
                         });
+
+                        models_loaded_clone.store(true, Ordering::SeqCst);
+                        eprintln!("✅ [main] Models loaded");
+
+                        // Refresh all chat inputs with newly loaded models
+                        cx.refresh_windows();
+
+                        check_fn_2(cx);
                     })
                     .ok();
                 }
