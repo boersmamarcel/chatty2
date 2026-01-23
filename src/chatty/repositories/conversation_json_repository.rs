@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
-use super::conversation_repository::{
-    BoxFuture, ConversationData, ConversationRepository, RepositoryResult,
-};
+use super::conversation_repository::{BoxFuture, ConversationData, ConversationRepository};
+use super::error::{RepositoryError, RepositoryResult};
 
 /// JSON file-based repository for conversations
 /// Stores each conversation as a separate file in ~/.config/chatty/conversations/
@@ -11,9 +10,11 @@ pub struct ConversationJsonRepository {
 }
 
 impl ConversationJsonRepository {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new() -> RepositoryResult<Self> {
         let config_dir = dirs::config_dir()
-            .ok_or("Could not determine config directory")?
+            .ok_or_else(|| RepositoryError::InitializationError {
+                message: "Could not determine config directory".to_string(),
+            })?
             .join("chatty")
             .join("conversations");
 

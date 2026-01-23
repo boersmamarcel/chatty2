@@ -3,6 +3,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::InputState;
 use gpui_component::scroll::ScrollableElement;
 use std::collections::HashMap;
+use tracing::{debug, info, warn};
 
 use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
@@ -56,10 +57,8 @@ impl ChatView {
 
     /// Add a user message to the chat
     pub fn add_user_message(&mut self, text: String, cx: &mut Context<Self>) {
-        eprintln!(
-            "💬 [ChatView::add_user_message] Adding user message: '{}'",
-            text
-        );
+        debug!(message = %text, "Adding user message");
+
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
             content: text.clone(),
@@ -68,18 +67,16 @@ impl ChatView {
             live_trace: None,
             is_markdown: false,
         });
-        eprintln!(
-            "📝 [ChatView::add_user_message] Total messages: {}",
-            self.messages.len()
-        );
+
+        debug!(total_messages = self.messages.len(), "User message added");
         cx.notify();
         self.scroll_to_bottom();
-        eprintln!("✅ [ChatView::add_user_message] Message added and notified");
     }
 
     /// Start an assistant message (for streaming)
     pub fn start_assistant_message(&mut self, cx: &mut Context<Self>) {
-        eprintln!("🤖 [ChatView::start_assistant_message] Starting assistant message");
+        debug!("Starting assistant message");
+
         self.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -89,9 +86,10 @@ impl ChatView {
             is_markdown: true,
         });
         self.active_tool_calls.clear();
-        eprintln!(
-            "📝 [ChatView::start_assistant_message] Total messages: {}",
-            self.messages.len()
+
+        debug!(
+            total_messages = self.messages.len(),
+            "Assistant message started"
         );
         cx.notify();
         self.scroll_to_bottom();
@@ -165,6 +163,44 @@ impl ChatView {
         self.scroll_to_bottom();
     }
 
+    /// Helper method to update the active tool call in the live trace
+    /// Reduces nesting from 6 levels to 2
+    fn update_tool_call_trace<F>(&mut self, updater: F) -> bool
+    where
+        F: FnOnce(&mut ToolCallBlock),
+    {
+        let last_message = match self.messages.last_mut() {
+            Some(msg) => msg,
+            None => return false,
+        };
+
+        if !last_message.is_streaming {
+            return false;
+        }
+
+        let trace = match last_message.live_trace.as_mut() {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let active_idx = match trace.active_tool_index {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let item = match trace.items.get_mut(active_idx) {
+            Some(i) => i,
+            None => return false,
+        };
+
+        if let super::message_types::TraceItem::ToolCall(tc) = item {
+            updater(tc);
+            return true;
+        }
+
+        false
+    }
+
     /// Handle tool call input event
     pub fn handle_tool_call_input(
         &mut self,
@@ -174,24 +210,13 @@ impl ChatView {
     ) {
         if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
             tool_call.input = arguments.clone();
-
-            // Update live trace
-            if let Some(last) = self.messages.last_mut() {
-                if last.is_streaming {
-                    if let Some(ref mut trace) = last.live_trace {
-                        if let Some(active_idx) = trace.active_tool_index {
-                            if let Some(item) = trace.items.get_mut(active_idx) {
-                                if let super::message_types::TraceItem::ToolCall(tc) = item {
-                                    tc.input = arguments;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            cx.notify();
         }
+
+        self.update_tool_call_trace(|tc| {
+            tc.input = arguments;
+        });
+
+        cx.notify();
     }
 
     /// Handle tool call result event
@@ -200,51 +225,41 @@ impl ChatView {
             tool_call.output = Some(result.clone());
             tool_call.output_preview = Some(result.clone());
             tool_call.state = ToolCallState::Success;
-
-            // Update live trace and clear active
-            if let Some(last) = self.messages.last_mut() {
-                if last.is_streaming {
-                    if let Some(ref mut trace) = last.live_trace {
-                        if let Some(active_idx) = trace.active_tool_index {
-                            if let Some(item) = trace.items.get_mut(active_idx) {
-                                if let super::message_types::TraceItem::ToolCall(tc) = item {
-                                    tc.output = Some(result);
-                                    tc.state = ToolCallState::Success;
-                                }
-                            }
-                        }
-                        trace.clear_active_tool();
-                    }
-                }
-            }
-
-            cx.notify();
         }
+
+        self.update_tool_call_trace(|tc| {
+            tc.output = Some(result);
+            tc.state = ToolCallState::Success;
+        });
+
+        // Clear active tool after successful completion
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                trace.clear_active_tool();
+            }
+        }
+
+        cx.notify();
     }
 
     /// Handle tool call error event
     pub fn handle_tool_call_error(&mut self, id: String, error: String, cx: &mut Context<Self>) {
         if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
             tool_call.state = ToolCallState::Error(error.clone());
-
-            // Update live trace and clear active
-            if let Some(last) = self.messages.last_mut() {
-                if last.is_streaming {
-                    if let Some(ref mut trace) = last.live_trace {
-                        if let Some(active_idx) = trace.active_tool_index {
-                            if let Some(item) = trace.items.get_mut(active_idx) {
-                                if let super::message_types::TraceItem::ToolCall(tc) = item {
-                                    tc.state = ToolCallState::Error(error);
-                                }
-                            }
-                        }
-                        trace.clear_active_tool();
-                    }
-                }
-            }
-
-            cx.notify();
         }
+
+        self.update_tool_call_trace(|tc| {
+            tc.state = ToolCallState::Error(error);
+        });
+
+        // Clear active tool after error
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                trace.clear_active_tool();
+            }
+        }
+
+        cx.notify();
     }
 
     /// Clear all messages from the chat view
