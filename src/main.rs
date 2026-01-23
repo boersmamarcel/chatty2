@@ -123,6 +123,16 @@ fn register_actions(cx: &mut App) {
 }
 
 fn main() {
+    // Initialize structured logging
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
+    tracing::info!("Starting Chatty application");
+
     // Initialize Tokio runtime for rig LLM operations
     // rig requires Tokio 1.x runtime for async operations
     let _tokio_runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");

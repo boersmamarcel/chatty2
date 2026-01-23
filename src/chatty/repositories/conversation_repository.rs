@@ -3,8 +3,9 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
+use super::error::RepositoryResult;
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-pub type RepositoryResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
