@@ -5,6 +5,7 @@ use rig::OneOrMany;
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::Message;
+use rig::completion::Prompt;
 use rig::completion::message::{AssistantContent, Text};
 use rig::message::UserContent;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -259,6 +260,47 @@ pub async fn stream_prompt(
     Ok((stream, user_message))
 }
 
+/// Extract text from UserContent
+fn extract_text_from_user_content(content: &UserContent) -> Option<String> {
+    match content {
+        UserContent::Text(text) => Some(text.text.clone()),
+        _ => None,
+    }
+}
+
+/// Extract text from AssistantContent
+fn extract_text_from_assistant_content(content: &AssistantContent) -> Option<String> {
+    match content {
+        AssistantContent::Text(text) => Some(text.text.clone()),
+        _ => None,
+    }
+}
+
+/// Truncate text to max length
+fn truncate_text(text: &str, max_len: usize) -> String {
+    text.chars().take(max_len).collect()
+}
+
+/// Clean and validate generated title
+fn clean_title(raw_title: &str) -> String {
+    let cleaned = raw_title
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .lines()
+        .next()
+        .unwrap_or("New Chat")
+        .to_string();
+
+    if cleaned.len() > 100 {
+        format!("{}...", &cleaned[..97])
+    } else if cleaned.is_empty() {
+        "New Chat".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// A single conversation with an AI agent
 pub struct Conversation {
     id: String,
@@ -433,6 +475,88 @@ impl Conversation {
     /// Get the count of messages in history
     pub fn message_count(&self) -> usize {
         self.history.len()
+    }
+
+    /// Extract text from first user message
+    fn extract_first_user_text(&self) -> String {
+        match self.history.first() {
+            Some(Message::User { content, .. }) => content
+                .iter()
+                .find_map(|c| extract_text_from_user_content(c))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// Extract text from first assistant message
+    fn extract_first_assistant_text(&self) -> String {
+        match self.history.get(1) {
+            Some(Message::Assistant { content, .. }) => content
+                .iter()
+                .find_map(|c| extract_text_from_assistant_content(c))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// Generate a concise title for the conversation based on the first exchange
+    pub async fn generate_and_set_title(&mut self) -> Result<String> {
+        eprintln!("🎯 [Conversation] generate_and_set_title called");
+        // Guard: Only generate title if we have exactly 2 messages
+        if self.message_count() != 2 {
+            let err_msg = format!(
+                "Title generation requires exactly 2 messages, found {}",
+                self.message_count()
+            );
+            eprintln!("❌ [Conversation] {}", err_msg);
+            return Err(anyhow!(err_msg));
+        }
+
+        eprintln!("✓ [Conversation] Message count is 2, proceeding");
+
+        // Extract first exchange
+        let user_text = self.extract_first_user_text();
+        let assistant_text = self.extract_first_assistant_text();
+
+        eprintln!(
+            "📝 [Conversation] User: {} chars, Assistant: {} chars",
+            user_text.len(),
+            assistant_text.len()
+        );
+
+        // Build title generation prompt
+        let title_prompt = format!(
+            "Generate a concise, descriptive title (3-7 words) for this conversation. \
+            Output ONLY the title, no quotes, no explanation.\n\n\
+            User: {}\n\nAssistant: {}",
+            truncate_text(&user_text, 500),
+            truncate_text(&assistant_text, 500)
+        );
+
+        // Use agent.prompt() for non-streaming completion
+        // The Prompt trait returns a String directly
+        eprintln!("🤖 [Conversation] Calling LLM for title generation...");
+        let response_text = match &self.agent {
+            AgentClient::Anthropic(agent) => agent.prompt(&title_prompt).await?,
+            AgentClient::OpenAI(agent) => agent.prompt(&title_prompt).await?,
+            AgentClient::Gemini(agent) => agent.prompt(&title_prompt).await?,
+            AgentClient::Cohere(agent) => agent.prompt(&title_prompt).await?,
+            AgentClient::Ollama(agent) => agent.prompt(&title_prompt).await?,
+        };
+
+        eprintln!("📨 [Conversation] LLM response: '{}'", response_text);
+
+        // Clean and validate the title
+        let title = clean_title(&response_text);
+
+        eprintln!("🧹 [Conversation] Cleaned title: '{}'", title);
+
+        // Set the title
+        self.set_title(title.clone());
+
+        eprintln!("✅ [Conversation] Title set successfully");
+
+        Ok(title)
     }
 
     /// Serialize message history to JSON string
