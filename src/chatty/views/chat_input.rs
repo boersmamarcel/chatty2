@@ -74,6 +74,11 @@ impl ChatInputState {
         &self.available_models
     }
 
+    /// Set the selected model ID
+    pub fn set_selected_model_id(&mut self, model_id: String) {
+        self.selected_model_id = Some(model_id);
+    }
+
     /// Send the current message
     pub fn send_message(&mut self, cx: &mut Context<Self>) {
         let message = self.input.read(cx).text().to_string();

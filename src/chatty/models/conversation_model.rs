@@ -459,4 +459,24 @@ impl Conversation {
     pub fn agent(&self) -> &AgentClient {
         &self.agent
     }
+
+    /// Update the model and agent for this conversation
+    ///
+    /// This allows switching models mid-conversation.
+    /// The history is preserved but future messages will use the new model.
+    pub async fn update_model(
+        &mut self,
+        model_config: &ModelConfig,
+        provider_config: &ProviderConfig,
+    ) -> Result<()> {
+        let agent = AgentClient::from_model_config(model_config, provider_config)
+            .await
+            .context("Failed to create agent from config")?;
+
+        self.agent = agent;
+        self.model_id = model_config.id.clone();
+        self.updated_at = SystemTime::now();
+
+        Ok(())
+    }
 }
