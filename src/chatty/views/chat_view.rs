@@ -329,11 +329,6 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        eprintln!(
-            "🎨 [ChatView::render] Rendering with {} messages",
-            self.messages.len()
-        );
-
         // Clear the input if a message was sent
         self.chat_input_state.update(cx, |state, cx| {
             state.clear_if_needed(window, cx);

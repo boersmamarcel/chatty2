@@ -687,6 +687,7 @@ impl ChattyApp {
         );
 
         let chat_view = self.chat_view.clone();
+        let sidebar = self.sidebar_view.clone();
 
         // Add user message to UI immediately so it appears responsive
         chat_view.update(cx, |view, cx| {
@@ -822,16 +823,65 @@ impl ChattyApp {
                                                         .and_then(|trace| serde_json::to_value(&trace).ok());
                             // Finalize response in conversation
                             eprintln!("💾 [AppController async] Finalizing response in conversation");
-                            cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                            let should_generate_title = cx.update_global::<ConversationsModel, _>(|store, _cx| {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                     conv.finalize_response(response_text.clone());
                                     conv.add_trace(trace_json);
                                     eprintln!("✅ [AppController async] Response finalized in conversation");
+                                    // Check if we should generate a title (first exchange complete)
+                                    let msg_count = conv.message_count();
+                                    eprintln!("📊 [AppController async] Message count after finalize: {}", msg_count);
+                                    eprintln!("�� [AppController async] Current title: '{}'", conv.title());
+                                    let should_gen = msg_count == 2 && conv.title() == "New Chat";
+                                    if should_gen {
+                                        eprintln!("🏷️  [AppController async] Will generate title for first exchange");
+                                    } else if msg_count != 2 {
+                                        eprintln!("⏭️  [AppController async] Skipping title generation (count = {} != 2)", msg_count);
+                                    } else {
+                                        eprintln!("⏭️  [AppController async] Skipping title generation (title already set)");
+                                    }
+                                    should_gen
                                 } else {
                                     eprintln!("❌ [AppController async] Could not find conversation to finalize");
+                                    false
                                 }
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                            // Generate title if this was the first exchange
+                            if should_generate_title {
+                                let title_result = cx
+                                    .update_global::<ConversationsModel, _>(|store, _cx| {
+                                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                            smol::block_on(conv.generate_and_set_title())
+                                        } else {
+                                            Err(anyhow::anyhow!("Conversation not found"))
+                                        }
+                                    })
+                                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                                match title_result {
+                                    Ok(new_title) => {
+                                        eprintln!("✅ [AppController async] Generated title: '{}'", new_title);
+
+                                        // Update sidebar to show new title
+                                        sidebar
+                                            .update(cx, |sidebar, cx| {
+                                                let convs = cx
+                                                    .global::<ConversationsModel>()
+                                                    .list_all()
+                                                    .iter()
+                                                    .map(|c| (c.id().to_string(), c.title().to_string()))
+                                                    .collect::<Vec<_>>();
+                                                sidebar.set_conversations(convs, cx);
+                                            })
+                                            .ok();
+                                    }
+                                    Err(e) => {
+                                        eprintln!("⚠️  [AppController async] Title generation failed: {:?}", e);
+                                    }
+                                }
+                            }
 
                             // Finalize UI
                             eprintln!("🎨 [AppController async] Finalizing UI");
