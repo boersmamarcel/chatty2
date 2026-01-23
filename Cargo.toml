@@ -17,3 +17,10 @@ dirs = "5.0"
 lazy_static = "1.4"
 smol = "2.0"
 uuid = { version = "1.0", features = ["v4"] }
+
+# Chat functionality dependencies
+futures = "0.3"
+anyhow = "1.0"
+base64 = "0.22"
+async-stream = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
