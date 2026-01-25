@@ -21,7 +21,19 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan-dev
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libfontconfig1-dev \
+            libasound2-dev \
+            libssl-dev \
+            pkg-config
 
       - name: Run tests
         run: cargo test --all-features
