@@ -122,66 +122,6 @@ fn register_actions(cx: &mut App) {
     });
 }
 
-/// Discover available Ollama models by querying the Ollama API
-async fn discover_ollama_models(base_url: &str) -> anyhow::Result<Vec<(String, String)>> {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Deserialize, Serialize)]
-    struct OllamaModel {
-        name: String,
-        #[serde(default)]
-        model: String,
-    }
-
-    #[derive(Debug, Deserialize, Serialize)]
-    struct OllamaTagsResponse {
-        models: Vec<OllamaModel>,
-    }
-
-    // Build the API endpoint URL
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-
-    // Make HTTP request to Ollama API
-    let response = reqwest::get(&url).await?;
-
-    if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Ollama API returned status: {}",
-            response.status()
-        ));
-    }
-
-    let tags_response: OllamaTagsResponse = response.json().await?;
-
-    // Extract model names and create display names
-    let models: Vec<(String, String)> = tags_response
-        .models
-        .into_iter()
-        .map(|m| {
-            let identifier = m.name.clone();
-            // Create a friendly display name (capitalize first letter, remove tags)
-            let display_name = identifier
-                .split(':')
-                .next()
-                .unwrap_or(&identifier)
-                .split('-')
-                .map(|s| {
-                    let mut c = s.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            (identifier, display_name)
-        })
-        .collect();
-
-    Ok(models)
-}
-
 fn main() {
     // Initialize structured logging
     tracing_subscriber::fmt()
@@ -290,24 +230,12 @@ fn main() {
             match repo.load_all().await {
                 Ok(providers) => {
                     cx.update(|cx| {
-                        let mut should_save = false;
-
                         cx.update_global::<settings::models::ProviderModel, _>(|model, _cx| {
                             model.replace_all(providers);
-
-                            // Ensure Ollama provider exists with default settings
-                            if !model.providers().iter().any(|p| {
-                                matches!(p.provider_type, settings::models::providers_store::ProviderType::Ollama)
-                            }) {
-                                use settings::models::providers_store::{ProviderConfig, ProviderType};
-                                let ollama_config =
-                                    ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
-                                        .with_base_url("http://localhost:11434".to_string());
-                                model.add_provider(ollama_config);
-                                eprintln!("✨ [main] Created default Ollama provider");
-                                should_save = true;
-                            }
                         });
+
+                        // Ensure Ollama provider exists with default settings
+                        let should_save = settings::providers::ensure_default_ollama_provider(cx);
 
                         // Save the updated providers if we added Ollama
                         if should_save {
@@ -360,120 +288,21 @@ fn main() {
                             .global::<settings::models::ProviderModel>()
                             .providers()
                             .iter()
-                            .find(|p| matches!(p.provider_type, settings::models::providers_store::ProviderType::Ollama))
+                            .find(|p| {
+                                matches!(
+                                    p.provider_type,
+                                    settings::models::providers_store::ProviderType::Ollama
+                                )
+                            })
                             .and_then(|p| p.base_url.clone())
                             .unwrap_or_else(|| "http://localhost:11434".to_string());
 
-                        let models_repo = repo.clone();
                         cx.spawn(async move |cx: &mut AsyncApp| {
-                                match discover_ollama_models(&ollama_base_url).await {
-                                    Ok(discovered_models) if !discovered_models.is_empty() => {
-                                        eprintln!(
-                                            "✨ [main] Discovered {} Ollama model(s)",
-                                            discovered_models.len()
-                                        );
-
-                                        // Create ModelConfig for each discovered model
-                                        let new_model_configs: Vec<settings::models::models_store::ModelConfig> =
-                                            discovered_models
-                                                .iter()
-                                                .map(|(identifier, display_name)| {
-                                                    use settings::models::models_store::ModelConfig;
-                                                    use settings::models::providers_store::ProviderType;
-                                                    let id = format!("ollama-{}", identifier.replace(':', "-"));
-                                                    ModelConfig::new(
-                                                        id,
-                                                        display_name.clone(),
-                                                        ProviderType::Ollama,
-                                                        identifier.clone(),
-                                                    )
-                                                })
-                                                .collect();
-
-                                        // Sync Ollama models: remove old ones, add new ones
-                                        cx.update(|cx| {
-                                            cx.update_global::<settings::models::ModelsModel, _>(
-                                                |model, _cx| {
-                                                    // Get existing Ollama model IDs
-                                                    let existing_ollama_ids: Vec<String> = model
-                                                        .models_by_provider(&settings::models::providers_store::ProviderType::Ollama)
-                                                        .iter()
-                                                        .map(|m| m.id.clone())
-                                                        .collect();
-
-                                                    // Remove all existing Ollama models
-                                                    for id in existing_ollama_ids {
-                                                        model.delete_model(&id);
-                                                    }
-
-                                                    // Add newly discovered models
-                                                    for config in &new_model_configs {
-                                                        model.add_model(config.clone());
-                                                    }
-
-                                                    eprintln!(
-                                                        "�� [main] Synced Ollama models: {} model(s) now available",
-                                                        new_model_configs.len()
-                                                    );
-                                                },
-                                            );
-
-                                            // Refresh windows to update UI
-                                            cx.refresh_windows();
-                                        })
-                                        .ok();
-
-                                        // Save to disk
-                                        let all_models = cx
-                                            .update(|cx| {
-                                                cx.global::<settings::models::ModelsModel>()
-                                                    .models()
-                                                    .to_vec()
-                                            })
-                                            .ok();
-
-                                        if let Some(all_models) = all_models {
-                                            if let Err(e) = models_repo.save_all(all_models).await {
-                                                eprintln!(
-                                                    "⚠️  [main] Failed to save discovered Ollama models: {}",
-                                                    e
-                                                );
-                                            } else {
-                                                eprintln!("💾 [main] Ollama models saved to disk");
-                                            }
-                                        }
-                                    }
-                                    Ok(_) => {
-                                        eprintln!("ℹ️  [main] No Ollama models installed at {}", ollama_base_url);
-                                        eprintln!("   Install models with: ollama pull <model-name>");
-
-                                        // Remove any existing Ollama models since none are available
-                                        cx.update(|cx| {
-                                            cx.update_global::<settings::models::ModelsModel, _>(
-                                                |model, _cx| {
-                                                    let existing_ollama_ids: Vec<String> = model
-                                                        .models_by_provider(&settings::models::providers_store::ProviderType::Ollama)
-                                                        .iter()
-                                                        .map(|m| m.id.clone())
-                                                        .collect();
-
-                                                    for id in existing_ollama_ids {
-                                                        model.delete_model(&id);
-                                                    }
-                                                },
-                                            );
-                                        }).ok();
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "⚠️  [main] Could not connect to Ollama at {}: {}",
-                                            ollama_base_url, e
-                                        );
-                                        eprintln!("   Make sure Ollama is running or install it from: https://ollama.ai");
-                                    }
-                                }
-                            })
-                            .detach();
+                            settings::providers::sync_ollama_models(&ollama_base_url, cx)
+                                .await
+                                .ok();
+                        })
+                        .detach();
 
                         // Refresh all chat inputs with newly loaded models
                         cx.refresh_windows();

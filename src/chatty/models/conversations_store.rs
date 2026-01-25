@@ -1,7 +1,7 @@
 use gpui::Global;
 use std::collections::HashMap;
 
-use super::conversation_model::Conversation;
+use super::conversation::Conversation;
 
 /// Global store for all conversations
 pub struct ConversationsModel {
