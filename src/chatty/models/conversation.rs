@@ -225,4 +225,11 @@ impl Conversation {
 
         Ok(())
     }
+
+    /// Set the agent and model ID synchronously (for model switching without blocking)
+    pub fn set_agent(&mut self, agent: AgentClient, model_id: String) {
+        self.agent = agent;
+        self.model_id = model_id;
+        self.updated_at = SystemTime::now();
+    }
 }

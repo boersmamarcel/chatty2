@@ -1,11 +1,14 @@
 use gpui::*;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tracing::{debug, error, info, warn};
 
+use crate::chatty::factories::AgentClient;
 use crate::chatty::models::{Conversation, ConversationsModel, StreamChunk};
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
+use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
@@ -22,6 +25,7 @@ pub struct ChattyApp {
     pub chat_view: Entity<ChatView>,
     pub sidebar_view: Entity<SidebarView>,
     conversation_repo: Arc<dyn ConversationRepository>,
+    is_ready: bool,
 }
 
 impl ChattyApp {
@@ -44,6 +48,7 @@ impl ChattyApp {
             chat_view,
             sidebar_view,
             conversation_repo,
+            is_ready: false,
         };
 
         // Store entity in global state for later access
@@ -71,7 +76,7 @@ impl ChattyApp {
             .unwrap_or(false);
 
         if !has_convs {
-            eprintln!("🆕 [ChattyApp::new] No conversations, creating initial one");
+            info!("No conversations, creating initial one");
 
             // Check if models are available
             let has_models = cx
@@ -80,12 +85,26 @@ impl ChattyApp {
                 .unwrap_or(false);
 
             if has_models {
-                // Models already loaded, create immediately
-                eprintln!("🆕 [ChattyApp::new] Models available, creating now");
-                app.create_new_conversation(cx).detach();
+                // Models already loaded, create immediately and wait for completion
+                info!("Models available, creating now");
+                let app_entity = cx.entity();
+                cx.spawn(async move |_, mut cx| {
+                    let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
+                        app_entity.update(cx, |app, cx| app.create_new_conversation(cx));
+                    if let Ok(task) = task_result {
+                        let _ = task.await;
+                    }
+                    let _: Result<(), _> = app_entity.update(cx, |app, cx| {
+                        app.is_ready = true;
+                        info!("App is now ready (initial conversation created)");
+                        cx.notify();
+                    });
+                    Ok::<_, anyhow::Error>(())
+                })
+                .detach();
             } else {
                 // Models not loaded yet, defer until after first render
-                eprintln!("🆕 [ChattyApp::new] Models not ready, will defer creation");
+                info!("Models not ready, will defer creation");
                 let app_entity = cx.entity();
                 cx.defer(move |cx| {
                     app_entity.update(cx, |app, cx| {
@@ -95,12 +114,25 @@ impl ChattyApp {
                             .unwrap_or(false);
 
                         if has_models {
-                            eprintln!("🆕 [ChattyApp::new deferred] Models now available, creating conversation");
-                            app.create_new_conversation(cx).detach();
+                            info!("Models now available, creating conversation");
+                            let app_entity_inner = cx.entity();
+                            cx.spawn(async move |_, mut cx| {
+                                let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
+                                    app_entity_inner
+                                        .update(cx, |app, cx| app.create_new_conversation(cx));
+                                if let Ok(task) = task_result {
+                                    let _ = task.await;
+                                }
+                                let _: Result<(), _> = app_entity_inner.update(cx, |app, cx| {
+                                    app.is_ready = true;
+                                    info!("App is now ready (deferred conversation created)");
+                                    cx.notify();
+                                });
+                                Ok::<_, anyhow::Error>(())
+                            })
+                            .detach();
                         } else {
-                            eprintln!(
-                                "⚠️  [ChattyApp::new deferred] Models still not available"
-                            );
+                            warn!("Models still not available");
                         }
                     });
                 });
@@ -123,9 +155,7 @@ impl ChattyApp {
     /// Load conversations after models and providers are ready
     /// This should be called from main.rs after both models and providers have been loaded
     pub fn load_conversations_after_models_ready(&self, cx: &mut Context<Self>) {
-        eprintln!(
-            "📂 [ChattyApp::load_conversations_after_models_ready] Starting conversation load"
-        );
+        info!("Starting conversation load");
         self.load_conversations(cx);
     }
 
@@ -188,17 +218,14 @@ impl ChattyApp {
             let input_state = view.chat_input_state().clone();
             let app_for_send = app_entity.clone();
             input_state.update(cx, |state, _cx| {
-                eprintln!("🔧 [AppController] Setting up on_send callback for chat input");
+                debug!("Setting up on_send callback for chat input");
                 state.set_on_send(move |message, cx| {
-                    eprintln!(
-                        "📨 [AppController] on_send callback triggered with: '{}'",
-                        message
-                    );
+                    debug!(message = %message, "on_send callback triggered");
                     let app = app_for_send.clone();
                     let msg = message.clone();
 
                     // Update directly without defer
-                    eprintln!("✅ [AppController] Calling send_message directly via entity");
+                    debug!("Calling send_message directly via entity");
                     app.update(cx, |app, cx| {
                         app.send_message(msg, cx);
                     });
@@ -211,12 +238,9 @@ impl ChattyApp {
             let input_state = view.chat_input_state().clone();
             let app_for_model = app_entity.clone();
             input_state.update(cx, |state, _cx| {
-                eprintln!("🔧 [AppController] Setting up on_model_change callback for chat input");
+                debug!("Setting up on_model_change callback for chat input");
                 state.set_on_model_change(move |model_id, cx| {
-                    eprintln!(
-                        "🔄 [AppController] on_model_change callback triggered with model: '{}'",
-                        model_id
-                    );
+                    debug!(model_id = %model_id, "on_model_change callback triggered");
                     let app = app_for_model.clone();
                     let model_id = model_id.clone();
 
@@ -287,14 +311,12 @@ impl ChattyApp {
     fn load_conversations(&self, cx: &mut Context<Self>) {
         let repo = self.conversation_repo.clone();
         let sidebar = self.sidebar_view.clone();
+        let chat_view = self.chat_view.clone();
 
-        cx.spawn(async move |_weak, mut cx| {
+        cx.spawn(async move |weak, mut cx| {
             match repo.load_all().await {
                 Ok(conversation_data) => {
-                    eprintln!(
-                        "📂 [load_conversations] Loaded {} conversation files",
-                        conversation_data.len()
-                    );
+                    info!(count = conversation_data.len(), "Loaded conversation files");
 
                     // Get global stores (need to access them in async context)
                     let models_result =
@@ -324,25 +346,19 @@ impl ChattyApp {
                                         .ok();
 
                                         restored_count += 1;
-                                        eprintln!("✅ [load_conversations] Restored: {}", conv_id);
+                                        info!(conv_id = %conv_id, "Restored conversation");
                                     }
                                     Err(e) => {
                                         failed_count += 1;
-                                        eprintln!(
-                                            "⚠️  [load_conversations] Failed to restore {}: {:?}",
-                                            conv_id, e
-                                        );
+                                        warn!(conv_id = %conv_id, error = ?e, "Failed to restore conversation");
                                     }
                                 }
                             }
 
-                            eprintln!(
-                                "📊 [load_conversations] Restored: {}, Failed: {}",
-                                restored_count, failed_count
-                            );
+                            info!(restored = restored_count, failed = failed_count, "Conversation load summary");
 
                             // Update sidebar with all conversations
-                            sidebar
+                            let active_conv_id = sidebar
                                 .update(cx, |sidebar, cx| {
                                     let convs = cx
                                         .global::<ConversationsModel>()
@@ -360,21 +376,42 @@ impl ChattyApp {
                                         cx.update_global::<ConversationsModel, _>(|store, _| {
                                             store.set_active(active_id.clone());
                                         });
-                                        sidebar.set_active_conversation(Some(active_id), cx);
+                                        sidebar
+                                            .set_active_conversation(Some(active_id.clone()), cx);
+                                        Some(active_id)
+                                    } else {
+                                        None
                                     }
                                 })
-                                .ok();
+                                .ok()
+                                .flatten();
+
+                            // Set active conversation on chat view and mark as ready
+                            if let Some(active_id) = active_conv_id {
+                                chat_view
+                                    .update(cx, |view, cx| {
+                                        view.set_conversation_id(active_id);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }
+
+                            // Mark app as ready
+                            if let Some(app) = weak.upgrade() {
+                                let _: Result<(), _> = app.update(cx, |app, cx| {
+                                    app.is_ready = true;
+                                    info!("App is now ready (conversations loaded)");
+                                    cx.notify();
+                                });
+                            }
                         }
                         _ => {
-                            eprintln!("❌ [load_conversations] Failed to access global stores");
+                            error!("Failed to access global stores");
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "❌ [load_conversations] Failed to load conversation files: {:?}",
-                        e
-                    );
+                    error!(error = ?e, "Failed to load conversation files");
                 }
             }
 
@@ -388,7 +425,7 @@ impl ChattyApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<String>> {
-        eprintln!("🆕 [AppController::create_new_conversation] Creating new conversation");
+        info!("Creating new conversation");
         // Get first available model
         let models = cx.global::<ModelsModel>();
         let providers = cx.global::<ProviderModel>();
@@ -479,12 +516,12 @@ impl ChattyApp {
                 })
             } else {
                 let err_msg = "No provider found for model";
-                eprintln!("{}", err_msg);
+                error!("{}", err_msg);
                 Task::ready(Err(anyhow::anyhow!(err_msg)))
             }
         } else {
             let err_msg = "No models configured";
-            eprintln!("{}", err_msg);
+            error!("{}", err_msg);
             // TODO: Show error in UI
             Task::ready(Err(anyhow::anyhow!(err_msg)))
         }
@@ -533,10 +570,7 @@ impl ChattyApp {
 
     /// Change the model for the active conversation
     fn change_conversation_model(&mut self, model_id: String, cx: &mut Context<Self>) {
-        eprintln!(
-            "🔄 [AppController::change_conversation_model] Changing to model: '{}'",
-            model_id
-        );
+        debug!(model_id = %model_id, "Changing to model");
 
         // Get the active conversation ID
         let conv_id = cx
@@ -559,24 +593,27 @@ impl ChattyApp {
                     let provider_config = provider_config.clone();
                     let repo = self.conversation_repo.clone();
 
-                    eprintln!(
-                        "✅ [AppController::change_conversation_model] Found model and provider config"
-                    );
+                    debug!("Found model and provider config");
 
                     // Update the conversation model
                     cx.spawn(async move |_weak, mut cx| -> anyhow::Result<()> {
-                        // Update the conversation's model and agent
+                        // Create new agent asynchronously (outside update_global to avoid blocking)
+                        let new_agent =
+                            AgentClient::from_model_config(&model_config, &provider_config).await?;
+
+                        // Update the conversation's agent synchronously
                         cx.update_global::<ConversationsModel, _>(|store, _cx| {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                eprintln!("🔄 [AppController async] Updating conversation model");
-                                smol::block_on(conv.update_model(&model_config, &provider_config))
+                                debug!("Updating conversation model");
+                                conv.set_agent(new_agent, model_config.id.clone());
+                                Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))
                             }
                         })
                         .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
-                        eprintln!("✅ [AppController async] Model updated successfully");
+                        debug!("Model updated successfully");
 
                         // Save to disk
                         let conv_data_res =
@@ -611,20 +648,20 @@ impl ChattyApp {
                             repo.save(&conv_id, conv_data)
                                 .await
                                 .map_err(|e| anyhow::anyhow!(e))?;
-                            eprintln!("💾 [AppController async] Conversation saved to disk");
+                            debug!("Conversation saved to disk");
                         }
 
                         Ok(())
                     })
                     .detach();
                 } else {
-                    eprintln!("❌ [AppController::change_conversation_model] Provider not found");
+                    error!("Provider not found");
                 }
             } else {
-                eprintln!("❌ [AppController::change_conversation_model] Model not found");
+                error!("Model not found");
             }
         } else {
-            eprintln!("❌ [AppController::change_conversation_model] No active conversation");
+            error!("No active conversation");
         }
     }
 
@@ -681,33 +718,23 @@ impl ChattyApp {
     }
 
     fn send_message(&mut self, message: String, cx: &mut Context<Self>) {
-        eprintln!(
-            "🚀 [AppController::send_message] Called with message: '{}'",
-            message
-        );
+        debug!(message = %message, "send_message called");
+
+        // Block message sending until app is ready (initial conversation created/loaded)
+        if !self.is_ready {
+            debug!("Not ready yet, ignoring message");
+            return;
+        }
 
         let chat_view = self.chat_view.clone();
         let sidebar = self.sidebar_view.clone();
-
-        // Add user message to UI immediately so it appears responsive
-        chat_view.update(cx, |view, cx| {
-            view.add_user_message(message.clone(), cx);
-        });
-        eprintln!("✅ [AppController::send_message] User message added to UI");
-
-        // Start assistant message in UI
-        chat_view.update(cx, |view, cx| {
-            view.start_assistant_message(cx);
-        });
-        eprintln!("✅ [AppController::send_message] Assistant message started");
-
         let app_entity = cx.entity();
         let repo = self.conversation_repo.clone();
 
         // Get active conversation and send message
-        eprintln!("🔄 [AppController::send_message] Spawning async task for LLM call");
+        debug!("Spawning async task for LLM call");
         cx.spawn(async move |_weak, mut cx| -> anyhow::Result<()> {
-                eprintln!("⚡ [AppController::send_message async] Async task started");
+                debug!("Async task started");
 
                 // Get active conversation ID, or create a new one if it doesn't exist
                 let conv_id: String = match cx
@@ -715,20 +742,20 @@ impl ChattyApp {
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
                 {
                     Some(id) => {
-                        eprintln!("✅ [AppController async] Found active conversation: {}", &id);
+                        debug!(conv_id = %id, "Found active conversation");
                         id
                     }
                     None => {
-                        eprintln!("❌ [AppController async] No active conversation found, creating one.");
+                        debug!("No active conversation found, creating one");
                         let task = app_entity.update(cx, |app, cx| app.create_new_conversation(cx))
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         match task.await {
                             Ok(id) => {
-                                eprintln!("✅ [AppController async] Created new conversation: {}", &id);
+                                debug!(conv_id = %id, "Created new conversation");
                                 id
                             }
                             Err(e) => {
-                                eprintln!("❌ [AppController async] Failed to create conversation: {:?}", e);
+                                error!(error = ?e, "Failed to create conversation");
                                 return Err(e);
                             }
                         }
@@ -736,44 +763,74 @@ impl ChattyApp {
                 };
 
                 // Now we have a conversation ID for sure, set it on the chat view
+                // and add the user/assistant messages AFTER conversation exists
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone());
+                    // Add user message to UI
+                    view.add_user_message(message.clone(), cx);
+                    debug!("User message added to UI");
+                    // Start assistant message in UI
+                    view.start_assistant_message(cx);
+                    debug!("Assistant message started");
                     cx.notify();
                 }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                eprintln!("✅ [AppController async] Set conversation ID on chat view: {}", &conv_id);
+                debug!(conv_id = %conv_id, "Set conversation ID on chat view");
 
-                // Get the stream
-                let mut stream = cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                // Extract agent and history synchronously (to avoid blocking in async context)
+                let (agent, history) = cx
+                    .update_global::<ConversationsModel, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation(&conv_id) {
+                            Ok((conv.agent().clone(), conv.history().to_vec()))
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Could not find conversation after creation/lookup"
+                            ))
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))??;
+
+                // Create stream asynchronously (outside update_global to avoid blocking)
+                debug!("Calling stream_prompt()");
+                let contents = vec![rig::message::UserContent::Text(
+                    rig::completion::message::Text {
+                        text: message.clone(),
+                    },
+                )];
+                let (mut stream, user_message) =
+                    stream_prompt(&agent, &history, contents).await?;
+
+                // Update history synchronously with user message
+                cx.update_global::<ConversationsModel, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        eprintln!("📤 [AppController async] Calling conv.send_text()");
-                        smol::block_on(conv.send_text(message))
-                    } else {
-                        Err(anyhow::anyhow!("Could not find conversation after creation/lookup"))
+                        conv.add_user_message_to_history(user_message);
                     }
-                }).map_err(|e| anyhow::anyhow!(e.to_string()))??;
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                eprintln!("✅ [AppController async] Got stream, starting to process");
+                debug!("Got stream, starting to process");
                 use futures::StreamExt;
                 let mut response_text = String::new();
                 let mut chunk_count = 0;
 
                 // Process stream
-                eprintln!("🔄 [AppController async] Entering stream processing loop");
+                debug!("Entering stream processing loop");
                 while let Some(chunk_result) = stream.next().await {
                     chunk_count += 1;
-                    eprintln!(
-                        "📦 [AppController async] Chunk #{}: {:?}",
-                        chunk_count, chunk_result
-                    );
+                    debug!(chunk_num = chunk_count, chunk = ?chunk_result, "Processing stream chunk");
                     match chunk_result {
                         Ok(StreamChunk::Text(text)) => {
-                            eprintln!("📝 [AppController async] Text chunk: '{}'", text);
+                            debug!(text = %text, "Text chunk received");
                             response_text.push_str(&text);
 
                             chat_view
                                 .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
+                                    let view_conv_id = view.conversation_id().cloned();
+                                    debug!(view_conv_id = ?view_conv_id, expected_conv_id = %conv_id, "Checking conversation ID");
+                                    if view_conv_id.as_ref() == Some(&conv_id) {
+                                        debug!("Conversation ID matches, appending text");
                                         view.append_assistant_text(&text, cx);
+                                    } else {
+                                        warn!("Conversation ID mismatch, text not appended");
                                     }
                                 })
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -815,34 +872,34 @@ impl ChattyApp {
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
                         Ok(StreamChunk::Done) => {
-                            eprintln!("🏁 [AppController async] Received Done chunk, finalizing");
+                            debug!("Received Done chunk, finalizing");
                             // Extract trace before finalizing
                                                     let trace_json = chat_view
                                                         .update(cx, |view, _cx| view.extract_current_trace())
                                                         .map_err(|e| anyhow::anyhow!(e.to_string()))?
                                                         .and_then(|trace| serde_json::to_value(&trace).ok());
                             // Finalize response in conversation
-                            eprintln!("💾 [AppController async] Finalizing response in conversation");
+                            debug!("Finalizing response in conversation");
                             let should_generate_title = cx.update_global::<ConversationsModel, _>(|store, _cx| {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                     conv.finalize_response(response_text.clone());
                                     conv.add_trace(trace_json);
-                                    eprintln!("✅ [AppController async] Response finalized in conversation");
+                                    debug!("Response finalized in conversation");
                                     // Check if we should generate a title (first exchange complete)
                                     let msg_count = conv.message_count();
-                                    eprintln!("📊 [AppController async] Message count after finalize: {}", msg_count);
-                                    eprintln!("�� [AppController async] Current title: '{}'", conv.title());
+                                    debug!(msg_count = msg_count, "Message count after finalize");
+                                    debug!(title = %conv.title(), "Current title");
                                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
                                     if should_gen {
-                                        eprintln!("🏷️  [AppController async] Will generate title for first exchange");
+                                        debug!("Will generate title for first exchange");
                                     } else if msg_count != 2 {
-                                        eprintln!("⏭️  [AppController async] Skipping title generation (count = {} != 2)", msg_count);
+                                        debug!(count = msg_count, "Skipping title generation (count != 2)");
                                     } else {
-                                        eprintln!("⏭️  [AppController async] Skipping title generation (title already set)");
+                                        debug!("Skipping title generation (title already set)");
                                     }
                                     should_gen
                                 } else {
-                                    eprintln!("❌ [AppController async] Could not find conversation to finalize");
+                                    error!("Could not find conversation to finalize");
                                     false
                                 }
                             })
@@ -850,41 +907,59 @@ impl ChattyApp {
 
                             // Generate title if this was the first exchange
                             if should_generate_title {
-                                let title_result = cx
+                                // Extract agent and history synchronously
+                                let title_data = cx
                                     .update_global::<ConversationsModel, _>(|store, _cx| {
-                                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                            smol::block_on(conv.generate_and_set_title())
+                                        if let Some(conv) = store.get_conversation(&conv_id) {
+                                            Ok((conv.agent().clone(), conv.history().to_vec()))
                                         } else {
                                             Err(anyhow::anyhow!("Conversation not found"))
                                         }
                                     })
                                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                                match title_result {
-                                    Ok(new_title) => {
-                                        eprintln!("✅ [AppController async] Generated title: '{}'", new_title);
+                                if let Ok((agent, history)) = title_data {
+                                    // Generate title asynchronously (outside update_global)
+                                    match generate_title(&agent, &history).await {
+                                        Ok(new_title) => {
+                                            debug!(title = %new_title, "Generated title");
 
-                                        // Update sidebar to show new title
-                                        sidebar
-                                            .update(cx, |sidebar, cx| {
-                                                let convs = cx
-                                                    .global::<ConversationsModel>()
-                                                    .list_all()
-                                                    .iter()
-                                                    .map(|c| (c.id().to_string(), c.title().to_string()))
-                                                    .collect::<Vec<_>>();
-                                                sidebar.set_conversations(convs, cx);
-                                            })
+                                            // Update title synchronously
+                                            cx.update_global::<ConversationsModel, _>(
+                                                |store, _cx| {
+                                                    if let Some(conv) =
+                                                        store.get_conversation_mut(&conv_id)
+                                                    {
+                                                        conv.set_title(new_title.clone());
+                                                    }
+                                                },
+                                            )
                                             .ok();
-                                    }
-                                    Err(e) => {
-                                        eprintln!("⚠️  [AppController async] Title generation failed: {:?}", e);
+
+                                            // Update sidebar to show new title
+                                            sidebar
+                                                .update(cx, |sidebar, cx| {
+                                                    let convs = cx
+                                                        .global::<ConversationsModel>()
+                                                        .list_all()
+                                                        .iter()
+                                                        .map(|c| {
+                                                            (c.id().to_string(), c.title().to_string())
+                                                        })
+                                                        .collect::<Vec<_>>();
+                                                    sidebar.set_conversations(convs, cx);
+                                                })
+                                                .ok();
+                                        }
+                                        Err(e) => {
+                                            warn!(error = ?e, "Title generation failed");
+                                        }
                                     }
                                 }
                             }
 
                             // Finalize UI
-                            eprintln!("🎨 [AppController async] Finalizing UI");
+                            debug!("Finalizing UI");
                             chat_view
                                 .update(cx, |view, cx| {
                                     if view.conversation_id() == Some(&conv_id) {
@@ -929,11 +1004,11 @@ impl ChattyApp {
                             break;
                         }
                         Ok(StreamChunk::Error(err)) => {
-                            eprintln!("Stream error: {}", err);
+                            error!(error = %err, "Stream error");
                             break;
                         }
                         Err(e) => {
-                            eprintln!("Stream error: {}", e);
+                            error!(error = %e, "Stream error");
                             break;
                         }
                     }
