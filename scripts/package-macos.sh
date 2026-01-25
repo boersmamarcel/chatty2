@@ -2,8 +2,8 @@
 
 set -e
 
+# Package name and version from Cargo.toml
 APP_NAME="chatty"
-BINARY_NAME="chatty"
 VERSION="0.1.0"
 IDENTIFIER="com.chatty"
 
@@ -13,23 +13,27 @@ CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 
-echo "Creating macOS application bundle for ${APP_NAME}..."
+echo "Creating macOS application bundle for ${APP_NAME} v${VERSION}..."
 
-if [ ! -f "${RELEASE_DIR}/${BINARY_NAME}" ]; then
-    echo "Error: Binary not found at ${RELEASE_DIR}/${BINARY_NAME}"
+# Check if binary exists
+if [ ! -f "${RELEASE_DIR}/${APP_NAME}" ]; then
+    echo "Error: Binary not found at ${RELEASE_DIR}/${APP_NAME}"
     echo "Please run 'cargo build --release' first"
     exit 1
 fi
 
+# Clean up any existing bundle
 rm -rf "${APP_BUNDLE}"
 
+# Create bundle structure
 mkdir -p "${MACOS_DIR}"
 mkdir -p "${RESOURCES_DIR}"
 
-cp "${RELEASE_DIR}/${BINARY_NAME}" "${MACOS_DIR}/${APP_NAME}"
-
+# Copy binary
+cp "${RELEASE_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
 
+# Create Info.plist
 cat > "${CONTENTS_DIR}/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -61,10 +65,13 @@ cat > "${CONTENTS_DIR}/Info.plist" << EOF
 </plist>
 EOF
 
-echo "✓ Application bundle created successfully: ${APP_BUNDLE}"
-echo ""
-echo "To run the application:"
-echo "  open ${APP_BUNDLE}"
-echo ""
-echo "To create a DMG for distribution, you can use:"
-echo "  hdiutil create -volname ${APP_NAME} -srcfolder ${APP_BUNDLE} -ov -format UDZO ${APP_NAME}.dmg"
+echo "macOS application bundle created successfully: ${APP_BUNDLE}"
+
+# Create DMG for distribution
+DMG_NAME="${APP_NAME}-${VERSION}-macos.dmg"
+echo "Creating DMG: ${DMG_NAME}..."
+hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "${DMG_NAME}" 2>/dev/null || {
+    echo "Note: DMG creation skipped (hdiutil not available or failed)"
+    echo "You can create a DMG manually with:"
+    echo "  hdiutil create -volname ${APP_NAME} -srcfolder ${APP_BUNDLE} -ov -format UDZO ${DMG_NAME}"
+}
