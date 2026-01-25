@@ -76,9 +76,7 @@ impl Global for ModelsModel {}
 
 impl ModelsModel {
     pub fn new() -> Self {
-        Self {
-            models: Vec::new(),
-        }
+        Self { models: Vec::new() }
     }
 
     pub fn add_model(&mut self, config: ModelConfig) {
