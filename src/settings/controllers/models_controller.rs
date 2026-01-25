@@ -1,5 +1,6 @@
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use gpui::{App, AsyncApp};
+use tracing::error;
 
 /// Signal to open create model dialog (to be picked up by ModelsListView)
 pub fn open_create_model_modal(_cx: &mut App) {
@@ -29,7 +30,7 @@ pub fn update_model(updated_config: ModelConfig, cx: &mut App) {
     let model = cx.global_mut::<ModelsModel>();
 
     if !model.update_model(updated_config) {
-        eprintln!("Failed to update model: model not found");
+        error!("Failed to update model: model not found");
         return;
     }
 
@@ -49,7 +50,7 @@ pub fn delete_model(model_id: String, cx: &mut App) {
     let model = cx.global_mut::<ModelsModel>();
 
     if !model.delete_model(&model_id) {
-        eprintln!("Failed to delete model: model not found");
+        error!("Failed to delete model: model not found");
         return;
     }
 
@@ -70,8 +71,7 @@ fn save_models_async(models: Vec<ModelConfig>, cx: &mut App) {
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = MODELS_REPOSITORY.clone();
         if let Err(e) = repo.save_all(models).await {
-            eprintln!("Failed to save models: {}", e);
-            eprintln!("Changes will be lost on restart - please try again");
+            error!(error = ?e, "Failed to save models, changes will be lost on restart");
         }
     })
     .detach();

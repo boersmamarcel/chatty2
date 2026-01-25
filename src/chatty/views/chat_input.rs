@@ -5,6 +5,7 @@ use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
 use std::sync::Arc;
+use tracing::{debug, error, warn};
 
 /// Callback type for sending messages
 pub type SendMessageCallback = Arc<dyn Fn(String, &mut Context<ChatInputState>) + Send + Sync>;
@@ -83,24 +84,24 @@ impl ChatInputState {
     pub fn send_message(&mut self, cx: &mut Context<Self>) {
         let message = self.input.read(cx).text().to_string();
 
-        eprintln!("🔵 [ChatInput] send_message called with: '{}'", message);
+        debug!(message = %message, "send_message called");
 
         if message.trim().is_empty() {
-            eprintln!("⚠️  [ChatInput] Message is empty, not sending");
+            warn!("Message is empty, not sending");
             return;
         }
 
         // Call the callback if set
         if let Some(on_send) = &self.on_send {
-            eprintln!("✅ [ChatInput] on_send callback exists, calling it");
+            debug!("on_send callback exists, calling it");
             on_send(message.clone(), cx);
         } else {
-            eprintln!("❌ [ChatInput] on_send callback is NOT set!");
+            error!("on_send callback is NOT set");
         }
 
         // Mark that we should clear on next render
         self.should_clear = true;
-        eprintln!("🔵 [ChatInput] Marked input for clearing");
+        debug!("Marked input for clearing");
     }
 
     /// Clear the input if needed

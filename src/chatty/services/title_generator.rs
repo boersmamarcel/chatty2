@@ -3,6 +3,7 @@ use rig::completion::Message;
 use rig::completion::Prompt;
 use rig::completion::message::{AssistantContent, Text};
 use rig::message::UserContent;
+use tracing::{debug, error};
 
 use crate::chatty::factories::AgentClient;
 
@@ -61,7 +62,7 @@ fn clean_title(raw_title: &str) -> String {
 /// - History doesn't have exactly 2 messages
 /// - LLM call fails
 pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<String> {
-    eprintln!("🎯 [TitleGenerator] generate_title called");
+    debug!("generate_title called");
 
     // Guard: Only generate title if we have exactly 2 messages
     if history.len() != 2 {
@@ -69,11 +70,11 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
             "Title generation requires exactly 2 messages, found {}",
             history.len()
         );
-        eprintln!("❌ [TitleGenerator] {}", err_msg);
+        error!("{}", err_msg);
         return Err(anyhow!(err_msg));
     }
 
-    eprintln!("✓ [TitleGenerator] Message count is 2, proceeding");
+    debug!("Message count is 2, proceeding");
 
     // Extract first exchange
     let user_text = match history.first() {
@@ -92,10 +93,10 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
         _ => String::new(),
     };
 
-    eprintln!(
-        "📝 [TitleGenerator] User: {} chars, Assistant: {} chars",
-        user_text.len(),
-        assistant_text.len()
+    debug!(
+        user_len = user_text.len(),
+        assistant_len = assistant_text.len(),
+        "Message lengths"
     );
 
     // Build title generation prompt
@@ -108,7 +109,7 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
     );
 
     // Use agent.prompt() for non-streaming completion
-    eprintln!("🤖 [TitleGenerator] Calling LLM for title generation...");
+    debug!("Calling LLM for title generation");
     let response_text = match agent {
         AgentClient::Anthropic(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::OpenAI(agent) => agent.prompt(&title_prompt).await?,
@@ -117,12 +118,12 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
         AgentClient::Ollama(agent) => agent.prompt(&title_prompt).await?,
     };
 
-    eprintln!("📨 [TitleGenerator] LLM response: '{}'", response_text);
+    debug!(response = %response_text, "LLM response received");
 
     // Clean and validate the title
     let title = clean_title(&response_text);
 
-    eprintln!("🧹 [TitleGenerator] Cleaned title: '{}'", title);
+    debug!(cleaned_title = %title, "Title cleaned");
 
     Ok(title)
 }

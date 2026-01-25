@@ -1,5 +1,6 @@
 use anyhow::Result;
 use gpui::{App, AsyncApp, BorrowAppContext};
+use tracing::{debug, error, info, warn};
 
 use crate::MODELS_REPOSITORY;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
@@ -22,14 +23,11 @@ use super::discovery::discover_ollama_models;
 /// # Returns
 /// The number of models synchronized, or an error
 pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Result<usize> {
-    eprintln!("🔍 [Ollama Sync] Attempting model auto-discovery");
+    info!("Attempting Ollama model auto-discovery");
 
     match discover_ollama_models(ollama_base_url).await {
         Ok(discovered_models) if !discovered_models.is_empty() => {
-            eprintln!(
-                "✨ [Ollama Sync] Discovered {} model(s)",
-                discovered_models.len()
-            );
+            info!(count = discovered_models.len(), "Ollama models discovered");
 
             // Create ModelConfig for each discovered model
             let new_model_configs: Vec<ModelConfig> = discovered_models
@@ -65,10 +63,7 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
                         model.add_model(config.clone());
                     }
 
-                    eprintln!(
-                        "🔄 [Ollama Sync] Synced: {} model(s) now available",
-                        new_model_configs.len()
-                    );
+                    debug!(count = new_model_configs.len(), "Models synced");
                 });
 
                 // Refresh windows to update UI
@@ -83,20 +78,16 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
             if let Some(all_models) = all_models {
                 let models_repo = MODELS_REPOSITORY.clone();
                 if let Err(e) = models_repo.save_all(all_models).await {
-                    eprintln!("⚠️  [Ollama Sync] Failed to save discovered models: {}", e);
+                    warn!(error = ?e, "Failed to save discovered models");
                 } else {
-                    eprintln!("💾 [Ollama Sync] Models saved to disk");
+                    debug!("Models saved to disk");
                 }
             }
 
             Ok(new_model_configs.len())
         }
         Ok(_) => {
-            eprintln!(
-                "ℹ️  [Ollama Sync] No models installed at {}",
-                ollama_base_url
-            );
-            eprintln!("   Install models with: ollama pull <model-name>");
+            info!(url = %ollama_base_url, "No Ollama models installed, install with: ollama pull <model-name>");
 
             // Remove any existing Ollama models since none are available
             cx.update(|cx| {
@@ -116,11 +107,7 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
             Ok(0)
         }
         Err(e) => {
-            eprintln!(
-                "⚠️  [Ollama Sync] Could not connect to Ollama at {}: {}",
-                ollama_base_url, e
-            );
-            eprintln!("   Make sure Ollama is running or install it from: https://ollama.ai");
+            warn!(url = %ollama_base_url, error = ?e, "Could not connect to Ollama, make sure Ollama is running or install from: https://ollama.ai");
             Err(e)
         }
     }
@@ -142,7 +129,7 @@ pub fn ensure_default_ollama_provider(cx: &mut App) -> bool {
             let ollama_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
                 .with_base_url("http://localhost:11434".to_string());
             model.add_provider(ollama_config);
-            eprintln!("✨ [Ollama Sync] Created default Ollama provider");
+            info!("Created default Ollama provider");
             should_save = true;
         }
     });

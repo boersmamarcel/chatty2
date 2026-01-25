@@ -97,12 +97,27 @@ impl ChatView {
 
     /// Append text to the current streaming assistant message
     pub fn append_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        debug!(
+            text_len = text.len(),
+            total_messages = self.messages.len(),
+            "append_assistant_text called"
+        );
         if let Some(last) = self.messages.last_mut() {
+            debug!(
+                is_streaming = last.is_streaming,
+                content_len = last.content.len(),
+                "Last message details"
+            );
             if last.is_streaming {
                 last.content.push_str(text);
+                debug!(new_content_len = last.content.len(), "Text appended");
                 cx.notify();
                 self.scroll_to_bottom();
+            } else {
+                warn!("Last message NOT streaming, text dropped");
             }
+        } else {
+            warn!("No messages in view, text dropped");
         }
     }
 
@@ -344,9 +359,7 @@ impl Render for ChatView {
                         .map(|m| m.models().is_empty())
                         .unwrap_or(true)
                 {
-                    eprintln!(
-                        "🆕 [ChatView] No conversations and models available, triggering creation"
-                    );
+                    info!("No conversations and models available, triggering creation");
                     // We need to trigger conversation creation on the parent ChattyApp
                     // This will be handled by sending a signal
                 }

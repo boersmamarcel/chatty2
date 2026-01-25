@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui_component::*;
+use tracing::{debug, error, info, warn};
 
 mod chatty;
 mod settings;
@@ -12,6 +13,12 @@ use settings::repositories::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Flag to prevent theme observer from saving during initialization.
+/// This avoids a race condition where the default theme could overwrite
+/// the user's saved theme preference before settings are loaded.
+static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 actions!(chatty, [OpenSettings]);
 
@@ -41,12 +48,18 @@ fn init_themes(cx: &mut App) {
     if let Err(err) = ThemeRegistry::watch_dir(PathBuf::from("./themes"), cx, |_cx| {
         // Empty callback - just loading themes into registry
     }) {
-        eprintln!("Failed to watch themes directory: {}", err);
+        warn!(error = ?err, "Failed to watch themes directory");
     }
 
     // Observe theme changes and persist base theme name + dark mode to GeneralSettingsModel
-    // This will only trigger when user makes changes, not on initial load
+    // Only persist after initialization is complete to avoid overwriting saved preferences
     cx.observe_global::<Theme>(|cx| {
+        // Skip saving during initialization - settings haven't been loaded yet
+        if !THEME_INIT_COMPLETE.load(Ordering::SeqCst) {
+            debug!("Skipping theme save during initialization");
+            return;
+        }
+
         let full_theme_name = cx.theme().theme_name().to_string();
         let is_dark = cx.theme().mode.is_dark();
 
@@ -67,7 +80,7 @@ fn init_themes(cx: &mut App) {
         cx.spawn(|_cx: &mut AsyncApp| async move {
             let repo = GENERAL_SETTINGS_REPOSITORY.clone();
             if let Err(e) = repo.save(settings).await {
-                eprintln!("Failed to save theme preference: {}", e);
+                warn!(error = ?e, "Failed to save theme preference");
             }
         })
         .detach();
@@ -90,6 +103,12 @@ fn apply_theme_from_settings(cx: &mut App) {
         .dark_mode
         .unwrap_or(false);
 
+    info!(
+        theme = %base_theme_name,
+        dark_mode = is_dark,
+        "Applying theme from saved settings"
+    );
+
     // Find the appropriate theme variant using shared utility
     let full_theme_name = settings::utils::find_theme_variant(cx, &base_theme_name, is_dark);
 
@@ -109,15 +128,26 @@ fn apply_theme_from_settings(cx: &mut App) {
         // Then apply the theme
         Theme::global_mut(cx).apply_config(&theme);
         cx.refresh_windows();
+
+        info!(theme = %full_theme_name, "Theme applied successfully");
+    } else {
+        warn!(
+            theme = %full_theme_name,
+            "Theme not found in registry, keeping default"
+        );
     }
+
+    // Mark initialization complete - now the observer can save user changes
+    THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
+    debug!("Theme initialization complete, observer now active");
 }
 
 fn register_actions(cx: &mut App) {
     // Register open settings action
-    println!("Action registered");
+    debug!("Action registered");
     cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None)]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
-        println!("Action triggered");
+        debug!("Action triggered");
         SettingsView::open_or_focus_settings_window(cx);
     });
 }
@@ -170,9 +200,9 @@ fn main() {
                     .ok();
                 }
                 Err(e) => {
-                    eprintln!("Failed to load general settings: {}", e);
-                    eprintln!("Using default settings");
-                    // Already initialized with defaults above, so no action needed
+                    warn!(error = ?e, "Failed to load general settings, using default settings");
+                    // Mark initialization complete even on error so the observer can save future changes
+                    THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
                 }
             }
         })
@@ -191,8 +221,6 @@ fn main() {
         cx.set_global(settings::views::models_page::GlobalModelsListView::default());
 
         // Use Arc<AtomicBool> to track when both providers and models are loaded
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
 
         let providers_loaded = Arc::new(AtomicBool::new(false));
         let models_loaded = Arc::new(AtomicBool::new(false));
@@ -203,9 +231,7 @@ fn main() {
             let models_loaded = models_loaded.clone();
             move |cx: &mut App| {
                 if providers_loaded.load(Ordering::SeqCst) && models_loaded.load(Ordering::SeqCst) {
-                    eprintln!(
-                        "✅ [main] Both models and providers loaded, triggering conversation load"
-                    );
+                    info!("Both models and providers loaded, triggering conversation load");
 
                     // Get the ChattyApp entity and call load_conversations_after_models_ready
                     if let Some(weak_entity) = cx
@@ -246,20 +272,20 @@ fn main() {
                             let repo_for_save = repo.clone();
                             cx.spawn(|_cx: &mut AsyncApp| async move {
                                 if let Err(e) = repo_for_save.save_all(providers_to_save).await {
-                                    eprintln!("Failed to persist default Ollama provider: {}", e);
+                                    warn!(error = ?e, "Failed to persist default Ollama provider");
                                 }
                             })
                             .detach();
                         }
 
                         providers_loaded_clone.store(true, Ordering::SeqCst);
-                        eprintln!("✅ [main] Providers loaded");
+                        info!("Providers loaded");
                         check_fn_1(cx);
                     })
                     .ok();
                 }
                 Err(e) => {
-                    eprintln!("Failed to load providers: {}", e);
+                    error!(error = ?e, "Failed to load providers");
                 }
             }
         })
@@ -278,10 +304,10 @@ fn main() {
                         });
 
                         models_loaded_clone.store(true, Ordering::SeqCst);
-                        eprintln!("✅ [main] Models loaded");
+                        info!("Models loaded");
 
                         // Always attempt to auto-discover Ollama models on startup
-                        eprintln!("🔍 [main] Attempting Ollama model auto-discovery");
+                        debug!("Attempting Ollama model auto-discovery");
 
                         // Get Ollama base URL
                         let ollama_base_url = cx
@@ -312,7 +338,7 @@ fn main() {
                     .ok();
                 }
                 Err(e) => {
-                    eprintln!("Failed to load models: {}", e);
+                    error!(error = ?e, "Failed to load models");
                 }
             }
         })
