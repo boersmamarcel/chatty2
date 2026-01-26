@@ -40,30 +40,26 @@ impl ConversationRepository for ConversationJsonRepository {
 
         Box::pin(async move {
             // Ensure directory exists
-            tokio::task::spawn_blocking(move || {
-                std::fs::create_dir_all(&conversations_dir)?;
+            tokio::fs::create_dir_all(&conversations_dir).await?;
 
-                let mut conversations = Vec::new();
+            let mut conversations = Vec::new();
 
-                // Read all .json files in the directory
-                for entry in std::fs::read_dir(&conversations_dir)? {
-                    let entry = entry?;
-                    let path = entry.path();
+            // Read all .json files in the directory
+            let mut entries = tokio::fs::read_dir(&conversations_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
 
-                    if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                        let content = std::fs::read_to_string(&path)?;
-                        let data: ConversationData = serde_json::from_str(&content)?;
-                        conversations.push(data);
-                    }
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    let content = tokio::fs::read_to_string(&path).await?;
+                    let data: ConversationData = serde_json::from_str(&content)?;
+                    conversations.push(data);
                 }
+            }
 
-                // Sort by updated_at descending
-                conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            // Sort by updated_at descending
+            conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-                Ok(conversations)
-            })
-            .await
-            .map_err(|e| RepositoryError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            Ok(conversations)
         })
     }
 
@@ -72,22 +68,18 @@ impl ConversationRepository for ConversationJsonRepository {
         let conversations_dir = self.conversations_dir.clone();
 
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                // Ensure directory exists
-                std::fs::create_dir_all(&conversations_dir)?;
+            // Ensure directory exists
+            tokio::fs::create_dir_all(&conversations_dir).await?;
 
-                // Serialize to JSON
-                let json = serde_json::to_string_pretty(&data)?;
+            // Serialize to JSON
+            let json = serde_json::to_string_pretty(&data)?;
 
-                // Write to file atomically (write to temp, then rename)
-                let temp_path = path.with_extension("json.tmp");
-                std::fs::write(&temp_path, json)?;
-                std::fs::rename(&temp_path, &path)?;
+            // Write to file atomically (write to temp, then rename)
+            let temp_path = path.with_extension("json.tmp");
+            tokio::fs::write(&temp_path, json).await?;
+            tokio::fs::rename(&temp_path, &path).await?;
 
-                Ok(())
-            })
-            .await
-            .map_err(|e| RepositoryError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            Ok(())
         })
     }
 
@@ -95,14 +87,10 @@ impl ConversationRepository for ConversationJsonRepository {
         let path = self.get_conversation_path(id);
 
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                if path.exists() {
-                    std::fs::remove_file(&path)?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| RepositoryError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                tokio::fs::remove_file(&path).await?;
+            }
+            Ok(())
         })
     }
 }
