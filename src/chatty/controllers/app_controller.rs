@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::chatty::factories::AgentClient;
-use crate::chatty::models::{Conversation, ConversationsModel, StreamChunk};
+use crate::chatty::models::{Conversation, ConversationsStore, StreamChunk};
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
@@ -31,8 +31,8 @@ pub struct ChattyApp {
 impl ChattyApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Initialize global conversations model if not already done
-        if !cx.has_global::<ConversationsModel>() {
-            cx.set_global(ConversationsModel::new());
+        if !cx.has_global::<ConversationsStore>() {
+            cx.set_global(ConversationsStore::new());
         }
 
         // Create repository
@@ -71,7 +71,7 @@ impl ChattyApp {
 
         // Auto-create first conversation if none exist
         let has_convs = cx
-            .try_global::<ConversationsModel>()
+            .try_global::<ConversationsStore>()
             .map(|store| store.count() > 0)
             .unwrap_or(false);
 
@@ -330,7 +330,7 @@ impl ChattyApp {
                                 {
                                     Ok(conversation) => {
                                         // Add to global store
-                                        cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                             store.add_conversation(conversation);
                                         })
                                         .ok();
@@ -351,7 +351,7 @@ impl ChattyApp {
                             let active_conv_id = sidebar
                                 .update(cx, |sidebar, cx| {
                                     let convs = cx
-                                        .global::<ConversationsModel>()
+                                        .global::<ConversationsStore>()
                                         .list_all()
                                         .iter()
                                         .map(|c| (c.id().to_string(), c.title().to_string()))
@@ -360,10 +360,10 @@ impl ChattyApp {
 
                                     // Set active conversation to the most recently updated
                                     if let Some(active_conv) =
-                                        cx.global::<ConversationsModel>().list_all().first()
+                                        cx.global::<ConversationsStore>().list_all().first()
                                     {
                                         let active_id = active_conv.id().to_string();
-                                        cx.update_global::<ConversationsModel, _>(|store, _| {
+                                        cx.update_global::<ConversationsStore, _>(|store, _| {
                                             store.set_active(active_id.clone());
                                         });
                                         sidebar
@@ -447,7 +447,7 @@ impl ChattyApp {
                     .await?;
 
                     // Add to global store
-                    cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
                         store.add_conversation(conversation);
                         store.set_active(conv_id.clone());
                     })?;
@@ -455,7 +455,7 @@ impl ChattyApp {
                     // Update sidebar
                     sidebar.update(cx, |sidebar, cx| {
                         let convs = cx
-                            .global::<ConversationsModel>()
+                            .global::<ConversationsStore>()
                             .list_all()
                             .iter()
                             .map(|c| (c.id().to_string(), c.title().to_string()))
@@ -520,7 +520,7 @@ impl ChattyApp {
     /// Load a conversation by ID
     fn load_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         // Set active in store
-        cx.update_global::<ConversationsModel, _>(|store, _cx| {
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
             store.set_active(id.to_string());
         });
 
@@ -535,7 +535,7 @@ impl ChattyApp {
 
         // Update chat view
         let conversation_data =
-            cx.global::<ConversationsModel>()
+            cx.global::<ConversationsStore>()
                 .get_conversation(id)
                 .map(|conv| {
                     (
@@ -564,7 +564,7 @@ impl ChattyApp {
 
         // Get the active conversation ID
         let conv_id = cx
-            .global::<ConversationsModel>()
+            .global::<ConversationsStore>()
             .active_id()
             .map(|s| s.to_string());
 
@@ -592,7 +592,7 @@ impl ChattyApp {
                             AgentClient::from_model_config(&model_config, &provider_config).await?;
 
                         // Update the conversation's agent synchronously
-                        cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(new_agent, model_config.id.clone());
@@ -607,7 +607,7 @@ impl ChattyApp {
 
                         // Save to disk
                         let conv_data_res =
-                            cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 store.get_conversation(&conv_id).and_then(|conv| {
                                     let history = conv.serialize_history().ok()?;
                                     let traces = conv.serialize_traces().ok()?;
@@ -663,21 +663,21 @@ impl ChattyApp {
         let chat_view = self.chat_view.clone();
 
         // Remove from global store
-        cx.update_global::<ConversationsModel, _>(|store, _cx| {
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
             store.delete_conversation(&conv_id);
         });
 
         // Update sidebar
         sidebar.update(cx, |sidebar, cx| {
             let convs = cx
-                .global::<ConversationsModel>()
+                .global::<ConversationsStore>()
                 .list_all()
                 .iter()
                 .map(|c| (c.id().to_string(), c.title().to_string()))
                 .collect::<Vec<_>>();
 
             let active_id = cx
-                .global::<ConversationsModel>()
+                .global::<ConversationsStore>()
                 .active_id()
                 .map(|s| s.to_string());
 
@@ -687,7 +687,7 @@ impl ChattyApp {
 
         // If deleted conversation was active, clear chat view or load new active
         let active_id = cx
-            .global::<ConversationsModel>()
+            .global::<ConversationsStore>()
             .active_id()
             .map(|s| s.to_string());
         if let Some(id) = active_id {
@@ -728,7 +728,7 @@ impl ChattyApp {
 
                 // Get active conversation ID, or create a new one if it doesn't exist
                 let conv_id: String = match cx
-                    .update_global::<ConversationsModel, _>(|store, _| store.active_id().cloned())
+                    .update_global::<ConversationsStore, _>(|store, _| store.active_id().cloned())
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
                 {
                     Some(id) => {
@@ -768,7 +768,7 @@ impl ChattyApp {
 
                 // Extract agent and history synchronously (to avoid blocking in async context)
                 let (agent, history) = cx
-                    .update_global::<ConversationsModel, _>(|store, _cx| {
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             Ok((conv.agent().clone(), conv.history().to_vec()))
                         } else {
@@ -790,7 +790,7 @@ impl ChattyApp {
                     stream_prompt(&agent, &history, contents).await?;
 
                 // Update history synchronously with user message
-                cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation_mut(&conv_id) {
                         conv.add_user_message_to_history(user_message);
                     }
@@ -870,7 +870,7 @@ impl ChattyApp {
                                                         .and_then(|trace| serde_json::to_value(&trace).ok());
                             // Finalize response in conversation
                             debug!("Finalizing response in conversation");
-                            let should_generate_title = cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                            let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                     conv.finalize_response(response_text.clone());
                                     conv.add_trace(trace_json);
@@ -899,7 +899,7 @@ impl ChattyApp {
                             if should_generate_title {
                                 // Extract agent and history synchronously
                                 let title_data = cx
-                                    .update_global::<ConversationsModel, _>(|store, _cx| {
+                                    .update_global::<ConversationsStore, _>(|store, _cx| {
                                         if let Some(conv) = store.get_conversation(&conv_id) {
                                             Ok((conv.agent().clone(), conv.history().to_vec()))
                                         } else {
@@ -915,7 +915,7 @@ impl ChattyApp {
                                             debug!(title = %new_title, "Generated title");
 
                                             // Update title synchronously
-                                            cx.update_global::<ConversationsModel, _>(
+                                            cx.update_global::<ConversationsStore, _>(
                                                 |store, _cx| {
                                                     if let Some(conv) =
                                                         store.get_conversation_mut(&conv_id)
@@ -930,7 +930,7 @@ impl ChattyApp {
                                             sidebar
                                                 .update(cx, |sidebar, cx| {
                                                     let convs = cx
-                                                        .global::<ConversationsModel>()
+                                                        .global::<ConversationsStore>()
                                                         .list_all()
                                                         .iter()
                                                         .map(|c| {
@@ -960,7 +960,7 @@ impl ChattyApp {
 
                             // Persist to disk
                             let conv_data_res =
-                                cx.update_global::<ConversationsModel, _>(|store, _cx| {
+                                cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                     store.get_conversation(&conv_id).and_then(|conv| {
                                         let history = conv.serialize_history().ok()?;
                                         let traces = conv.serialize_traces().ok()?;

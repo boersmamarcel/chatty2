@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use super::conversation::Conversation;
 
 /// Global store for all conversations
-pub struct ConversationsModel {
+pub struct ConversationsStore {
     conversations: HashMap<String, Conversation>,
     active_conversation_id: Option<String>,
 }
 
-impl Global for ConversationsModel {}
+impl Global for ConversationsStore {}
 
-impl ConversationsModel {
+impl ConversationsStore {
     pub fn new() -> Self {
         Self {
             conversations: HashMap::new(),
@@ -80,7 +80,7 @@ impl ConversationsModel {
     }
 }
 
-impl Default for ConversationsModel {
+impl Default for ConversationsStore {
     fn default() -> Self {
         Self::new()
     }
