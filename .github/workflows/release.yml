@@ -53,32 +53,6 @@ jobs:
           name: linux-x86_64
           path: chatty-*-linux-x86_64.tar.gz
 
-  build-macos-intel:
-    runs-on: macos-13
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Package macOS app
-        run: ./scripts/package-macos.sh
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-intel
-          path: chatty-*-macos.dmg
-
-      - name: Upload macOS app bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-intel-app
-          path: chatty.app
 
   build-macos-arm:
     runs-on: macos-latest
@@ -137,7 +111,7 @@ jobs:
           path: chatty-*-windows-x86_64.zip
 
   create-release:
-    needs: [build-linux, build-macos-intel, build-macos-arm, build-windows]
+    needs: [build-linux, build-macos-arm, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
