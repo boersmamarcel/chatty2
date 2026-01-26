@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ProviderType {
     OpenAI,
     Anthropic,

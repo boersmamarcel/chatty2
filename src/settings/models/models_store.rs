@@ -45,26 +45,6 @@ impl ModelConfig {
             extra_params: HashMap::new(),
         }
     }
-
-    pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = temperature;
-        self
-    }
-
-    pub fn with_preamble(mut self, preamble: String) -> Self {
-        self.preamble = preamble;
-        self
-    }
-
-    pub fn with_max_tokens(mut self, max_tokens: i32) -> Self {
-        self.max_tokens = Some(max_tokens);
-        self
-    }
-
-    pub fn with_top_p(mut self, top_p: f32) -> Self {
-        self.top_p = Some(top_p);
-        self
-    }
 }
 
 #[derive(Clone)]
@@ -76,9 +56,7 @@ impl Global for ModelsModel {}
 
 impl ModelsModel {
     pub fn new() -> Self {
-        Self {
-            models: Vec::new(),
-        }
+        Self { models: Vec::new() }
     }
 
     pub fn add_model(&mut self, config: ModelConfig) {
@@ -106,10 +84,6 @@ impl ModelsModel {
 
     pub fn models(&self) -> &[ModelConfig] {
         &self.models
-    }
-
-    pub fn models_mut(&mut self) -> &mut Vec<ModelConfig> {
-        &mut self.models
     }
 
     pub fn models_by_provider(&self, provider_type: &ProviderType) -> Vec<&ModelConfig> {

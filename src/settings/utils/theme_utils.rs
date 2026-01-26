@@ -40,7 +40,8 @@ pub fn find_theme_variant(cx: &App, base_name: &str, is_dark: bool) -> SharedStr
 /// Get all unique base theme names from the registry, sorted alphabetically.
 /// Returns tuples of (value, label) for use in dropdowns.
 pub fn get_all_base_theme_names(cx: &App) -> Vec<(SharedString, SharedString)> {
-    let all_themes: Vec<SharedString> = ThemeRegistry::global(cx).themes().keys().cloned().collect();
+    let all_themes: Vec<SharedString> =
+        ThemeRegistry::global(cx).themes().keys().cloned().collect();
 
     // Extract unique base theme names
     let mut theme_bases: HashSet<String> = HashSet::new();

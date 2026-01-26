@@ -16,16 +16,12 @@ use gpui_component::{
     tab::{Tab, TabBar},
     v_flex,
 };
+use tracing::trace;
 
 // Global state to store the models list view
+#[derive(Default)]
 pub struct GlobalModelsListView {
     pub view: Option<Entity<ModelsListView>>,
-}
-
-impl Default for GlobalModelsListView {
-    fn default() -> Self {
-        Self { view: None }
-    }
 }
 
 impl Global for GlobalModelsListView {}
@@ -35,12 +31,12 @@ fn string_to_provider_type(s: &str) -> ProviderType {
     match s {
         "OpenAI" => ProviderType::OpenAI,
         "Anthropic" => ProviderType::Anthropic,
-        "Gemini" => ProviderType::Gemini,
+        "Google Gemini" => ProviderType::Gemini,
         "Cohere" => ProviderType::Cohere,
         "Perplexity" => ProviderType::Perplexity,
-        "XAI" => ProviderType::XAI,
+        "xAI" => ProviderType::XAI,
         "Azure OpenAI" => ProviderType::AzureOpenAI,
-        "Hugging Face" => ProviderType::HuggingFace,
+        "HuggingFace" => ProviderType::HuggingFace,
         "Ollama" => ProviderType::Ollama,
         _ => ProviderType::OpenAI, // Default fallback
     }
@@ -71,7 +67,7 @@ impl ModelsListView {
     }
 
     fn show_add_model_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        println!("Opening Add Model dialog...");
+        trace!("Opening Add Model dialog");
 
         // Track active tab (0 = Basic, 1 = Advanced)
         let active_tab = std::rc::Rc::new(std::cell::Cell::new(0usize));
@@ -295,7 +291,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or(&"OpenAI");
+                                                        .unwrap_or("OpenAI");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -339,7 +335,7 @@ impl ModelsListView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        println!("Opening Edit Model dialog for ID: {}", model_id);
+        trace!("Opening Edit Model dialog for ID: {}", model_id);
 
         // Load existing model data
         let existing_model = match cx.global::<ModelsModel>().get_model(&model_id) {
@@ -400,7 +396,7 @@ impl ModelsListView {
         let provider_index = configured_providers
             .iter()
             .position(|p| p.provider_type == existing_model.provider_type)
-            .map(|idx| IndexPath::new(idx));
+            .map(IndexPath::new);
 
         let provider_select = cx.new(|cx| SelectState::new(providers, provider_index, window, cx));
 
@@ -592,7 +588,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or(&"OpenAI");
+                                                        .unwrap_or("OpenAI");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -666,7 +662,7 @@ impl Render for ModelsListView {
                             .label("+ Add Model")
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| {
-                                println!("Add Model button clicked!");
+                                trace!("Add Model button clicked");
                                 this.show_add_model_dialog(window, cx);
                             })),
                     ),
