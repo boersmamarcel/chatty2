@@ -7,7 +7,7 @@ A desktop chat application built with Rust and GPUI.
 - **UI Framework**: [GPUI](https://crates.io/crates/gpui) - Zed's GPU-accelerated UI framework
 - **Components**: gpui-component for UI components
 - **LLM Integration**: [rig-core](https://crates.io/crates/rig-core) for LLM operations
-- **Async Runtime**: Tokio (for rig) + smol (for GPUI)
+- **Async Runtime**: Tokio
 - **Serialization**: serde/serde_json for persistence
 
 ## Project Structure
@@ -83,7 +83,7 @@ sudo apt-get install -y \
 
 ## Architecture Notes
 
-- **Dual Runtime**: The app uses both Tokio (required by rig for LLM operations) and smol (used by GPUI). Tokio runtime is entered at startup and maintained throughout.
+- **Tokio Runtime**: The app uses Tokio for all async operations. The runtime is entered at startup and maintained throughout the application lifecycle.
 - **Global State**: Uses GPUI's global state system (`cx.set_global`, `cx.global`) for app-wide state like providers, models, and settings.
 - **Async Loading**: Providers, models, and settings are loaded asynchronously to avoid blocking the UI during startup.
 - **Theme System**: Themes are loaded from `./themes` directory. User preferences (theme name + dark mode) are persisted to JSON.

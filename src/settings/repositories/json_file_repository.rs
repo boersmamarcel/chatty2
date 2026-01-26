@@ -29,22 +29,24 @@ impl ProviderRepository for JsonFileRepository {
 
         Box::pin(async move {
             // Check file existence on blocking pool
-            let exists = smol::unblock({
+            let exists = tokio::task::spawn_blocking({
                 let path = path.clone();
                 move || path.exists()
             })
-            .await;
+            .await
+            .unwrap_or(false);
 
             if !exists {
                 return Ok(Vec::new());
             }
 
             // Read file on blocking pool
-            let contents = smol::unblock({
+            let contents = tokio::task::spawn_blocking({
                 let path = path.clone();
                 move || std::fs::read_to_string(&path)
             })
             .await
+            .map_err(|e| RepositoryError::IoError(e.to_string()))?
             .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
             // JSON parsing is CPU-bound, keep on async thread (it's fast)
@@ -64,7 +66,7 @@ impl ProviderRepository for JsonFileRepository {
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
             // All file I/O on blocking pool
-            smol::unblock({
+            tokio::task::spawn_blocking({
                 let path = path.clone();
                 move || {
                     // Create directory if needed
@@ -84,7 +86,8 @@ impl ProviderRepository for JsonFileRepository {
                     Ok::<(), RepositoryError>(())
                 }
             })
-            .await?;
+            .await
+            .map_err(|e| RepositoryError::IoError(e.to_string()))??;
 
             Ok(())
         })

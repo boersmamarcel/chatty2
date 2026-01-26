@@ -168,7 +168,7 @@ fn main() {
     let _tokio_runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
     // Enter the runtime context for the entire application
-    // This allows rig to use Tokio even though GPUI uses smol
+    // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
 
     let app = Application::new();
