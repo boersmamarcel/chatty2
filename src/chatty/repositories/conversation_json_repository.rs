@@ -40,7 +40,7 @@ impl ConversationRepository for ConversationJsonRepository {
 
         Box::pin(async move {
             // Ensure directory exists
-            smol::unblock(move || {
+            tokio::task::spawn_blocking(move || {
                 std::fs::create_dir_all(&conversations_dir)?;
 
                 let mut conversations = Vec::new();
@@ -63,6 +63,7 @@ impl ConversationRepository for ConversationJsonRepository {
                 Ok(conversations)
             })
             .await
+            .map_err(|e| RepositoryError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?
         })
     }
 
@@ -71,7 +72,7 @@ impl ConversationRepository for ConversationJsonRepository {
         let conversations_dir = self.conversations_dir.clone();
 
         Box::pin(async move {
-            smol::unblock(move || {
+            tokio::task::spawn_blocking(move || {
                 // Ensure directory exists
                 std::fs::create_dir_all(&conversations_dir)?;
 
@@ -86,6 +87,7 @@ impl ConversationRepository for ConversationJsonRepository {
                 Ok(())
             })
             .await
+            .map_err(|e| RepositoryError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?
         })
     }
 
@@ -93,13 +95,14 @@ impl ConversationRepository for ConversationJsonRepository {
         let path = self.get_conversation_path(id);
 
         Box::pin(async move {
-            smol::unblock(move || {
+            tokio::task::spawn_blocking(move || {
                 if path.exists() {
                     std::fs::remove_file(&path)?;
                 }
                 Ok(())
             })
             .await
+            .map_err(|e| RepositoryError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?
         })
     }
 }
