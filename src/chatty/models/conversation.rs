@@ -30,6 +30,17 @@ impl Conversation {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
     ) -> Result<Self> {
+        // Log URL information
+        let url_info = provider_config
+            .base_url
+            .as_ref()
+            .map(|url| format!(" with URL: {}", url))
+            .unwrap_or_else(|| " (using default URL)".to_string());
+        println!(
+            "[Conversation::new] Initializing with provider: {:?}{}, model: {}",
+            provider_config.provider_type, url_info, model_config.model_identifier
+        );
+
         let agent = AgentClient::from_model_config(model_config, provider_config)
             .await
             .context("Failed to create agent from config")?;
@@ -54,6 +65,17 @@ impl Conversation {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
     ) -> Result<Self> {
+        // Log URL information
+        let url_info = provider_config
+            .base_url
+            .as_ref()
+            .map(|url| format!(" with URL: {}", url))
+            .unwrap_or_else(|| " (using default URL)".to_string());
+        println!(
+            "[Conversation::from_data] Restoring conversation {} with provider: {:?}{}, model: {}",
+            data.id, provider_config.provider_type, url_info, model_config.model_identifier
+        );
+
         // Reconstruct agent
         let agent = AgentClient::from_model_config(model_config, provider_config)
             .await

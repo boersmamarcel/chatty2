@@ -30,12 +30,12 @@ fn string_to_provider_type(s: &str) -> ProviderType {
     match s {
         "OpenAI" => ProviderType::OpenAI,
         "Anthropic" => ProviderType::Anthropic,
-        "Gemini" => ProviderType::Gemini,
+        "Google Gemini" => ProviderType::Gemini,
         "Cohere" => ProviderType::Cohere,
         "Perplexity" => ProviderType::Perplexity,
-        "XAI" => ProviderType::XAI,
+        "xAI" => ProviderType::XAI,
         "Azure OpenAI" => ProviderType::AzureOpenAI,
-        "Hugging Face" => ProviderType::HuggingFace,
+        "HuggingFace" => ProviderType::HuggingFace,
         "Ollama" => ProviderType::Ollama,
         _ => ProviderType::OpenAI, // Default fallback
     }
