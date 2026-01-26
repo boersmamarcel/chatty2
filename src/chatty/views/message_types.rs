@@ -116,6 +116,11 @@ impl SystemTrace {
         self.items.push(TraceItem::ToolCall(tool_call));
     }
 
+    #[allow(dead_code)]
+    pub fn add_thinking(&mut self, thinking: ThinkingBlock) {
+        self.items.push(TraceItem::Thinking(thinking));
+    }
+
     pub fn has_items(&self) -> bool {
         !self.items.is_empty()
     }
