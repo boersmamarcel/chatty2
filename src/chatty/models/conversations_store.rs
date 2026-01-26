@@ -62,20 +62,6 @@ impl ConversationsModel {
         }
     }
 
-    /// Get the active conversation (immutable)
-    pub fn get_active(&self) -> Option<&Conversation> {
-        self.active_conversation_id
-            .as_ref()
-            .and_then(|id| self.conversations.get(id))
-    }
-
-    /// Get the active conversation (mutable)
-    pub fn get_active_mut(&mut self) -> Option<&mut Conversation> {
-        self.active_conversation_id
-            .as_ref()
-            .and_then(|id| self.conversations.get_mut(id))
-    }
-
     /// Get the active conversation ID
     pub fn active_id(&self) -> Option<&String> {
         self.active_conversation_id.as_ref()
@@ -91,17 +77,6 @@ impl ConversationsModel {
     /// Get count of conversations
     pub fn count(&self) -> usize {
         self.conversations.len()
-    }
-
-    /// Check if there are any conversations
-    pub fn is_empty(&self) -> bool {
-        self.conversations.is_empty()
-    }
-
-    /// Clear all conversations
-    pub fn clear(&mut self) {
-        self.conversations.clear();
-        self.active_conversation_id = None;
     }
 }
 

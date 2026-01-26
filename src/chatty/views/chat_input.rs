@@ -65,11 +65,6 @@ impl ChatInputState {
         }
     }
 
-    /// Get the currently selected model ID
-    pub fn selected_model_id(&self) -> Option<&String> {
-        self.selected_model_id.as_ref()
-    }
-
     /// Get the available models list
     pub fn available_models(&self) -> &[(String, String)] {
         &self.available_models

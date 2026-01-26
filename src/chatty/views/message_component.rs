@@ -2,7 +2,7 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
 
-use super::message_types::{AssistantMessage, SystemTrace, UserMessage};
+use super::message_types::{AssistantMessage, SystemTrace};
 use super::trace_components::SystemTraceView;
 
 /// Message role indicator
@@ -26,18 +26,6 @@ pub struct DisplayMessage {
 }
 
 impl DisplayMessage {
-    /// Create a user display message
-    pub fn from_user_message(user_msg: &UserMessage) -> Self {
-        Self {
-            role: MessageRole::User,
-            content: user_msg.text.clone(),
-            is_streaming: false,
-            system_trace_view: None,
-            live_trace: None,
-            is_markdown: false,
-        }
-    }
-
     /// Create an assistant display message
     pub fn from_assistant_message(assistant_msg: &AssistantMessage, cx: &mut App) -> Self {
         // Only create a trace view if the trace exists AND has items

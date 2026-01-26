@@ -2,12 +2,6 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use gpui::{App, AsyncApp};
 use tracing::error;
 
-/// Signal to open create model dialog (to be picked up by ModelsListView)
-pub fn open_create_model_modal(_cx: &mut App) {
-    // This is now a no-op - the Add button directly opens the dialog
-    // Kept for backwards compatibility during refactoring
-}
-
 /// Create a new model
 pub fn create_model(config: ModelConfig, cx: &mut App) {
     // 1. Apply update immediately (optimistic update)

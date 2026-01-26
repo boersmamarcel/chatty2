@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod controllers;
 pub mod factories;
 pub mod models;

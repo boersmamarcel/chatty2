@@ -1,15 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Represents the different types of messages in a conversation
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum MessageContent {
-    /// A message from the user
-    User(UserMessage),
-    /// A message from the assistant with potential system trace
-    Assistant(AssistantMessage),
-}
-
 /// User message content
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserMessage {
@@ -106,27 +97,9 @@ pub enum ToolCallState {
     Error(String),
 }
 
-impl ToolCallState {
-    pub fn is_running(&self) -> bool {
-        matches!(self, ToolCallState::Running)
-    }
-
-    pub fn is_success(&self) -> bool {
-        matches!(self, ToolCallState::Success)
-    }
-
-    pub fn is_error(&self) -> bool {
-        matches!(self, ToolCallState::Error(_))
-    }
-}
-
 impl ThinkingState {
     pub fn is_processing(&self) -> bool {
         matches!(self, ThinkingState::Processing)
-    }
-
-    pub fn is_completed(&self) -> bool {
-        matches!(self, ThinkingState::Completed)
     }
 }
 
@@ -137,10 +110,6 @@ impl SystemTrace {
             total_duration: None,
             active_tool_index: None,
         }
-    }
-
-    pub fn add_thinking(&mut self, thinking: ThinkingBlock) {
-        self.items.push(TraceItem::Thinking(thinking));
     }
 
     pub fn add_tool_call(&mut self, tool_call: ToolCallBlock) {
@@ -159,16 +128,6 @@ impl SystemTrace {
     /// Clear active tool when it completes
     pub fn clear_active_tool(&mut self) {
         self.active_tool_index = None;
-    }
-
-    /// Get the display name of the currently active tool
-    pub fn active_tool_name(&self) -> Option<String> {
-        self.active_tool_index.and_then(|idx| {
-            self.items.get(idx).and_then(|item| match item {
-                TraceItem::ToolCall(tc) => Some(tc.display_name.clone()),
-                _ => None,
-            })
-        })
     }
 }
 
@@ -194,14 +153,6 @@ impl AssistantMessage {
             is_streaming: false,
         }
     }
-
-    pub fn streaming() -> Self {
-        Self {
-            text: String::new(),
-            system_trace: None,
-            is_streaming: true,
-        }
-    }
 }
 
 impl UserMessage {
@@ -210,10 +161,6 @@ impl UserMessage {
             text,
             attachments: Vec::new(),
         }
-    }
-
-    pub fn with_attachments(text: String, attachments: Vec<MessageAttachment>) -> Self {
-        Self { text, attachments }
     }
 
     /// Convert from rig UserContent to UserMessage

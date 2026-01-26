@@ -4,11 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rig::OneOrMany;
 use rig::completion::Message;
 use rig::completion::message::{AssistantContent, Text};
-use rig::message::UserContent;
 
 use crate::chatty::factories::AgentClient;
 use crate::chatty::repositories::ConversationData;
-use crate::chatty::services::{ResponseStream, generate_title, stream_prompt};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
@@ -85,24 +83,11 @@ impl Conversation {
         })
     }
 
-    /// Send a text message and get a streaming response
-    pub async fn send_text(&mut self, text: String) -> Result<ResponseStream> {
-        let content = UserContent::Text(Text { text });
-        self.send_multimodal(vec![content]).await
-    }
-
     /// Add user message to history
     pub fn add_user_message_to_history(&mut self, message: Message) {
         self.history.push(message);
         self.system_traces.push(None);
         self.updated_at = SystemTime::now();
-    }
-
-    /// Send a multimodal message (text + images/PDFs)
-    pub async fn send_multimodal(&mut self, contents: Vec<UserContent>) -> Result<ResponseStream> {
-        let (stream, user_message) = stream_prompt(&self.agent, &self.history, contents).await?;
-        self.add_user_message_to_history(user_message);
-        Ok(stream)
     }
 
     /// Finalize response after stream is consumed
@@ -165,23 +150,9 @@ impl Conversation {
         self.updated_at
     }
 
-    /// Clear conversation history
-    pub fn clear_history(&mut self) {
-        self.history.clear();
-        self.system_traces.clear();
-        self.updated_at = SystemTime::now();
-    }
-
     /// Get the count of messages in history
     pub fn message_count(&self) -> usize {
         self.history.len()
-    }
-
-    /// Generate and set a concise title for the conversation based on the first exchange
-    pub async fn generate_and_set_title(&mut self) -> Result<String> {
-        let title = generate_title(&self.agent, &self.history).await?;
-        self.set_title(title.clone());
-        Ok(title)
     }
 
     /// Serialize message history to JSON string
@@ -207,23 +178,6 @@ impl Conversation {
     /// Get the agent
     pub fn agent(&self) -> &AgentClient {
         &self.agent
-    }
-
-    /// Update the model and agent for this conversation
-    pub async fn update_model(
-        &mut self,
-        model_config: &ModelConfig,
-        provider_config: &ProviderConfig,
-    ) -> Result<()> {
-        let agent = AgentClient::from_model_config(model_config, provider_config)
-            .await
-            .context("Failed to create agent from config")?;
-
-        self.agent = agent;
-        self.model_id = model_config.id.clone();
-        self.updated_at = SystemTime::now();
-
-        Ok(())
     }
 
     /// Set the agent and model ID synchronously (for model switching without blocking)
