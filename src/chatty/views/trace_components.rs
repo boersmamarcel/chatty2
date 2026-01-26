@@ -5,22 +5,9 @@ use gpui_component::ActiveTheme;
 
 use super::message_types::{SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem};
 
-/// State for managing trace view (simplified for terminal style)
-#[derive(Clone)]
-pub struct TraceViewState {
-    // Intentionally minimal - all content always visible in terminal style
-}
-
-impl TraceViewState {
-    pub fn new(_item_count: usize) -> Self {
-        Self {}
-    }
-}
-
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
     trace: SystemTrace,
-    state: TraceViewState,
     is_collapsed: bool,
 }
 
@@ -28,19 +15,8 @@ impl SystemTraceView {
     pub fn new(trace: SystemTrace) -> Self {
         Self {
             trace,
-            state: TraceViewState::new(0),
             is_collapsed: true,
         }
-    }
-
-    /// Allow updating trace during streaming
-    pub fn update_trace(&mut self, trace: SystemTrace) {
-        self.trace = trace;
-    }
-
-    /// Toggle the collapsed state
-    pub fn toggle_collapsed(&mut self) {
-        self.is_collapsed = !self.is_collapsed;
     }
 
     /// Render the trace container header with active status

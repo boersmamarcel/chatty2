@@ -864,7 +864,6 @@ dependencies = [
  "rig-core",
  "serde",
  "serde_json",
- "smol",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

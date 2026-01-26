@@ -84,12 +84,6 @@ impl SidebarView {
     {
         self.on_delete_conversation = Some(Arc::new(callback));
     }
-
-    /// Toggle collapsed state
-    pub fn toggle_collapsed(&mut self, cx: &mut Context<Self>) {
-        self.is_collapsed = !self.is_collapsed;
-        cx.notify();
-    }
 }
 
 impl Render for SidebarView {

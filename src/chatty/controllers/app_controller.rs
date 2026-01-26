@@ -142,16 +142,6 @@ impl ChattyApp {
         app
     }
 
-    /// Get chat view entity
-    pub fn chat_view(&self) -> &Entity<ChatView> {
-        &self.chat_view
-    }
-
-    /// Get sidebar view entity
-    pub fn sidebar_view(&self) -> &Entity<SidebarView> {
-        &self.sidebar_view
-    }
-
     /// Load conversations after models and providers are ready
     /// This should be called from main.rs after both models and providers have been loaded
     pub fn load_conversations_after_models_ready(&self, cx: &mut Context<Self>) {
