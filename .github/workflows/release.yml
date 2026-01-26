@@ -115,8 +115,29 @@ jobs:
           name: macos-arm64-app
           path: chatty.app
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package Windows app
+        run: powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: chatty-*-windows-x86_64.zip
+
   create-release:
-    needs: [build-linux, build-macos-intel, build-macos-arm]
+    needs: [build-linux, build-macos-intel, build-macos-arm, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,6 +165,8 @@ jobs:
           # Copy macOS DMGs
           cp artifacts/macos-intel/*.dmg release-assets/ || true
           cp artifacts/macos-arm64/*.dmg release-assets/ || true
+          # Copy Windows zip
+          cp artifacts/windows-x86_64/*.zip release-assets/ || true
           # Create zip from macOS app bundles
           cd artifacts/macos-intel-app && zip -r ../../release-assets/chatty-${{ steps.version.outputs.version }}-macos-intel.zip chatty.app || true
           cd ../..
