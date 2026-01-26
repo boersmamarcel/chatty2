@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::trace;
 
 use rig::OneOrMany;
 use rig::completion::Message;
@@ -36,8 +37,8 @@ impl Conversation {
             .as_ref()
             .map(|url| format!(" with URL: {}", url))
             .unwrap_or_else(|| " (using default URL)".to_string());
-        println!(
-            "[Conversation::new] Initializing with provider: {:?}{}, model: {}",
+        trace!(
+            "Initializing conversation with provider: {:?}{}, model: {}",
             provider_config.provider_type, url_info, model_config.model_identifier
         );
 
@@ -71,8 +72,8 @@ impl Conversation {
             .as_ref()
             .map(|url| format!(" with URL: {}", url))
             .unwrap_or_else(|| " (using default URL)".to_string());
-        println!(
-            "[Conversation::from_data] Restoring conversation {} with provider: {:?}{}, model: {}",
+        trace!(
+            "Restoring conversation {} with provider: {:?}{}, model: {}",
             data.id, provider_config.provider_type, url_info, model_config.model_identifier
         );
 

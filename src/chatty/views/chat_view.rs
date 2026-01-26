@@ -352,9 +352,9 @@ impl Render for ChatView {
         });
 
         // Auto-create first conversation if needed (one-time check)
-        use crate::chatty::models::ConversationsModel;
+        use crate::chatty::models::ConversationsStore;
         if self.conversation_id.is_none() {
-            if let Some(convs_model) = cx.try_global::<ConversationsModel>() {
+            if let Some(convs_model) = cx.try_global::<ConversationsStore>() {
                 if convs_model.count() == 0
                     && !cx
                         .try_global::<ModelsModel>()
