@@ -52,7 +52,7 @@ impl Render for SettingsView {
                                             let mut scrollable_menu = menu.max_h(px(300.0)).scrollable(true);
 
                                             for (value, label) in &theme_opts {
-                                                let is_selected = value.to_string() == current_theme;
+                                                let is_selected = *value == current_theme;
                                                 let val_clone = value.clone();
 
                                                 scrollable_menu = scrollable_menu.item(

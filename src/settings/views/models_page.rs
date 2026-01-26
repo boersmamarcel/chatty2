@@ -18,14 +18,9 @@ use gpui_component::{
 };
 
 // Global state to store the models list view
+#[derive(Default)]
 pub struct GlobalModelsListView {
     pub view: Option<Entity<ModelsListView>>,
-}
-
-impl Default for GlobalModelsListView {
-    fn default() -> Self {
-        Self { view: None }
-    }
 }
 
 impl Global for GlobalModelsListView {}
@@ -295,7 +290,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or(&"OpenAI");
+                                                        .unwrap_or("OpenAI");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -400,7 +395,7 @@ impl ModelsListView {
         let provider_index = configured_providers
             .iter()
             .position(|p| p.provider_type == existing_model.provider_type)
-            .map(|idx| IndexPath::new(idx));
+            .map(IndexPath::new);
 
         let provider_select = cx.new(|cx| SelectState::new(providers, provider_index, window, cx));
 
@@ -592,7 +587,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or(&"OpenAI");
+                                                        .unwrap_or("OpenAI");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 

@@ -6,6 +6,7 @@ use crate::settings::models::providers_store::ProviderConfig;
 
 /// Repository error type - abstracts over specific implementation errors
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum RepositoryError {
     IoError(String),
     SerializationError(String),

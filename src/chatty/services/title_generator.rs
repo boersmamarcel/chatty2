@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use rig::completion::Message;
 use rig::completion::Prompt;
-use rig::completion::message::{AssistantContent, Text};
+use rig::completion::message::AssistantContent;
 use rig::message::UserContent;
 use tracing::{debug, error};
 
@@ -80,7 +80,7 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
     let user_text = match history.first() {
         Some(Message::User { content, .. }) => content
             .iter()
-            .find_map(|c| extract_text_from_user_content(c))
+            .find_map(extract_text_from_user_content)
             .unwrap_or_default(),
         _ => String::new(),
     };
@@ -88,7 +88,7 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
     let assistant_text = match history.get(1) {
         Some(Message::Assistant { content, .. }) => content
             .iter()
-            .find_map(|c| extract_text_from_assistant_content(c))
+            .find_map(extract_text_from_assistant_content)
             .unwrap_or_default(),
         _ => String::new(),
     };

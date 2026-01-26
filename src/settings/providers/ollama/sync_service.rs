@@ -1,10 +1,10 @@
 use anyhow::Result;
 use gpui::{App, AsyncApp, BorrowAppContext};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::MODELS_REPOSITORY;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
-use crate::settings::models::providers_store::{ProviderModel, ProviderType};
+use crate::settings::models::providers_store::ProviderType;
 
 use super::discovery::discover_ollama_models;
 

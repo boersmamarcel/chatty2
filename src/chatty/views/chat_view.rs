@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::input::InputState;

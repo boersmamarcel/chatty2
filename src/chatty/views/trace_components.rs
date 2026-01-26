@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::ActiveTheme;
 

@@ -3,14 +3,9 @@ use gpui::*;
 use gpui_component::Root;
 
 // Global state to track the settings window handle
+#[derive(Default)]
 pub struct GlobalSettingsWindow {
     handle: Option<WindowHandle<Root>>,
-}
-
-impl Default for GlobalSettingsWindow {
-    fn default() -> Self {
-        Self { handle: None }
-    }
 }
 
 impl Global for GlobalSettingsWindow {}

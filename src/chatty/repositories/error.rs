@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum RepositoryError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

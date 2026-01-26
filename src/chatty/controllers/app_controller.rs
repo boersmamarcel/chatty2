@@ -44,7 +44,7 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
-        let mut app = Self {
+        let app = Self {
             chat_view,
             sidebar_view,
             conversation_repo,
@@ -88,7 +88,7 @@ impl ChattyApp {
                 // Models already loaded, create immediately and wait for completion
                 info!("Models available, creating now");
                 let app_entity = cx.entity();
-                cx.spawn(async move |_, mut cx| {
+                cx.spawn(async move |_, cx| {
                     let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
                         app_entity.update(cx, |app, cx| app.create_new_conversation(cx));
                     if let Ok(task) = task_result {
@@ -107,7 +107,7 @@ impl ChattyApp {
                 info!("Models not ready, will defer creation");
                 let app_entity = cx.entity();
                 cx.defer(move |cx| {
-                    app_entity.update(cx, |app, cx| {
+                    app_entity.update(cx, |_app, cx| {
                         let has_models = cx
                             .try_global::<ModelsModel>()
                             .map(|m| !m.models().is_empty())
@@ -116,7 +116,7 @@ impl ChattyApp {
                         if has_models {
                             info!("Models now available, creating conversation");
                             let app_entity_inner = cx.entity();
-                            cx.spawn(async move |_, mut cx| {
+                            cx.spawn(async move |_, cx| {
                                 let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
                                     app_entity_inner
                                         .update(cx, |app, cx| app.create_new_conversation(cx));
@@ -313,7 +313,7 @@ impl ChattyApp {
         let sidebar = self.sidebar_view.clone();
         let chat_view = self.chat_view.clone();
 
-        cx.spawn(async move |weak, mut cx| {
+        cx.spawn(async move |weak, cx| {
             match repo.load_all().await {
                 Ok(conversation_data) => {
                     info!(count = conversation_data.len(), "Loaded conversation files");
@@ -443,7 +443,7 @@ impl ChattyApp {
                 let sidebar = self.sidebar_view.clone();
                 let repo = self.conversation_repo.clone();
 
-                cx.spawn(async move |_weak, mut cx| {
+                cx.spawn(async move |_weak, cx| {
                     // Create conversation
                     let conv_id = uuid::Uuid::new_v4().to_string();
                     let title = "New Chat".to_string();
@@ -596,7 +596,7 @@ impl ChattyApp {
                     debug!("Found model and provider config");
 
                     // Update the conversation model
-                    cx.spawn(async move |_weak, mut cx| -> anyhow::Result<()> {
+                    cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
                         // Create new agent asynchronously (outside update_global to avoid blocking)
                         let new_agent =
                             AgentClient::from_model_config(&model_config, &provider_config).await?;
@@ -733,7 +733,7 @@ impl ChattyApp {
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
-        cx.spawn(async move |_weak, mut cx| -> anyhow::Result<()> {
+        cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
                 debug!("Async task started");
 
                 // Get active conversation ID, or create a new one if it doesn't exist
