@@ -154,7 +154,7 @@ impl RenderOnce for ChatInput {
 
         // Model display name
         let model_display = self.state.read(cx).get_selected_model_display_name();
-        let no_models = self.state.read(cx).available_models.is_empty();
+        let _no_models = self.state.read(cx).available_models.is_empty();
 
         // Model dropdown button
         let model_button = Button::new("model-select").label(model_display.clone());

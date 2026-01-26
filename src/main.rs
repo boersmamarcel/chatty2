@@ -237,12 +237,11 @@ fn main() {
                     if let Some(weak_entity) = cx
                         .try_global::<GlobalChattyApp>()
                         .and_then(|global| global.entity.clone())
+                        && let Some(entity) = weak_entity.upgrade()
                     {
-                        if let Some(entity) = weak_entity.upgrade() {
-                            entity.update(cx, |app, cx| {
-                                app.load_conversations_after_models_ready(cx);
-                            });
-                        }
+                        entity.update(cx, |app, cx| {
+                            app.load_conversations_after_models_ready(cx);
+                        });
                     }
                 }
             }

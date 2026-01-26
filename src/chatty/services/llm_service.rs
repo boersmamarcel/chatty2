@@ -54,33 +54,32 @@ macro_rules! process_agent_stream {
                         use rig::streaming::StreamedUserContent;
                         use rig::completion::message::ToolResultContent;
 
-                        if let StreamedUserContent::ToolResult(tool_result) = user_content {
-                            let content_text = tool_result.content.iter()
-                                .filter_map(|c| match c {
-                                    ToolResultContent::Text(text) => Some(text.text.clone()),
-                                    ToolResultContent::Image(_) => Some("[Image result]".to_string()),
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
+                        let StreamedUserContent::ToolResult(tool_result) = user_content;
+                        let content_text = tool_result.content.iter()
+                            .filter_map(|c| match c {
+                                ToolResultContent::Text(text) => Some(text.text.clone()),
+                                ToolResultContent::Image(_) => Some("[Image result]".to_string()),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
 
-                            let call_id = tool_result.call_id.clone()
-                                .unwrap_or_else(|| tool_result.id.clone());
+                        let call_id = tool_result.call_id.clone()
+                            .unwrap_or_else(|| tool_result.id.clone());
 
-                            let is_error = content_text.trim_start().starts_with("Error:")
-                                || content_text.trim_start().starts_with("ERROR:")
-                                || content_text.trim_start().starts_with("error:");
+                        let is_error = content_text.trim_start().starts_with("Error:")
+                            || content_text.trim_start().starts_with("ERROR:")
+                            || content_text.trim_start().starts_with("error:");
 
-                            if is_error {
-                                yield Ok(StreamChunk::ToolCallError {
-                                    id: call_id,
-                                    error: content_text,
-                                });
-                            } else {
-                                yield Ok(StreamChunk::ToolCallResult {
-                                    id: call_id,
-                                    result: content_text,
-                                });
-                            }
+                        if is_error {
+                            yield Ok(StreamChunk::ToolCallError {
+                                id: call_id,
+                                error: content_text,
+                            });
+                        } else {
+                            yield Ok(StreamChunk::ToolCallResult {
+                                id: call_id,
+                                result: content_text,
+                            });
                         }
                     }
                     Err(e) => {
