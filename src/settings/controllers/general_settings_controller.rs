@@ -3,6 +3,7 @@ use crate::settings::models::GeneralSettingsModel;
 use crate::settings::utils::find_theme_variant;
 use gpui::{App, AsyncApp, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeRegistry};
+use tracing::{error, warn};
 
 /// Update font size and persist to disk
 pub fn update_font_size(cx: &mut App, font_size: f32) {
@@ -19,8 +20,7 @@ pub fn update_font_size(cx: &mut App, font_size: f32) {
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = GENERAL_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
-            eprintln!("Failed to save general settings: {}", e);
-            eprintln!("Changes will be lost on restart - please try again");
+            error!(error = ?e, "Failed to save general settings, changes will be lost on restart");
         }
     })
     .detach();
@@ -41,8 +41,7 @@ pub fn update_line_height(cx: &mut App, line_height: f32) {
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = GENERAL_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
-            eprintln!("Failed to save general settings: {}", e);
-            eprintln!("Changes will be lost on restart - please try again");
+            error!(error = ?e, "Failed to save general settings, changes will be lost on restart");
         }
     })
     .detach();
@@ -63,6 +62,6 @@ pub fn update_theme(cx: &mut App, base_theme_name: SharedString) {
         Theme::global_mut(cx).apply_config(&theme);
         cx.refresh_windows();
     } else {
-        eprintln!("Warning: Theme '{}' not found", full_theme_name);
+        warn!(theme_name = %full_theme_name, "Theme not found");
     }
 }

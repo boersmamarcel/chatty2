@@ -9,12 +9,18 @@ impl Render for ChattyApp {
 
         div()
             .size_full()
+            .flex()
+            .flex_row()
             .bg(cx.theme().background)
             .text_size(px(cx.global::<GeneralSettingsModel>().font_size))
-            .child(format!(
-                "Hello, Chatty! Font-size:{}",
-                cx.global::<GeneralSettingsModel>().font_size
-            ))
+            .child(
+                // Sidebar - left panel
+                self.sidebar_view.clone(),
+            )
+            .child(
+                // Chat view - right panel
+                self.chat_view.clone(),
+            )
             .children(dialog_layer)
     }
 }

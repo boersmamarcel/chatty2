@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: chatty
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libfontconfig1-dev \
+            libasound2-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package Linux app
+        run: ./scripts/package-linux.sh
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: chatty-*-linux-x86_64.tar.gz
+
+  build-macos-intel:
+    runs-on: macos-13
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package macOS app
+        run: ./scripts/package-macos.sh
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-intel
+          path: chatty-*-macos.dmg
+
+      - name: Upload macOS app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-intel-app
+          path: chatty.app
+
+  build-macos-arm:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package macOS app
+        run: ./scripts/package-macos.sh
+
+      - name: Rename artifacts for ARM
+        run: |
+          if [ -f chatty-*-macos.dmg ]; then
+            for f in chatty-*-macos.dmg; do
+              mv "$f" "${f%-macos.dmg}-macos-arm64.dmg"
+            done
+          fi
+
+      - name: Upload macOS ARM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: chatty-*-macos-arm64.dmg
+
+      - name: Upload macOS ARM app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-app
+          path: chatty.app
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package Windows app
+        run: powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: chatty-*-windows-x86_64.zip
+
+  create-release:
+    needs: [build-linux, build-macos-intel, build-macos-arm, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Copy Linux tarball
+          cp artifacts/linux-x86_64/*.tar.gz release-assets/ || true
+          # Copy macOS DMGs
+          cp artifacts/macos-intel/*.dmg release-assets/ || true
+          cp artifacts/macos-arm64/*.dmg release-assets/ || true
+          # Copy Windows zip
+          cp artifacts/windows-x86_64/*.zip release-assets/ || true
+          # Create zip from macOS app bundles
+          cd artifacts/macos-intel-app && zip -r ../../release-assets/chatty-${{ steps.version.outputs.version }}-macos-intel.zip chatty.app || true
+          cd ../..
+          cd artifacts/macos-arm64-app && zip -r ../../release-assets/chatty-${{ steps.version.outputs.version }}-macos-arm64.zip chatty.app || true
+          cd ../..
+          ls -la release-assets/
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

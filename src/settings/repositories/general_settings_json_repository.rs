@@ -27,26 +27,17 @@ impl GeneralSettingsRepository for GeneralSettingsJsonRepository {
         let path = self.file_path.clone();
 
         Box::pin(async move {
-            // Check file existence on blocking pool
-            let exists = smol::unblock({
-                let path = path.clone();
-                move || path.exists()
-            })
-            .await;
-
-            if !exists {
+            // Check if file exists
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 return Ok(GeneralSettingsModel::default());
             }
 
-            // Read file on blocking pool
-            let contents = smol::unblock({
-                let path = path.clone();
-                move || std::fs::read_to_string(&path)
-            })
-            .await
-            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            // Read file
+            let contents = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-            // JSON parsing is CPU-bound, keep on async thread (it's fast)
+            // Parse JSON
             let settings: GeneralSettingsModel = serde_json::from_str(&contents)
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
@@ -58,32 +49,26 @@ impl GeneralSettingsRepository for GeneralSettingsJsonRepository {
         let path = self.file_path.clone();
 
         Box::pin(async move {
-            // JSON serialization is CPU-bound, keep on async thread (it's fast)
+            // Serialize to JSON
             let json = serde_json::to_string_pretty(&settings)
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
-            // All file I/O on blocking pool
-            smol::unblock({
-                let path = path.clone();
-                move || {
-                    // Create directory if needed
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-                    }
+            // Create directory if needed
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            }
 
-                    // Write atomically using temp file + rename
-                    let temp_path = path.with_extension("json.tmp");
-                    std::fs::write(&temp_path, &json)
-                        .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            // Write atomically using temp file + rename
+            let temp_path = path.with_extension("json.tmp");
+            tokio::fs::write(&temp_path, &json)
+                .await
+                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-                    std::fs::rename(&temp_path, &path)
-                        .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-                    Ok::<(), RepositoryError>(())
-                }
-            })
-            .await?;
+            tokio::fs::rename(&temp_path, &path)
+                .await
+                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
             Ok(())
         })

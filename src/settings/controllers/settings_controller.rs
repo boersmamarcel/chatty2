@@ -1,16 +1,12 @@
 use crate::settings::utils::get_all_base_theme_names;
 use gpui::*;
 use gpui_component::Root;
+use tracing::trace;
 
 // Global state to track the settings window handle
+#[derive(Default)]
 pub struct GlobalSettingsWindow {
     handle: Option<WindowHandle<Root>>,
-}
-
-impl Default for GlobalSettingsWindow {
-    fn default() -> Self {
-        Self { handle: None }
-    }
 }
 
 impl Global for GlobalSettingsWindow {}
@@ -24,7 +20,7 @@ impl SettingsView {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Register a callback to clear the global handle when this window is released
         cx.on_release(|_view, cx| {
-            println!("SettingsView released - clearing global handle");
+            trace!("SettingsView released - clearing global handle");
             cx.global_mut::<GlobalSettingsWindow>().handle = None;
         })
         .detach();
@@ -40,7 +36,7 @@ impl SettingsView {
     pub fn open_or_focus_settings_window(cx: &mut App) {
         // Check if we have a stored window handle
         if let Some(handle) = cx.global::<GlobalSettingsWindow>().handle {
-            println!(
+            trace!(
                 "Window handle exists (window_id: {:?}), attempting to activate",
                 handle.window_id()
             );
@@ -55,7 +51,7 @@ impl SettingsView {
             return;
         }
 
-        println!("Creating new settings window");
+        trace!("Creating new settings window");
 
         // Create a new settings window
         let options = WindowOptions {
@@ -77,7 +73,7 @@ impl SettingsView {
             let view = cx.new(|cx| SettingsView::new(window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         }) {
-            println!(
+            trace!(
                 "Stored window handle (window_id: {:?})",
                 window_handle.window_id()
             );
