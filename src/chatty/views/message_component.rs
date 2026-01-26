@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
+use tracing::debug;
 
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::trace_components::SystemTraceView;
@@ -10,6 +11,15 @@ use super::trace_components::SystemTraceView;
 pub enum MessageRole {
     User,
     Assistant,
+}
+
+/// Represents a parsed segment of message content
+#[derive(Clone, Debug)]
+enum ContentSegment {
+    /// Regular text content (may contain markdown)
+    Text(String),
+    /// A thinking block with its content
+    Thinking(String),
 }
 
 /// Display message structure used in chat view
@@ -62,6 +72,104 @@ impl RenderOnce for MarkdownContent {
     }
 }
 
+/// Parse content to extract thinking blocks and regular text segments
+/// Supports <think>...</think> and <thinking>...</thinking> patterns
+fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
+    let mut segments = Vec::new();
+    let mut remaining = content;
+
+    while !remaining.is_empty() {
+        // Look for opening tag - support both <think> and <thinking>
+        let (start_idx, tag_len) = if let Some(idx) = remaining.find("<think>") {
+            // Check it's not actually <thinking>
+            if remaining[idx..].starts_with("<thinking>") {
+                (idx, 10) // "<thinking>" is 10 chars
+            } else {
+                (idx, 7) // "<think>" is 7 chars
+            }
+        } else if let Some(idx) = remaining.find("<thinking>") {
+            (idx, 10)
+        } else {
+            // No more thinking blocks, add remaining text
+            let text = remaining.trim();
+            if !text.is_empty() {
+                segments.push(ContentSegment::Text(text.to_string()));
+            }
+            break;
+        };
+
+        // Add any text before the thinking block
+        if start_idx > 0 {
+            let text = remaining[..start_idx].trim();
+            if !text.is_empty() {
+                segments.push(ContentSegment::Text(text.to_string()));
+            }
+        }
+
+        // Find the closing tag - support </think> and </thinking>
+        let after_open = &remaining[start_idx + tag_len..];
+        let end_tag_and_len = after_open
+            .find("</think>")
+            .map(|idx| (idx, 8)) // "</think>" is 8 chars
+            .or_else(|| after_open.find("</thinking>").map(|idx| (idx, 11)));
+
+        if let Some((end_idx, close_tag_len)) = end_tag_and_len {
+            let thinking_content = after_open[..end_idx].trim().to_string();
+            if !thinking_content.is_empty() {
+                segments.push(ContentSegment::Thinking(thinking_content));
+            }
+            remaining = &after_open[end_idx + close_tag_len..];
+        } else {
+            // No closing tag found - treat rest as incomplete thinking block (streaming)
+            let thinking_content = after_open.trim().to_string();
+            if !thinking_content.is_empty() {
+                segments.push(ContentSegment::Thinking(thinking_content));
+            }
+            break;
+        }
+    }
+
+    segments
+}
+
+/// Render a thinking block with special styling
+fn render_thinking_block(
+    content: &str,
+    index: usize,
+    segment_index: usize,
+    cx: &App,
+) -> Stateful<Div> {
+    let border_color = cx.theme().border;
+    let muted_text = cx.theme().muted_foreground;
+    let bg_color = cx.theme().muted;
+
+    div()
+        .id(ElementId::Name(
+            format!("msg-{}-thinking-{}", index, segment_index).into(),
+        ))
+        .mb_3()
+        .p_3()
+        .bg(bg_color)
+        .border_l_4()
+        .border_color(border_color)
+        .rounded_md()
+        .child(
+            div().flex().items_center().gap_2().mb_2().child(
+                div()
+                    .text_xs()
+                    .text_color(muted_text)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("💭 Thinking"),
+            ),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(muted_text)
+                .child(content.to_string()),
+        )
+}
+
 /// Render a message in the chat view
 pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl IntoElement {
     let mut container = div()
@@ -81,7 +189,49 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
         container = container.child(trace_view.clone());
     }
 
-    // Render content based on whether it's markdown
+    // Parse content for thinking blocks (for assistant messages)
+    if matches!(msg.role, MessageRole::Assistant) {
+        let segments = parse_content_segments(&msg.content);
+
+        debug!(
+            content_len = msg.content.len(),
+            segments_count = segments.len(),
+            has_thinking = segments.iter().any(|s| matches!(s, ContentSegment::Thinking(_))),
+            content_preview = %msg.content.chars().take(100).collect::<String>(),
+            "Parsing message for thinking blocks"
+        );
+
+        // If we have segments with thinking blocks, render them specially
+        if segments
+            .iter()
+            .any(|s| matches!(s, ContentSegment::Thinking(_)))
+        {
+            let children: Vec<AnyElement> = segments
+                .iter()
+                .enumerate()
+                .map(|(seg_idx, segment)| match segment {
+                    ContentSegment::Thinking(content) => {
+                        render_thinking_block(content, index, seg_idx, cx).into_any_element()
+                    }
+                    ContentSegment::Text(text) => {
+                        if msg.is_markdown && !msg.is_streaming {
+                            MarkdownContent {
+                                content: text.clone(),
+                                message_index: index * 100 + seg_idx,
+                            }
+                            .into_any_element()
+                        } else {
+                            div().child(text.clone()).into_any_element()
+                        }
+                    }
+                })
+                .collect();
+
+            return container.children(children);
+        }
+    }
+
+    // Render content based on whether it's markdown (no thinking blocks found)
     // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
     if msg.is_markdown && !msg.is_streaming && matches!(msg.role, MessageRole::Assistant) {
         container.child(MarkdownContent {
