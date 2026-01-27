@@ -2,10 +2,16 @@
 
 set -e
 
-# Package name and version from Cargo.toml
+# Package name
 APP_NAME="chatty"
-VERSION="0.1.0"
 IDENTIFIER="com.chatty"
+
+# Extract version from Cargo.toml (single source of truth)
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+if [ -z "$VERSION" ]; then
+    echo "Error: Could not extract version from Cargo.toml"
+    exit 1
+fi
 
 RELEASE_DIR="target/release"
 APP_BUNDLE="${APP_NAME}.app"

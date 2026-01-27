@@ -3,9 +3,15 @@
 
 $ErrorActionPreference = "Stop"
 
-# Package name and version from Cargo.toml
+# Package name
 $APP_NAME = "chatty"
-$VERSION = "0.1.0"
+
+# Extract version from Cargo.toml (single source of truth)
+$VERSION = (Select-String -Path "Cargo.toml" -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+if (-not $VERSION) {
+    Write-Host "Error: Could not extract version from Cargo.toml" -ForegroundColor Red
+    exit 1
+}
 
 $RELEASE_DIR = "target\release"
 $PACKAGE_DIR = "${APP_NAME}-${VERSION}-windows-x86_64"
