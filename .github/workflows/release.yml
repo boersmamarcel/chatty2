@@ -53,7 +53,6 @@ jobs:
           name: linux-x86_64
           path: chatty-*-linux-x86_64.tar.gz
 
-
   build-macos-arm:
     runs-on: macos-latest
     steps:
@@ -62,6 +61,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Build release binary
         run: cargo build --release
@@ -83,11 +88,15 @@ jobs:
           name: macos-arm64
           path: chatty-*-macos-arm64.dmg
 
-      - name: Upload macOS ARM app bundle
+      - name: Create app bundle zip
+        run: |
+          zip -r chatty-${{ steps.version.outputs.version }}-macos-arm64-app.zip chatty.app
+
+      - name: Upload macOS ARM app bundle zip
         uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64-app
-          path: chatty.app
+          name: macos-arm64-app-zip
+          path: chatty-*-macos-arm64-app.zip
 
   build-windows:
     runs-on: windows-latest
@@ -136,16 +145,12 @@ jobs:
           mkdir -p release-assets
           # Copy Linux tarball
           cp artifacts/linux-x86_64/*.tar.gz release-assets/ || true
-          # Copy macOS DMGs
-          cp artifacts/macos-intel/*.dmg release-assets/ || true
+          # Copy macOS ARM DMG
           cp artifacts/macos-arm64/*.dmg release-assets/ || true
+          # Copy macOS ARM app bundle zip
+          cp artifacts/macos-arm64-app-zip/*.zip release-assets/ || true
           # Copy Windows zip
           cp artifacts/windows-x86_64/*.zip release-assets/ || true
-          # Create zip from macOS app bundles
-          cd artifacts/macos-intel-app && zip -r ../../release-assets/chatty-${{ steps.version.outputs.version }}-macos-intel.zip chatty.app || true
-          cd ../..
-          cd artifacts/macos-arm64-app && zip -r ../../release-assets/chatty-${{ steps.version.outputs.version }}-macos-arm64.zip chatty.app || true
-          cd ../..
           ls -la release-assets/
 
       - name: Create or update release
