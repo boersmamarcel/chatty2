@@ -354,7 +354,7 @@ impl ChattyApp {
                                         .global::<ConversationsStore>()
                                         .list_all()
                                         .iter()
-                                        .map(|c| (c.id().to_string(), c.title().to_string()))
+                                        .map(|c| (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd)))
                                         .collect::<Vec<_>>();
                                     sidebar.set_conversations(convs, cx);
 
@@ -458,7 +458,13 @@ impl ChattyApp {
                             .global::<ConversationsStore>()
                             .list_all()
                             .iter()
-                            .map(|c| (c.id().to_string(), c.title().to_string()))
+                            .map(|c| {
+                                (
+                                    c.id().to_string(),
+                                    c.title().to_string(),
+                                    Some(c.token_usage().total_estimated_cost_usd),
+                                )
+                            })
                             .collect::<Vec<_>>();
                         sidebar.set_conversations(convs, cx);
                         sidebar.set_active_conversation(Some(conv_id.clone()), cx);
@@ -494,6 +500,7 @@ impl ChattyApp {
                         model_id: model_config.id.clone(),
                         message_history: "[]".to_string(),
                         system_traces: "[]".to_string(),
+                        token_usage: "{}".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -623,6 +630,9 @@ impl ChattyApp {
                                         model_id: conv.model_id().to_string(),
                                         message_history: history,
                                         system_traces: traces,
+                                        token_usage: conv
+                                            .serialize_token_usage()
+                                            .unwrap_or_else(|_| "{}".to_string()),
                                         created_at: conv
                                             .created_at()
                                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -673,7 +683,13 @@ impl ChattyApp {
                 .global::<ConversationsStore>()
                 .list_all()
                 .iter()
-                .map(|c| (c.id().to_string(), c.title().to_string()))
+                .map(|c| {
+                    (
+                        c.id().to_string(),
+                        c.title().to_string(),
+                        Some(c.token_usage().total_estimated_cost_usd),
+                    )
+                })
                 .collect::<Vec<_>>();
 
             let active_id = cx
@@ -801,6 +817,7 @@ impl ChattyApp {
                 use futures::StreamExt;
                 let mut response_text = String::new();
                 let mut chunk_count = 0;
+                let mut token_usage: Option<(u32, u32)> = None;
 
                 // Process stream
                 debug!("Entering stream processing loop");
@@ -861,6 +878,10 @@ impl ChattyApp {
                                 })
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
+                        Ok(StreamChunk::TokenUsage { input_tokens, output_tokens }) => {
+                            debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Received token usage");
+                            token_usage = Some((input_tokens, output_tokens));
+                        }
                         Ok(StreamChunk::Done) => {
                             debug!("Received Done chunk, finalizing");
                             // Extract trace before finalizing
@@ -870,6 +891,61 @@ impl ChattyApp {
                                                         .and_then(|trace| serde_json::to_value(&trace).ok());
                             // Finalize response in conversation
                             debug!("Finalizing response in conversation");
+                            // Add token usage and calculate costs if available
+                            if let Some((input_tokens, output_tokens)) = token_usage {
+                                use crate::chatty::models::TokenUsage;
+                                use crate::settings::models::ModelsModel;
+
+                                // Get model config to calculate costs
+                                let model_id_for_cost = conv_id.clone();
+                                let cost_result = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                    store.get_conversation(&model_id_for_cost)
+                                        .map(|conv| conv.model_id().to_string())
+                                });
+
+                                if let Ok(Some(model_id)) = cost_result {
+                                    let models_result = cx.update_global::<ModelsModel, _>(|models, _cx| {
+                                        models.get_model(&model_id).cloned()
+                                    });
+
+                                    if let Ok(Some(model_config)) = models_result {
+                                        let mut usage = TokenUsage::new(input_tokens, output_tokens);
+
+                                        // Calculate cost if pricing is configured
+                                        if let (Some(input_cost), Some(output_cost)) = (
+                                            model_config.cost_per_million_input_tokens,
+                                            model_config.cost_per_million_output_tokens
+                                        ) {
+                                            usage.calculate_cost(input_cost, output_cost);
+                                            debug!(
+                                                input_tokens = input_tokens,
+                                                output_tokens = output_tokens,
+                                                cost = ?usage.estimated_cost_usd,
+                                                "Calculated token cost"
+                                            );
+                                        }
+
+                                        // Add usage to conversation
+                                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                                conv.add_token_usage(usage);
+                                            }
+                                        }).ok();
+
+                                        // Update sidebar to show new cost
+                                        sidebar.update(cx, |sidebar, cx| {
+                                            let convs = cx
+                                                .global::<ConversationsStore>()
+                                                .list_all()
+                                                .iter()
+                                                .map(|c| (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd)))
+                                                .collect::<Vec<_>>();
+                                            sidebar.set_conversations(convs, cx);
+                                        }).ok();
+                                    }
+                                }
+                            }
+
                             let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                     conv.finalize_response(response_text.clone());
@@ -934,7 +1010,7 @@ impl ChattyApp {
                                                         .list_all()
                                                         .iter()
                                                         .map(|c| {
-                                                            (c.id().to_string(), c.title().to_string())
+                                                            (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd))
                                                         })
                                                         .collect::<Vec<_>>();
                                                     sidebar.set_conversations(convs, cx);
@@ -964,6 +1040,7 @@ impl ChattyApp {
                                     store.get_conversation(&conv_id).and_then(|conv| {
                                         let history = conv.serialize_history().ok()?;
                                         let traces = conv.serialize_traces().ok()?;
+                                        let token_usage = conv.serialize_token_usage().ok()?;
                                         let now = SystemTime::now()
                                             .duration_since(SystemTime::UNIX_EPOCH)
                                             .unwrap()
@@ -976,6 +1053,7 @@ impl ChattyApp {
                                             model_id: conv.model_id().to_string(),
                                             message_history: history,
                                             system_traces: traces,
+                                            token_usage,
                                             created_at: conv
                                                 .created_at()
                                                 .duration_since(SystemTime::UNIX_EPOCH)
