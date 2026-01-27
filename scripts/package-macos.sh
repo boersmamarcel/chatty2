@@ -67,6 +67,10 @@ EOF
 
 echo "macOS application bundle created successfully: ${APP_BUNDLE}"
 
+# Apply ad-hoc code signature
+echo "Applying ad-hoc code signature..."
+codesign -s - --force --deep "${APP_BUNDLE}"
+
 # Create DMG for distribution
 DMG_NAME="${APP_NAME}-${VERSION}-macos.dmg"
 echo "Creating DMG: ${DMG_NAME}..."
