@@ -855,15 +855,20 @@ dependencies = [
  "async-stream",
  "base64",
  "dirs 5.0.1",
+ "flate2",
  "futures",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "lazy_static",
+ "open",
  "reqwest",
  "rig-core",
+ "semver",
  "serde",
  "serde_json",
+ "tar",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -5919,6 +5924,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d863878d212c87a19c1a610eb53bb01fe12951c0501cf5a0d65f724914a667a"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr 1.6.1",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7524,6 +7540,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.2",
+]
+
+[[package]]
 name = "xcb"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7712,7 +7738,7 @@ dependencies = [
  "libc",
  "pin-project",
  "redox_syscall 0.2.16",
- "xattr",
+ "xattr 0.2.3",
 ]
 
 [[package]]

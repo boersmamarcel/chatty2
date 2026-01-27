@@ -2,9 +2,11 @@ use gpui::*;
 use gpui_component::*;
 use tracing::{debug, error, info, warn};
 
+mod auto_updater;
 mod chatty;
 mod settings;
 
+use auto_updater::AutoUpdater;
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
@@ -219,6 +221,12 @@ fn main() {
 
         // Initialize global models list view state
         cx.set_global(settings::views::models_page::GlobalModelsListView::default());
+
+        // Initialize auto-updater with current version from Cargo.toml
+        let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
+        updater.start_polling(cx);
+        cx.set_global(updater);
+        info!("Auto-updater initialized and polling started");
 
         // Use Arc<AtomicBool> to track when both providers and models are loaded
 
