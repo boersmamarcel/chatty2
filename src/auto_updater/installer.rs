@@ -398,14 +398,24 @@ fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf, InstallE
 // =============================================================================
 
 #[cfg(target_os = "windows")]
-async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallError> {
-    // Verify file extension
-    if installer_path.extension().map(|e| e != "exe").unwrap_or(true) {
-        return Err(InstallError::InvalidUpdateFile(
-            "Expected .exe installer".to_string(),
-        ));
-    }
+async fn install_release_windows(update_path: &Path) -> Result<bool, InstallError> {
+    let extension = update_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
 
+    match extension {
+        "exe" => install_windows_installer(update_path).await,
+        "zip" => install_windows_zip(update_path).await,
+        _ => Err(InstallError::InvalidUpdateFile(
+            "Expected .exe installer or .zip archive".to_string(),
+        )),
+    }
+}
+
+/// Install using a Windows installer (.exe)
+#[cfg(target_os = "windows")]
+async fn install_windows_installer(installer_path: &Path) -> Result<bool, InstallError> {
     if !installer_path.exists() {
         return Err(InstallError::FileNotFound(
             installer_path.display().to_string(),
@@ -425,7 +435,12 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
 
     // We'll try Inno Setup flags first as they're most common for Rust apps
     let output = Command::new(installer_path)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"])
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/CLOSEAPPLICATIONS",
+        ])
         .spawn();
 
     match output {
@@ -442,80 +457,346 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
             Command::new(installer_path)
                 .args(["/S"])
                 .spawn()
-                .map_err(|e| InstallError::CommandFailed(format!("Failed to launch installer: {}", e)))?;
+                .map_err(|e| {
+                    InstallError::CommandFailed(format!("Failed to launch installer: {}", e))
+                })?;
 
             Ok(true)
         }
     }
 }
 
+/// Install from a ZIP archive (portable distribution)
+///
+/// This extracts the ZIP to a staging area and prepares for the helper script
+/// to swap the files after the main process exits.
+#[cfg(target_os = "windows")]
+async fn install_windows_zip(zip_path: &Path) -> Result<bool, InstallError> {
+    use std::fs::File;
+    use std::io::{Read, Write};
+
+    if !zip_path.exists() {
+        return Err(InstallError::FileNotFound(zip_path.display().to_string()));
+    }
+
+    info!(zip = ?zip_path, "Extracting Windows ZIP update");
+
+    // Create staging directory in temp
+    let staging_dir = std::env::temp_dir().join("chatty_update_staging");
+    if staging_dir.exists() {
+        std::fs::remove_dir_all(&staging_dir).map_err(InstallError::IoError)?;
+    }
+    std::fs::create_dir_all(&staging_dir).map_err(InstallError::IoError)?;
+
+    // Extract ZIP using PowerShell (built-in on Windows)
+    let output = Command::new("powershell")
+        .args([
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &format!(
+                "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                zip_path.display(),
+                staging_dir.display()
+            ),
+        ])
+        .output()
+        .map_err(|e| InstallError::CommandFailed(format!("PowerShell extract: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InstallError::ExtractionFailed(stderr.to_string()));
+    }
+
+    // Find the new binary in the staging directory
+    let binary_name = "chatty.exe";
+    let new_binary = find_windows_binary(&staging_dir, binary_name)?;
+
+    info!(new_binary = ?new_binary, "Found new binary in staging");
+
+    // Store the staging path for the helper script
+    let staging_info_path = std::env::temp_dir().join("chatty_update_info.txt");
+    let mut info_file = File::create(&staging_info_path).map_err(InstallError::IoError)?;
+    writeln!(info_file, "{}", new_binary.display()).map_err(InstallError::IoError)?;
+
+    info!("ZIP extracted, ready for finalization on quit");
+
+    // Signal that we need the helper script to complete the update
+    Ok(true)
+}
+
+/// Find the binary in the extracted directory (handles nested folders)
+#[cfg(target_os = "windows")]
+fn find_windows_binary(dir: &Path, binary_name: &str) -> Result<PathBuf, InstallError> {
+    // Check direct path
+    let direct = dir.join(binary_name);
+    if direct.exists() {
+        return Ok(direct);
+    }
+
+    // Search one level deep (ZIP might have a folder)
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let nested = path.join(binary_name);
+                if nested.exists() {
+                    return Ok(nested);
+                }
+            }
+        }
+    }
+
+    // Recursive search as fallback
+    fn search_recursive(dir: &Path, name: &str) -> Option<PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.file_name().map(|n| n == name).unwrap_or(false) {
+                    return Some(path);
+                }
+                if path.is_dir() {
+                    if let Some(found) = search_recursive(&path, name) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    search_recursive(dir, binary_name).ok_or_else(|| {
+        InstallError::FileNotFound(format!("Binary '{}' not found in archive", binary_name))
+    })
+}
+
 /// Finalize Windows update after the main application quits
 ///
 /// This creates a helper script that:
 /// 1. Waits for the main process to exit
-/// 2. Completes any pending file operations
-/// 3. Restarts the application
+/// 2. Backs up the current executable
+/// 3. Copies the new executable in place
+/// 4. Restarts the application
+/// 5. Cleans up staging files and itself
 #[cfg(target_os = "windows")]
 pub fn finalize_windows_update(update_path: &Path) -> Result<(), InstallError> {
     use std::io::Write;
 
-    let current_exe = std::env::current_exe()
-        .map_err(|e| InstallError::IoError(e))?;
-
+    let current_exe =
+        std::env::current_exe().map_err(InstallError::IoError)?;
     let current_pid = std::process::id();
+    let current_dir = current_exe
+        .parent()
+        .ok_or_else(|| InstallError::FileNotFound("Could not get exe directory".to_string()))?;
 
-    // Create a PowerShell script to handle the update
-    let script_content = format!(r#"
-# Wait for the main process to exit
+    // Check if we have staging info (ZIP update) or just need restart (installer update)
+    let staging_info_path = std::env::temp_dir().join("chatty_update_info.txt");
+    let new_binary_path = if staging_info_path.exists() {
+        std::fs::read_to_string(&staging_info_path)
+            .map_err(InstallError::IoError)?
+            .trim()
+            .to_string()
+    } else {
+        // No staging info = installer-based update, just restart
+        return finalize_windows_restart_only();
+    };
+
+    // Create the PowerShell helper script for file swapping
+    let script_content = generate_windows_helper_script(
+        current_pid,
+        &current_exe,
+        current_dir,
+        &new_binary_path,
+    );
+
+    // Write the script to a temp file
+    let script_path = std::env::temp_dir().join("chatty_update_helper.ps1");
+
+    let mut file =
+        std::fs::File::create(&script_path).map_err(InstallError::IoError)?;
+    file.write_all(script_content.as_bytes())
+        .map_err(InstallError::IoError)?;
+
+    info!(script = ?script_path, "Created Windows update helper script");
+
+    // Launch the PowerShell script hidden
+    Command::new("powershell")
+        .args(["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .arg(&script_path)
+        .spawn()
+        .map_err(|e| {
+            InstallError::CommandFailed(format!("Failed to launch helper script: {}", e))
+        })?;
+
+    info!("Windows update helper script launched");
+
+    Ok(())
+}
+
+/// Generate the PowerShell helper script content
+#[cfg(target_os = "windows")]
+fn generate_windows_helper_script(
+    pid: u32,
+    current_exe: &Path,
+    install_dir: &Path,
+    new_binary: &str,
+) -> String {
+    let exe_escaped = current_exe.display().to_string().replace("'", "''");
+    let install_dir_escaped = install_dir.display().to_string().replace("'", "''");
+    let new_binary_escaped = new_binary.replace("'", "''");
+
+    format!(
+        r#"# Chatty Auto-Update Helper Script
+# This script handles the file swap after the main application exits
+
+param()
+
+$ErrorActionPreference = "Continue"
 $processId = {pid}
-$maxWait = 30  # seconds
-$waited = 0
+$currentExe = '{exe}'
+$installDir = '{install_dir}'
+$newBinary = '{new_binary}'
+$backupExe = '{exe}.backup'
+$maxWaitSeconds = 60
+$logFile = Join-Path $env:TEMP "chatty_update.log"
 
-while ($waited -lt $maxWait) {{
+function Write-Log {{
+    param([string]$Message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp - $Message" | Out-File -FilePath $logFile -Append
+    Write-Host $Message
+}}
+
+Write-Log "Starting Chatty update process..."
+Write-Log "Waiting for process $processId to exit..."
+
+# Wait for the main process to exit
+$waited = 0
+while ($waited -lt $maxWaitSeconds) {{
     $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
     if ($null -eq $process) {{
+        Write-Log "Process exited after $waited seconds"
         break
     }}
     Start-Sleep -Seconds 1
     $waited++
 }}
 
-# Give a little extra time for file handles to release
+if ($waited -ge $maxWaitSeconds) {{
+    Write-Log "WARNING: Timed out waiting for process to exit"
+}}
+
+# Extra wait for file handles to release
 Start-Sleep -Seconds 2
 
-# Restart the application
-Start-Process -FilePath "{exe}"
+# Backup the current executable
+Write-Log "Creating backup of current executable..."
+try {{
+    if (Test-Path $currentExe) {{
+        Copy-Item -Path $currentExe -Destination $backupExe -Force
+        Write-Log "Backup created: $backupExe"
+    }}
+}} catch {{
+    Write-Log "WARNING: Failed to create backup: $_"
+}}
 
-# Clean up this script
+# Copy the new binary
+Write-Log "Installing new version..."
+try {{
+    Copy-Item -Path $newBinary -Destination $currentExe -Force
+    Write-Log "New binary installed successfully"
+}} catch {{
+    Write-Log "ERROR: Failed to install new binary: $_"
+    # Try to restore backup
+    if (Test-Path $backupExe) {{
+        Write-Log "Attempting to restore backup..."
+        Copy-Item -Path $backupExe -Destination $currentExe -Force
+    }}
+    exit 1
+}}
+
+# Clean up staging directory
+Write-Log "Cleaning up staging files..."
+$stagingDir = Join-Path $env:TEMP "chatty_update_staging"
+if (Test-Path $stagingDir) {{
+    Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+}}
+$stagingInfo = Join-Path $env:TEMP "chatty_update_info.txt"
+if (Test-Path $stagingInfo) {{
+    Remove-Item -Path $stagingInfo -Force -ErrorAction SilentlyContinue
+}}
+
+# Remove backup after successful update
+if (Test-Path $backupExe) {{
+    Remove-Item -Path $backupExe -Force -ErrorAction SilentlyContinue
+}}
+
+# Restart the application
+Write-Log "Restarting application..."
+Start-Process -FilePath $currentExe
+
+Write-Log "Update completed successfully!"
+
+# Clean up this script (delayed)
+Start-Sleep -Seconds 2
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"#,
+        pid = pid,
+        exe = exe_escaped,
+        install_dir = install_dir_escaped,
+        new_binary = new_binary_escaped,
+    )
+}
+
+/// Simple restart-only finalization (for installer-based updates)
+#[cfg(target_os = "windows")]
+fn finalize_windows_restart_only() -> Result<(), InstallError> {
+    use std::io::Write;
+
+    let current_exe =
+        std::env::current_exe().map_err(InstallError::IoError)?;
+    let current_pid = std::process::id();
+
+    let script_content = format!(
+        r#"# Chatty Restart Helper
+$processId = {pid}
+$maxWait = 30
+
+# Wait for process to exit
+$waited = 0
+while ($waited -lt $maxWait) {{
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {{ break }}
+    Start-Sleep -Seconds 1
+    $waited++
+}}
+
+Start-Sleep -Seconds 2
+
+# Restart
+Start-Process -FilePath '{exe}'
+
+# Self-delete
+Start-Sleep -Seconds 1
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force
 "#,
         pid = current_pid,
-        exe = current_exe.display().to_string().replace("\\", "\\\\")
+        exe = current_exe.display().to_string().replace("'", "''"),
     );
 
-    // Write the script to a temp file
-    let temp_dir = std::env::temp_dir();
-    let script_path = temp_dir.join("chatty_update_helper.ps1");
-
-    let mut file = std::fs::File::create(&script_path)
-        .map_err(|e| InstallError::IoError(e))?;
+    let script_path = std::env::temp_dir().join("chatty_restart_helper.ps1");
+    let mut file =
+        std::fs::File::create(&script_path).map_err(InstallError::IoError)?;
     file.write_all(script_content.as_bytes())
-        .map_err(|e| InstallError::IoError(e))?;
+        .map_err(InstallError::IoError)?;
 
-    info!(script = ?script_path, "Created update helper script");
-
-    // Launch the PowerShell script hidden
     Command::new("powershell")
-        .args([
-            "-ExecutionPolicy", "Bypass",
-            "-WindowStyle", "Hidden",
-            "-File",
-        ])
+        .args(["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
         .arg(&script_path)
         .spawn()
-        .map_err(|e| InstallError::CommandFailed(format!("Failed to launch helper script: {}", e)))?;
-
-    info!("Update helper script launched");
+        .map_err(|e| {
+            InstallError::CommandFailed(format!("Failed to launch restart helper: {}", e))
+        })?;
 
     Ok(())
 }
