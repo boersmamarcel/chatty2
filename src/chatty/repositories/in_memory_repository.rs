@@ -94,6 +94,7 @@ mod tests {
             model_id: "model-1".to_string(),
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
+            token_usage: "{}".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -116,6 +117,7 @@ mod tests {
             model_id: "model-1".to_string(),
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
+            token_usage: "{}".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -137,6 +139,7 @@ mod tests {
             model_id: "model-1".to_string(),
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
+            token_usage: "{}".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -147,6 +150,7 @@ mod tests {
             model_id: "model-1".to_string(),
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
+            token_usage: "{}".to_string(),
             created_at: 2000,
             updated_at: 2000,
         };

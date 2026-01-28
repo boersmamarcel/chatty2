@@ -20,6 +20,12 @@ pub struct ModelConfig {
     pub top_p: Option<f32>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, String>,
+    /// Cost per million input tokens in USD (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_per_million_input_tokens: Option<f64>,
+    /// Cost per million output tokens in USD (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_per_million_output_tokens: Option<f64>,
 }
 
 fn default_temperature() -> f32 {
@@ -43,6 +49,8 @@ impl ModelConfig {
             max_tokens: None,
             top_p: None,
             extra_params: HashMap::new(),
+            cost_per_million_input_tokens: None,
+            cost_per_million_output_tokens: None,
         }
     }
 }

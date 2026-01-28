@@ -7,6 +7,7 @@ use rig::completion::Message;
 use rig::completion::message::{AssistantContent, Text};
 
 use crate::chatty::factories::AgentClient;
+use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::chatty::repositories::ConversationData;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
@@ -19,6 +20,7 @@ pub struct Conversation {
     agent: AgentClient,
     history: Vec<Message>,
     system_traces: Vec<Option<serde_json::Value>>,
+    token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
 }
@@ -55,6 +57,7 @@ impl Conversation {
             agent,
             history: Vec::new(),
             system_traces: Vec::new(),
+            token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
         })
@@ -90,6 +93,10 @@ impl Conversation {
         let system_traces = Self::deserialize_traces(&data.system_traces)
             .context("Failed to deserialize system traces")?;
 
+        // Deserialize token usage (with fallback to empty if not present)
+        let token_usage = Self::deserialize_token_usage(&data.token_usage)
+            .unwrap_or_else(|_| ConversationTokenUsage::new());
+
         // Convert Unix timestamps to SystemTime
         let created_at = UNIX_EPOCH + Duration::from_secs(data.created_at as u64);
         let updated_at = UNIX_EPOCH + Duration::from_secs(data.updated_at as u64);
@@ -101,6 +108,7 @@ impl Conversation {
             agent,
             history,
             system_traces,
+            token_usage,
             created_at,
             updated_at,
         })
@@ -208,5 +216,26 @@ impl Conversation {
         self.agent = agent;
         self.model_id = model_id;
         self.updated_at = SystemTime::now();
+    }
+
+    /// Get token usage stats
+    pub fn token_usage(&self) -> &ConversationTokenUsage {
+        &self.token_usage
+    }
+
+    /// Add token usage for the most recent exchange
+    pub fn add_token_usage(&mut self, usage: TokenUsage) {
+        self.token_usage.add_usage(usage);
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Serialize token usage to JSON string
+    pub fn serialize_token_usage(&self) -> Result<String> {
+        serde_json::to_string(&self.token_usage).context("Failed to serialize token usage")
+    }
+
+    /// Deserialize token usage from JSON string
+    pub fn deserialize_token_usage(json: &str) -> Result<ConversationTokenUsage> {
+        serde_json::from_str(json).context("Failed to deserialize token usage")
     }
 }
