@@ -2,7 +2,7 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::input::InputState;
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -34,6 +34,27 @@ impl ChatView {
 
         let chat_input_state = cx.new(|_cx| ChatInputState::new(input.clone()));
         let scroll_handle = ScrollHandle::new();
+
+        // Subscribe to input events to handle Enter key
+        let state_for_enter = chat_input_state.clone();
+        cx.subscribe(&input, move |_input_state, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { secondary } = event {
+                // Only send on plain Enter (not Shift+Enter)
+                if !secondary {
+                    state_for_enter.update(cx, |state, cx| {
+                        state.send_message(cx);
+                    });
+                }
+            }
+        })
+        .detach();
+
+        // Focus the input immediately after creation
+        chat_input_state.update(cx, |state, cx| {
+            state.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        });
 
         Self {
             chat_input_state,

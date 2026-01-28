@@ -43,6 +43,14 @@ impl SidebarView {
         conversations: Vec<(String, String)>,
         cx: &mut Context<Self>,
     ) {
+        tracing::debug!(
+            count = conversations.len(),
+            "SidebarView: set_conversations called with {} conversations",
+            conversations.len()
+        );
+        for (id, title) in &conversations {
+            tracing::debug!(id = %id, title = %title, "  - Conversation");
+        }
         self.conversations = conversations;
         cx.notify();
     }
@@ -88,6 +96,12 @@ impl SidebarView {
 
 impl Render for SidebarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        tracing::debug!(
+            count = self.conversations.len(),
+            "SidebarView: render called with {} conversations",
+            self.conversations.len()
+        );
+
         let on_new_chat = self.on_new_chat.clone();
         let on_settings = self.on_settings.clone();
         let on_select = self.on_select_conversation.clone();
