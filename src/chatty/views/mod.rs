@@ -2,6 +2,7 @@ pub mod app_view;
 pub mod chat_input;
 pub mod chat_view;
 pub mod conversation_item;
+pub mod footer;
 pub mod message_component;
 pub mod message_types;
 pub mod sidebar_view;

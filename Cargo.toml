@@ -35,3 +35,6 @@ open = "5.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
+
+# Asset embedding
+rust-embed = "8.0"

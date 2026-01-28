@@ -12,6 +12,4 @@ mod installer;
 mod model;
 mod release_source;
 
-pub use installer::*;
 pub use model::*;
-pub use release_source::*;
