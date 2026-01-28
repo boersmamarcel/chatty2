@@ -347,8 +347,17 @@ impl ChattyApp {
 
                             info!(restored = restored_count, failed = failed_count, "Conversation load summary");
 
+                            // Clear the active conversation in the store
+                            // This is necessary because add_conversation() auto-sets the first one as active
+                            // We want no active conversation so the first message creates a NEW conversation
+                            cx.update_global::<ConversationsStore, _>(|store, _| {
+                                debug!(active_before = ?store.active_id(), "Clearing active conversation after load");
+                                store.clear_active();
+                                debug!("Active conversation cleared");
+                            }).ok();
+
                             // Update sidebar with all conversations
-                            let active_conv_id = sidebar
+                            sidebar
                                 .update(cx, |sidebar, cx| {
                                     let convs = cx
                                         .global::<ConversationsStore>()
@@ -356,35 +365,24 @@ impl ChattyApp {
                                         .iter()
                                         .map(|c| (c.id().to_string(), c.title().to_string()))
                                         .collect::<Vec<_>>();
+                                    debug!(conv_count = convs.len(), "Loaded conversations, updating sidebar");
                                     sidebar.set_conversations(convs, cx);
 
-                                    // Set active conversation to the most recently updated
-                                    if let Some(active_conv) =
-                                        cx.global::<ConversationsStore>().list_all().first()
-                                    {
-                                        let active_id = active_conv.id().to_string();
-                                        cx.update_global::<ConversationsStore, _>(|store, _| {
-                                            store.set_active(active_id.clone());
-                                        });
-                                        sidebar
-                                            .set_active_conversation(Some(active_id.clone()), cx);
-                                        Some(active_id)
-                                    } else {
-                                        None
-                                    }
+                                    // Don't set any conversation as active on startup
+                                    // This ensures the first message creates a NEW conversation
+                                    sidebar.set_active_conversation(None, cx);
                                 })
-                                .ok()
-                                .flatten();
+                                .ok();
 
-                            // Set active conversation on chat view and mark as ready
-                            if let Some(active_id) = active_conv_id {
-                                chat_view
-                                    .update(cx, |view, cx| {
-                                        view.set_conversation_id(active_id);
-                                        cx.notify();
-                                    })
-                                    .ok();
-                            }
+                            // Don't set any conversation as active in the store or chat view
+                            // This ensures when the user sends the first message, a new conversation is created
+                            chat_view
+                                .update(cx, |view, cx| {
+                                    view.set_conversation_id(String::new());
+                                    view.clear_messages(cx);
+                                    cx.notify();
+                                })
+                                .ok();
 
                             // Mark app as ready
                             if let Some(app) = weak.upgrade() {
@@ -460,8 +458,13 @@ impl ChattyApp {
                             .iter()
                             .map(|c| (c.id().to_string(), c.title().to_string()))
                             .collect::<Vec<_>>();
+                        debug!(
+                            conv_count = convs.len(),
+                            "Updating sidebar with conversations"
+                        );
                         sidebar.set_conversations(convs, cx);
                         sidebar.set_active_conversation(Some(conv_id.clone()), cx);
+                        debug!("Sidebar updated with new conversation");
                     })?;
 
                     // Update chat view
@@ -765,6 +768,12 @@ impl ChattyApp {
                     cx.notify();
                 }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 debug!(conv_id = %conv_id, "Set conversation ID on chat view");
+
+                // Force sidebar to re-render by notifying it explicitly
+                // This ensures the new conversation appears immediately
+                sidebar.update(cx, |_sidebar, cx| {
+                    cx.notify();
+                }).ok();
 
                 // Extract agent and history synchronously (to avoid blocking in async context)
                 let (agent, history) = cx
