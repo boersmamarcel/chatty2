@@ -15,6 +15,7 @@ pub struct ConversationItem {
     on_click: Option<ConversationActionCallback>,
     on_delete: Option<ConversationActionCallback>,
     is_collapsed: bool,
+    cost_usd: Option<f64>,
 }
 
 impl ConversationItem {
@@ -26,7 +27,13 @@ impl ConversationItem {
             on_click: None,
             on_delete: None,
             is_collapsed: false,
+            cost_usd: None,
         }
+    }
+
+    pub fn cost(mut self, cost_usd: Option<f64>) -> Self {
+        self.cost_usd = cost_usd;
+        self
     }
 
     pub fn active(mut self, is_active: bool) -> Self {
@@ -88,19 +95,48 @@ impl RenderOnce for ConversationItem {
             .items_center()
             .gap_2()
             .child(
-                // Conversation title
+                // Conversation title with optional cost below
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .flex_1()
-                    .text_sm()
                     .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .when(self.is_collapsed, |d| d.child("•"))
-                    .when(!self.is_collapsed, |d| d.child(self.title.clone()))
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         if let Some(callback) = &on_click {
                             callback(&id_for_click, cx);
                         }
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .when(self.is_collapsed, |d| d.child("•"))
+                            .when(!self.is_collapsed, |d| d.child(self.title.clone())),
+                    )
+                    .when(!self.is_collapsed && self.cost_usd.is_some(), |parent| {
+                        let cost = self.cost_usd.unwrap();
+                        if cost <= 0.0 {
+                            return parent;
+                        }
+
+                        // Always show in dollars for consistency
+                        let cost_text = if cost >= 0.01 {
+                            format!("${:.2}", cost)
+                        } else if cost >= 0.001 {
+                            format!("${:.3}", cost)
+                        } else {
+                            format!("${:.4}", cost)
+                        };
+
+                        parent.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(cost_text),
+                        )
                     }),
             )
             .when(!self.is_collapsed && on_delete.is_some(), |this| {

@@ -12,10 +12,26 @@ use crate::chatty::factories::AgentClient;
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     Text(String),
-    ToolCallStarted { id: String, name: String },
-    ToolCallInput { id: String, arguments: String },
-    ToolCallResult { id: String, result: String },
-    ToolCallError { id: String, error: String },
+    ToolCallStarted {
+        id: String,
+        name: String,
+    },
+    ToolCallInput {
+        id: String,
+        arguments: String,
+    },
+    ToolCallResult {
+        id: String,
+        result: String,
+    },
+    ToolCallError {
+        id: String,
+        error: String,
+    },
+    TokenUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     Done,
     Error(String),
 }
@@ -81,6 +97,16 @@ macro_rules! process_agent_stream {
                                 result: content_text,
                             });
                         }
+                    }
+                    Ok(rig::agent::MultiTurnStreamItem::FinalResponse(final_response)) => {
+                        // Extract token usage from the final response
+                        let usage = final_response.usage();
+                        let input_tokens = usage.input_tokens as u32;
+                        let output_tokens = usage.output_tokens as u32;
+                        yield Ok(StreamChunk::TokenUsage {
+                            input_tokens,
+                            output_tokens,
+                        });
                     }
                     Err(e) => {
                         yield Ok(StreamChunk::Error(e.to_string()));

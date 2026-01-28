@@ -15,7 +15,7 @@ pub type DeleteConversationCallback = Arc<dyn Fn(&str, &mut App) + Send + Sync>;
 
 /// Sidebar view showing conversations
 pub struct SidebarView {
-    conversations: Vec<(String, String)>, // (id, title)
+    conversations: Vec<(String, String, Option<f64>)>, // (id, title, cost)
     active_conversation_id: Option<String>,
     on_new_chat: Option<NewChatCallback>,
     on_settings: Option<SettingsCallback>,
@@ -40,7 +40,7 @@ impl SidebarView {
     /// Set conversations to display
     pub fn set_conversations(
         &mut self,
-        conversations: Vec<(String, String)>,
+        conversations: Vec<(String, String, Option<f64>)>,
         cx: &mut Context<Self>,
     ) {
         self.conversations = conversations;
@@ -145,7 +145,7 @@ impl Render for SidebarView {
                                 self.conversations
                                     .iter()
                                     .enumerate()
-                                    .map(|(ix, (id, title))| {
+                                    .map(|(ix, (id, title, cost))| {
                                         let is_active = active_id.as_ref() == Some(id);
                                         let on_select_clone = on_select.clone();
                                         let on_delete_clone = on_delete.clone();
@@ -156,6 +156,7 @@ impl Render for SidebarView {
                                                 ConversationItem::new(id.clone(), title.clone())
                                                     .active(is_active)
                                                     .collapsed(self.is_collapsed)
+                                                    .cost(*cost)
                                                     .on_click(move |conv_id, cx| {
                                                         if let Some(callback) = &on_select_clone {
                                                             callback(conv_id, cx);
