@@ -60,6 +60,7 @@ struct ReleaseAsset {
     version: String,
     download_url: String,
     name: String,
+    sha256: Option<String>,
 }
 
 /// GitHub Releases API response structures
@@ -120,6 +121,112 @@ impl AutoUpdater {
             should_restart_on_quit: false,
             pending_update_path: None,
         }
+    }
+
+    /// Fetch and parse checksums from the release
+    async fn fetch_checksums(
+        client: &reqwest::Client,
+        release: &GitHubRelease,
+    ) -> std::collections::HashMap<String, String> {
+        let checksum_patterns = [
+            "checksums.txt",
+            "checksums.sha256",
+            "SHA256SUMS",
+            "CHECKSUMS",
+        ];
+
+        for pattern in &checksum_patterns {
+            if let Some(checksum_asset) = release
+                .assets
+                .iter()
+                .find(|a| a.name.to_lowercase() == pattern.to_lowercase())
+            {
+                debug!(
+                    url = &checksum_asset.browser_download_url,
+                    "Found checksums file"
+                );
+
+                match client
+                    .get(&checksum_asset.browser_download_url)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        if let Ok(text) = response.text().await {
+                            return Self::parse_checksums(&text);
+                        }
+                    }
+                    Err(e) => {
+                        debug!(error = ?e, "Failed to fetch checksums file");
+                    }
+                }
+            }
+        }
+
+        std::collections::HashMap::new()
+    }
+
+    /// Parse checksums from text format
+    fn parse_checksums(text: &str) -> std::collections::HashMap<String, String> {
+        let mut checksums = std::collections::HashMap::new();
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Try "hash  filename" or "hash filename" format
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let hash = parts[0];
+                let filename = parts[1..].join(" ");
+
+                if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    checksums.insert(filename, hash.to_lowercase());
+                    continue;
+                }
+            }
+
+            // Try "filename: hash" format
+            if let Some((filename, hash)) = line.split_once(':') {
+                let hash = hash.trim();
+                let filename = filename.trim();
+
+                if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    checksums.insert(filename.to_string(), hash.to_lowercase());
+                }
+            }
+        }
+
+        debug!(count = checksums.len(), "Parsed checksums");
+        checksums
+    }
+
+    /// Verify SHA-256 checksum of a file
+    async fn verify_checksum(
+        path: &PathBuf,
+        expected_hash: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(path).await?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 8192];
+
+        loop {
+            let bytes_read = file.read(&mut buffer).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        let hash = format!("{:x}", hasher.finalize());
+        let expected_hash_lower = expected_hash.to_lowercase();
+
+        Ok(hash == expected_hash_lower)
     }
 
     /// Get the current update status
@@ -372,15 +479,25 @@ async fn fetch_latest_release(
 
         // Try to find matching asset using simple convention
         if let Some(asset) = find_matching_asset(&release.assets, os, arch) {
+            // Fetch checksums for this release
+            let checksums = AutoUpdater::fetch_checksums(client, &release).await;
+            let sha256 = checksums.get(&asset.name).cloned();
+
+            if sha256.is_none() {
+                debug!(asset = &asset.name, "Warning: No checksum found for asset");
+            }
+
             info!(
                 version = version,
                 name = &asset.name,
+                has_checksum = sha256.is_some(),
                 "Found matching release asset"
             );
             return Ok(Some(ReleaseAsset {
                 version: version.to_string(),
                 download_url: asset.browser_download_url,
                 name: asset.name,
+                sha256,
             }));
         }
     }
@@ -449,6 +566,61 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
     match download_file(&asset.download_url, &download_path, cx).await {
         Ok(()) => {
             info!(path = ?download_path, "Download complete");
+
+            // Verify checksum if available
+            if let Some(ref expected_hash) = asset.sha256 {
+                info!(
+                    expected_hash = expected_hash,
+                    "Verifying download integrity"
+                );
+
+                match AutoUpdater::verify_checksum(&download_path, expected_hash).await {
+                    Ok(true) => {
+                        info!("Checksum verification passed");
+                    }
+                    Ok(false) => {
+                        error!(
+                            expected = expected_hash,
+                            "Checksum verification failed - download may be corrupted or tampered"
+                        );
+                        // Delete the corrupted file
+                        let _ = tokio::fs::remove_file(&download_path).await;
+
+                        cx.update(|cx| {
+                            cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                                updater.status = AutoUpdateStatus::Error(
+                                    "Security check failed: Download integrity verification failed. \
+                                     The downloaded file does not match the expected checksum."
+                                        .to_string(),
+                                );
+                            });
+                        })
+                        .ok();
+                        return;
+                    }
+                    Err(e) => {
+                        error!(error = ?e, "Failed to verify checksum");
+                        // Delete the file to be safe
+                        let _ = tokio::fs::remove_file(&download_path).await;
+
+                        cx.update(|cx| {
+                            cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                                updater.status = AutoUpdateStatus::Error(format!(
+                                    "Checksum verification error: {}",
+                                    e
+                                ));
+                            });
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            } else {
+                warn!(
+                    "No checksum available for verification - proceeding without integrity check. \
+                     This is insecure and should be fixed in the release process."
+                );
+            }
 
             let final_path = download_path.clone();
             let _ = temp_dir.keep(); // Persist temp dir

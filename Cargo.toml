@@ -29,6 +29,7 @@ semver = "1.0"
 tempfile = "3.10"
 flate2 = "1.0"
 tar = "0.4"
+sha2 = "0.10"
 
 # Logging and error handling
 tracing = "0.1"
