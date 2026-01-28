@@ -79,7 +79,11 @@ codesign -s - --force --deep "${APP_BUNDLE}"
 
 # Create DMG for distribution
 # Use simplified naming convention for auto-updater: chatty-macos-{arch}.dmg
+# Map arm64 -> aarch64 to match Rust's arch convention
 ARCH=$(uname -m)
+if [ "$ARCH" = "arm64" ]; then
+    ARCH="aarch64"
+fi
 DMG_NAME="${APP_NAME}-macos-${ARCH}.dmg"
 echo "Creating DMG: ${DMG_NAME}..."
 hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "${DMG_NAME}" 2>/dev/null || {

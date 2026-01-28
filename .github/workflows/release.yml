@@ -125,12 +125,13 @@ jobs:
       - name: Create Windows Installer
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.validate-version.outputs.version }} scripts/installer-windows.iss
+        shell: pwsh
 
       - name: Upload Windows Installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64-setup
-          path: chatty-windows-*.exe
+          path: scripts/chatty-windows-x86_64.exe
 
   create-release:
     needs: [validate-version, build-linux, build-macos-arm, build-windows]
