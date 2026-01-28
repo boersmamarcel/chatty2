@@ -14,7 +14,9 @@ if (-not $VERSION) {
 }
 
 $RELEASE_DIR = "target\release"
-$PACKAGE_DIR = "${APP_NAME}-${VERSION}-windows-x86_64"
+# Use simplified naming convention for auto-updater: chatty-windows-{arch}.exe
+$ARCH = "x86_64"  # Windows builds are x86_64
+$PACKAGE_DIR = "${APP_NAME}-windows-${ARCH}"
 $BINARY = "${APP_NAME}.exe"
 
 Write-Host "Creating Windows package for ${APP_NAME} v${VERSION}..."

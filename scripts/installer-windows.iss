@@ -25,7 +25,8 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 ; Output settings
 OutputDir=.
-OutputBaseFilename=chatty-{#MyAppVersion}-windows-x86_64-setup
+; Use simplified naming convention for auto-updater: chatty-windows-x86_64.exe
+OutputBaseFilename=chatty-windows-x86_64
 ; Compression
 Compression=lzma2/ultra64
 SolidCompression=yes

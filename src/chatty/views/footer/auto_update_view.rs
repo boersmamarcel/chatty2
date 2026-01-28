@@ -50,21 +50,14 @@ impl RenderOnce for AutoUpdateView {
                 false,
                 false,
             ),
-            AutoUpdateStatus::Installing => (
-                CustomIcon::Loader,
-                "Installing...".to_string(),
-                "Installing update".to_string(),
-                false,
-                false,
-            ),
-            AutoUpdateStatus::Updated { version, .. } => (
+            AutoUpdateStatus::Ready(version, _) => (
                 CustomIcon::CheckCircle,
                 "Restart to update".to_string(),
                 format!("Click to restart and install v{}", version),
                 true,
-                true, // Highlight this state
+                true, // Highlight ready state
             ),
-            AutoUpdateStatus::Errored(msg) => (
+            AutoUpdateStatus::Error(msg) => (
                 CustomIcon::AlertCircle,
                 "Update failed".to_string(),
                 msg.clone(),
@@ -90,12 +83,12 @@ impl RenderOnce for AutoUpdateView {
                     ),
             );
 
-        // Add highlighted styling for update ready state
+        // Highlight ready state
         if highlighted {
             button = button.primary();
         }
 
-        // Only enable click handler if the button should be clickable
+        // Enable click handler for interactive states
         if enabled {
             if let Some(handler) = self.on_click {
                 button = button.on_click(move |_event, window, cx| {

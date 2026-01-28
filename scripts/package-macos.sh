@@ -78,7 +78,9 @@ echo "Applying ad-hoc code signature..."
 codesign -s - --force --deep "${APP_BUNDLE}"
 
 # Create DMG for distribution
-DMG_NAME="${APP_NAME}-${VERSION}-macos.dmg"
+# Use simplified naming convention for auto-updater: chatty-macos-{arch}.dmg
+ARCH=$(uname -m)
+DMG_NAME="${APP_NAME}-macos-${ARCH}.dmg"
 echo "Creating DMG: ${DMG_NAME}..."
 hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "${DMG_NAME}" 2>/dev/null || {
     echo "Note: DMG creation skipped (hdiutil not available or failed)"
