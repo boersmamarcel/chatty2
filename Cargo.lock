@@ -861,7 +861,6 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "lazy_static",
- "open",
  "reqwest",
  "rig-core",
  "rust-embed",

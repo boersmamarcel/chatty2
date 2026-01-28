@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v0.1.0, v1.0.0, etc.
+      - "v*" # Trigger on version tags like v0.1.0, v1.0.0, etc.
 
 env:
   CARGO_TERM_COLOR: always
@@ -82,7 +82,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
-          path: chatty-*-linux-x86_64.tar.gz
+          path: chatty-linux-*.tar.gz
 
   build-macos-arm:
     needs: validate-version
@@ -100,29 +100,11 @@ jobs:
       - name: Package macOS app
         run: ./scripts/package-macos.sh
 
-      - name: Rename artifacts for ARM
-        run: |
-          if [ -f chatty-*-macos.dmg ]; then
-            for f in chatty-*-macos.dmg; do
-              mv "$f" "${f%-macos.dmg}-macos-arm64.dmg"
-            done
-          fi
-
       - name: Upload macOS ARM artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: chatty-*-macos-arm64.dmg
-
-      - name: Create app bundle zip
-        run: |
-          zip -r chatty-${{ needs.validate-version.outputs.version }}-macos-arm64-app.zip chatty.app
-
-      - name: Upload macOS ARM app bundle zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-arm64-app-zip
-          path: chatty-*-macos-arm64-app.zip
+          path: chatty-macos-*.dmg
 
   build-windows:
     needs: validate-version
@@ -137,9 +119,6 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package Windows ZIP (portable)
-        run: powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
-
       - name: Install Inno Setup
         run: choco install innosetup -y
 
@@ -147,17 +126,11 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.validate-version.outputs.version }} scripts/installer-windows.iss
 
-      - name: Upload Windows ZIP artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x86_64-zip
-          path: chatty-*-windows-x86_64.zip
-
       - name: Upload Windows Installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64-setup
-          path: chatty-*-windows-x86_64-setup.exe
+          path: chatty-windows-*.exe
 
   create-release:
     needs: [validate-version, build-linux, build-macos-arm, build-windows]
@@ -180,10 +153,6 @@ jobs:
           cp artifacts/linux-x86_64/*.tar.gz release-assets/ || true
           # Copy macOS ARM DMG
           cp artifacts/macos-arm64/*.dmg release-assets/ || true
-          # Copy macOS ARM app bundle zip
-          cp artifacts/macos-arm64-app-zip/*.zip release-assets/ || true
-          # Copy Windows ZIP (portable)
-          cp artifacts/windows-x86_64-zip/*.zip release-assets/ || true
           # Copy Windows Installer
           cp artifacts/windows-x86_64-setup/*.exe release-assets/ || true
           ls -la release-assets/

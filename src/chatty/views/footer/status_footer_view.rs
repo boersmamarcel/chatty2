@@ -35,17 +35,17 @@ impl RenderOnce for StatusFooterView {
                         let updater = cx.global::<AutoUpdater>().clone();
                         updater.check_for_update(cx);
                     }
-                    AutoUpdateStatus::Updated { .. } => {
+                    AutoUpdateStatus::Ready(..) => {
                         let mut updater = cx.global::<AutoUpdater>().clone();
                         updater.install_and_restart(cx);
                     }
-                    AutoUpdateStatus::Errored(_) => {
+                    AutoUpdateStatus::Error(_) => {
                         cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                             updater.dismiss_error();
                         });
                     }
                     _ => {
-                        // Do nothing for Checking, Downloading, Installing states
+                        // Do nothing for Checking, Downloading states
                     }
                 }
             }))

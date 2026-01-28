@@ -13,7 +13,9 @@ if [ -z "$VERSION" ]; then
 fi
 
 RELEASE_DIR="target/release"
-PACKAGE_DIR="${APP_NAME}-${VERSION}-linux-x86_64"
+# Use simplified naming convention for auto-updater: chatty-linux-{arch}.tar.gz
+ARCH=$(uname -m)
+PACKAGE_DIR="${APP_NAME}-linux-${ARCH}"
 
 echo "Creating Linux package for ${APP_NAME} v${VERSION}..."
 
