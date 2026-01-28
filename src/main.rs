@@ -2,10 +2,12 @@ use gpui::*;
 use gpui_component::*;
 use tracing::{debug, error, info, warn};
 
+mod assets;
 mod auto_updater;
 mod chatty;
 mod settings;
 
+use assets::ChattyAssets;
 use auto_updater::AutoUpdater;
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
@@ -173,7 +175,9 @@ fn main() {
     // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
 
-    let app = Application::new();
+    let app = Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .with_assets(ChattyAssets);
 
     app.run(move |cx| {
         cx.activate(true);
@@ -224,8 +228,8 @@ fn main() {
 
         // Initialize auto-updater with current version from Cargo.toml
         let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
+        cx.set_global(updater.clone());
         updater.start_polling(cx);
-        cx.set_global(updater);
         info!("Auto-updater initialized and polling started");
 
         // Use Arc<AtomicBool> to track when both providers and models are loaded

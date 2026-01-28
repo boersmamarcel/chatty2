@@ -864,6 +864,7 @@ dependencies = [
  "open",
  "reqwest",
  "rig-core",
+ "rust-embed",
  "semver",
  "serde",
  "serde_json",

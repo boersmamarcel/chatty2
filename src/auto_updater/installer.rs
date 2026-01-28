@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Error type for installation operations
 #[derive(Debug, thiserror::Error)]
@@ -76,9 +76,7 @@ mod macos {
         /// Mount a DMG and return the mount point
         pub fn mount(dmg_path: &Path) -> Result<Self, InstallError> {
             if !dmg_path.exists() {
-                return Err(InstallError::FileNotFound(
-                    dmg_path.display().to_string(),
-                ));
+                return Err(InstallError::FileNotFound(dmg_path.display().to_string()));
             }
 
             info!(path = ?dmg_path, "Mounting DMG");
@@ -140,7 +138,9 @@ mod macos {
                 }
             }
 
-            Err(InstallError::MountFailed("Could not parse mount point".to_string()))
+            Err(InstallError::MountFailed(
+                "Could not parse mount point".to_string(),
+            ))
         }
 
         /// Get the mount point path
@@ -150,8 +150,8 @@ mod macos {
 
         /// Find the .app bundle in the mounted DMG
         pub fn find_app_bundle(&self) -> Result<PathBuf, InstallError> {
-            let entries = std::fs::read_dir(&self.mount_point)
-                .map_err(|e| InstallError::IoError(e))?;
+            let entries =
+                std::fs::read_dir(&self.mount_point).map_err(|e| InstallError::IoError(e))?;
 
             for entry in entries {
                 let entry = entry.map_err(|e| InstallError::IoError(e))?;
@@ -161,7 +161,9 @@ mod macos {
                 }
             }
 
-            Err(InstallError::FileNotFound("No .app bundle found in DMG".to_string()))
+            Err(InstallError::FileNotFound(
+                "No .app bundle found in DMG".to_string(),
+            ))
         }
     }
 
@@ -209,15 +211,16 @@ async fn install_release_macos(dmg_path: &Path) -> Result<bool, InstallError> {
     info!(app_bundle = ?app_bundle, "Found app bundle in DMG");
 
     // Determine the destination
-    let current_exe = std::env::current_exe()
-        .map_err(|e| InstallError::IoError(e))?;
+    let current_exe = std::env::current_exe().map_err(|e| InstallError::IoError(e))?;
 
     // Navigate up to find the .app bundle
     // /path/to/Chatty.app/Contents/MacOS/chatty -> /path/to/Chatty.app
     let dest_app = current_exe
         .ancestors()
         .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
-        .ok_or_else(|| InstallError::FileNotFound("Could not find current app bundle".to_string()))?;
+        .ok_or_else(|| {
+            InstallError::FileNotFound("Could not find current app bundle".to_string())
+        })?;
 
     info!(
         source = ?app_bundle,
@@ -235,7 +238,10 @@ async fn install_release_macos(dmg_path: &Path) -> Result<bool, InstallError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InstallError::CommandFailed(format!("rsync failed: {}", stderr)));
+        return Err(InstallError::CommandFailed(format!(
+            "rsync failed: {}",
+            stderr
+        )));
     }
 
     info!("Update installed successfully");
@@ -251,8 +257,8 @@ async fn install_release_macos(dmg_path: &Path) -> Result<bool, InstallError> {
 #[cfg(target_os = "linux")]
 async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError> {
     use flate2::read::GzDecoder;
-    use tar::Archive;
     use std::fs::File;
+    use tar::Archive;
 
     // Verify file extension
     let is_tarball = tarball_path
@@ -278,8 +284,7 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
     }
 
     // Create a temporary extraction directory
-    let extract_dir = tempfile::tempdir()
-        .map_err(|e| InstallError::IoError(e))?;
+    let extract_dir = tempfile::tempdir().map_err(|e| InstallError::IoError(e))?;
 
     info!(
         tarball = ?tarball_path,
@@ -288,12 +293,12 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
     );
 
     // Extract the tarball
-    let file = File::open(tarball_path)
-        .map_err(|e| InstallError::IoError(e))?;
+    let file = File::open(tarball_path).map_err(|e| InstallError::IoError(e))?;
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
 
-    archive.unpack(extract_dir.path())
+    archive
+        .unpack(extract_dir.path())
         .map_err(|e| InstallError::ExtractionFailed(e.to_string()))?;
 
     // Find the binary in the extracted contents
@@ -303,8 +308,7 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
     info!(binary = ?extracted_binary, "Found extracted binary");
 
     // Determine destination
-    let current_exe = std::env::current_exe()
-        .map_err(|e| InstallError::IoError(e))?;
+    let current_exe = std::env::current_exe().map_err(|e| InstallError::IoError(e))?;
 
     // Try to determine the best installation location
     let dest_path = if current_exe.starts_with("/usr/local/bin") {
@@ -337,12 +341,14 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(InstallError::CommandFailed(format!("rsync failed: {}", stderr)));
+            return Err(InstallError::CommandFailed(format!(
+                "rsync failed: {}",
+                stderr
+            )));
         }
     } else {
         // Fallback to std::fs::copy
-        std::fs::copy(&extracted_binary, &dest_path)
-            .map_err(|e| InstallError::IoError(e))?;
+        std::fs::copy(&extracted_binary, &dest_path).map_err(|e| InstallError::IoError(e))?;
     }
 
     // Make the binary executable
@@ -353,8 +359,7 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
             .map_err(|e| InstallError::IoError(e))?
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&dest_path, perms)
-            .map_err(|e| InstallError::IoError(e))?;
+        std::fs::set_permissions(&dest_path, perms).map_err(|e| InstallError::IoError(e))?;
     }
 
     info!("Update installed successfully");
@@ -389,8 +394,9 @@ fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf, InstallE
         None
     }
 
-    search_recursive(dir, binary_name)
-        .ok_or_else(|| InstallError::FileNotFound(format!("Binary '{}' not found in archive", binary_name)))
+    search_recursive(dir, binary_name).ok_or_else(|| {
+        InstallError::FileNotFound(format!("Binary '{}' not found in archive", binary_name))
+    })
 }
 
 // =============================================================================
@@ -582,8 +588,7 @@ fn find_windows_binary(dir: &Path, binary_name: &str) -> Result<PathBuf, Install
 pub fn finalize_windows_update(update_path: &Path) -> Result<(), InstallError> {
     use std::io::Write;
 
-    let current_exe =
-        std::env::current_exe().map_err(InstallError::IoError)?;
+    let current_exe = std::env::current_exe().map_err(InstallError::IoError)?;
     let current_pid = std::process::id();
     let current_dir = current_exe
         .parent()
@@ -602,18 +607,13 @@ pub fn finalize_windows_update(update_path: &Path) -> Result<(), InstallError> {
     };
 
     // Create the PowerShell helper script for file swapping
-    let script_content = generate_windows_helper_script(
-        current_pid,
-        &current_exe,
-        current_dir,
-        &new_binary_path,
-    );
+    let script_content =
+        generate_windows_helper_script(current_pid, &current_exe, current_dir, &new_binary_path);
 
     // Write the script to a temp file
     let script_path = std::env::temp_dir().join("chatty_update_helper.ps1");
 
-    let mut file =
-        std::fs::File::create(&script_path).map_err(InstallError::IoError)?;
+    let mut file = std::fs::File::create(&script_path).map_err(InstallError::IoError)?;
     file.write_all(script_content.as_bytes())
         .map_err(InstallError::IoError)?;
 
@@ -621,7 +621,13 @@ pub fn finalize_windows_update(update_path: &Path) -> Result<(), InstallError> {
 
     // Launch the PowerShell script hidden
     Command::new("powershell")
-        .args(["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .args([
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
         .arg(&script_path)
         .spawn()
         .map_err(|e| {
@@ -753,8 +759,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
 fn finalize_windows_restart_only() -> Result<(), InstallError> {
     use std::io::Write;
 
-    let current_exe =
-        std::env::current_exe().map_err(InstallError::IoError)?;
+    let current_exe = std::env::current_exe().map_err(InstallError::IoError)?;
     let current_pid = std::process::id();
 
     let script_content = format!(
@@ -785,13 +790,18 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force
     );
 
     let script_path = std::env::temp_dir().join("chatty_restart_helper.ps1");
-    let mut file =
-        std::fs::File::create(&script_path).map_err(InstallError::IoError)?;
+    let mut file = std::fs::File::create(&script_path).map_err(InstallError::IoError)?;
     file.write_all(script_content.as_bytes())
         .map_err(InstallError::IoError)?;
 
     Command::new("powershell")
-        .args(["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .args([
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
         .arg(&script_path)
         .spawn()
         .map_err(|e| {
