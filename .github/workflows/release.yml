@@ -157,6 +157,15 @@ jobs:
           cp artifacts/windows-x86_64-setup/*.exe release-assets/ || true
           ls -la release-assets/
 
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          # Generate SHA-256 checksums for all release assets
+          sha256sum * > checksums.txt
+          cat checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
