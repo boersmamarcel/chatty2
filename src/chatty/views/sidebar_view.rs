@@ -130,6 +130,8 @@ impl Render for SidebarView {
                     .px_3()
                     .gap_2()
                     .when(self.is_collapsed, |this| this.pt_2().px_2())
+                    // Add extra top padding on macOS for traffic light buttons
+                    .when(cfg!(target_os = "macos"), |this| this.pt(px(40.0)))
                     .child(
                         Button::new("new-chat")
                             .label(if self.is_collapsed { "+" } else { "New Chat" })

@@ -365,17 +365,8 @@ fn main() {
         // register actions
         register_actions(cx);
 
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: Point::default(),
-                size: size(px(1000.0), px(600.0)),
-            })),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Chatty".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        // Get platform-specific window options for main window
+        let options = settings::utils::window_utils::get_main_window_options();
 
         cx.open_window(options, |window, cx| {
             let view = cx.new(|cx| ChattyApp::new(window, cx));
