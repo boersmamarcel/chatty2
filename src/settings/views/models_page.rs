@@ -85,6 +85,8 @@ impl ModelsListView {
             .new(|cx| InputState::new(window, cx).placeholder("System instructions for the model"));
         let max_tokens_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 4096"));
         let top_p_input = cx.new(|cx| InputState::new(window, cx).placeholder("0.0 - 1.0"));
+        let cost_input_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 2.50"));
+        let cost_output_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 10.00"));
 
         // Get configured providers from the global store
         let providers: Vec<String> = cx
@@ -204,6 +206,22 @@ impl ModelsListView {
                                                     )
                                                     .child(Input::new(&top_p_input)),
                                             )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child(
+                                                        "Cost Per Million Input Tokens (USD)",
+                                                    ))
+                                                    .child(Input::new(&cost_input_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child(
+                                                        "Cost Per Million Output Tokens (USD)",
+                                                    ))
+                                                    .child(Input::new(&cost_output_input)),
+                                            )
                                     }
                                 })
                                 .child(
@@ -225,6 +243,8 @@ impl ModelsListView {
                                                 let preamble_input = preamble_input.clone();
                                                 let max_tokens_input = max_tokens_input.clone();
                                                 let top_p_input = top_p_input.clone();
+                                                let cost_input_input = cost_input_input.clone();
+                                                let cost_output_input = cost_output_input.clone();
                                                 let provider_select = provider_select.clone();
 
                                                 move |_, window, cx| {
@@ -281,6 +301,31 @@ impl ModelsListView {
                                                             .filter(|&v| (0.0..=1.0).contains(&v))
                                                     };
 
+                                                    let cost_input_str =
+                                                        cost_input_input.read(cx).value();
+                                                    let cost_output_str =
+                                                        cost_output_input.read(cx).value();
+
+                                                    let cost_per_million_input_tokens =
+                                                        if cost_input_str.trim().is_empty() {
+                                                            None
+                                                        } else {
+                                                            cost_input_str
+                                                                .parse::<f64>()
+                                                                .ok()
+                                                                .filter(|&v| v >= 0.0)
+                                                        };
+
+                                                    let cost_per_million_output_tokens =
+                                                        if cost_output_str.trim().is_empty() {
+                                                            None
+                                                        } else {
+                                                            cost_output_str
+                                                                .parse::<f64>()
+                                                                .ok()
+                                                                .filter(|&v| v >= 0.0)
+                                                        };
+
                                                     let all_providers: Vec<&str> = cx
                                                         .global::<ProviderModel>()
                                                         .configured_providers()
@@ -308,6 +353,8 @@ impl ModelsListView {
                                                         top_p,
                                                         extra_params:
                                                             std::collections::HashMap::new(),
+                                                        cost_per_million_input_tokens,
+                                                        cost_per_million_output_tokens,
                                                     };
 
                                                     // Save the model
@@ -382,6 +429,20 @@ impl ModelsListView {
             let mut state = InputState::new(window, cx).placeholder("0.0 - 1.0");
             if let Some(top_p) = existing_model.top_p {
                 state.set_value(top_p.to_string(), window, cx);
+            }
+            state
+        });
+        let cost_input_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("e.g., 2.50");
+            if let Some(cost) = existing_model.cost_per_million_input_tokens {
+                state.set_value(cost.to_string(), window, cx);
+            }
+            state
+        });
+        let cost_output_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("e.g., 10.00");
+            if let Some(cost) = existing_model.cost_per_million_output_tokens {
+                state.set_value(cost.to_string(), window, cx);
             }
             state
         });
@@ -499,6 +560,22 @@ impl ModelsListView {
                                                     )
                                                     .child(Input::new(&top_p_input)),
                                             )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child(
+                                                        "Cost Per Million Input Tokens (USD)",
+                                                    ))
+                                                    .child(Input::new(&cost_input_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child(
+                                                        "Cost Per Million Output Tokens (USD)",
+                                                    ))
+                                                    .child(Input::new(&cost_output_input)),
+                                            )
                                     }
                                 })
                                 .child(
@@ -520,6 +597,8 @@ impl ModelsListView {
                                                 let preamble_input = preamble_input.clone();
                                                 let max_tokens_input = max_tokens_input.clone();
                                                 let top_p_input = top_p_input.clone();
+                                                let cost_input_input = cost_input_input.clone();
+                                                let cost_output_input = cost_output_input.clone();
                                                 let provider_select = provider_select.clone();
                                                 let model_id_for_update =
                                                     model_id_for_update.clone();
@@ -578,6 +657,31 @@ impl ModelsListView {
                                                             .filter(|&v| (0.0..=1.0).contains(&v))
                                                     };
 
+                                                    let cost_input_str =
+                                                        cost_input_input.read(cx).value();
+                                                    let cost_output_str =
+                                                        cost_output_input.read(cx).value();
+
+                                                    let cost_per_million_input_tokens =
+                                                        if cost_input_str.trim().is_empty() {
+                                                            None
+                                                        } else {
+                                                            cost_input_str
+                                                                .parse::<f64>()
+                                                                .ok()
+                                                                .filter(|&v| v >= 0.0)
+                                                        };
+
+                                                    let cost_per_million_output_tokens =
+                                                        if cost_output_str.trim().is_empty() {
+                                                            None
+                                                        } else {
+                                                            cost_output_str
+                                                                .parse::<f64>()
+                                                                .ok()
+                                                                .filter(|&v| v >= 0.0)
+                                                        };
+
                                                     let all_providers: Vec<&str> = cx
                                                         .global::<ProviderModel>()
                                                         .configured_providers()
@@ -605,6 +709,8 @@ impl ModelsListView {
                                                         top_p,
                                                         extra_params:
                                                             std::collections::HashMap::new(),
+                                                        cost_per_million_input_tokens,
+                                                        cost_per_million_output_tokens,
                                                     };
 
                                                     // Update the model

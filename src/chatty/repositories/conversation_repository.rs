@@ -7,6 +7,11 @@ use super::error::RepositoryResult;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Default empty token usage for backward compatibility
+fn default_empty_token_usage() -> String {
+    "{}".to_string()
+}
+
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationData {
@@ -15,6 +20,8 @@ pub struct ConversationData {
     pub model_id: String,
     pub message_history: String, // JSON-serialized Vec<Message>
     pub system_traces: String,   // JSON-serialized Vec<Option<serde_json::Value>>
+    #[serde(default = "default_empty_token_usage")]
+    pub token_usage: String, // JSON-serialized ConversationTokenUsage
     pub created_at: i64,         // Unix timestamp
     pub updated_at: i64,         // Unix timestamp
 }
