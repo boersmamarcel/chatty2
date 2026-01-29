@@ -19,13 +19,10 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, warn};
 
 mod installer;
-use installer::{InstallError, install_release};
+use installer::install_release;
 
 /// Polling interval for checking updates (1 hour)
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
-
-/// Minimum polling interval to prevent abuse (5 minutes)
-const MIN_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// GitHub repository owner
 const GITHUB_OWNER: &str = "boersmamarcel";
@@ -246,11 +243,6 @@ impl AutoUpdater {
         }
     }
 
-    /// Reset the status to idle
-    pub fn reset(&mut self) {
-        self.status = AutoUpdateStatus::Idle;
-    }
-
     /// Start the polling loop for checking updates
     pub fn start_polling(&self, cx: &mut App) {
         info!(
@@ -403,23 +395,6 @@ impl AutoUpdater {
             }
         })
         .detach();
-    }
-
-    /// Finalize pending updates on application quit (Windows only)
-    #[cfg(target_os = "windows")]
-    pub fn finalize_update(&self) -> Result<(), InstallError> {
-        if self.should_restart_on_quit {
-            if let Some(ref update_path) = self.pending_update_path {
-                return installer::finalize_windows_update(update_path);
-            }
-        }
-        Ok(())
-    }
-
-    /// Stub for non-Windows platforms
-    #[cfg(not(target_os = "windows"))]
-    pub fn finalize_update(&self) -> Result<(), InstallError> {
-        Ok(())
     }
 }
 
