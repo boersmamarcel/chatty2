@@ -871,135 +871,8 @@ impl ChattyApp {
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
                         Ok(StreamChunk::Done) => {
-                            debug!("Received Done chunk, finalizing");
-                            // Extract trace before finalizing
-                                                    let trace_json = chat_view
-                                                        .update(cx, |view, _cx| view.extract_current_trace())
-                                                        .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                                                        .and_then(|trace| serde_json::to_value(&trace).ok());
-                            // Finalize response in conversation
-                            debug!("Finalizing response in conversation");
-                            let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                    conv.finalize_response(response_text.clone());
-                                    conv.add_trace(trace_json);
-                                    debug!("Response finalized in conversation");
-                                    // Check if we should generate a title (first exchange complete)
-                                    let msg_count = conv.message_count();
-                                    debug!(msg_count = msg_count, "Message count after finalize");
-                                    debug!(title = %conv.title(), "Current title");
-                                    let should_gen = msg_count == 2 && conv.title() == "New Chat";
-                                    if should_gen {
-                                        debug!("Will generate title for first exchange");
-                                    } else if msg_count != 2 {
-                                        debug!(count = msg_count, "Skipping title generation (count != 2)");
-                                    } else {
-                                        debug!("Skipping title generation (title already set)");
-                                    }
-                                    should_gen
-                                } else {
-                                    error!("Could not find conversation to finalize");
-                                    false
-                                }
-                            })
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                            // Generate title if this was the first exchange
-                            if should_generate_title {
-                                // Extract agent and history synchronously
-                                let title_data = cx
-                                    .update_global::<ConversationsStore, _>(|store, _cx| {
-                                        if let Some(conv) = store.get_conversation(&conv_id) {
-                                            Ok((conv.agent().clone(), conv.history().to_vec()))
-                                        } else {
-                                            Err(anyhow::anyhow!("Conversation not found"))
-                                        }
-                                    })
-                                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                                if let Ok((agent, history)) = title_data {
-                                    // Generate title asynchronously (outside update_global)
-                                    match generate_title(&agent, &history).await {
-                                        Ok(new_title) => {
-                                            debug!(title = %new_title, "Generated title");
-
-                                            // Update title synchronously
-                                            cx.update_global::<ConversationsStore, _>(
-                                                |store, _cx| {
-                                                    if let Some(conv) =
-                                                        store.get_conversation_mut(&conv_id)
-                                                    {
-                                                        conv.set_title(new_title.clone());
-                                                    }
-                                                },
-                                            )
-                                            .ok();
-
-                                            // Update sidebar to show new title
-                                            sidebar
-                                                .update(cx, |sidebar, cx| {
-                                                    let convs = cx
-                                                        .global::<ConversationsStore>()
-                                                        .list_all()
-                                                        .iter()
-                                                        .map(|c| {
-                                                            (c.id().to_string(), c.title().to_string())
-                                                        })
-                                                        .collect::<Vec<_>>();
-                                                    sidebar.set_conversations(convs, cx);
-                                                })
-                                                .ok();
-                                        }
-                                        Err(e) => {
-                                            warn!(error = ?e, "Title generation failed");
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Finalize UI
-                            debug!("Finalizing UI");
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.finalize_assistant_message(cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                            // Persist to disk
-                            let conv_data_res =
-                                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                    store.get_conversation(&conv_id).and_then(|conv| {
-                                        let history = conv.serialize_history().ok()?;
-                                        let traces = conv.serialize_traces().ok()?;
-                                        let now = SystemTime::now()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_secs()
-                                            as i64;
-
-                                        Some(ConversationData {
-                                            id: conv.id().to_string(),
-                                            title: conv.title().to_string(),
-                                            model_id: conv.model_id().to_string(),
-                                            message_history: history,
-                                            system_traces: traces,
-                                            created_at: conv
-                                                .created_at()
-                                                .duration_since(SystemTime::UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_secs()
-                                                as i64,
-                                            updated_at: now,
-                                        })
-                                    })
-                                });
-                            if let Ok(Some(conv_data)) = conv_data_res {
-                                repo.save(&conv_id, conv_data)
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!(e))?;
-                            }
+                            debug!("Received Done chunk");
+                            // Don't finalize yet - there may still be buffered chunks
                             break;
                         }
                         Ok(StreamChunk::Error(err)) => {
@@ -1011,6 +884,139 @@ impl ChattyApp {
                             break;
                         }
                     }
+                }
+
+                // Stream loop finished - now perform all finalization
+                debug!("Stream loop finished, starting finalization");
+
+                // Extract trace before finalizing
+                let trace_json = chat_view
+                    .update(cx, |view, _cx| view.extract_current_trace())
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                    .and_then(|trace| serde_json::to_value(&trace).ok());
+
+                // Finalize UI - stop streaming animation
+                debug!("Finalizing UI");
+                chat_view
+                    .update(cx, |view, cx| {
+                        if view.conversation_id() == Some(&conv_id) {
+                            view.finalize_assistant_message(cx);
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                // Finalize response in conversation
+                debug!("Finalizing response in conversation");
+                let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                        conv.finalize_response(response_text.clone());
+                        conv.add_trace(trace_json);
+                        debug!("Response finalized in conversation");
+                        // Check if we should generate a title (first exchange complete)
+                        let msg_count = conv.message_count();
+                        debug!(msg_count = msg_count, "Message count after finalize");
+                        debug!(title = %conv.title(), "Current title");
+                        let should_gen = msg_count == 2 && conv.title() == "New Chat";
+                        if should_gen {
+                            debug!("Will generate title for first exchange");
+                        } else if msg_count != 2 {
+                            debug!(count = msg_count, "Skipping title generation (count != 2)");
+                        } else {
+                            debug!("Skipping title generation (title already set)");
+                        }
+                        should_gen
+                    } else {
+                        error!("Could not find conversation to finalize");
+                        false
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                // Generate title if this was the first exchange
+                if should_generate_title {
+                    // Extract agent and history synchronously
+                    let title_data = cx
+                        .update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation(&conv_id) {
+                                Ok((conv.agent().clone(), conv.history().to_vec()))
+                            } else {
+                                Err(anyhow::anyhow!("Conversation not found"))
+                            }
+                        })
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                    if let Ok((agent, history)) = title_data {
+                        // Generate title asynchronously (outside update_global)
+                        match generate_title(&agent, &history).await {
+                            Ok(new_title) => {
+                                debug!(title = %new_title, "Generated title");
+
+                                // Update title synchronously
+                                cx.update_global::<ConversationsStore, _>(
+                                    |store, _cx| {
+                                        if let Some(conv) =
+                                            store.get_conversation_mut(&conv_id)
+                                        {
+                                            conv.set_title(new_title.clone());
+                                        }
+                                    },
+                                )
+                                .ok();
+
+                                // Update sidebar to show new title
+                                sidebar
+                                    .update(cx, |sidebar, cx| {
+                                        let convs = cx
+                                            .global::<ConversationsStore>()
+                                            .list_all()
+                                            .iter()
+                                            .map(|c| {
+                                                (c.id().to_string(), c.title().to_string())
+                                            })
+                                            .collect::<Vec<_>>();
+                                        sidebar.set_conversations(convs, cx);
+                                    })
+                                    .ok();
+                            }
+                            Err(e) => {
+                                warn!(error = ?e, "Title generation failed");
+                            }
+                        }
+                    }
+                }
+
+                // Persist to disk
+                let conv_data_res =
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        store.get_conversation(&conv_id).and_then(|conv| {
+                            let history = conv.serialize_history().ok()?;
+                            let traces = conv.serialize_traces().ok()?;
+                            let now = SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                as i64;
+
+                            Some(ConversationData {
+                                id: conv.id().to_string(),
+                                title: conv.title().to_string(),
+                                model_id: conv.model_id().to_string(),
+                                message_history: history,
+                                system_traces: traces,
+                                created_at: conv
+                                    .created_at()
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs()
+                                    as i64,
+                                updated_at: now,
+                            })
+                        })
+                    });
+                if let Ok(Some(conv_data)) = conv_data_res {
+                    repo.save(&conv_id, conv_data)
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?;
                 }
 
                 Ok(())

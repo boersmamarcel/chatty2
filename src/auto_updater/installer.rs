@@ -22,17 +22,11 @@ pub enum InstallError {
     #[error("Mount failed: {0}")]
     MountFailed(String),
 
-    #[error("Extraction failed: {0}")]
-    ExtractionFailed(String),
-
     #[error("File not found: {0}")]
     FileNotFound(String),
 
     #[error("Invalid update file: {0}")]
     InvalidUpdateFile(String),
-
-    #[error("Unsupported platform")]
-    UnsupportedPlatform,
 }
 
 /// Install the release from the given path
@@ -129,11 +123,6 @@ mod macos {
             Err(InstallError::MountFailed(
                 "Could not parse mount point".to_string(),
             ))
-        }
-
-        /// Get the mount point path
-        pub fn path(&self) -> &Path {
-            &self.mount_point
         }
 
         /// Find the .app bundle in the mounted DMG
@@ -399,11 +388,6 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
 #[cfg(target_os = "windows")]
 pub fn finalize_windows_update(_update_path: &Path) -> Result<(), InstallError> {
     // Installer handles file replacement and restart, nothing to do here
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn finalize_windows_update(_update_path: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 

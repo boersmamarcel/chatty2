@@ -35,19 +35,6 @@ pub enum CustomIcon {
     Download,    // download.svg - Downloading
     AlertCircle, // alert-circle.svg - Errors
     CheckCircle, // check-circle.svg - Update ready
-
-    // Existing UI icons (from inspiration)
-    Settings,
-    NewChat,
-    PanelLeftClose,
-    PanelLeftOpen,
-    MessageSquare,
-    SendHorizontal,
-    FilePlusCorner,
-    Ellipsis,
-    WindowClose,
-    WindowMinimize,
-    WindowMaximize,
 }
 
 impl IconNamed for CustomIcon {
@@ -59,19 +46,6 @@ impl IconNamed for CustomIcon {
             CustomIcon::Download => "icons/download.svg",
             CustomIcon::AlertCircle => "icons/alert-circle.svg",
             CustomIcon::CheckCircle => "icons/check-circle.svg",
-
-            // Existing UI icons
-            CustomIcon::Settings => "icons/settings.svg",
-            CustomIcon::NewChat => "icons/message-circle-plus.svg",
-            CustomIcon::PanelLeftClose => "icons/panel-left-close.svg",
-            CustomIcon::PanelLeftOpen => "icons/panel-left-open.svg",
-            CustomIcon::MessageSquare => "icons/message-square.svg",
-            CustomIcon::SendHorizontal => "icons/send-horizontal.svg",
-            CustomIcon::FilePlusCorner => "icons/file-plus-corner.svg",
-            CustomIcon::Ellipsis => "icons/ellipsis.svg",
-            CustomIcon::WindowClose => "icons/x.svg",
-            CustomIcon::WindowMinimize => "icons/minimize.svg",
-            CustomIcon::WindowMaximize => "icons/maximize-2.svg",
         }
         .into()
     }
