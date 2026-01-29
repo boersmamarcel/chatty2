@@ -48,8 +48,8 @@ impl SidebarView {
             "SidebarView: set_conversations called with {} conversations",
             conversations.len()
         );
-        for (id, title) in &conversations {
-            tracing::debug!(id = %id, title = %title, "  - Conversation");
+        for (id, title, cost) in &conversations {
+            tracing::debug!(id = %id, title = %title, cost = ?cost, "  - Conversation");
         }
         self.conversations = conversations;
         cx.notify();

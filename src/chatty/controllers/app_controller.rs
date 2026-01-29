@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::chatty::factories::AgentClient;
+use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{Conversation, ConversationsStore, StreamChunk};
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
@@ -992,7 +993,7 @@ impl ChattyApp {
                                             .list_all()
                                             .iter()
                                             .map(|c| {
-                                                (c.id().to_string(), c.title().to_string())
+                                                (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd))
                                             })
                                             .collect::<Vec<_>>();
                                         sidebar.set_conversations(convs, cx);
@@ -1002,6 +1003,69 @@ impl ChattyApp {
                             Err(e) => {
                                 warn!(error = ?e, "Title generation failed");
                             }
+                        }
+                    }
+                }
+
+                // Update token usage if available
+                if let Some((input_tokens, output_tokens)) = token_usage {
+                    debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Processing token usage");
+
+                    // Get model pricing from the conversation's model
+                    let model_pricing_result = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        store.get_conversation(&conv_id).map(|conv| conv.model_id().to_string())
+                    });
+
+                    if let Ok(Some(model_id)) = model_pricing_result {
+                        let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
+                            models.get_model(&model_id).and_then(|model| {
+                                match (model.cost_per_million_input_tokens, model.cost_per_million_output_tokens) {
+                                    (Some(input_cost), Some(output_cost)) => Some((input_cost, output_cost)),
+                                    _ => None,
+                                }
+                            })
+                        }).ok().flatten();
+
+                        if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
+                            let mut usage = TokenUsage::new(input_tokens, output_tokens);
+                            usage.calculate_cost(cost_per_million_input, cost_per_million_output);
+                            let cost_usd = usage.estimated_cost_usd;
+
+                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                    conv.add_token_usage(usage);
+                                }
+                            }).ok();
+
+                            debug!(cost_usd = ?cost_usd, "Token usage updated in conversation");
+
+                            // Update sidebar with refreshed costs
+                            debug!("Updating sidebar with new costs");
+                            let update_result = sidebar.update(cx, |sidebar, cx| {
+                                let convs = cx
+                                    .global::<ConversationsStore>()
+                                    .list_all()
+                                    .iter()
+                                    .map(|c| {
+                                        let cost = c.token_usage().total_estimated_cost_usd;
+                                        debug!(id = %c.id(), cost = ?cost, "Sidebar conversation cost");
+                                        (
+                                            c.id().to_string(),
+                                            c.title().to_string(),
+                                            Some(cost),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                debug!(count = convs.len(), "Setting {} conversations on sidebar", convs.len());
+                                sidebar.set_conversations(convs, cx);
+                            });
+                            if let Err(e) = update_result {
+                                warn!(error = ?e, "Failed to update sidebar with costs");
+                            } else {
+                                debug!("Sidebar updated successfully with new costs");
+                            }
+                        } else {
+                            debug!("No pricing information available for model");
                         }
                     }
                 }
@@ -1024,6 +1088,9 @@ impl ChattyApp {
                                 model_id: conv.model_id().to_string(),
                                 message_history: history,
                                 system_traces: traces,
+                                token_usage: conv
+                                    .serialize_token_usage()
+                                    .unwrap_or_else(|_| "{}".to_string()),
                                 created_at: conv
                                     .created_at()
                                     .duration_since(SystemTime::UNIX_EPOCH)
