@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// the user's saved theme preference before settings are loaded.
 static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
-actions!(chatty, [OpenSettings]);
+actions!(chatty, [OpenSettings, Quit]);
 
 // Global repositories
 lazy_static::lazy_static! {
@@ -149,10 +149,17 @@ fn apply_theme_from_settings(cx: &mut App) {
 fn register_actions(cx: &mut App) {
     // Register open settings action
     debug!("Action registered");
-    cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None)]);
+    cx.bind_keys([
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-q", Quit, None),
+    ]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
         SettingsView::open_or_focus_settings_window(cx);
+    });
+    cx.on_action(|_: &Quit, cx: &mut App| {
+        debug!("Quit action triggered");
+        cx.quit();
     });
 }
 
