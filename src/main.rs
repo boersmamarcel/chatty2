@@ -147,11 +147,19 @@ fn apply_theme_from_settings(cx: &mut App) {
 }
 
 fn register_actions(cx: &mut App) {
-    // Register open settings action
+    // Register open settings action with platform-specific keybindings
     debug!("Action registered");
+
+    #[cfg(target_os = "macos")]
     cx.bind_keys([
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-q", Quit, None),
+    ]);
+
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("ctrl-q", Quit, None),
     ]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
