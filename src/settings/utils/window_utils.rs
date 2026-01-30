@@ -5,7 +5,7 @@ use gpui::*;
 /// Platform-specific behavior:
 /// - macOS: Transparent titlebar with native decorations
 /// - Windows: Transparent titlebar with client-side decorations
-/// - Linux: Non-transparent titlebar with client-side decorations
+/// - Linux: Transparent titlebar with client-side decorations (custom titlebar)
 pub fn get_main_window_options() -> WindowOptions {
     WindowOptions {
         titlebar: Some(get_titlebar_options()),
@@ -20,22 +20,11 @@ pub fn get_main_window_options() -> WindowOptions {
 
 /// Returns platform-specific titlebar options.
 ///
-/// - macOS/Windows: Transparent titlebar with traffic light positioning at None
-/// - Linux: Non-transparent titlebar
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+/// All platforms use transparent titlebar for custom titlebar rendering.
 fn get_titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
         title: Some("Chatty".into()),
         appears_transparent: true,
-        traffic_light_position: None,
-    }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn get_titlebar_options() -> TitlebarOptions {
-    TitlebarOptions {
-        title: Some("Chatty".into()),
-        appears_transparent: false,
         traffic_light_position: None,
     }
 }

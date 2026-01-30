@@ -1,4 +1,5 @@
 use crate::chatty::controllers::ChattyApp;
+use crate::chatty::views::AppTitleBar;
 use crate::chatty::views::footer::StatusFooterView;
 use crate::settings::models::general_model::GeneralSettingsModel;
 use gpui::*;
@@ -14,6 +15,10 @@ impl Render for ChattyApp {
             .flex_col()
             .bg(cx.theme().background)
             .text_size(px(cx.global::<GeneralSettingsModel>().font_size))
+            .child(
+                // Custom titlebar for Linux/Windows (empty on macOS)
+                AppTitleBar::new(),
+            )
             .child(
                 // Content area - existing panels
                 div()
