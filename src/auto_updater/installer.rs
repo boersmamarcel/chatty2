@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tracing::{debug, info, warn};
+use tracing::info;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tracing::{debug, warn};
 
 /// Error type for installation operations
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +29,9 @@ pub enum InstallError {
 
     #[error("Invalid update file: {0}")]
     InvalidUpdateFile(String),
+
+    #[error("Extraction failed: {0}")]
+    ExtractionFailed(String),
 }
 
 /// Install the release from the given path
