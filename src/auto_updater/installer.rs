@@ -292,8 +292,19 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
             )));
         }
     } else {
-        // Fallback to std::fs::copy
-        std::fs::copy(&extracted_binary, &dest_path)?;
+        // Fallback: use atomic file replacement to avoid race conditions and partial writes
+        // Write to a temporary file first, then atomically rename
+        let temp_dest = dest_path.with_extension("tmp");
+
+        // Copy to temporary location
+        std::fs::copy(&extracted_binary, &temp_dest)?;
+
+        // Atomically rename to final destination (atomic on Unix filesystems)
+        std::fs::rename(&temp_dest, &dest_path).map_err(|e| {
+            // Clean up temp file on failure
+            let _ = std::fs::remove_file(&temp_dest);
+            e
+        })?;
     }
 
     // Make the binary executable

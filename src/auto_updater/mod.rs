@@ -591,10 +591,24 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                     }
                 }
             } else {
-                warn!(
-                    "No checksum available for verification - proceeding without integrity check. \
-                     This is insecure and should be fixed in the release process."
+                error!(
+                    "Security check failed: No checksum available for this release. \
+                     Checksums are mandatory for security. This must be fixed in the release process."
                 );
+                // Delete the downloaded file since we cannot verify its integrity
+                let _ = tokio::fs::remove_file(&download_path).await;
+
+                cx.update(|cx| {
+                    cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                        updater.status = AutoUpdateStatus::Error(
+                            "Security check failed: No checksum available for this release. \
+                             Updates require integrity verification."
+                                .to_string(),
+                        );
+                    });
+                })
+                .ok();
+                return;
             }
 
             let final_path = download_path.clone();
