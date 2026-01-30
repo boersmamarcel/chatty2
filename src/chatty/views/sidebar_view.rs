@@ -12,6 +12,7 @@ pub type NewChatCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
 pub type SettingsCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
 pub type SelectConversationCallback = Arc<dyn Fn(&str, &mut App) + Send + Sync>;
 pub type DeleteConversationCallback = Arc<dyn Fn(&str, &mut App) + Send + Sync>;
+pub type ToggleCallback = Arc<dyn Fn(bool, &mut App) + Send + Sync>;
 
 /// Sidebar view showing conversations
 pub struct SidebarView {
@@ -21,6 +22,7 @@ pub struct SidebarView {
     on_settings: Option<SettingsCallback>,
     on_select_conversation: Option<SelectConversationCallback>,
     on_delete_conversation: Option<DeleteConversationCallback>,
+    on_toggle: Option<ToggleCallback>,
     is_collapsed: bool,
 }
 
@@ -33,6 +35,7 @@ impl SidebarView {
             on_settings: None,
             on_select_conversation: None,
             on_delete_conversation: None,
+            on_toggle: None,
             is_collapsed: false,
         }
     }
@@ -92,6 +95,34 @@ impl SidebarView {
     {
         self.on_delete_conversation = Some(Arc::new(callback));
     }
+
+    /// Set callback for toggling sidebar collapse state
+    pub fn set_on_toggle<F>(&mut self, callback: F)
+    where
+        F: Fn(bool, &mut App) + Send + Sync + 'static,
+    {
+        self.on_toggle = Some(Arc::new(callback));
+    }
+
+    /// Toggle the collapsed state of the sidebar
+    pub fn toggle_collapsed(&mut self, cx: &mut Context<Self>) {
+        self.is_collapsed = !self.is_collapsed;
+        if let Some(callback) = &self.on_toggle {
+            callback(self.is_collapsed, cx);
+        }
+        cx.notify();
+    }
+
+    /// Set the collapsed state of the sidebar
+    pub fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.is_collapsed = collapsed;
+        cx.notify();
+    }
+
+    /// Get the current collapsed state
+    pub fn is_collapsed(&self) -> bool {
+        self.is_collapsed
+    }
 }
 
 impl Render for SidebarView {
@@ -108,7 +139,7 @@ impl Render for SidebarView {
         let on_delete = self.on_delete_conversation.clone();
         let active_id = self.active_conversation_id.clone();
 
-        let width = if self.is_collapsed { px(48.) } else { px(255.) };
+        let width = if self.is_collapsed { px(0.) } else { px(255.) };
 
         v_flex()
             .id("sidebar")
@@ -120,56 +151,62 @@ impl Render for SidebarView {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .border_color(cx.theme().sidebar_border)
-            .border_r_1()
+            .when(!self.is_collapsed, |this| this.border_r_1())
             .when(self.is_collapsed, |this| this.gap_2())
-            .child(
-                // Header: New Chat button
-                h_flex()
-                    .id("header")
-                    .pt_3()
-                    .px_3()
-                    .gap_2()
-                    .when(self.is_collapsed, |this| this.pt_2().px_2())
-                    // Add extra top padding on macOS for traffic light buttons
-                    .when(cfg!(target_os = "macos"), |this| this.pt(px(40.0)))
-                    .child(
-                        Button::new("new-chat")
-                            .label(if self.is_collapsed { "+" } else { "New Chat" })
-                            .small()
-                            .w_full()
-                            .on_click(move |_event, _window, cx| {
-                                if let Some(callback) = &on_new_chat {
-                                    callback(cx);
-                                }
-                            }),
-                    ),
-            )
-            .child(
-                // Content: Conversation list
-                v_flex()
-                    .id("content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(
-                        v_flex()
-                            .id("inner")
-                            .px_3()
-                            .gap_y_1()
-                            .when(self.is_collapsed, |this| this.p_2())
-                            .children(
-                                self.conversations
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(ix, (id, title, cost))| {
-                                        let is_active = active_id.as_ref() == Some(id);
-                                        let on_select_clone = on_select.clone();
-                                        let on_delete_clone = on_delete.clone();
+            .when(!self.is_collapsed, |this| {
+                this.child(
+                    // Header: New Chat button
+                    h_flex()
+                        .id("header")
+                        .pt_3()
+                        .px_3()
+                        .gap_2()
+                        .when(self.is_collapsed, |this| this.pt_2().px_2())
+                        // Add extra top padding on macOS for traffic light buttons
+                        .when(cfg!(target_os = "macos"), |this| this.pt(px(40.0)))
+                        .child(
+                            Button::new("new-chat")
+                                .label(if self.is_collapsed { "+" } else { "New Chat" })
+                                .small()
+                                .w_full()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(callback) = &on_new_chat {
+                                        callback(cx);
+                                    }
+                                }),
+                        ),
+                )
+            })
+            .when(!self.is_collapsed, |this| {
+                this.child(
+                    // Content: Conversation list
+                    v_flex()
+                        .id("content")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(
+                            v_flex()
+                                .id("inner")
+                                .px_3()
+                                .gap_y_1()
+                                .when(self.is_collapsed, |this| this.p_2())
+                                .children(
+                                    self.conversations
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(ix, (id, title, cost))| {
+                                            let is_active = active_id.as_ref() == Some(id);
+                                            let on_select_clone = on_select.clone();
+                                            let on_delete_clone = on_delete.clone();
 
-                                        div()
-                                            .id(ix)
-                                            .child(
-                                                ConversationItem::new(id.clone(), title.clone())
+                                            div()
+                                                .id(ix)
+                                                .child(
+                                                    ConversationItem::new(
+                                                        id.clone(),
+                                                        title.clone(),
+                                                    )
                                                     .active(is_active)
                                                     .collapsed(self.is_collapsed)
                                                     .cost(*cost)
@@ -183,37 +220,43 @@ impl Render for SidebarView {
                                                             callback(conv_id, cx);
                                                         }
                                                     }),
-                                            )
-                                            .when(ix == 0, |this| this.mt_3())
-                                            .when(
-                                                ix == self.conversations.len().saturating_sub(1),
-                                                |this| this.mb_3(),
-                                            )
-                                    })
-                                    .collect::<Vec<_>>(),
-                            ),
-                    ),
-            )
-            .child(
-                // Footer: Settings button
-                h_flex()
-                    .id("footer")
-                    .pb_3()
-                    .px_3()
-                    .gap_2()
-                    .when(self.is_collapsed, |this| this.pt_2().px_2())
-                    .child(
-                        Button::new("settings")
-                            .icon(Icon::new(IconName::Settings))
-                            .label(if self.is_collapsed { "" } else { "Settings" })
-                            .small()
-                            .w_full()
-                            .on_click(move |_event, _window, cx| {
-                                if let Some(callback) = &on_settings {
-                                    callback(cx);
-                                }
-                            }),
-                    ),
-            )
+                                                )
+                                                .when(ix == 0, |this| this.mt_3())
+                                                .when(
+                                                    ix == self
+                                                        .conversations
+                                                        .len()
+                                                        .saturating_sub(1),
+                                                    |this| this.mb_3(),
+                                                )
+                                        })
+                                        .collect::<Vec<_>>(),
+                                ),
+                        ),
+                )
+            })
+            .when(!self.is_collapsed, |this| {
+                this.child(
+                    // Footer: Settings button
+                    h_flex()
+                        .id("footer")
+                        .pb_3()
+                        .px_3()
+                        .gap_2()
+                        .when(self.is_collapsed, |this| this.pt_2().px_2())
+                        .child(
+                            Button::new("settings")
+                                .icon(Icon::new(IconName::Settings))
+                                .label(if self.is_collapsed { "" } else { "Settings" })
+                                .small()
+                                .w_full()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(callback) = &on_settings {
+                                        callback(cx);
+                                    }
+                                }),
+                        ),
+                )
+            })
     }
 }

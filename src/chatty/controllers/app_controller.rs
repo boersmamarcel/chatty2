@@ -204,6 +204,14 @@ impl ChattyApp {
             });
         });
 
+        // Toggle sidebar callback
+        sidebar.update(cx, |sidebar, _cx| {
+            sidebar.set_on_toggle(move |collapsed, _cx| {
+                // Optional: Could save collapsed state to settings here
+                debug!(collapsed = collapsed, "Sidebar toggled");
+            });
+        });
+
         // Chat input send message callback
         chat_view.update(cx, |view, cx| {
             let input_state = view.chat_input_state().clone();

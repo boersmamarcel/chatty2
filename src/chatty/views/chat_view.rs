@@ -1,5 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
@@ -528,6 +529,8 @@ impl Render for ChatView {
             .flex_col()
             .bg(cx.theme().background)
             .overflow_hidden()
+            // Add top padding on macOS for floating toggle button
+            .when(cfg!(target_os = "macos"), |this| this.pt(px(24.)))
             .child(
                 // Message list - scrollable area
                 div()

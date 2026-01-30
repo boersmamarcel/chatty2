@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// the user's saved theme preference before settings are loaded.
 static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
-actions!(chatty, [OpenSettings, Quit]);
+actions!(chatty, [OpenSettings, Quit, ToggleSidebar]);
 
 // Global repositories
 lazy_static::lazy_static! {
@@ -154,12 +154,14 @@ fn register_actions(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
     ]);
 
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("ctrl-b", ToggleSidebar, None),
     ]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
@@ -168,6 +170,21 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx: &mut App| {
         debug!("Quit action triggered");
         cx.quit();
+    });
+    cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
+        debug!("Toggle sidebar action triggered");
+        // Get the ChattyApp entity and toggle the sidebar
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.sidebar_view.update(cx, |sidebar, cx| {
+                    sidebar.toggle_collapsed(cx);
+                });
+            });
+        }
     });
 }
 
