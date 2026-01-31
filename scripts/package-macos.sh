@@ -39,6 +39,17 @@ mkdir -p "${RESOURCES_DIR}"
 cp "${RELEASE_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
 
+# Copy icon if available
+if [ -f "assets/app_icon/icon.icns" ]; then
+    cp "assets/app_icon/icon.icns" "${RESOURCES_DIR}/"
+fi
+
+# Copy themes if available
+if [ -d "themes" ]; then
+    mkdir -p "${RESOURCES_DIR}/themes"
+    cp themes/*.json "${RESOURCES_DIR}/themes/" 2>/dev/null || true
+fi
+
 # Create Info.plist
 cat > "${CONTENTS_DIR}/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -61,6 +72,8 @@ cat > "${CONTENTS_DIR}/Info.plist" << EOF
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
     <string>${VERSION}</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.13</string>
     <key>NSHighResolutionCapable</key>
