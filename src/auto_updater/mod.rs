@@ -8,6 +8,7 @@
 //!
 //! Simplified architecture: direct GitHub API integration, no trait abstraction.
 
+use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -101,13 +102,29 @@ impl Global for AutoUpdater {}
 impl AutoUpdater {
     /// Create a new AutoUpdater with the current application version
     pub fn new(current_version: &str) -> Self {
+        use reqwest::header::{AUTHORIZATION, HeaderMap};
+
         let version = Version::parse(current_version).unwrap_or_else(|e| {
             warn!(error = ?e, version = current_version, "Failed to parse current version, using 0.0.0");
             Version::new(0, 0, 0)
         });
 
+        let mut headers = HeaderMap::new();
+        if let Ok(token) = env::var("GITHUB_TOKEN") {
+            info!("Using GITHUB_TOKEN for authenticated updater requests.");
+            match format!("Bearer {}", token).parse() {
+                Ok(header_value) => {
+                    headers.insert(AUTHORIZATION, header_value);
+                }
+                Err(e) => {
+                    error!(error = ?e, "Failed to create authorization header from GITHUB_TOKEN");
+                }
+            }
+        }
+
         let client = reqwest::Client::builder()
             .user_agent("chatty-auto-updater/1.0")
+            .default_headers(headers)
             .build()
             .expect("Failed to create HTTP client");
 
