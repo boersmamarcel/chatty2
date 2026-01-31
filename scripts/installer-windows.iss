@@ -39,6 +39,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Architecture
 ArchitecturesInstallIn64BitMode=x64compatible
+; Icon
+#ifexist "..\assets\app_icon\icon.ico"
+SetupIconFile=..\assets\app_icon\icon.ico
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -48,8 +52,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-; Add any additional files here (themes, configs, etc.)
-; Source: "themes\*"; DestDir: "{app}\themes"; Flags: ignoreversion recursesubdirs
+; Themes
+Source: "themes\*.json"; DestDir: "{app}\themes"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

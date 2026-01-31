@@ -38,3 +38,7 @@ thiserror = "1.0"
 
 # Asset embedding
 rust-embed = "8.0"
+
+[build-dependencies]
+# Windows icon embedding
+winres = "0.1"
