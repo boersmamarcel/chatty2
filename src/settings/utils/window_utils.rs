@@ -14,6 +14,7 @@ pub fn get_main_window_options() -> WindowOptions {
             origin: Point::default(),
             size: size(px(1000.0), px(600.0)),
         })),
+        app_id: Some("chatty".to_string()),
         ..Default::default()
     }
 }
