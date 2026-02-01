@@ -75,14 +75,14 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package Linux app
-        run: ./scripts/package-linux.sh
+      - name: Package Linux AppImage
+        run: ./scripts/package-linux-appimage.sh
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
-          path: chatty-linux-*.tar.gz
+          path: chatty-linux-*.AppImage
 
   build-macos-arm:
     needs: validate-version
@@ -150,8 +150,8 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          # Copy Linux tarball
-          cp artifacts/linux-x86_64/*.tar.gz release-assets/ || true
+          # Copy Linux AppImage
+          cp artifacts/linux-x86_64/*.AppImage release-assets/ || true
           # Copy macOS ARM DMG
           cp artifacts/macos-arm64/*.dmg release-assets/ || true
           # Copy Windows Installer

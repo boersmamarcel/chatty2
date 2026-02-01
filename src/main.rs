@@ -48,6 +48,14 @@ lazy_static::lazy_static! {
 }
 
 fn get_themes_dir() -> PathBuf {
+    // Check CHATTY_DATA_DIR environment variable (set by AppImage)
+    if let Ok(data_dir) = std::env::var("CHATTY_DATA_DIR") {
+        let themes_path = PathBuf::from(data_dir).join("themes");
+        if themes_path.exists() {
+            return themes_path;
+        }
+    }
+
     // Try to find themes directory relative to the executable
     #[cfg(target_os = "macos")]
     {
