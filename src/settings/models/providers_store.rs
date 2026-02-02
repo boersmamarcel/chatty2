@@ -9,12 +9,7 @@ pub enum ProviderType {
     OpenAI,
     Anthropic,
     Gemini,
-    Cohere,
-    Perplexity,
-    #[serde(rename = "xai")]
-    XAI,
-    AzureOpenAI,
-    HuggingFace,
+    Mistral,
     Ollama,
 }
 
@@ -24,11 +19,7 @@ impl ProviderType {
             ProviderType::OpenAI => "OpenAI",
             ProviderType::Anthropic => "Anthropic",
             ProviderType::Gemini => "Google Gemini",
-            ProviderType::Cohere => "Cohere",
-            ProviderType::Perplexity => "Perplexity",
-            ProviderType::XAI => "xAI",
-            ProviderType::AzureOpenAI => "Azure OpenAI",
-            ProviderType::HuggingFace => "HuggingFace",
+            ProviderType::Mistral => "Mistral",
             ProviderType::Ollama => "Ollama",
         }
     }
