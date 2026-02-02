@@ -11,7 +11,7 @@ pub enum AgentClient {
     Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
     OpenAI(Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
     Gemini(Agent<rig::providers::gemini::completion::CompletionModel>),
-    Cohere(Agent<rig::providers::cohere::completion::CompletionModel>),
+    Mistral(Agent<rig::providers::mistral::completion::CompletionModel>),
     Ollama(Agent<rig::providers::ollama::CompletionModel>),
 }
 
@@ -65,11 +65,11 @@ impl AgentClient {
 
                 Ok(AgentClient::Gemini(builder.build()))
             }
-            ProviderType::Cohere => {
+            ProviderType::Mistral => {
                 let key =
-                    api_key.ok_or_else(|| anyhow!("API key not configured for Cohere provider"))?;
+                    api_key.ok_or_else(|| anyhow!("API key not configured for Mistral provider"))?;
 
-                let client = rig::providers::cohere::Client::new(&key)?;
+                let client = rig::providers::mistral::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
@@ -79,7 +79,7 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                Ok(AgentClient::Cohere(builder.build()))
+                Ok(AgentClient::Mistral(builder.build()))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -96,10 +96,6 @@ impl AgentClient {
 
                 Ok(AgentClient::Ollama(builder.build()))
             }
-            _ => Err(anyhow!(
-                "Unsupported provider type: {:?}",
-                provider_config.provider_type
-            )),
         }
     }
 }

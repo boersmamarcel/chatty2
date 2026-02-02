@@ -165,7 +165,7 @@ pub async fn stream_prompt(
                 .await;
             process_agent_stream!(stream)
         }
-        AgentClient::Cohere(agent) => {
+        AgentClient::Mistral(agent) => {
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
