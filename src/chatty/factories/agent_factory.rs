@@ -66,8 +66,8 @@ impl AgentClient {
                 Ok(AgentClient::Gemini(builder.build()))
             }
             ProviderType::Mistral => {
-                let key =
-                    api_key.ok_or_else(|| anyhow!("API key not configured for Mistral provider"))?;
+                let key = api_key
+                    .ok_or_else(|| anyhow!("API key not configured for Mistral provider"))?;
 
                 let client = rig::providers::mistral::Client::new(&key)?;
                 let mut builder = client
