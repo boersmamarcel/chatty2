@@ -114,7 +114,7 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
         AgentClient::Anthropic(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::OpenAI(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::Gemini(agent) => agent.prompt(&title_prompt).await?,
-        AgentClient::Cohere(agent) => agent.prompt(&title_prompt).await?,
+        AgentClient::Mistral(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::Ollama(agent) => agent.prompt(&title_prompt).await?,
     };
 
