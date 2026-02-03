@@ -5,6 +5,7 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::skeleton::Skeleton;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -474,6 +475,25 @@ impl ChatView {
     fn scroll_to_bottom(&mut self) {
         self.scroll_handle.set_offset(point(px(0.0), px(-f32::MAX)));
     }
+
+    /// Check if we're awaiting a response (streaming message with no content yet)
+    fn is_awaiting_response(&self) -> bool {
+        self.messages
+            .last()
+            .map_or(false, |msg| msg.is_streaming && msg.content.is_empty())
+    }
+
+    /// Render loading skeleton indicator
+    fn render_loading_skeleton(&self) -> impl IntoElement {
+        div()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Skeleton::new().w(px(280.)).h(px(16.)).rounded(px(4.)))
+            .child(Skeleton::new().w(px(220.)).h(px(16.)).rounded(px(4.)))
+            .child(Skeleton::new().w(px(180.)).h(px(16.)).rounded(px(4.)))
+    }
 }
 
 impl Render for ChatView {
@@ -537,21 +557,34 @@ impl Render for ChatView {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(
+                    .child({
+                        let is_awaiting = self.is_awaiting_response();
                         div()
                             .id("chat-messages")
                             .track_scroll(&self.scroll_handle)
                             .overflow_scroll()
                             .size_full()
                             .child(
-                                div().p_4().flex().flex_col().gap_4().children(
-                                    self.messages
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(index, msg)| render_message(msg, index, cx)),
-                                ),
-                            ),
-                    )
+                                div()
+                                    .p_4()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_4()
+                                    .children(
+                                        self.messages
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, msg)| {
+                                                // Skip empty streaming messages (we show skeleton instead)
+                                                !(msg.is_streaming && msg.content.is_empty())
+                                            })
+                                            .map(|(index, msg)| render_message(msg, index, cx)),
+                                    )
+                                    .when(is_awaiting, |this| {
+                                        this.child(self.render_loading_skeleton())
+                                    }),
+                            )
+                    })
                     .vertical_scrollbar(&self.scroll_handle),
             )
             .child(

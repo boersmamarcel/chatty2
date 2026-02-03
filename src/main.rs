@@ -1,3 +1,6 @@
+// Hide console window on Windows in release builds
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use gpui::*;
 use gpui_component::*;
 use tracing::{debug, error, info, warn};
