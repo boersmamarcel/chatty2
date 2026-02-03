@@ -31,6 +31,7 @@ pub enum InstallError {
     InvalidUpdateFile(String),
 
     #[error("Extraction failed: {0}")]
+    #[allow(dead_code)]
     ExtractionFailed(String),
 }
 
@@ -113,14 +114,14 @@ mod macos {
 
             // Fallback: find /Volumes/ path
             for line in output.lines() {
-                if line.contains("/Volumes/") {
-                    if let Some(start) = line.find("/Volumes/") {
-                        let rest = &line[start..];
-                        let end = rest.find('<').unwrap_or(rest.len());
-                        let path = rest[..end].trim();
-                        if !path.is_empty() {
-                            return Ok(PathBuf::from(path));
-                        }
+                if line.contains("/Volumes/")
+                    && let Some(start) = line.find("/Volumes/")
+                {
+                    let rest = &line[start..];
+                    let end = rest.find('<').unwrap_or(rest.len());
+                    let path = rest[..end].trim();
+                    if !path.is_empty() {
+                        return Ok(PathBuf::from(path));
                     }
                 }
             }

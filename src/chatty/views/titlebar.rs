@@ -1,6 +1,5 @@
 use super::SidebarView;
 use gpui::*;
-use gpui_component::h_flex;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use gpui_component::{Icon, IconName, Sizable, TitleBar, button::Button};
