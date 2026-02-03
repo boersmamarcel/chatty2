@@ -32,11 +32,7 @@ fn string_to_provider_type(s: &str) -> ProviderType {
         "OpenAI" => ProviderType::OpenAI,
         "Anthropic" => ProviderType::Anthropic,
         "Google Gemini" => ProviderType::Gemini,
-        "Cohere" => ProviderType::Cohere,
-        "Perplexity" => ProviderType::Perplexity,
-        "xAI" => ProviderType::XAI,
-        "Azure OpenAI" => ProviderType::AzureOpenAI,
-        "HuggingFace" => ProviderType::HuggingFace,
+        "Mistral" => ProviderType::Mistral,
         "Ollama" => ProviderType::Ollama,
         _ => ProviderType::OpenAI, // Default fallback
     }
@@ -815,11 +811,7 @@ impl ModelsListDelegate {
             ProviderType::OpenAI,
             ProviderType::Anthropic,
             ProviderType::Gemini,
-            ProviderType::Cohere,
-            ProviderType::Perplexity,
-            ProviderType::XAI,
-            ProviderType::AzureOpenAI,
-            ProviderType::HuggingFace,
+            ProviderType::Mistral,
             ProviderType::Ollama,
         ];
 

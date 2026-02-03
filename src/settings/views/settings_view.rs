@@ -27,7 +27,7 @@ impl Render for SettingsView {
             .with_group_variant(GroupBoxVariant::Outline)
             .pages(vec![
                 SettingPage::new("General")
-                    .resettable(true)
+                    .resettable(false)
                     .default_open(true)
                     .groups(vec![
                         SettingGroup::new().title("Appearance").items(vec![
@@ -123,26 +123,6 @@ impl Render for SettingsView {
                                 .default_value(14.0),
                             )
                             .description("Adjust the default font size."),
-                            SettingItem::new(
-                                "Line Height",
-                                SettingField::number_input(
-                                    NumberFieldOptions {
-                                        min: 12.0,
-                                        max: 48.0,
-                                        ..Default::default()
-                                    },
-                                    |cx: &App| {
-                                        cx.global::<GeneralSettingsModel>().line_height.into()
-                                    },
-                                    |val: f64, cx: &mut App| {
-                                        general_settings_controller::update_line_height(
-                                            cx, val as f32,
-                                        );
-                                    },
-                                )
-                                .default_value(20.0),
-                            )
-                            .description("Adjust the line height for text."),
                         ]),
                     ]),
                 SettingPage::new("Models")

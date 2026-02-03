@@ -2,15 +2,46 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*" # Trigger on version tags like v0.1.0, v1.0.0, etc.
 
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: chatty
 
 jobs:
+  # Validate that the tag version matches Cargo.toml
+  validate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract and validate version
+        id: version
+        run: |
+          # Extract version from tag (remove 'v' prefix)
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Tag version: $TAG_VERSION"
+
+          # Extract version from Cargo.toml
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          # Validate they match
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Version mismatch! Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            echo "::error::Please update Cargo.toml to version $TAG_VERSION before tagging."
+            exit 1
+          fi
+
+          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Version validated: $TAG_VERSION"
+
   build-linux:
+    needs: validate-version
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -44,16 +75,17 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package Linux app
-        run: ./scripts/package-linux.sh
+      - name: Package Linux AppImage
+        run: ./scripts/package-linux-appimage.sh
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
-          path: chatty-*-linux-x86_64.tar.gz
+          path: chatty-linux-*.AppImage
 
   build-macos-arm:
+    needs: validate-version
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -62,43 +94,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Get version from Cargo.toml
-        id: version
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Build release binary
         run: cargo build --release
 
       - name: Package macOS app
         run: ./scripts/package-macos.sh
 
-      - name: Rename artifacts for ARM
-        run: |
-          if [ -f chatty-*-macos.dmg ]; then
-            for f in chatty-*-macos.dmg; do
-              mv "$f" "${f%-macos.dmg}-macos-arm64.dmg"
-            done
-          fi
-
       - name: Upload macOS ARM artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: chatty-*-macos-arm64.dmg
-
-      - name: Create app bundle zip
-        run: |
-          zip -r chatty-${{ steps.version.outputs.version }}-macos-arm64-app.zip chatty.app
-
-      - name: Upload macOS ARM app bundle zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-arm64-app-zip
-          path: chatty-*-macos-arm64-app.zip
+          path: chatty-macos-*.dmg
 
   build-windows:
+    needs: validate-version
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -110,30 +119,28 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package Windows app
-        run: powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+      - name: Install Inno Setup
+        run: choco install innosetup -y
 
-      - name: Upload Windows artifact
+      - name: Create Windows Installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.validate-version.outputs.version }} scripts/installer-windows.iss
+        shell: pwsh
+
+      - name: Upload Windows Installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64
-          path: chatty-*-windows-x86_64.zip
+          name: windows-x86_64-setup
+          path: scripts/chatty-windows-x86_64.exe
 
   create-release:
-    needs: [build-linux, build-macos-arm, build-windows]
+    needs: [validate-version, build-linux, build-macos-arm, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Get version from Cargo.toml
-        id: version
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -143,23 +150,30 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          # Copy Linux tarball
-          cp artifacts/linux-x86_64/*.tar.gz release-assets/ || true
+          # Copy Linux AppImage
+          cp artifacts/linux-x86_64/*.AppImage release-assets/ || true
           # Copy macOS ARM DMG
           cp artifacts/macos-arm64/*.dmg release-assets/ || true
-          # Copy macOS ARM app bundle zip
-          cp artifacts/macos-arm64-app-zip/*.zip release-assets/ || true
-          # Copy Windows zip
-          cp artifacts/windows-x86_64/*.zip release-assets/ || true
+          # Copy Windows Installer
+          cp artifacts/windows-x86_64-setup/*.exe release-assets/ || true
           ls -la release-assets/
 
-      - name: Create or update release
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          # Generate SHA-256 checksums for all release assets
+          sha256sum * > checksums.txt
+          cat checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: Release v${{ steps.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           generate_release_notes: true
           files: release-assets/*
         env:

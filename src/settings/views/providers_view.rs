@@ -8,11 +8,7 @@ pub fn providers_page() -> SettingPage {
         create_openai_group(),
         create_anthropic_group(),
         create_gemini_group(),
-        create_cohere_group(),
-        create_perplexity_group(),
-        create_xai_group(),
-        create_azure_openai_group(),
-        create_huggingface_group(),
+        create_mistral_group(),
         create_ollama_group(),
     ])
 }
@@ -44,48 +40,12 @@ fn create_gemini_group() -> SettingGroup {
     )
 }
 
-fn create_cohere_group() -> SettingGroup {
+fn create_mistral_group() -> SettingGroup {
     create_provider_group(
-        "Cohere",
-        "Configure Cohere API access - Command R, Command R+, embeddings",
-        ProviderType::Cohere,
-        "Enter your Cohere API key for Command models",
-    )
-}
-
-fn create_perplexity_group() -> SettingGroup {
-    create_provider_group(
-        "Perplexity",
-        "Configure Perplexity API access - online search-powered AI responses",
-        ProviderType::Perplexity,
-        "Enter your Perplexity API key for search-enhanced responses",
-    )
-}
-
-fn create_xai_group() -> SettingGroup {
-    create_provider_group(
-        "xAI",
-        "Configure xAI (Grok) API access - Grok models by Elon Musk",
-        ProviderType::XAI,
-        "Enter your xAI API key for Grok models",
-    )
-}
-
-fn create_azure_openai_group() -> SettingGroup {
-    create_provider_group(
-        "Azure OpenAI",
-        "Configure Azure OpenAI API access - Enterprise GPT-4, GPT-3.5 on Microsoft Azure",
-        ProviderType::AzureOpenAI,
-        "Enter your Azure OpenAI API key for enterprise deployments",
-    )
-}
-
-fn create_huggingface_group() -> SettingGroup {
-    create_provider_group(
-        "HuggingFace",
-        "Configure HuggingFace API access - open-source models, Inference API",
-        ProviderType::HuggingFace,
-        "Enter your HuggingFace API token for model access",
+        "Mistral",
+        "Configure Mistral API access - Mistral Large, Mistral Medium, Mistral Small",
+        ProviderType::Mistral,
+        "Enter your Mistral API key for Mistral models",
     )
 }
 

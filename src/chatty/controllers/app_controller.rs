@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::chatty::factories::AgentClient;
+use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{Conversation, ConversationsStore, StreamChunk};
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
@@ -203,6 +204,14 @@ impl ChattyApp {
             });
         });
 
+        // Toggle sidebar callback
+        sidebar.update(cx, |sidebar, _cx| {
+            sidebar.set_on_toggle(move |collapsed, _cx| {
+                // Optional: Could save collapsed state to settings here
+                debug!(collapsed = collapsed, "Sidebar toggled");
+            });
+        });
+
         // Chat input send message callback
         chat_view.update(cx, |view, cx| {
             let input_state = view.chat_input_state().clone();
@@ -347,8 +356,17 @@ impl ChattyApp {
 
                             info!(restored = restored_count, failed = failed_count, "Conversation load summary");
 
+                            // Clear the active conversation in the store
+                            // This is necessary because add_conversation() auto-sets the first one as active
+                            // We want no active conversation so the first message creates a NEW conversation
+                            cx.update_global::<ConversationsStore, _>(|store, _| {
+                                debug!(active_before = ?store.active_id(), "Clearing active conversation after load");
+                                store.clear_active();
+                                debug!("Active conversation cleared");
+                            }).ok();
+
                             // Update sidebar with all conversations
-                            let active_conv_id = sidebar
+                            sidebar
                                 .update(cx, |sidebar, cx| {
                                     let convs = cx
                                         .global::<ConversationsStore>()
@@ -356,35 +374,24 @@ impl ChattyApp {
                                         .iter()
                                         .map(|c| (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd)))
                                         .collect::<Vec<_>>();
+                                    debug!(conv_count = convs.len(), "Loaded conversations, updating sidebar");
                                     sidebar.set_conversations(convs, cx);
 
-                                    // Set active conversation to the most recently updated
-                                    if let Some(active_conv) =
-                                        cx.global::<ConversationsStore>().list_all().first()
-                                    {
-                                        let active_id = active_conv.id().to_string();
-                                        cx.update_global::<ConversationsStore, _>(|store, _| {
-                                            store.set_active(active_id.clone());
-                                        });
-                                        sidebar
-                                            .set_active_conversation(Some(active_id.clone()), cx);
-                                        Some(active_id)
-                                    } else {
-                                        None
-                                    }
+                                    // Don't set any conversation as active on startup
+                                    // This ensures the first message creates a NEW conversation
+                                    sidebar.set_active_conversation(None, cx);
                                 })
-                                .ok()
-                                .flatten();
+                                .ok();
 
-                            // Set active conversation on chat view and mark as ready
-                            if let Some(active_id) = active_conv_id {
-                                chat_view
-                                    .update(cx, |view, cx| {
-                                        view.set_conversation_id(active_id);
-                                        cx.notify();
-                                    })
-                                    .ok();
-                            }
+                            // Don't set any conversation as active in the store or chat view
+                            // This ensures when the user sends the first message, a new conversation is created
+                            chat_view
+                                .update(cx, |view, cx| {
+                                    view.set_conversation_id(String::new());
+                                    view.clear_messages(cx);
+                                    cx.notify();
+                                })
+                                .ok();
 
                             // Mark app as ready
                             if let Some(app) = weak.upgrade() {
@@ -466,8 +473,13 @@ impl ChattyApp {
                                 )
                             })
                             .collect::<Vec<_>>();
+                        debug!(
+                            conv_count = convs.len(),
+                            "Updating sidebar with conversations"
+                        );
                         sidebar.set_conversations(convs, cx);
                         sidebar.set_active_conversation(Some(conv_id.clone()), cx);
+                        debug!("Sidebar updated with new conversation");
                     })?;
 
                     // Update chat view
@@ -782,6 +794,12 @@ impl ChattyApp {
                 }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 debug!(conv_id = %conv_id, "Set conversation ID on chat view");
 
+                // Force sidebar to re-render by notifying it explicitly
+                // This ensures the new conversation appears immediately
+                sidebar.update(cx, |_sidebar, cx| {
+                    cx.notify();
+                }).ok();
+
                 // Extract agent and history synchronously (to avoid blocking in async context)
                 let (agent, history) = cx
                     .update_global::<ConversationsStore, _>(|store, _cx| {
@@ -883,192 +901,8 @@ impl ChattyApp {
                             token_usage = Some((input_tokens, output_tokens));
                         }
                         Ok(StreamChunk::Done) => {
-                            debug!("Received Done chunk, finalizing");
-                            // Extract trace before finalizing
-                                                    let trace_json = chat_view
-                                                        .update(cx, |view, _cx| view.extract_current_trace())
-                                                        .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                                                        .and_then(|trace| serde_json::to_value(&trace).ok());
-                            // Finalize response in conversation
-                            debug!("Finalizing response in conversation");
-                            // Add token usage and calculate costs if available
-                            if let Some((input_tokens, output_tokens)) = token_usage {
-                                use crate::chatty::models::TokenUsage;
-                                use crate::settings::models::ModelsModel;
-
-                                // Get model config to calculate costs
-                                let model_id_for_cost = conv_id.clone();
-                                let cost_result = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                    store.get_conversation(&model_id_for_cost)
-                                        .map(|conv| conv.model_id().to_string())
-                                });
-
-                                if let Ok(Some(model_id)) = cost_result {
-                                    let models_result = cx.update_global::<ModelsModel, _>(|models, _cx| {
-                                        models.get_model(&model_id).cloned()
-                                    });
-
-                                    if let Ok(Some(model_config)) = models_result {
-                                        let mut usage = TokenUsage::new(input_tokens, output_tokens);
-
-                                        // Calculate cost if pricing is configured
-                                        if let (Some(input_cost), Some(output_cost)) = (
-                                            model_config.cost_per_million_input_tokens,
-                                            model_config.cost_per_million_output_tokens
-                                        ) {
-                                            usage.calculate_cost(input_cost, output_cost);
-                                            debug!(
-                                                input_tokens = input_tokens,
-                                                output_tokens = output_tokens,
-                                                cost = ?usage.estimated_cost_usd,
-                                                "Calculated token cost"
-                                            );
-                                        }
-
-                                        // Add usage to conversation
-                                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                                conv.add_token_usage(usage);
-                                            }
-                                        }).ok();
-
-                                        // Update sidebar to show new cost
-                                        sidebar.update(cx, |sidebar, cx| {
-                                            let convs = cx
-                                                .global::<ConversationsStore>()
-                                                .list_all()
-                                                .iter()
-                                                .map(|c| (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd)))
-                                                .collect::<Vec<_>>();
-                                            sidebar.set_conversations(convs, cx);
-                                        }).ok();
-                                    }
-                                }
-                            }
-
-                            let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                    conv.finalize_response(response_text.clone());
-                                    conv.add_trace(trace_json);
-                                    debug!("Response finalized in conversation");
-                                    // Check if we should generate a title (first exchange complete)
-                                    let msg_count = conv.message_count();
-                                    debug!(msg_count = msg_count, "Message count after finalize");
-                                    debug!(title = %conv.title(), "Current title");
-                                    let should_gen = msg_count == 2 && conv.title() == "New Chat";
-                                    if should_gen {
-                                        debug!("Will generate title for first exchange");
-                                    } else if msg_count != 2 {
-                                        debug!(count = msg_count, "Skipping title generation (count != 2)");
-                                    } else {
-                                        debug!("Skipping title generation (title already set)");
-                                    }
-                                    should_gen
-                                } else {
-                                    error!("Could not find conversation to finalize");
-                                    false
-                                }
-                            })
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                            // Generate title if this was the first exchange
-                            if should_generate_title {
-                                // Extract agent and history synchronously
-                                let title_data = cx
-                                    .update_global::<ConversationsStore, _>(|store, _cx| {
-                                        if let Some(conv) = store.get_conversation(&conv_id) {
-                                            Ok((conv.agent().clone(), conv.history().to_vec()))
-                                        } else {
-                                            Err(anyhow::anyhow!("Conversation not found"))
-                                        }
-                                    })
-                                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                                if let Ok((agent, history)) = title_data {
-                                    // Generate title asynchronously (outside update_global)
-                                    match generate_title(&agent, &history).await {
-                                        Ok(new_title) => {
-                                            debug!(title = %new_title, "Generated title");
-
-                                            // Update title synchronously
-                                            cx.update_global::<ConversationsStore, _>(
-                                                |store, _cx| {
-                                                    if let Some(conv) =
-                                                        store.get_conversation_mut(&conv_id)
-                                                    {
-                                                        conv.set_title(new_title.clone());
-                                                    }
-                                                },
-                                            )
-                                            .ok();
-
-                                            // Update sidebar to show new title
-                                            sidebar
-                                                .update(cx, |sidebar, cx| {
-                                                    let convs = cx
-                                                        .global::<ConversationsStore>()
-                                                        .list_all()
-                                                        .iter()
-                                                        .map(|c| {
-                                                            (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd))
-                                                        })
-                                                        .collect::<Vec<_>>();
-                                                    sidebar.set_conversations(convs, cx);
-                                                })
-                                                .ok();
-                                        }
-                                        Err(e) => {
-                                            warn!(error = ?e, "Title generation failed");
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Finalize UI
-                            debug!("Finalizing UI");
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.finalize_assistant_message(cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                            // Persist to disk
-                            let conv_data_res =
-                                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                    store.get_conversation(&conv_id).and_then(|conv| {
-                                        let history = conv.serialize_history().ok()?;
-                                        let traces = conv.serialize_traces().ok()?;
-                                        let token_usage = conv.serialize_token_usage().ok()?;
-                                        let now = SystemTime::now()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_secs()
-                                            as i64;
-
-                                        Some(ConversationData {
-                                            id: conv.id().to_string(),
-                                            title: conv.title().to_string(),
-                                            model_id: conv.model_id().to_string(),
-                                            message_history: history,
-                                            system_traces: traces,
-                                            token_usage,
-                                            created_at: conv
-                                                .created_at()
-                                                .duration_since(SystemTime::UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_secs()
-                                                as i64,
-                                            updated_at: now,
-                                        })
-                                    })
-                                });
-                            if let Ok(Some(conv_data)) = conv_data_res {
-                                repo.save(&conv_id, conv_data)
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!(e))?;
-                            }
+                            debug!("Received Done chunk");
+                            // Don't finalize yet - there may still be buffered chunks
                             break;
                         }
                         Ok(StreamChunk::Error(err)) => {
@@ -1080,6 +914,205 @@ impl ChattyApp {
                             break;
                         }
                     }
+                }
+
+                // Stream loop finished - now perform all finalization
+                debug!("Stream loop finished, starting finalization");
+
+                // Extract trace before finalizing
+                let trace_json = chat_view
+                    .update(cx, |view, _cx| view.extract_current_trace())
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                    .and_then(|trace| serde_json::to_value(&trace).ok());
+
+                // Finalize UI - stop streaming animation
+                debug!("Finalizing UI");
+                chat_view
+                    .update(cx, |view, cx| {
+                        if view.conversation_id() == Some(&conv_id) {
+                            view.finalize_assistant_message(cx);
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                // Finalize response in conversation
+                debug!("Finalizing response in conversation");
+                let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                        conv.finalize_response(response_text.clone());
+                        conv.add_trace(trace_json);
+                        debug!("Response finalized in conversation");
+                        // Check if we should generate a title (first exchange complete)
+                        let msg_count = conv.message_count();
+                        debug!(msg_count = msg_count, "Message count after finalize");
+                        debug!(title = %conv.title(), "Current title");
+                        let should_gen = msg_count == 2 && conv.title() == "New Chat";
+                        if should_gen {
+                            debug!("Will generate title for first exchange");
+                        } else if msg_count != 2 {
+                            debug!(count = msg_count, "Skipping title generation (count != 2)");
+                        } else {
+                            debug!("Skipping title generation (title already set)");
+                        }
+                        should_gen
+                    } else {
+                        error!("Could not find conversation to finalize");
+                        false
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                // Generate title if this was the first exchange
+                if should_generate_title {
+                    // Extract agent and history synchronously
+                    let title_data = cx
+                        .update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation(&conv_id) {
+                                Ok((conv.agent().clone(), conv.history().to_vec()))
+                            } else {
+                                Err(anyhow::anyhow!("Conversation not found"))
+                            }
+                        })
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                    if let Ok((agent, history)) = title_data {
+                        // Generate title asynchronously (outside update_global)
+                        match generate_title(&agent, &history).await {
+                            Ok(new_title) => {
+                                debug!(title = %new_title, "Generated title");
+
+                                // Update title synchronously
+                                cx.update_global::<ConversationsStore, _>(
+                                    |store, _cx| {
+                                        if let Some(conv) =
+                                            store.get_conversation_mut(&conv_id)
+                                        {
+                                            conv.set_title(new_title.clone());
+                                        }
+                                    },
+                                )
+                                .ok();
+
+                                // Update sidebar to show new title
+                                sidebar
+                                    .update(cx, |sidebar, cx| {
+                                        let convs = cx
+                                            .global::<ConversationsStore>()
+                                            .list_all()
+                                            .iter()
+                                            .map(|c| {
+                                                (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd))
+                                            })
+                                            .collect::<Vec<_>>();
+                                        sidebar.set_conversations(convs, cx);
+                                    })
+                                    .ok();
+                            }
+                            Err(e) => {
+                                warn!(error = ?e, "Title generation failed");
+                            }
+                        }
+                    }
+                }
+
+                // Update token usage if available
+                if let Some((input_tokens, output_tokens)) = token_usage {
+                    debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Processing token usage");
+
+                    // Get model pricing from the conversation's model
+                    let model_pricing_result = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        store.get_conversation(&conv_id).map(|conv| conv.model_id().to_string())
+                    });
+
+                    if let Ok(Some(model_id)) = model_pricing_result {
+                        let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
+                            models.get_model(&model_id).and_then(|model| {
+                                match (model.cost_per_million_input_tokens, model.cost_per_million_output_tokens) {
+                                    (Some(input_cost), Some(output_cost)) => Some((input_cost, output_cost)),
+                                    _ => None,
+                                }
+                            })
+                        }).ok().flatten();
+
+                        if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
+                            let mut usage = TokenUsage::new(input_tokens, output_tokens);
+                            usage.calculate_cost(cost_per_million_input, cost_per_million_output);
+                            let cost_usd = usage.estimated_cost_usd;
+
+                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                    conv.add_token_usage(usage);
+                                }
+                            }).ok();
+
+                            debug!(cost_usd = ?cost_usd, "Token usage updated in conversation");
+
+                            // Update sidebar with refreshed costs
+                            debug!("Updating sidebar with new costs");
+                            let update_result = sidebar.update(cx, |sidebar, cx| {
+                                let convs = cx
+                                    .global::<ConversationsStore>()
+                                    .list_all()
+                                    .iter()
+                                    .map(|c| {
+                                        let cost = c.token_usage().total_estimated_cost_usd;
+                                        debug!(id = %c.id(), cost = ?cost, "Sidebar conversation cost");
+                                        (
+                                            c.id().to_string(),
+                                            c.title().to_string(),
+                                            Some(cost),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                debug!(count = convs.len(), "Setting {} conversations on sidebar", convs.len());
+                                sidebar.set_conversations(convs, cx);
+                            });
+                            if let Err(e) = update_result {
+                                warn!(error = ?e, "Failed to update sidebar with costs");
+                            } else {
+                                debug!("Sidebar updated successfully with new costs");
+                            }
+                        } else {
+                            debug!("No pricing information available for model");
+                        }
+                    }
+                }
+
+                // Persist to disk
+                let conv_data_res =
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        store.get_conversation(&conv_id).and_then(|conv| {
+                            let history = conv.serialize_history().ok()?;
+                            let traces = conv.serialize_traces().ok()?;
+                            let now = SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                as i64;
+
+                            Some(ConversationData {
+                                id: conv.id().to_string(),
+                                title: conv.title().to_string(),
+                                model_id: conv.model_id().to_string(),
+                                message_history: history,
+                                system_traces: traces,
+                                token_usage: conv
+                                    .serialize_token_usage()
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                                created_at: conv
+                                    .created_at()
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs()
+                                    as i64,
+                                updated_at: now,
+                            })
+                        })
+                    });
+                if let Ok(Some(conv_data)) = conv_data_res {
+                    repo.save(&conv_id, conv_data)
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?;
                 }
 
                 Ok(())
