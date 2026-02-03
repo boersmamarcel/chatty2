@@ -480,7 +480,7 @@ impl ChatView {
     fn is_awaiting_response(&self) -> bool {
         self.messages
             .last()
-            .map_or(false, |msg| msg.is_streaming && msg.content.is_empty())
+            .is_some_and(|msg| msg.is_streaming && msg.content.is_empty())
     }
 
     /// Render loading skeleton indicator

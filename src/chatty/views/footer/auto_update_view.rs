@@ -3,9 +3,11 @@ use crate::auto_updater::{AutoUpdateStatus, AutoUpdater};
 use gpui::*;
 use gpui_component::{ActiveTheme as _, Icon, Sizable, button::*, h_flex};
 
+type ClickHandler = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+
 #[derive(IntoElement)]
 pub struct AutoUpdateView {
-    on_click: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_click: Option<ClickHandler>,
 }
 
 impl AutoUpdateView {
@@ -89,12 +91,10 @@ impl RenderOnce for AutoUpdateView {
         }
 
         // Enable click handler for interactive states
-        if enabled {
-            if let Some(handler) = self.on_click {
-                button = button.on_click(move |_event, window, cx| {
-                    handler(window, cx);
-                });
-            }
+        if enabled && let Some(handler) = self.on_click {
+            button = button.on_click(move |_event, window, cx| {
+                handler(window, cx);
+            });
         }
 
         button

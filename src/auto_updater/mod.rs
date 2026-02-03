@@ -32,9 +32,10 @@ const GITHUB_OWNER: &str = "boersmamarcel";
 const GITHUB_REPO: &str = "chatty2";
 
 /// Represents the current state of the auto-updater
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum AutoUpdateStatus {
     /// Waiting for the next poll interval
+    #[default]
     Idle,
     /// Currently fetching release metadata
     Checking,
@@ -44,12 +45,6 @@ pub enum AutoUpdateStatus {
     Ready(String, PathBuf),
     /// Something went wrong
     Error(String),
-}
-
-impl Default for AutoUpdateStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Information about a release asset available for download
@@ -434,16 +429,15 @@ async fn fetch_latest_release(
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-    if response.status() == reqwest::StatusCode::FORBIDDEN {
-        if response
+    if response.status() == reqwest::StatusCode::FORBIDDEN
+        && response
             .headers()
             .get("x-ratelimit-remaining")
             .and_then(|v| v.to_str().ok())
             .map(|s| s == "0")
             .unwrap_or(false)
-        {
-            return Err("Rate limited by GitHub API".to_string());
-        }
+    {
+        return Err("Rate limited by GitHub API".to_string());
     }
 
     if !response.status().is_success() {

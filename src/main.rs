@@ -63,15 +63,14 @@ fn get_themes_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         // On macOS, check in the app bundle's Resources directory
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(app_bundle) = exe_path
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(app_bundle) = exe_path
                 .ancestors()
                 .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
-            {
-                let resources_themes = app_bundle.join("Contents/Resources/themes");
-                if resources_themes.exists() {
-                    return resources_themes;
-                }
+        {
+            let resources_themes = app_bundle.join("Contents/Resources/themes");
+            if resources_themes.exists() {
+                return resources_themes;
             }
         }
     }
