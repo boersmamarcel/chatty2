@@ -23,6 +23,7 @@ impl TokenUsage {
         }
     }
 
+    #[allow(dead_code)]
     pub fn total_tokens(&self) -> u32 {
         self.input_tokens + self.output_tokens
     }
@@ -62,6 +63,7 @@ impl ConversationTokenUsage {
     }
 
     /// Recalculate totals from per-message usages
+    #[allow(dead_code)]
     pub fn recalculate_totals(&mut self) {
         self.total_input_tokens = self.message_usages.iter().map(|u| u.input_tokens).sum();
         self.total_output_tokens = self.message_usages.iter().map(|u| u.output_tokens).sum();

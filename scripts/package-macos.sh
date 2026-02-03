@@ -2,10 +2,16 @@
 
 set -e
 
-# Package name and version from Cargo.toml
+# Package name
 APP_NAME="chatty"
-VERSION="0.1.0"
 IDENTIFIER="com.chatty"
+
+# Extract version from Cargo.toml (single source of truth)
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+if [ -z "$VERSION" ]; then
+    echo "Error: Could not extract version from Cargo.toml"
+    exit 1
+fi
 
 RELEASE_DIR="target/release"
 APP_BUNDLE="${APP_NAME}.app"
@@ -33,6 +39,17 @@ mkdir -p "${RESOURCES_DIR}"
 cp "${RELEASE_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
 
+# Copy icon if available
+if [ -f "assets/app_icon/icon.icns" ]; then
+    cp "assets/app_icon/icon.icns" "${RESOURCES_DIR}/"
+fi
+
+# Copy themes if available
+if [ -d "themes" ]; then
+    mkdir -p "${RESOURCES_DIR}/themes"
+    cp themes/*.json "${RESOURCES_DIR}/themes/" 2>/dev/null || true
+fi
+
 # Create Info.plist
 cat > "${CONTENTS_DIR}/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -55,6 +72,8 @@ cat > "${CONTENTS_DIR}/Info.plist" << EOF
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
     <string>${VERSION}</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.13</string>
     <key>NSHighResolutionCapable</key>
@@ -72,7 +91,13 @@ echo "Applying ad-hoc code signature..."
 codesign -s - --force --deep "${APP_BUNDLE}"
 
 # Create DMG for distribution
-DMG_NAME="${APP_NAME}-${VERSION}-macos.dmg"
+# Use simplified naming convention for auto-updater: chatty-macos-{arch}.dmg
+# Map arm64 -> aarch64 to match Rust's arch convention
+ARCH=$(uname -m)
+if [ "$ARCH" = "arm64" ]; then
+    ARCH="aarch64"
+fi
+DMG_NAME="${APP_NAME}-macos-${ARCH}.dmg"
 echo "Creating DMG: ${DMG_NAME}..."
 hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "${DMG_NAME}" 2>/dev/null || {
     echo "Note: DMG creation skipped (hdiutil not available or failed)"

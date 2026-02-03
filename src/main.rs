@@ -1,10 +1,17 @@
+// Hide console window on Windows in release builds
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use gpui::*;
 use gpui_component::*;
 use tracing::{debug, error, info, warn};
 
+mod assets;
+mod auto_updater;
 mod chatty;
 mod settings;
 
+use assets::ChattyAssets;
+use auto_updater::AutoUpdater;
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
@@ -20,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// the user's saved theme preference before settings are loaded.
 static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
-actions!(chatty, [OpenSettings]);
+actions!(chatty, [OpenSettings, Quit, ToggleSidebar]);
 
 // Global repositories
 lazy_static::lazy_static! {
@@ -43,9 +50,41 @@ lazy_static::lazy_static! {
     };
 }
 
+fn get_themes_dir() -> PathBuf {
+    // Check CHATTY_DATA_DIR environment variable (set by AppImage)
+    if let Ok(data_dir) = std::env::var("CHATTY_DATA_DIR") {
+        let themes_path = PathBuf::from(data_dir).join("themes");
+        if themes_path.exists() {
+            return themes_path;
+        }
+    }
+
+    // Try to find themes directory relative to the executable
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, check in the app bundle's Resources directory
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(app_bundle) = exe_path
+                .ancestors()
+                .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
+        {
+            let resources_themes = app_bundle.join("Contents/Resources/themes");
+            if resources_themes.exists() {
+                return resources_themes;
+            }
+        }
+    }
+
+    // Default to ./themes for development and Linux/Windows
+    PathBuf::from("./themes")
+}
+
 fn init_themes(cx: &mut App) {
+    let themes_dir = get_themes_dir();
+    info!(themes_dir = ?themes_dir, "Loading themes from directory");
+
     // Just watch themes directory to load the registry
-    if let Err(err) = ThemeRegistry::watch_dir(PathBuf::from("./themes"), cx, |_cx| {
+    if let Err(err) = ThemeRegistry::watch_dir(themes_dir, cx, |_cx| {
         // Empty callback - just loading themes into registry
     }) {
         warn!(error = ?err, "Failed to watch themes directory");
@@ -143,12 +182,44 @@ fn apply_theme_from_settings(cx: &mut App) {
 }
 
 fn register_actions(cx: &mut App) {
-    // Register open settings action
+    // Register open settings action with platform-specific keybindings
     debug!("Action registered");
-    cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None)]);
+
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+    ]);
+
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("ctrl-b", ToggleSidebar, None),
+    ]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
         SettingsView::open_or_focus_settings_window(cx);
+    });
+    cx.on_action(|_: &Quit, cx: &mut App| {
+        debug!("Quit action triggered");
+        cx.quit();
+    });
+    cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
+        debug!("Toggle sidebar action triggered");
+        // Get the ChattyApp entity and toggle the sidebar
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.sidebar_view.update(cx, |sidebar, cx| {
+                    sidebar.toggle_collapsed(cx);
+                });
+            });
+        }
     });
 }
 
@@ -171,7 +242,9 @@ fn main() {
     // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
 
-    let app = Application::new();
+    let app = Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .with_assets(ChattyAssets);
 
     app.run(move |cx| {
         cx.activate(true);
@@ -219,6 +292,12 @@ fn main() {
 
         // Initialize global models list view state
         cx.set_global(settings::views::models_page::GlobalModelsListView::default());
+
+        // Initialize auto-updater with current version from Cargo.toml
+        let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
+        cx.set_global(updater.clone());
+        updater.start_polling(cx);
+        info!("Auto-updater initialized and polling started");
 
         // Use Arc<AtomicBool> to track when both providers and models are loaded
 
@@ -346,17 +425,8 @@ fn main() {
         // register actions
         register_actions(cx);
 
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: Point::default(),
-                size: size(px(1000.0), px(600.0)),
-            })),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Chatty".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        // Get platform-specific window options for main window
+        let options = settings::utils::window_utils::get_main_window_options();
 
         cx.open_window(options, |window, cx| {
             let view = cx.new(|cx| ChattyApp::new(window, cx));

@@ -67,6 +67,11 @@ impl ConversationsStore {
         self.active_conversation_id.as_ref()
     }
 
+    /// Clear the active conversation (set to None)
+    pub fn clear_active(&mut self) {
+        self.active_conversation_id = None;
+    }
+
     /// List all conversations (sorted by updated_at descending)
     pub fn list_all(&self) -> Vec<&Conversation> {
         let mut convs: Vec<&Conversation> = self.conversations.values().collect();
