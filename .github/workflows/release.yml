@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*" # Trigger on version tags like v0.1.0, v1.0.0, etc.
+      - "[0-9]*" # Also trigger on tags without v prefix like 0.1.0, 1.0.0, etc.
   release:
     types: [published] # Trigger when a release is published via GitHub UI
 
@@ -17,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,8 +33,9 @@ jobs:
             TAG_NAME="${GITHUB_REF_NAME}"
           fi
 
-          # Extract version from tag (remove 'v' prefix)
+          # Extract version from tag (remove 'v' prefix if present)
           TAG_VERSION="${TAG_NAME#v}"
+          echo "Tag name: $TAG_NAME"
           echo "Tag version: $TAG_VERSION"
 
           # Extract version from Cargo.toml
@@ -47,7 +50,8 @@ jobs:
           fi
 
           echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
-          echo "✅ Version validated: $TAG_VERSION"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Version validated: $TAG_VERSION (tag: $TAG_NAME)"
 
   build-linux:
     needs: validate-version
@@ -179,8 +183,8 @@ jobs:
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.validate-version.outputs.version }}
-          name: Release v${{ needs.validate-version.outputs.version }}
+          tag_name: ${{ needs.validate-version.outputs.tag_name }}
+          name: Release ${{ needs.validate-version.outputs.tag_name }}
           draft: false
           prerelease: ${{ contains(needs.validate-version.outputs.version, '-alpha') || contains(needs.validate-version.outputs.version, '-beta') || contains(needs.validate-version.outputs.version, '-rc') }}
           generate_release_notes: true
