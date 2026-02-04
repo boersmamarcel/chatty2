@@ -29,12 +29,14 @@ fi
 # Check for appimagetool
 if ! command -v appimagetool &> /dev/null; then
     echo "appimagetool not found. Downloading..."
-    APPIMAGETOOL="appimagetool-${ARCH}.AppImage"
-    if [ ! -f "${APPIMAGETOOL}" ]; then
-        wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL}"
-        chmod +x "${APPIMAGETOOL}"
+    APPIMAGETOOL_APPIMAGE="appimagetool-${ARCH}.AppImage"
+    if [ ! -f "${APPIMAGETOOL_APPIMAGE}" ]; then
+        wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL_APPIMAGE}"
+        chmod +x "${APPIMAGETOOL_APPIMAGE}"
     fi
-    APPIMAGETOOL="./${APPIMAGETOOL}"
+    # Extract the AppImage to avoid FUSE requirement in CI environments
+    ./${APPIMAGETOOL_APPIMAGE} --appimage-extract > /dev/null 2>&1
+    APPIMAGETOOL="./squashfs-root/AppRun"
 else
     APPIMAGETOOL="appimagetool"
 fi
