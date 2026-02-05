@@ -2,10 +2,13 @@
 //!
 //! Platform-specific strategies:
 //! - macOS: Mount DMG, rsync .app bundle, unmount
-//! - Linux: Extract tarball, rsync binary
+//! - Linux: Copy AppImage to replace current executable
 //! - Windows: Launch installer with silent flags
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::path::PathBuf;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 
 use tracing::info;
@@ -19,12 +22,15 @@ pub enum InstallError {
     IoError(#[from] std::io::Error),
 
     #[error("Command failed: {0}")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     CommandFailed(String),
 
     #[error("Mount failed: {0}")]
+    #[cfg(target_os = "macos")]
     MountFailed(String),
 
     #[error("File not found: {0}")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     FileNotFound(String),
 
     #[error("Invalid update file: {0}")]
@@ -227,88 +233,39 @@ async fn install_release_macos(dmg_path: &Path) -> Result<bool, InstallError> {
 // =============================================================================
 
 #[cfg(target_os = "linux")]
-async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError> {
-    use flate2::read::GzDecoder;
-    use std::fs::File;
-    use tar::Archive;
-
+async fn install_release_linux(appimage_path: &Path) -> Result<bool, InstallError> {
     // Verify file extension
-    let is_tarball = tarball_path
+    let is_appimage = appimage_path
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.ends_with(".tar.gz") || n.ends_with(".tgz"))
+        .map(|n| n.ends_with(".AppImage"))
         .unwrap_or(false);
 
-    if !is_tarball {
+    if !is_appimage {
         return Err(InstallError::InvalidUpdateFile(
-            "Expected .tar.gz file".to_string(),
+            "Expected .AppImage file".to_string(),
         ));
     }
 
-    // Create temporary extraction directory
-    let extract_dir = tempfile::tempdir()?;
-
-    info!(tarball = ?tarball_path, extract_dir = ?extract_dir.path(), "Extracting update");
-
-    // Extract the tarball
-    let file = File::open(tarball_path)?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
-    archive
-        .unpack(extract_dir.path())
-        .map_err(|e| InstallError::ExtractionFailed(e.to_string()))?;
-
-    // Find the binary
-    let binary_name = "chatty";
-    let extracted_binary = find_binary_in_dir(extract_dir.path(), binary_name)?;
-
-    info!(binary = ?extracted_binary, "Found extracted binary");
-
-    // Determine destination: try current location first
+    // Determine destination: current executable location
     let current_exe = std::env::current_exe()?;
     let dest_path = current_exe;
 
-    info!(source = ?extracted_binary, dest = ?dest_path, "Installing binary");
+    info!(source = ?appimage_path, dest = ?dest_path, "Installing AppImage");
 
-    // Try using rsync if available
-    let rsync_available = Command::new("which")
-        .arg("rsync")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    // Use atomic file replacement: copy to temp file, then rename
+    let temp_dest = dest_path.with_extension("tmp");
 
-    if rsync_available {
-        let output = Command::new("rsync")
-            .args(["-a"])
-            .arg(&extracted_binary)
-            .arg(&dest_path)
-            .output()
-            .map_err(|e| InstallError::CommandFailed(format!("rsync: {}", e)))?;
+    // Copy to temporary location
+    std::fs::copy(appimage_path, &temp_dest)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(InstallError::CommandFailed(format!(
-                "rsync failed: {}",
-                stderr
-            )));
-        }
-    } else {
-        // Fallback: use atomic file replacement to avoid race conditions and partial writes
-        // Write to a temporary file first, then atomically rename
-        let temp_dest = dest_path.with_extension("tmp");
+    // Atomically rename to final destination (atomic on Unix filesystems)
+    std::fs::rename(&temp_dest, &dest_path).inspect_err(|_| {
+        // Clean up temp file on failure
+        let _ = std::fs::remove_file(&temp_dest);
+    })?;
 
-        // Copy to temporary location
-        std::fs::copy(&extracted_binary, &temp_dest)?;
-
-        // Atomically rename to final destination (atomic on Unix filesystems)
-        std::fs::rename(&temp_dest, &dest_path).map_err(|e| {
-            // Clean up temp file on failure
-            let _ = std::fs::remove_file(&temp_dest);
-            e
-        })?;
-    }
-
-    // Make the binary executable
+    // Make the AppImage executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -319,37 +276,6 @@ async fn install_release_linux(tarball_path: &Path) -> Result<bool, InstallError
 
     info!("Update installed successfully");
     Ok(false) // No restart needed on Linux
-}
-
-#[cfg(target_os = "linux")]
-fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf, InstallError> {
-    // Check direct path first
-    let direct = dir.join(binary_name);
-    if direct.exists() && direct.is_file() {
-        return Ok(direct);
-    }
-
-    // Search recursively
-    fn search_recursive(dir: &Path, name: &str) -> Option<PathBuf> {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.file_name().map(|n| n == name).unwrap_or(false) {
-                    return Some(path);
-                }
-                if path.is_dir() {
-                    if let Some(found) = search_recursive(&path, name) {
-                        return Some(found);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    search_recursive(dir, binary_name).ok_or_else(|| {
-        InstallError::FileNotFound(format!("Binary '{}' not found in archive", binary_name))
-    })
 }
 
 // =============================================================================
@@ -414,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_install_error_display() {
-        let err = InstallError::FileNotFound("test.dmg".to_string());
+        let err = InstallError::InvalidUpdateFile("test.dmg".to_string());
         assert!(err.to_string().contains("test.dmg"));
     }
 
