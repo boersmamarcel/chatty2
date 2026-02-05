@@ -6,7 +6,7 @@
 //! - Windows: Launch installer with silent flags
 
 use std::path::Path;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
@@ -301,13 +301,10 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
     info!(installer = ?installer_path, "Launching Windows installer");
 
     // Launch installer with Inno Setup silent flags
+    // Note: We don't use /NORESTART because the [Run] section in the .iss file
+    // handles launching the new app after installation
     let result = Command::new(installer_path)
-        .args([
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/CLOSEAPPLICATIONS",
-        ])
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"])
         .spawn();
 
     match result {
@@ -327,13 +324,6 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
             Ok(true)
         }
     }
-}
-
-/// Finalize Windows update - simplified (installer handles everything)
-#[cfg(target_os = "windows")]
-pub fn finalize_windows_update(_update_path: &Path) -> Result<(), InstallError> {
-    // Installer handles file replacement and restart, nothing to do here
-    Ok(())
 }
 
 #[cfg(test)]
