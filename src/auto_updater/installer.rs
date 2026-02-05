@@ -11,9 +11,11 @@ use std::path::PathBuf;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
+use tracing::debug;
 use tracing::info;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Error type for installation operations
 #[derive(Debug, thiserror::Error)]
