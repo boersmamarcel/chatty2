@@ -29,17 +29,19 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
         Ok(discovered_models) if !discovered_models.is_empty() => {
             info!(count = discovered_models.len(), "Ollama models discovered");
 
-            // Create ModelConfig for each discovered model
+            // Create ModelConfig for each discovered model, with vision capability
             let new_model_configs: Vec<ModelConfig> = discovered_models
                 .iter()
-                .map(|(identifier, display_name)| {
+                .map(|(identifier, display_name, supports_vision)| {
                     let id = format!("ollama-{}", identifier.replace(':', "-"));
-                    ModelConfig::new(
+                    let mut config = ModelConfig::new(
                         id,
                         display_name.clone(),
                         ProviderType::Ollama,
                         identifier.clone(),
-                    )
+                    );
+                    config.supports_images = *supports_vision;
+                    config
                 })
                 .collect();
 

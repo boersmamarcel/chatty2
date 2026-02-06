@@ -1,4 +1,5 @@
 use gpui::*;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
@@ -218,15 +219,15 @@ impl ChattyApp {
             let app_for_send = app_entity.clone();
             input_state.update(cx, |state, _cx| {
                 debug!("Setting up on_send callback for chat input");
-                state.set_on_send(move |message, cx| {
-                    debug!(message = %message, "on_send callback triggered");
+                state.set_on_send(move |message, attachments, cx| {
+                    debug!(message = %message, attachment_count = attachments.len(), "on_send callback triggered");
                     let app = app_for_send.clone();
                     let msg = message.clone();
+                    let att = attachments.clone();
 
-                    // Update directly without defer
                     debug!("Calling send_message directly via entity");
                     app.update(cx, |app, cx| {
-                        app.send_message(msg, cx);
+                        app.send_message(msg, att, cx);
                     });
                 });
             });
@@ -241,10 +242,27 @@ impl ChattyApp {
                 state.set_on_model_change(move |model_id, cx| {
                     debug!(model_id = %model_id, "on_model_change callback triggered");
                     let app = app_for_model.clone();
-                    let model_id = model_id.clone();
+                    let mid = model_id.clone();
 
                     app.update(cx, |app, cx| {
-                        app.change_conversation_model(model_id, cx);
+                        // Defer capability update to avoid re-entering ChatInputState
+                        let chat_view = app.chat_view.clone();
+                        let mid_for_defer = mid.clone();
+                        cx.defer(move |cx| {
+                            let capabilities = cx
+                                .global::<ModelsModel>()
+                                .get_model(&mid_for_defer)
+                                .map(|m| (m.supports_images, m.supports_pdf))
+                                .unwrap_or((false, false));
+
+                            chat_view.update(cx, |view, cx| {
+                                view.chat_input_state().update(cx, |state, _cx| {
+                                    state.set_capabilities(capabilities.0, capabilities.1);
+                                });
+                            });
+                        });
+
+                        app.change_conversation_model(mid, cx);
                     });
                 });
             });
@@ -265,10 +283,18 @@ impl ChattyApp {
 
             let default_model_id = models_list.first().map(|(id, _)| id.clone());
 
+            // Get capabilities of the default model
+            let default_capabilities = models_model
+                .models()
+                .first()
+                .map(|m| (m.supports_images, m.supports_pdf))
+                .unwrap_or((false, false));
+
             // Set available models on chat input
             chat_view.update(cx, |view, cx| {
                 view.chat_input_state().update(cx, |state, _cx| {
                     state.set_available_models(models_list, default_model_id);
+                    state.set_capabilities(default_capabilities.0, default_capabilities.1);
                 });
             });
         }
@@ -497,6 +523,7 @@ impl ChattyApp {
 
                         view.chat_input_state().update(cx, |state, _cx| {
                             state.set_available_models(models_list, Some(model_config.id.clone()));
+                            state.set_capabilities(model_config.supports_images, model_config.supports_pdf);
                         });
                     })?;
 
@@ -569,9 +596,16 @@ impl ChattyApp {
                 view.set_conversation_id(conv_id.clone());
                 view.load_history(&history, &traces, cx);
 
-                // Update the selected model in the chat input
+                // Update the selected model and capabilities in the chat input
+                let model_capabilities = cx
+                    .global::<ModelsModel>()
+                    .get_model(&model_id)
+                    .map(|m| (m.supports_images, m.supports_pdf))
+                    .unwrap_or((false, false));
+
                 view.chat_input_state().update(cx, |state, _cx| {
                     state.set_selected_model_id(model_id);
+                    state.set_capabilities(model_capabilities.0, model_capabilities.1);
                 });
             });
         }
@@ -735,8 +769,8 @@ impl ChattyApp {
         .detach();
     }
 
-    fn send_message(&mut self, message: String, cx: &mut Context<Self>) {
-        debug!(message = %message, "send_message called");
+    fn send_message(&mut self, message: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
+        debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
         // Block message sending until app is ready (initial conversation created/loaded)
         if !self.is_ready {
@@ -785,7 +819,7 @@ impl ChattyApp {
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone());
                     // Add user message to UI
-                    view.add_user_message(message.clone(), cx);
+                    view.add_user_message(message.clone(), attachments.clone(), cx);
                     debug!("User message added to UI");
                     // Start assistant message in UI
                     view.start_assistant_message(cx);
@@ -815,11 +849,19 @@ impl ChattyApp {
 
                 // Create stream asynchronously (outside update_global to avoid blocking)
                 debug!("Calling stream_prompt()");
-                let contents = vec![rig::message::UserContent::Text(
+                let mut contents = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
                         text: message.clone(),
                     },
                 )];
+
+                // Convert file attachments to UserContent
+                for path in &attachments {
+                    match attachment_to_user_content(path) {
+                        Ok(content) => contents.push(content),
+                        Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
+                    }
+                }
                 let (mut stream, user_message) =
                     stream_prompt(&agent, &history, contents).await?;
 
@@ -1118,5 +1160,49 @@ impl ChattyApp {
                 Ok(())
             })
             .detach();
+    }
+}
+
+/// Convert a file attachment to a rig-core UserContent
+fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message::UserContent> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let data = std::fs::read(path)?;
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+
+    match ext.as_str() {
+        "png" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::PNG),
+            None,
+        )),
+        "jpg" | "jpeg" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::JPEG),
+            None,
+        )),
+        "gif" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::GIF),
+            None,
+        )),
+        "webp" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::WEBP),
+            None,
+        )),
+        "svg" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::SVG),
+            None,
+        )),
+        "pdf" => Ok(rig::message::UserContent::document(
+            b64,
+            Some(rig::completion::message::DocumentMediaType::PDF),
+        )),
+        _ => Err(anyhow::anyhow!("Unsupported file type: {}", ext)),
     }
 }

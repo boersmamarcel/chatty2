@@ -26,6 +26,12 @@ pub struct ModelConfig {
     /// Cost per million output tokens in USD (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_million_output_tokens: Option<f64>,
+    /// Whether this model supports image inputs
+    #[serde(default)]
+    pub supports_images: bool,
+    /// Whether this model supports PDF document inputs
+    #[serde(default)]
+    pub supports_pdf: bool,
 }
 
 fn default_temperature() -> f32 {
@@ -51,6 +57,8 @@ impl ModelConfig {
             extra_params: HashMap::new(),
             cost_per_million_input_tokens: None,
             cost_per_million_output_tokens: None,
+            supports_images: false,
+            supports_pdf: false,
         }
     }
 }

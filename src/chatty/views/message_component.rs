@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
+use std::path::PathBuf;
 use gpui_component::text::TextView;
 use tracing::debug;
 
@@ -33,6 +34,8 @@ pub struct DisplayMessage {
     pub live_trace: Option<SystemTrace>,
     // Track if this message should render as markdown
     pub is_markdown: bool,
+    // File attachments (images/PDFs) for this message
+    pub attachments: Vec<PathBuf>,
 }
 
 impl DisplayMessage {
@@ -52,6 +55,7 @@ impl DisplayMessage {
             system_trace_view: trace_view,
             live_trace: None,
             is_markdown: true,
+            attachments: Vec::new(),
         }
     }
 }
@@ -170,6 +174,64 @@ fn render_thinking_block(
         )
 }
 
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
+
+fn is_image_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Render attachment images as thumbnails above the message text
+fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
+    let border_color = cx.theme().border;
+
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .mb_2()
+        .children(attachments.iter().enumerate().map(|(i, path)| {
+            let element_id = ElementId::Name(
+                format!("msg-{}-attachment-{}", index, i).into(),
+            );
+
+            if is_image_file(path) {
+                // Render image thumbnail
+                div()
+                    .id(element_id)
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    .overflow_hidden()
+                    .child(
+                        img(path.clone())
+                            .max_w(px(300.))
+                            .max_h(px(300.))
+                            .rounded_md(),
+                    )
+            } else {
+                // Non-image attachment (PDF etc) - show filename
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+
+                div()
+                    .id(element_id)
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    .text_sm()
+                    .child(format!("📎 {}", filename))
+            }
+        }))
+}
+
 /// Render a message in the chat view
 pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl IntoElement {
     let mut container = div()
@@ -187,6 +249,11 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
     // Add system trace if present (for tool calls, thinking, etc.)
     if let Some(ref trace_view) = msg.system_trace_view {
         container = container.child(trace_view.clone());
+    }
+
+    // Render attachments (images/PDFs) if present
+    if !msg.attachments.is_empty() {
+        container = container.child(render_attachments(&msg.attachments, index, cx));
     }
 
     // Parse content for thinking blocks (for assistant messages)

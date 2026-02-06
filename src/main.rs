@@ -378,6 +378,18 @@ fn main() {
                 Ok(models) => {
                     cx.update(|cx| {
                         cx.update_global::<settings::models::ModelsModel, _>(|model, _cx| {
+                            // Apply default capabilities for models that don't have them set
+                            let models: Vec<_> = models
+                                .into_iter()
+                                .map(|mut m| {
+                                    if !m.supports_images && !m.supports_pdf {
+                                        let (img, pdf) = m.provider_type.default_capabilities();
+                                        m.supports_images = img;
+                                        m.supports_pdf = pdf;
+                                    }
+                                    m
+                                })
+                                .collect();
                             model.replace_all(models);
                         });
 
