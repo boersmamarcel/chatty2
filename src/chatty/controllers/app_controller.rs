@@ -540,6 +540,7 @@ impl ChattyApp {
                         message_history: "[]".to_string(),
                         system_traces: "[]".to_string(),
                         token_usage: "{}".to_string(),
+                        attachment_paths: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -587,14 +588,15 @@ impl ChattyApp {
                     (
                         conv.history().to_vec(),
                         conv.system_traces().to_vec(),
+                        conv.attachment_paths().to_vec(),
                         conv.model_id().to_string(),
                     )
                 });
 
-        if let Some((history, traces, model_id)) = conversation_data {
+        if let Some((history, traces, attachment_paths, model_id)) = conversation_data {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone());
-                view.load_history(&history, &traces, cx);
+                view.load_history(&history, &traces, &attachment_paths, cx);
 
                 // Update the selected model and capabilities in the chat input
                 let model_capabilities = cx
@@ -679,6 +681,9 @@ impl ChattyApp {
                                         token_usage: conv
                                             .serialize_token_usage()
                                             .unwrap_or_else(|_| "{}".to_string()),
+                                        attachment_paths: conv
+                                            .serialize_attachment_paths()
+                                            .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
                                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -868,7 +873,7 @@ impl ChattyApp {
                 // Update history synchronously with user message
                 cx.update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.add_user_message_to_history(user_message);
+                        conv.add_user_message_with_attachments(user_message, attachments.clone());
                     }
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1141,6 +1146,9 @@ impl ChattyApp {
                                 token_usage: conv
                                     .serialize_token_usage()
                                     .unwrap_or_else(|_| "{}".to_string()),
+                                attachment_paths: conv
+                                    .serialize_attachment_paths()
+                                    .unwrap_or_else(|_| "[]".to_string()),
                                 created_at: conv
                                     .created_at()
                                     .duration_since(SystemTime::UNIX_EPOCH)
