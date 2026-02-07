@@ -881,15 +881,8 @@ impl ChattyApp {
 
                 // Convert file attachments to UserContent
                 // Filter based on provider capabilities to prevent panics in rig-core
-                let provider_supports_pdf = matches!(
-                    &agent,
-                    crate::chatty::factories::AgentClient::Anthropic(_)
-                        | crate::chatty::factories::AgentClient::Gemini(_)
-                );
-                let provider_supports_images = !matches!(
-                    &agent,
-                    crate::chatty::factories::AgentClient::Mistral(_)
-                );
+                let provider_supports_pdf = agent.supports_pdf();
+                let provider_supports_images = agent.supports_images();
                 for path in &attachments {
                     let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
                     if is_pdf && !provider_supports_pdf {

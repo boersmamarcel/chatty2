@@ -98,4 +98,51 @@ impl AgentClient {
             }
         }
     }
+
+    /// Returns whether this provider supports image attachments.
+    ///
+    /// # Provider Support
+    /// - ✅ Anthropic, OpenAI, Gemini, Ollama
+    /// - ❌ Mistral (panics on image content)
+    ///
+    /// Use this method to filter attachments before sending to the LLM.
+    pub fn supports_images(&self) -> bool {
+        match self {
+            AgentClient::Anthropic(_) => true,
+            AgentClient::OpenAI(_) => true,
+            AgentClient::Gemini(_) => true,
+            AgentClient::Ollama(_) => true,
+            AgentClient::Mistral(_) => false, // Mistral panics on images!
+        }
+    }
+
+    /// Returns whether this provider natively supports PDF attachments.
+    ///
+    /// # Provider Support
+    /// - ✅ Anthropic, Gemini (native PDF support)
+    /// - ⚠️ OpenAI, Ollama (lossy text extraction)
+    /// - ❌ Mistral (not supported)
+    ///
+    /// Providers marked ⚠️ will convert PDFs to text, losing formatting and images.
+    pub fn supports_pdf(&self) -> bool {
+        match self {
+            AgentClient::Anthropic(_) => true,
+            AgentClient::Gemini(_) => true,
+            AgentClient::OpenAI(_) => false,  // Lossy conversion
+            AgentClient::Ollama(_) => false,  // Lossy conversion
+            AgentClient::Mistral(_) => false,
+        }
+    }
+
+    /// Returns the provider name for logging/debugging.
+    pub fn provider_name(&self) -> &'static str {
+        match self {
+            AgentClient::Anthropic(_) => "Anthropic",
+            AgentClient::OpenAI(_) => "OpenAI",
+            AgentClient::Gemini(_) => "Gemini",
+            AgentClient::Ollama(_) => "Ollama",
+            AgentClient::Mistral(_) => "Mistral",
+        }
+    }
+
 }
