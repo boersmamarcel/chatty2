@@ -426,6 +426,7 @@ impl ChatView {
         &mut self,
         history: &[rig::completion::Message],
         traces: &[Option<serde_json::Value>],
+        attachment_paths: &[Vec<PathBuf>],
         cx: &mut Context<Self>,
     ) {
         use rig::completion::Message;
@@ -436,7 +437,11 @@ impl ChatView {
             match msg {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
-                    if !user_msg.text.is_empty() {
+                    let attachments = attachment_paths
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !user_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,
                             content: user_msg.text,
@@ -444,7 +449,7 @@ impl ChatView {
                             system_trace_view: None,
                             live_trace: None,
                             is_markdown: false,
-                            attachments: Vec::new(),
+                            attachments,
                         });
                     }
                 }

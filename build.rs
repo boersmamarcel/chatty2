@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const PDFIUM_VERSION: &str = "6666";
+const PDFIUM_VERSION: &str = "7543";
 
 fn main() {
     #[cfg(target_os = "windows")]

@@ -449,11 +449,24 @@ impl ChattyApp {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<String>> {
         info!("Creating new conversation");
-        // Get first available model
+        // Use the selected model from chat input, falling back to first available
+        let selected_model_id = self
+            .chat_view
+            .read(cx)
+            .chat_input_state()
+            .read(cx)
+            .selected_model_id()
+            .cloned();
+
         let models = cx.global::<ModelsModel>();
         let providers = cx.global::<ProviderModel>();
 
-        if let Some(model_config) = models.models().first() {
+        let model_config = selected_model_id
+            .as_ref()
+            .and_then(|id| models.get_model(id).cloned())
+            .or_else(|| models.models().first().cloned());
+
+        if let Some(model_config) = model_config {
             // Find the provider for this model
             if let Some(provider_config) = providers
                 .providers()
@@ -540,6 +553,7 @@ impl ChattyApp {
                         message_history: "[]".to_string(),
                         system_traces: "[]".to_string(),
                         token_usage: "{}".to_string(),
+                        attachment_paths: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -587,14 +601,15 @@ impl ChattyApp {
                     (
                         conv.history().to_vec(),
                         conv.system_traces().to_vec(),
+                        conv.attachment_paths().to_vec(),
                         conv.model_id().to_string(),
                     )
                 });
 
-        if let Some((history, traces, model_id)) = conversation_data {
+        if let Some((history, traces, attachment_paths, model_id)) = conversation_data {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone());
-                view.load_history(&history, &traces, cx);
+                view.load_history(&history, &traces, &attachment_paths, cx);
 
                 // Update the selected model and capabilities in the chat input
                 let model_capabilities = cx
@@ -679,6 +694,9 @@ impl ChattyApp {
                                         token_usage: conv
                                             .serialize_token_usage()
                                             .unwrap_or_else(|_| "{}".to_string()),
+                                        attachment_paths: conv
+                                            .serialize_attachment_paths()
+                                            .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
                                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -856,7 +874,26 @@ impl ChattyApp {
                 )];
 
                 // Convert file attachments to UserContent
+                // Filter based on provider capabilities to prevent panics in rig-core
+                let provider_supports_pdf = matches!(
+                    &agent,
+                    crate::chatty::factories::AgentClient::Anthropic(_)
+                        | crate::chatty::factories::AgentClient::Gemini(_)
+                );
+                let provider_supports_images = !matches!(
+                    &agent,
+                    crate::chatty::factories::AgentClient::Mistral(_)
+                );
                 for path in &attachments {
+                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    if is_pdf && !provider_supports_pdf {
+                        warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
+                        continue;
+                    }
+                    if !is_pdf && !provider_supports_images {
+                        warn!(?path, "Skipping image attachment: provider does not support images");
+                        continue;
+                    }
                     match attachment_to_user_content(path) {
                         Ok(content) => contents.push(content),
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
@@ -868,7 +905,7 @@ impl ChattyApp {
                 // Update history synchronously with user message
                 cx.update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.add_user_message_to_history(user_message);
+                        conv.add_user_message_with_attachments(user_message, attachments.clone());
                     }
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1141,6 +1178,9 @@ impl ChattyApp {
                                 token_usage: conv
                                     .serialize_token_usage()
                                     .unwrap_or_else(|_| "{}".to_string()),
+                                attachment_paths: conv
+                                    .serialize_attachment_paths()
+                                    .unwrap_or_else(|_| "[]".to_string()),
                                 created_at: conv
                                     .created_at()
                                     .duration_since(SystemTime::UNIX_EPOCH)
