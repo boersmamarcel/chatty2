@@ -32,11 +32,20 @@ pub struct ModelConfig {
     /// Whether this model supports PDF document inputs
     #[serde(default)]
     pub supports_pdf: bool,
+    /// Whether this model supports the temperature parameter
+    /// Some models (like OpenAI reasoning models) don't support temperature
+    #[serde(default = "default_supports_temperature")]
+    pub supports_temperature: bool,
 }
 
 fn default_temperature() -> f32 {
     1.0
 }
+
+fn default_supports_temperature() -> bool {
+    true // Most models support temperature
+}
+
 
 impl ModelConfig {
     pub fn new(
@@ -59,6 +68,7 @@ impl ModelConfig {
             cost_per_million_output_tokens: None,
             supports_images: false,
             supports_pdf: false,
+            supports_temperature: true,
         }
     }
 }
