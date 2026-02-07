@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
-use std::path::PathBuf;
 use gpui_component::text::TextView;
+use std::path::PathBuf;
 use tracing::debug;
 
 use super::message_types::{AssistantMessage, SystemTrace};
@@ -193,9 +193,7 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         .gap_2()
         .mb_2()
         .children(attachments.iter().enumerate().map(|(i, path)| {
-            let element_id = ElementId::Name(
-                format!("msg-{}-attachment-{}", index, i).into(),
-            );
+            let element_id = ElementId::Name(format!("msg-{}-attachment-{}", index, i).into());
 
             if is_image_file(path) {
                 // Render image thumbnail

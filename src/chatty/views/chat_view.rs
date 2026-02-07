@@ -84,7 +84,12 @@ impl ChatView {
     }
 
     /// Add a user message to the chat
-    pub fn add_user_message(&mut self, text: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub fn add_user_message(
+        &mut self,
+        text: String,
+        attachments: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         debug!(message = %text, attachment_count = attachments.len(), "Adding user message");
 
         self.messages.push(DisplayMessage {
@@ -437,10 +442,7 @@ impl ChatView {
             match msg {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
-                    let attachments = attachment_paths
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_default();
+                    let attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
                     if !user_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,

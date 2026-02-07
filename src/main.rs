@@ -487,4 +487,3 @@ fn main() {
         .expect("Failed to open main window");
     });
 }
-

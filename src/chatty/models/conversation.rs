@@ -97,8 +97,8 @@ impl Conversation {
             .context("Failed to deserialize system traces")?;
 
         // Deserialize attachment paths
-        let attachment_paths = Self::deserialize_attachment_paths(&data.attachment_paths)
-            .unwrap_or_default();
+        let attachment_paths =
+            Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
 
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
@@ -123,7 +123,11 @@ impl Conversation {
     }
 
     /// Add user message to history with attachment paths
-    pub fn add_user_message_with_attachments(&mut self, message: Message, attachments: Vec<PathBuf>) {
+    pub fn add_user_message_with_attachments(
+        &mut self,
+        message: Message,
+        attachments: Vec<PathBuf>,
+    ) {
         self.history.push(message);
         self.system_traces.push(None);
         self.attachment_paths.push(attachments);
@@ -223,7 +227,8 @@ impl Conversation {
 
     /// Serialize attachment paths to JSON string
     pub fn serialize_attachment_paths(&self) -> Result<String> {
-        serde_json::to_string(&self.attachment_paths).context("Failed to serialize attachment paths")
+        serde_json::to_string(&self.attachment_paths)
+            .context("Failed to serialize attachment paths")
     }
 
     /// Deserialize attachment paths from JSON string

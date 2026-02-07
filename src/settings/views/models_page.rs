@@ -353,7 +353,7 @@ impl ModelsListView {
                                                         cost_per_million_output_tokens,
                                                         supports_images: false,
                                                         supports_pdf: false,
-                                                    supports_temperature: true,
+                                                        supports_temperature: true,
                                                     };
 
                                                     // Save the model (capabilities auto-set by create_model)
@@ -712,7 +712,7 @@ impl ModelsListView {
                                                         cost_per_million_output_tokens,
                                                         supports_images: false,
                                                         supports_pdf: false,
-                                                    supports_temperature: true,
+                                                        supports_temperature: true,
                                                     };
 
                                                     // Update the model

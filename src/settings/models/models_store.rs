@@ -46,7 +46,6 @@ fn default_supports_temperature() -> bool {
     true // Most models support temperature
 }
 
-
 impl ModelConfig {
     pub fn new(
         id: String,

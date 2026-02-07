@@ -114,5 +114,4 @@ impl AgentClient {
             AgentClient::Mistral(_) => "Mistral",
         }
     }
-
 }

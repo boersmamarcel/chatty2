@@ -280,7 +280,8 @@ impl AutoUpdater {
                         }
                     }
                 })
-                .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+                .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                .ok();
             }
         })
         .detach();
@@ -379,7 +380,8 @@ impl AutoUpdater {
                             updater.status = AutoUpdateStatus::Idle;
                         });
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                    .ok();
 
                     // On macOS and Linux, restart immediately
                     #[cfg(not(target_os = "windows"))]
@@ -391,7 +393,8 @@ impl AutoUpdater {
                         cx.update(|cx| {
                             cx.quit();
                         })
-                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                        .ok();
                     }
                 }
                 Err(e) => {
@@ -402,7 +405,8 @@ impl AutoUpdater {
                                 AutoUpdateStatus::Error(format!("Installation failed: {}", e));
                         });
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                    .ok();
                 }
             }
         })
@@ -522,7 +526,8 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
             updater.status = AutoUpdateStatus::Downloading(0.0);
         });
     })
-    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+    .ok();
 
     info!(
         url = &asset.download_url,
@@ -541,7 +546,8 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                         AutoUpdateStatus::Error(format!("Failed to create temp dir: {}", e));
                 });
             })
-            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+            .ok();
             return;
         }
     };
@@ -597,7 +603,8 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                                 ));
                             });
                         })
-                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                        .ok();
                         return;
                     }
                 }
@@ -618,7 +625,8 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                         );
                     });
                 })
-                .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+                .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                .ok();
                 return;
             }
 
@@ -630,7 +638,8 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                     updater.status = AutoUpdateStatus::Ready(asset.version.clone(), final_path);
                 });
             })
-            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+            .ok();
         }
         Err(e) => {
             error!(error = ?e, "Download failed");
@@ -639,7 +648,8 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                     updater.status = AutoUpdateStatus::Error(format!("Download failed: {}", e));
                 });
             })
-            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+            .ok();
         }
     }
 }
@@ -675,7 +685,8 @@ async fn download_file(
                     updater.status = AutoUpdateStatus::Downloading(progress);
                 });
             })
-            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+            .ok();
         }
     }
 
