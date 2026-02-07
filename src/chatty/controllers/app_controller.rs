@@ -900,7 +900,7 @@ impl ChattyApp {
                         warn!(?path, "Skipping image attachment: provider does not support images");
                         continue;
                     }
-                    match attachment_to_user_content(path) {
+                    match attachment_to_user_content(path).await {
                         Ok(content) => contents.push(content),
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
                     }
@@ -1210,13 +1210,13 @@ impl ChattyApp {
 }
 
 /// Convert a file attachment to a rig-core UserContent
-fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message::UserContent> {
+async fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message::UserContent> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    let data = std::fs::read(path)?;
+    let data = tokio::fs::read(path).await?;
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
 
     match ext.as_str() {
