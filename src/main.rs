@@ -204,6 +204,7 @@ fn register_actions(cx: &mut App) {
     });
     cx.on_action(|_: &Quit, cx: &mut App| {
         debug!("Quit action triggered");
+        chatty::services::cleanup_thumbnails();
         cx.quit();
     });
     cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
@@ -465,3 +466,4 @@ fn main() {
         .expect("Failed to open main window");
     });
 }
+

@@ -1,7 +1,13 @@
 use pdfium_render::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const THUMBNAIL_SIZE: u32 = 64;
+
+lazy_static::lazy_static! {
+    /// Session-scoped temp directory for PDF thumbnails
+    static ref THUMBNAIL_DIR: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+}
 
 #[derive(Debug)]
 pub enum PdfThumbnailError {
@@ -44,6 +50,43 @@ fn pdfium_lib_path() -> Option<PathBuf> {
     Some(PathBuf::from(lib_dir))
 }
 
+/// Get or create the session temp directory for PDF thumbnails
+fn get_thumbnail_dir() -> Result<PathBuf, PdfThumbnailError> {
+    let mut dir = THUMBNAIL_DIR.lock().unwrap();
+    
+    if let Some(ref path) = *dir {
+        return Ok(path.clone());
+    }
+    
+    // Create a unique session directory
+    let session_id = std::process::id();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let mut temp_dir = std::env::temp_dir();
+    temp_dir.push(format!("chatty_thumbnails_{}_{}", session_id, timestamp));
+    
+    std::fs::create_dir_all(&temp_dir)?;
+    *dir = Some(temp_dir.clone());
+    
+    Ok(temp_dir)
+}
+
+/// Clean up the session temp directory and all thumbnails
+pub fn cleanup_thumbnails() {
+    let dir = THUMBNAIL_DIR.lock().unwrap().clone();
+    
+    if let Some(path) = dir
+        && path.exists() {
+            match std::fs::remove_dir_all(&path) {
+                Err(e) => tracing::warn!("Failed to cleanup thumbnail directory: {}", e),
+                Ok(()) => tracing::debug!("Cleaned up thumbnail directory: {:?}", path),
+            }
+        }
+}
+
 /// Render PDF first page to a temporary thumbnail PNG file
 pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailError> {
     let lib_dir = pdfium_lib_path().ok_or_else(|| {
@@ -68,7 +111,10 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
     let bitmap = page.render_with_config(&render_config)?;
     let image = bitmap.as_image();
 
-    // Use a unique temp file per PDF path to support concurrent thumbnails
+    // Use session temp directory
+    let thumbnail_dir = get_thumbnail_dir()?;
+    
+    // Use a unique filename per PDF path to support concurrent thumbnails
     let hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -77,10 +123,9 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
         hasher.finish()
     };
 
-    let mut temp_path = std::env::temp_dir();
-    temp_path.push(format!("chatty_pdf_thumb_{:x}.png", hash));
-
+    let temp_path = thumbnail_dir.join(format!("thumb_{:x}.png", hash));
     image.save_with_format(&temp_path, image::ImageFormat::Png)?;
 
     Ok(temp_path)
 }
+
