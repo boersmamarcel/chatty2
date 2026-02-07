@@ -615,69 +615,111 @@ pub async fn stream_prompt(
 
 
 
-## Provider Capability Pattern
+## Model Capability Architecture
 
-When adding new LLM providers, centralize capability detection in the `AgentClient` enum rather than scattering `matches!()` expressions throughout the codebase.
+Model capabilities (image/PDF/temperature support) are stored in two complementary layers:
 
-**Implementation:**
+### Layer 1: ProviderType::default_capabilities() - Initialization Defaults
 
+**Location**: `src/settings/models/providers_store.rs`
+
+**Purpose**: Provides default capability values when creating new models.
+
+**Implementation**:
 ```rust
-// In src/chatty/factories/agent_factory.rs
-impl AgentClient {
-    /// Returns whether this provider supports image attachments
-    pub fn supports_images(&self) -> bool {
+impl ProviderType {
+    pub fn default_capabilities(&self) -> (bool, bool) {
         match self {
-            AgentClient::Anthropic(_) => true,
-            AgentClient::OpenAI(_) => true,
-            AgentClient::Gemini(_) => true,
-            AgentClient::Ollama(_) => true,
-            AgentClient::Mistral(_) => false, // Mistral panics on images!
-        }
-    }
-
-    /// Returns whether this provider natively supports PDF attachments
-    pub fn supports_pdf(&self) -> bool {
-        match self {
-            AgentClient::Anthropic(_) => true,
-            AgentClient::Gemini(_) => true,
-            AgentClient::OpenAI(_) => false,  // Lossy conversion
-            AgentClient::Ollama(_) => false,  // Lossy conversion
-            AgentClient::Mistral(_) => false,
-        }
-    }
-
-    pub fn provider_name(&self) -> &'static str {
-        match self {
-            AgentClient::Anthropic(_) => "Anthropic",
-            AgentClient::OpenAI(_) => "OpenAI",
-            AgentClient::Gemini(_) => "Gemini",
-            AgentClient::Ollama(_) => "Ollama",
-            AgentClient::Mistral(_) => "Mistral",
+            ProviderType::Anthropic => (true, true),   // Images + PDFs
+            ProviderType::Gemini => (true, true),      // Images + PDFs
+            ProviderType::OpenAI => (true, false),     // Images only (PDF lossy)
+            ProviderType::Ollama => (false, false),    // Per-model detection
+            ProviderType::Mistral => (false, false),   // No multimodal support
         }
     }
 }
 ```
 
-**Usage:**
+**Used in**:
+- `models_controller.rs`: When creating new models
+- `main.rs`: Applying defaults at startup for models with unset capabilities
 
+### Layer 2: ModelConfig - Persisted Per-Model State
+
+**Location**: `src/settings/models/models_store.rs` → JSON storage
+
+**Purpose**: 
+- Stores actual per-model capabilities (critical for Ollama)
+- Drives UI decisions (show/hide attachment buttons)
+- Used for runtime validation before sending to LLM
+
+**Fields**:
 ```rust
-// GOOD: Centralized, single source of truth
-let provider_supports_pdf = agent.supports_pdf();
-let provider_supports_images = agent.supports_images();
-
-// BAD: Hardcoded, scattered across codebase
-let provider_supports_pdf = matches!(
-    &agent,
-    AgentClient::Anthropic(_) | AgentClient::Gemini(_)
-);
+pub struct ModelConfig {
+    pub supports_images: bool,
+    pub supports_pdf: bool,
+    pub supports_temperature: bool,
+    // ... other fields
+}
 ```
 
-**Benefits:**
-- Single source of truth for provider capabilities
-- Easy to add new providers (modify one match statement)
-- Self-documenting with rustdoc comments
-- Testable in isolation
-- Prevents runtime panics (e.g., Mistral + images)
+**Special Case: Ollama Models**
+
+Ollama models have **per-model** capabilities that are dynamically detected:
+- Vision capability varies by model (e.g., `llama3.2-vision:latest` vs `llama3.2:latest`)
+- Detected via `/api/show` endpoint in `sync_service.rs`
+- Stored in ModelConfig for persistence across app restarts
+
+**Usage Locations**:
+
+1. **UI Layer** (app_controller.rs, chat_input.rs):
+   ```rust
+   // Read from ModelConfig to show/hide buttons
+   let model_config = cx.global::<ModelsModel>().get_model(&model_id)?;
+   input_state.set_capabilities(model_config.supports_images, model_config.supports_pdf);
+   ```
+
+2. **Message Send** (app_controller.rs):
+   ```rust
+   // Filter attachments before sending to LLM
+   let model_config = cx.global::<ModelsModel>().get_model(&model_id)?;
+   if is_pdf && !model_config.supports_pdf {
+       warn!("Skipping PDF: model doesn't support PDFs");
+       continue;
+   }
+   ```
+
+3. **Agent Creation** (agent_factory.rs):
+   ```rust
+   // Conditionally set temperature for OpenAI reasoning models
+   if model_config.supports_temperature {
+       builder = builder.temperature(model_config.temperature as f64);
+   }
+   ```
+
+### Why Two Layers?
+
+- **Layer 1 (ProviderType defaults)**: Quick initialization for new models
+- **Layer 2 (ModelConfig persistence)**: Handles per-model overrides (Ollama) and user preferences
+
+### Adding New Providers
+
+When adding a new provider (e.g., "Cohere"):
+
+1. Add variant to `ProviderType` enum
+2. Update `ProviderType::default_capabilities()` with provider defaults
+3. ModelConfig automatically inherits these defaults via `create_model()` controller
+
+**That's it!** No need to update multiple capability checks scattered throughout the codebase.
+
+### Architectural Benefits
+
+✅ Single source of truth for runtime decisions (ModelConfig)
+✅ Supports per-model capabilities (Ollama vision detection)
+✅ UI shows correct attachment options based on selected model
+✅ Prevents sending unsupported attachments to LLM APIs
+✅ Simple to extend with new providers
+
 
 ## Error Handling Pattern: Avoid Silent Failures
 

@@ -876,11 +876,26 @@ impl ChattyApp {
                     cx.notify();
                 }).ok();
 
-                // Extract agent and history synchronously (to avoid blocking in async context)
-                let (agent, history) = cx
-                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                // Extract agent, history, model_id, and capabilities synchronously
+                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images) = cx
+                    .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
-                            Ok((conv.agent().clone(), conv.history().to_vec()))
+                            let model_id = conv.model_id().to_string();
+                            
+                            // Get capabilities from ModelsModel
+                            let (supports_pdf, supports_images) = cx
+                                .global::<ModelsModel>()
+                                .get_model(&model_id)
+                                .map(|m| (m.supports_pdf, m.supports_images))
+                                .unwrap_or((false, false)); // Safe fallback if model not found
+                            
+                            Ok((
+                                conv.agent().clone(),
+                                conv.history().to_vec(),
+                                model_id,
+                                supports_pdf,
+                                supports_images
+                            ))
                         } else {
                             Err(anyhow::anyhow!(
                                 "Could not find conversation after creation/lookup"
@@ -898,9 +913,7 @@ impl ChattyApp {
                 )];
 
                 // Convert file attachments to UserContent
-                // Filter based on provider capabilities to prevent panics in rig-core
-                let provider_supports_pdf = agent.supports_pdf();
-                let provider_supports_images = agent.supports_images();
+                // Filter based on model capabilities to prevent panics in rig-core
                 for path in &attachments {
                     let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
                     if is_pdf && !provider_supports_pdf {
