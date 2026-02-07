@@ -614,3 +614,124 @@ pub async fn stream_prompt(
 10. **Context types** determine available operations and access levels
 
 
+
+## Provider Capability Pattern
+
+When adding new LLM providers, centralize capability detection in the `AgentClient` enum rather than scattering `matches!()` expressions throughout the codebase.
+
+**Implementation:**
+
+```rust
+// In src/chatty/factories/agent_factory.rs
+impl AgentClient {
+    /// Returns whether this provider supports image attachments
+    pub fn supports_images(&self) -> bool {
+        match self {
+            AgentClient::Anthropic(_) => true,
+            AgentClient::OpenAI(_) => true,
+            AgentClient::Gemini(_) => true,
+            AgentClient::Ollama(_) => true,
+            AgentClient::Mistral(_) => false, // Mistral panics on images!
+        }
+    }
+
+    /// Returns whether this provider natively supports PDF attachments
+    pub fn supports_pdf(&self) -> bool {
+        match self {
+            AgentClient::Anthropic(_) => true,
+            AgentClient::Gemini(_) => true,
+            AgentClient::OpenAI(_) => false,  // Lossy conversion
+            AgentClient::Ollama(_) => false,  // Lossy conversion
+            AgentClient::Mistral(_) => false,
+        }
+    }
+
+    pub fn provider_name(&self) -> &'static str {
+        match self {
+            AgentClient::Anthropic(_) => "Anthropic",
+            AgentClient::OpenAI(_) => "OpenAI",
+            AgentClient::Gemini(_) => "Gemini",
+            AgentClient::Ollama(_) => "Ollama",
+            AgentClient::Mistral(_) => "Mistral",
+        }
+    }
+}
+```
+
+**Usage:**
+
+```rust
+// GOOD: Centralized, single source of truth
+let provider_supports_pdf = agent.supports_pdf();
+let provider_supports_images = agent.supports_images();
+
+// BAD: Hardcoded, scattered across codebase
+let provider_supports_pdf = matches!(
+    &agent,
+    AgentClient::Anthropic(_) | AgentClient::Gemini(_)
+);
+```
+
+**Benefits:**
+- Single source of truth for provider capabilities
+- Easy to add new providers (modify one match statement)
+- Self-documenting with rustdoc comments
+- Testable in isolation
+- Prevents runtime panics (e.g., Mistral + images)
+
+## Error Handling Pattern: Avoid Silent Failures
+
+Never use `.ok()` to silently discard errors from UI updates or other operations. Always log failures for debugging.
+
+**Bad:**
+
+```rust
+cx.update(|_, cx| {
+    cx.refresh_windows();
+}).ok(); // Error silently discarded!
+```
+
+**Good:**
+
+```rust
+cx.update(|_, cx| {
+    cx.refresh_windows();
+}).map_err(|e| warn!(error = ?e, "Failed to refresh windows"))
+.ok();
+```
+
+**When to propagate vs log:**
+- **Log as `warn!()`**: UI refresh failures, non-critical updates
+- **Propagate with `?`**: File I/O failures, download failures, critical operations
+
+## Complex Function Documentation Pattern
+
+For functions exceeding ~100 lines with multiple responsibilities, add comprehensive documentation with phase markers:
+
+```rust
+/// Brief description of what the function does
+///
+/// Detailed breakdown of phases:
+/// 1. Phase one description
+/// 2. Phase two description
+/// 3. Phase three description
+///
+/// # Note
+/// Acknowledge complexity and future refactoring opportunities
+fn complex_function(&mut self, ...) {
+    // PHASE 1: Clear description
+    // ... code ...
+    
+    // PHASE 2: Another clear description
+    // ... code ...
+    
+    // PHASE 3: Yet another clear description
+    // ... code ...
+}
+```
+
+This pattern:
+- Helps navigate large functions
+- Documents intent without changing behavior
+- Flags technical debt for future refactoring
+- Makes code reviews easier
