@@ -4,3 +4,7 @@
 **.DS_Store
 *.db
 /libs/
+
+# AppImage build artifacts
+/squashfs-root
+appimagetool-*.AppImage

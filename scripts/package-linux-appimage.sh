@@ -43,6 +43,7 @@ fi
 
 # Clean up any existing AppDir
 rm -rf "${APPDIR}"
+rm -rf squashfs-root
 rm -f "${APPIMAGE_NAME}"
 
 # Create AppDir structure
@@ -165,8 +166,9 @@ chmod +x "${APPDIR}/AppRun"
 # Build the AppImage
 ARCH="${ARCH}" "${APPIMAGETOOL}" "${APPDIR}" "${APPIMAGE_NAME}"
 
-# Clean up AppDir
+# Clean up AppDir and squashfs-root
 rm -rf "${APPDIR}"
+rm -rf squashfs-root
 
 echo ""
 echo "AppImage created successfully: ${APPIMAGE_NAME}"
