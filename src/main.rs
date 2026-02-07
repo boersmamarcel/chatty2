@@ -224,6 +224,20 @@ fn register_actions(cx: &mut App) {
     });
 }
 
+fn set_app_menus(cx: &mut App) {
+    cx.set_menus(vec![Menu {
+        name: "Chatty".into(),
+        items: vec![
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Settings", OpenSettings),
+            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::separator(),
+            MenuItem::action("Quit", Quit),
+        ],
+    }]);
+}
+
 fn main() {
     // Initialize structured logging
     tracing_subscriber::fmt()
@@ -458,6 +472,9 @@ fn main() {
 
         // register actions
         register_actions(cx);
+
+        // Set up native macOS menu bar
+        set_app_menus(cx);
 
         // Get platform-specific window options for main window
         let options = settings::utils::window_utils::get_main_window_options();
