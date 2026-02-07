@@ -177,6 +177,11 @@ impl ChatInputState {
         }
     }
 
+    /// Get the selected model ID
+    pub fn selected_model_id(&self) -> Option<&String> {
+        self.selected_model_id.as_ref()
+    }
+
     /// Get display name for selected model
     pub fn get_selected_model_display_name(&self) -> String {
         self.selected_model_id

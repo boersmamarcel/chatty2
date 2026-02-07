@@ -449,11 +449,24 @@ impl ChattyApp {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<String>> {
         info!("Creating new conversation");
-        // Get first available model
+        // Use the selected model from chat input, falling back to first available
+        let selected_model_id = self
+            .chat_view
+            .read(cx)
+            .chat_input_state()
+            .read(cx)
+            .selected_model_id()
+            .cloned();
+
         let models = cx.global::<ModelsModel>();
         let providers = cx.global::<ProviderModel>();
 
-        if let Some(model_config) = models.models().first() {
+        let model_config = selected_model_id
+            .as_ref()
+            .and_then(|id| models.get_model(id).cloned())
+            .or_else(|| models.models().first().cloned());
+
+        if let Some(model_config) = model_config {
             // Find the provider for this model
             if let Some(provider_config) = providers
                 .providers()
@@ -861,7 +874,26 @@ impl ChattyApp {
                 )];
 
                 // Convert file attachments to UserContent
+                // Filter based on provider capabilities to prevent panics in rig-core
+                let provider_supports_pdf = matches!(
+                    &agent,
+                    crate::chatty::factories::AgentClient::Anthropic(_)
+                        | crate::chatty::factories::AgentClient::Gemini(_)
+                );
+                let provider_supports_images = !matches!(
+                    &agent,
+                    crate::chatty::factories::AgentClient::Mistral(_)
+                );
                 for path in &attachments {
+                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    if is_pdf && !provider_supports_pdf {
+                        warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
+                        continue;
+                    }
+                    if !is_pdf && !provider_supports_images {
+                        warn!(?path, "Skipping image attachment: provider does not support images");
+                        continue;
+                    }
                     match attachment_to_user_content(path) {
                         Ok(content) => contents.push(content),
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
