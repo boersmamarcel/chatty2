@@ -119,14 +119,13 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
     
     // Use a unique filename per PDF path to support concurrent thumbnails
     let hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        pdf_path.hash(&mut hasher);
-        hasher.finish()
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(pdf_path.to_string_lossy().as_bytes());
+        format!("{:x}", hasher.finalize())
     };
 
-    let temp_path = thumbnail_dir.join(format!("thumb_{:x}.png", hash));
+    let temp_path = thumbnail_dir.join(format!("thumb_{}.png", hash));
     image.save_with_format(&temp_path, image::ImageFormat::Png)?;
 
     Ok(temp_path)
@@ -413,3 +412,4 @@ startxref
         cleanup_thumbnails();
     }
 }
+

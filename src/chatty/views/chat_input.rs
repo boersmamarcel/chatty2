@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
-use crate::chatty::services::render_pdf_thumbnail;
+use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use super::attachment_validation::{validate_attachment, is_image_extension, PDF_EXTENSION};
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 
 
 
@@ -21,6 +23,9 @@ pub type SendMessageCallback =
 pub type ModelChangeCallback = Arc<dyn Fn(String, &mut Context<ChatInputState>) + Send + Sync>;
 
 /// State for the chat input component
+/// Cache for PDF thumbnails: maps PDF path -> thumbnail path or error
+type ThumbnailCache = Arc<RwLock<HashMap<PathBuf, Result<PathBuf, String>>>>;
+
 pub struct ChatInputState {
     pub input: Entity<InputState>,
     attachments: Vec<PathBuf>,
@@ -31,6 +36,7 @@ pub struct ChatInputState {
     available_models: Vec<(String, String)>, // (id, display_name)
     supports_images: bool,
     supports_pdf: bool,
+    thumbnail_cache: ThumbnailCache,
 }
 
 impl ChatInputState {
@@ -42,6 +48,7 @@ impl ChatInputState {
             on_send: None,
             on_model_change: None,
             selected_model_id: None,
+            thumbnail_cache: Arc::new(RwLock::new(HashMap::new())),
             available_models: Vec::new(),
             supports_images: false,
             supports_pdf: false,
@@ -104,6 +111,10 @@ impl ChatInputState {
 
             match validate_attachment(&path) {
                 Ok(()) => {
+                    // Start thumbnail generation for PDFs immediately in background
+                    if is_pdf(&path) {
+                        self.start_thumbnail_generation_for_pdf(path.clone());
+                    }
                     self.attachments.push(path);
                 }
                 Err(err) => {
@@ -128,6 +139,45 @@ impl ChatInputState {
     /// Clear all attachments
     pub fn clear_attachments(&mut self) {
         self.attachments.clear();
+    }
+
+    /// Start background thumbnail generation for a PDF (called when attachment is added)
+    fn start_thumbnail_generation_for_pdf(&self, pdf_path: PathBuf) {
+        let cache = self.thumbnail_cache.clone();
+
+        // Check if already cached or in progress
+        if let Ok(guard) = cache.try_read() {
+            if guard.contains_key(&pdf_path) {
+                return; // Already generating or cached
+            }
+        }
+
+        // Mark as in-progress immediately to prevent duplicate work
+        if let Ok(mut cache_write) = cache.try_write() {
+            cache_write.entry(pdf_path.clone()).or_insert_with(|| Err("Generating...".to_string()));
+        }
+
+        // Spawn background task on the tokio runtime
+        let cache_for_task = cache.clone();
+        let pdf_path_for_result = pdf_path.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                render_pdf_thumbnail(&pdf_path)
+                    .map_err(|e| format!("Failed to generate thumbnail: {}", e))
+            }).await;
+
+            let thumbnail_result = match result {
+                Ok(res) => res,
+                Err(e) => Err(format!("Task error: {}", e)),
+            };
+
+            // Update cache with result
+            if let Ok(mut cache_write) = cache_for_task.try_write() {
+                cache_write.insert(pdf_path_for_result, thumbnail_result);
+            }
+            
+            // Note: UI will be updated on next render when attachments are displayed
+        });
     }
 
     /// Send the current message
@@ -205,20 +255,21 @@ fn render_file_chip(
     path: &Path,
     index: usize,
     state: &Entity<ChatInputState>,
+    thumbnail_cache: &ThumbnailCache,
 ) -> impl IntoElement {
-    let state = state.clone();
+    let state_clone = state.clone();
 
-    // Generate thumbnail path: actual image path for images, PDF thumbnail for PDFs
+    // Determine display path based on file type
     let display_path = if is_image(path) {
+        // Images can be displayed directly
         Some(path.to_path_buf())
     } else if is_pdf(path) {
-        match render_pdf_thumbnail(path) {
-            Ok(thumbnail_path) => Some(thumbnail_path),
-            Err(e) => {
-                warn!(?path, error = %e, "Failed to generate PDF thumbnail");
-                None
-            }
-        }
+        // For PDFs, check cache (generation started in add_attachments)
+        // Use blocking read since we're not in a window context
+        // Check the thumbnail cache (non-blocking)
+        thumbnail_cache.try_read().ok().and_then(|guard| {
+            guard.get(path).and_then(|r| r.as_ref().ok()).cloned()
+        })
     } else {
         None
     };
@@ -241,6 +292,7 @@ fn render_file_chip(
             )
         })
         .when(display_path.is_none(), |d| {
+            // Show placeholder for PDFs (loading or no preview)
             d.child(
                 div()
                     .w_full()
@@ -272,7 +324,7 @@ fn render_file_chip(
                 .hover(|style| style.bg(rgb(0x111827)))
                 .child("×")
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    state.update(cx, |state, _cx| {
+                    state_clone.update(cx, |state, _cx| {
                         state.remove_attachment(index);
                     });
                 }),
@@ -304,6 +356,9 @@ impl RenderOnce for ChatInput {
         let supports_pdf = self.state.read(cx).supports_pdf;
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
+        
+        // Read thumbnail cache (for PDF previews)
+        let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
 
         // Model display name
         let model_display = self.state.read(cx).get_selected_model_display_name();
@@ -549,7 +604,7 @@ impl RenderOnce for ChatInput {
                                         .iter()
                                         .enumerate()
                                         .map(|(index, path)| {
-                                            render_file_chip(path, index, &self.state)
+                                            render_file_chip(path, index, &self.state, &thumbnail_cache)
                                         }),
                                 ),
                         )
@@ -557,3 +612,20 @@ impl RenderOnce for ChatInput {
             )
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
