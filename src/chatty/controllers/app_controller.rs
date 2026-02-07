@@ -374,6 +374,7 @@ impl ChattyApp {
                                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                             store.add_conversation(conversation);
                                         })
+                                        .map_err(|e| warn!(error = ?e, "Failed to add restored conversation to store"))
                                         .ok();
 
                                         restored_count += 1;
@@ -395,7 +396,8 @@ impl ChattyApp {
                                 debug!(active_before = ?store.active_id(), "Clearing active conversation after load");
                                 store.clear_active();
                                 debug!("Active conversation cleared");
-                            }).ok();
+                            }).map_err(|e| warn!(error = ?e, "Failed to clear active conversation"))
+                            .ok();
 
                             // Update sidebar with all conversations
                             sidebar
@@ -413,6 +415,7 @@ impl ChattyApp {
                                     // This ensures the first message creates a NEW conversation
                                     sidebar.set_active_conversation(None, cx);
                                 })
+                                .map_err(|e| warn!(error = ?e, "Failed to update sidebar after load"))
                                 .ok();
 
                             // Don't set any conversation as active in the store or chat view
@@ -423,6 +426,7 @@ impl ChattyApp {
                                     view.clear_messages(cx);
                                     cx.notify();
                                 })
+                                .map_err(|e| warn!(error = ?e, "Failed to clear chat view on startup"))
                                 .ok();
 
                             // Mark app as ready
@@ -787,7 +791,9 @@ impl ChattyApp {
 
         // Delete from disk
         cx.spawn(async move |_weak, _cx| {
-            repo.delete(&conv_id).await.ok();
+            if let Err(e) = repo.delete(&conv_id).await {
+                warn!(error = ?e, conv_id = %conv_id, "Failed to delete conversation from disk");
+            }
             Ok::<_, anyhow::Error>(())
         })
         .detach();
@@ -874,7 +880,8 @@ impl ChattyApp {
                 // This ensures the new conversation appears immediately
                 sidebar.update(cx, |_sidebar, cx| {
                     cx.notify();
-                }).ok();
+                }).map_err(|e| warn!(error = ?e, "Failed to refresh sidebar after creating conversation"))
+                .ok();
 
                 // Extract agent, history, model_id, and capabilities synchronously
                 let (agent, history, _model_id, provider_supports_pdf, provider_supports_images) = cx
@@ -1100,6 +1107,7 @@ impl ChattyApp {
                                         }
                                     },
                                 )
+                                .map_err(|e| warn!(error = ?e, "Failed to update conversation title in store"))
                                 .ok();
 
                                 // Update sidebar to show new title
@@ -1115,6 +1123,7 @@ impl ChattyApp {
                                             .collect::<Vec<_>>();
                                         sidebar.set_conversations(convs, cx);
                                     })
+                                    .map_err(|e| warn!(error = ?e, "Failed to update sidebar with new title"))
                                     .ok();
                             }
                             Err(e) => {
@@ -1152,7 +1161,8 @@ impl ChattyApp {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                     conv.add_token_usage(usage);
                                 }
-                            }).ok();
+                            }).map_err(|e| warn!(error = ?e, "Failed to update token usage in store"))
+                            .ok();
 
                             debug!(cost_usd = ?cost_usd, "Token usage updated in conversation");
 

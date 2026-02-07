@@ -104,6 +104,7 @@ impl AgentClient {
     }
 
     /// Returns the provider name for logging/debugging.
+    #[allow(dead_code)]
     pub fn provider_name(&self) -> &'static str {
         match self {
             AgentClient::Anthropic(_) => "Anthropic",

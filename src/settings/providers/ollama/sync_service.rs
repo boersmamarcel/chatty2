@@ -75,6 +75,7 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
             // Save to disk
             let all_models = cx
                 .update(|cx| cx.global::<ModelsModel>().models().to_vec())
+                .map_err(|e| warn!(error = ?e, "Failed to save models after Ollama sync"))
                 .ok();
 
             if let Some(all_models) = all_models {

@@ -146,10 +146,10 @@ impl ChatInputState {
         let cache = self.thumbnail_cache.clone();
 
         // Check if already cached or in progress
-        if let Ok(guard) = cache.try_read() {
-            if guard.contains_key(&pdf_path) {
-                return; // Already generating or cached
-            }
+        if let Ok(guard) = cache.try_read()
+            && guard.contains_key(&pdf_path)
+        {
+            return; // Already generating or cached
         }
 
         // Mark as in-progress immediately to prevent duplicate work

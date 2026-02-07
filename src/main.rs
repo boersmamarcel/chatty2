@@ -271,6 +271,7 @@ fn main() {
                         // Apply theme from loaded settings
                         apply_theme_from_settings(cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to apply theme from loaded settings"))
                     .ok();
                 }
                 Err(e) => {
@@ -367,6 +368,7 @@ fn main() {
                         info!("Providers loaded");
                         check_fn_1(cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global providers after load"))
                     .ok();
                 }
                 Err(e) => {
@@ -434,6 +436,7 @@ fn main() {
                         cx.spawn(async move |cx: &mut AsyncApp| {
                             settings::providers::sync_ollama_models(&ollama_base_url, cx)
                                 .await
+                                .map_err(|e| warn!(error = ?e, "Failed to sync Ollama models"))
                                 .ok();
                         })
                         .detach();
@@ -443,6 +446,7 @@ fn main() {
 
                         check_fn_2(cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to update models after load"))
                     .ok();
                 }
                 Err(e) => {
