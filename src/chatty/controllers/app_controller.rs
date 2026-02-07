@@ -793,6 +793,24 @@ impl ChattyApp {
         .detach();
     }
 
+    /// Send a message to the LLM and stream the response
+    ///
+    /// This is the main message-handling function with the following phases:
+    /// 1. Ensure conversation exists (create if needed)
+    /// 2. Update UI with user message
+    /// 3. Filter attachments based on provider capabilities
+    /// 4. Stream LLM response and update UI incrementally
+    /// 5. Finalize response and save to conversation
+    /// 6. Generate title for first exchange
+    /// 7. Update token usage and persist to disk
+    ///
+    /// # Note
+    /// This function is complex (400+ lines) and could benefit from extraction
+    /// of helper functions in future refactoring. The main complexity comes from:
+    /// - Async/await with GPUI entity updates
+    /// - Stream processing with multiple chunk types
+    /// - UI synchronization during streaming
+    /// - Title generation and token usage tracking
     fn send_message(&mut self, message: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
         debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
@@ -812,7 +830,7 @@ impl ChattyApp {
         cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
                 debug!("Async task started");
 
-                // Get active conversation ID, or create a new one if it doesn't exist
+                // PHASE 1: Ensure conversation exists (create if needed)
                 let conv_id: String = match cx
                     .update_global::<ConversationsStore, _>(|store, _| store.active_id().cloned())
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -838,7 +856,7 @@ impl ChattyApp {
                     }
                 };
 
-                // Now we have a conversation ID for sure, set it on the chat view
+                // PHASE 2: Initialize UI with user and assistant messages
                 // and add the user/assistant messages AFTER conversation exists
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone());
@@ -871,7 +889,7 @@ impl ChattyApp {
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
-                // Create stream asynchronously (outside update_global to avoid blocking)
+                // PHASE 3: Prepare message contents with attachment filtering
                 debug!("Calling stream_prompt()");
                 let mut contents = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
@@ -915,7 +933,7 @@ impl ChattyApp {
                 let mut chunk_count = 0;
                 let mut token_usage: Option<(u32, u32)> = None;
 
-                // Process stream
+                // PHASE 4: Process LLM response stream
                 debug!("Entering stream processing loop");
                 while let Some(chunk_result) = stream.next().await {
                     chunk_count += 1;
@@ -994,7 +1012,7 @@ impl ChattyApp {
                     }
                 }
 
-                // Stream loop finished - now perform all finalization
+                // PHASE 5: Finalize response in conversation and UI
                 debug!("Stream loop finished, starting finalization");
 
                 // Extract trace before finalizing
@@ -1040,7 +1058,7 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                // Generate title if this was the first exchange
+                // PHASE 6: Generate title for first conversation exchange
                 if should_generate_title {
                     // Extract agent and history synchronously
                     let title_data = cx
@@ -1093,7 +1111,7 @@ impl ChattyApp {
                     }
                 }
 
-                // Update token usage if available
+                // PHASE 7: Update token usage and save conversation
                 if let Some((input_tokens, output_tokens)) = token_usage {
                     debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Processing token usage");
 
