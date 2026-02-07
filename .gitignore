@@ -8,3 +8,22 @@
 # AppImage build artifacts
 /squashfs-root
 appimagetool-*.AppImage
+
+# Build output and artifacts
+*.dmg
+*.app
+*.tar.gz
+chatty.app/
+chatty-*.dmg
+
+# Backup and temporary files
+*.backup
+*.bak
+*~
+
+# Documentation artifacts (should be in docs/ if needed)
+REFACTORING_SUMMARY.md
+TEST_SUMMARY.md
+
+# Inspiration/reference code (should be external)
+/inspiration/
