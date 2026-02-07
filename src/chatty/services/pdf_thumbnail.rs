@@ -53,31 +53,31 @@ fn pdfium_lib_path() -> Option<PathBuf> {
 /// Get or create the session temp directory for PDF thumbnails
 pub(crate) fn get_thumbnail_dir() -> Result<PathBuf, PdfThumbnailError> {
     let mut dir = THUMBNAIL_DIR.lock().unwrap();
-    
+
     if let Some(ref path) = *dir {
         return Ok(path.clone());
     }
-    
+
     // Create a unique session directory
     let session_id = std::process::id();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     let mut temp_dir = std::env::temp_dir();
     temp_dir.push(format!("chatty_thumbnails_{}_{}", session_id, timestamp));
-    
+
     std::fs::create_dir_all(&temp_dir)?;
     *dir = Some(temp_dir.clone());
-    
+
     Ok(temp_dir)
 }
 
 /// Clean up the session temp directory and all thumbnails
 pub fn cleanup_thumbnails() {
     let mut dir = THUMBNAIL_DIR.lock().unwrap();
-    
+
     if let Some(ref path) = *dir {
         if path.exists() {
             match std::fs::remove_dir_all(path) {
@@ -116,10 +116,10 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
 
     // Use session temp directory
     let thumbnail_dir = get_thumbnail_dir()?;
-    
+
     // Use a unique filename per PDF path to support concurrent thumbnails
     let hash = {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(pdf_path.to_string_lossy().as_bytes());
         format!("{:x}", hasher.finalize())
@@ -131,10 +131,9 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
     Ok(temp_path)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_thumbnails, get_thumbnail_dir, render_pdf_thumbnail, PdfThumbnailError};
+    use super::{PdfThumbnailError, cleanup_thumbnails, get_thumbnail_dir, render_pdf_thumbnail};
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -222,10 +221,7 @@ startxref
         let _ = fs::remove_file(&pdf_path);
 
         // Assertions
-        assert!(
-            result.is_ok(),
-            "Expected valid PDF to render successfully"
-        );
+        assert!(result.is_ok(), "Expected valid PDF to render successfully");
 
         let thumbnail_path = result.unwrap();
         assert!(
@@ -341,8 +337,14 @@ startxref
         let thumbnail_path = thumbnail_result.unwrap();
         let session_dir = thumbnail_path.parent().unwrap().to_path_buf();
 
-        assert!(thumbnail_path.exists(), "Thumbnail should exist before cleanup");
-        assert!(session_dir.exists(), "Session dir should exist before cleanup");
+        assert!(
+            thumbnail_path.exists(),
+            "Thumbnail should exist before cleanup"
+        );
+        assert!(
+            session_dir.exists(),
+            "Session dir should exist before cleanup"
+        );
 
         // Cleanup
         cleanup_thumbnails();
@@ -412,4 +414,3 @@ startxref
         cleanup_thumbnails();
     }
 }
-

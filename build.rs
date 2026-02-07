@@ -26,22 +26,37 @@ fn setup_pdfium() {
     let (lib_name, download_url) = match (target_os.as_str(), target_arch.as_str()) {
         ("macos", "aarch64") => (
             "libpdfium.dylib",
-            format!("https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-mac-arm64.tgz", PDFIUM_VERSION),
+            format!(
+                "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-mac-arm64.tgz",
+                PDFIUM_VERSION
+            ),
         ),
         ("macos", "x86_64") => (
             "libpdfium.dylib",
-            format!("https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-mac-x64.tgz", PDFIUM_VERSION),
+            format!(
+                "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-mac-x64.tgz",
+                PDFIUM_VERSION
+            ),
         ),
         ("linux", "x86_64") => (
             "libpdfium.so",
-            format!("https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-linux-x64.tgz", PDFIUM_VERSION),
+            format!(
+                "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-linux-x64.tgz",
+                PDFIUM_VERSION
+            ),
         ),
         ("windows", "x86_64") => (
             "pdfium.dll",
-            format!("https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-win-x64.tgz", PDFIUM_VERSION),
+            format!(
+                "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-win-x64.tgz",
+                PDFIUM_VERSION
+            ),
         ),
         _ => {
-            println!("cargo:warning=Unsupported platform for pdfium: {}-{}", target_os, target_arch);
+            println!(
+                "cargo:warning=Unsupported platform for pdfium: {}-{}",
+                target_os, target_arch
+            );
             return;
         }
     };
@@ -49,7 +64,10 @@ fn setup_pdfium() {
     let lib_path = libs_dir.join(lib_name);
 
     if !lib_path.exists() {
-        println!("cargo:warning=Downloading pdfium library for {}-{}...", target_os, target_arch);
+        println!(
+            "cargo:warning=Downloading pdfium library for {}-{}...",
+            target_os, target_arch
+        );
         if let Err(e) = download_and_extract(&download_url, &libs_dir) {
             println!("cargo:warning=Failed to download pdfium: {}", e);
             println!("cargo:warning=PDF thumbnail generation will not be available");
@@ -63,7 +81,10 @@ fn setup_pdfium() {
     println!("cargo:rerun-if-changed=libs/lib");
 }
 
-fn download_and_extract(url: &str, dest_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn download_and_extract(
+    url: &str,
+    dest_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let response = reqwest::blocking::get(url)?;
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()).into());

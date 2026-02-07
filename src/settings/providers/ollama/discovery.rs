@@ -90,21 +90,19 @@ async fn check_model_vision(client: &reqwest::Client, base_url: &str, model_name
         .await;
 
     match response {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<OllamaShowResponse>().await {
-                Ok(show) => {
-                    let has_vision = show.capabilities.iter().any(|c| c == "vision");
-                    if has_vision {
-                        debug!(model = %model_name, "Ollama model supports vision");
-                    }
-                    has_vision
+        Ok(resp) if resp.status().is_success() => match resp.json::<OllamaShowResponse>().await {
+            Ok(show) => {
+                let has_vision = show.capabilities.iter().any(|c| c == "vision");
+                if has_vision {
+                    debug!(model = %model_name, "Ollama model supports vision");
                 }
-                Err(e) => {
-                    warn!(model = %model_name, error = ?e, "Failed to parse /api/show response");
-                    false
-                }
+                has_vision
             }
-        }
+            Err(e) => {
+                warn!(model = %model_name, error = ?e, "Failed to parse /api/show response");
+                false
+            }
+        },
         Ok(resp) => {
             warn!(model = %model_name, status = %resp.status(), "Ollama /api/show returned error");
             false

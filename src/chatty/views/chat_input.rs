@@ -8,12 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
+use super::attachment_validation::{PDF_EXTENSION, is_image_extension, validate_attachment};
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
-use super::attachment_validation::{validate_attachment, is_image_extension, PDF_EXTENSION};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-
-
 
 /// Callback type for sending messages (with attachments)
 pub type SendMessageCallback =
@@ -154,7 +152,9 @@ impl ChatInputState {
 
         // Mark as in-progress immediately to prevent duplicate work
         if let Ok(mut cache_write) = cache.try_write() {
-            cache_write.entry(pdf_path.clone()).or_insert_with(|| Err("Generating...".to_string()));
+            cache_write
+                .entry(pdf_path.clone())
+                .or_insert_with(|| Err("Generating...".to_string()));
         }
 
         // Spawn background task on the tokio runtime
@@ -164,7 +164,8 @@ impl ChatInputState {
             let result = tokio::task::spawn_blocking(move || {
                 render_pdf_thumbnail(&pdf_path)
                     .map_err(|e| format!("Failed to generate thumbnail: {}", e))
-            }).await;
+            })
+            .await;
 
             let thumbnail_result = match result {
                 Ok(res) => res,
@@ -175,7 +176,7 @@ impl ChatInputState {
             if let Ok(mut cache_write) = cache_for_task.try_write() {
                 cache_write.insert(pdf_path_for_result, thumbnail_result);
             }
-            
+
             // Note: UI will be updated on next render when attachments are displayed
         });
     }
@@ -267,9 +268,10 @@ fn render_file_chip(
         // For PDFs, check cache (generation started in add_attachments)
         // Use blocking read since we're not in a window context
         // Check the thumbnail cache (non-blocking)
-        thumbnail_cache.try_read().ok().and_then(|guard| {
-            guard.get(path).and_then(|r| r.as_ref().ok()).cloned()
-        })
+        thumbnail_cache
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.get(path).and_then(|r| r.as_ref().ok()).cloned())
     } else {
         None
     };
@@ -356,7 +358,7 @@ impl RenderOnce for ChatInput {
         let supports_pdf = self.state.read(cx).supports_pdf;
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
-        
+
         // Read thumbnail cache (for PDF previews)
         let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
 
@@ -464,22 +466,18 @@ impl RenderOnce for ChatInput {
                                                 cx.spawn(async move |cx| {
                                                     let receiver = cx
                                                         .update(|cx| {
-                                                            cx.prompt_for_paths(
-                                                                PathPromptOptions {
-                                                                    files: true,
-                                                                    directories: false,
-                                                                    multiple: true,
-                                                                    prompt: Some(
-                                                                        "Select Images".into(),
-                                                                    ),
-                                                                },
-                                                            )
+                                                            cx.prompt_for_paths(PathPromptOptions {
+                                                                files: true,
+                                                                directories: false,
+                                                                multiple: true,
+                                                                prompt: Some(
+                                                                    "Select Images".into(),
+                                                                ),
+                                                            })
                                                         })
                                                         .ok()?;
 
-                                                    if let Ok(Some(paths)) =
-                                                        receiver.await.ok()?
-                                                    {
+                                                    if let Ok(Some(paths)) = receiver.await.ok()? {
                                                         state
                                                             .update(cx, |state, cx| {
                                                                 state.add_attachments(paths, cx);
@@ -510,22 +508,18 @@ impl RenderOnce for ChatInput {
                                                 cx.spawn(async move |cx| {
                                                     let receiver = cx
                                                         .update(|cx| {
-                                                            cx.prompt_for_paths(
-                                                                PathPromptOptions {
-                                                                    files: true,
-                                                                    directories: false,
-                                                                    multiple: true,
-                                                                    prompt: Some(
-                                                                        "Select PDF Files".into(),
-                                                                    ),
-                                                                },
-                                                            )
+                                                            cx.prompt_for_paths(PathPromptOptions {
+                                                                files: true,
+                                                                directories: false,
+                                                                multiple: true,
+                                                                prompt: Some(
+                                                                    "Select PDF Files".into(),
+                                                                ),
+                                                            })
                                                         })
                                                         .ok()?;
 
-                                                    if let Ok(Some(paths)) =
-                                                        receiver.await.ok()?
-                                                    {
+                                                    if let Ok(Some(paths)) = receiver.await.ok()? {
                                                         state
                                                             .update(cx, |state, cx| {
                                                                 state.add_attachments(paths, cx);
@@ -599,33 +593,11 @@ impl RenderOnce for ChatInput {
                                 .p_2()
                                 .mt_2()
                                 .rounded_lg()
-                                .children(
-                                    attachments
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(index, path)| {
-                                            render_file_chip(path, index, &self.state, &thumbnail_cache)
-                                        }),
-                                ),
+                                .children(attachments.iter().enumerate().map(|(index, path)| {
+                                    render_file_chip(path, index, &self.state, &thumbnail_cache)
+                                })),
                         )
                     }),
             )
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

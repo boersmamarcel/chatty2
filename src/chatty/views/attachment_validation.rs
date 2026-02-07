@@ -1,5 +1,5 @@
 //! Attachment validation logic
-//! 
+//!
 //! This module provides validation functions for file attachments,
 //! checking file size, extension, and existence.
 
