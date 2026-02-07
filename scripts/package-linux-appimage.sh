@@ -26,25 +26,30 @@ if [ ! -f "${RELEASE_DIR}/${APP_NAME}" ]; then
     exit 1
 fi
 
+# Clean up any existing AppDir and build artifacts
+rm -rf "${APPDIR}"
+rm -rf squashfs-root
+rm -f "${APPIMAGE_NAME}"
+
 # Check for appimagetool
 if ! command -v appimagetool &> /dev/null; then
     echo "appimagetool not found. Downloading..."
     APPIMAGETOOL_APPIMAGE="appimagetool-${ARCH}.AppImage"
     if [ ! -f "${APPIMAGETOOL_APPIMAGE}" ]; then
-        wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL_APPIMAGE}"
+        wget "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL_APPIMAGE}"
         chmod +x "${APPIMAGETOOL_APPIMAGE}"
     fi
     # Extract the AppImage to avoid FUSE requirement in CI environments
+    echo "Extracting appimagetool..."
     ./${APPIMAGETOOL_APPIMAGE} --appimage-extract > /dev/null 2>&1
+    if [ ! -f "./squashfs-root/AppRun" ]; then
+        echo "Error: Failed to extract appimagetool"
+        exit 1
+    fi
     APPIMAGETOOL="./squashfs-root/AppRun"
 else
     APPIMAGETOOL="appimagetool"
 fi
-
-# Clean up any existing AppDir
-rm -rf "${APPDIR}"
-rm -rf squashfs-root
-rm -f "${APPIMAGE_NAME}"
 
 # Create AppDir structure
 mkdir -p "${APPDIR}/usr/bin"
