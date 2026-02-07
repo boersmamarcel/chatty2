@@ -9,10 +9,9 @@ use std::sync::Arc;
 use tracing::{debug, error, warn};
 
 use crate::chatty::services::render_pdf_thumbnail;
+use super::attachment_validation::{validate_attachment, is_image_extension, PDF_EXTENSION};
 
-const MAX_FILE_SIZE: u64 = 5_242_880; // 5MB
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
-const PDF_EXTENSION: &str = "pdf";
+
 
 /// Callback type for sending messages (with attachments)
 pub type SendMessageCallback =
@@ -103,25 +102,13 @@ impl ChatInputState {
                 continue;
             }
 
-            if let Ok(metadata) = std::fs::metadata(&path) {
-                if metadata.len() > MAX_FILE_SIZE {
-                    warn!(?path, size = metadata.len(), "File too large (max 5MB)");
-                    continue;
-                }
-            } else {
-                warn!(?path, "Could not read file metadata");
-                continue;
-            }
-
-            if let Some(ext) = path.extension() {
-                let ext_str = ext.to_string_lossy().to_lowercase();
-                if IMAGE_EXTENSIONS.contains(&ext_str.as_ref()) || ext_str == PDF_EXTENSION {
+            match validate_attachment(&path) {
+                Ok(()) => {
                     self.attachments.push(path);
-                } else {
-                    warn!(?path, "Unsupported file type");
                 }
-            } else {
-                warn!(?path, "File has no extension");
+                Err(err) => {
+                    warn!(?path, ?err, "File validation failed");
+                }
             }
         }
     }
@@ -204,7 +191,7 @@ impl ChatInputState {
 
 fn is_image(path: &Path) -> bool {
     path.extension()
-        .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_ref()))
+        .map(|ext| is_image_extension(&ext.to_string_lossy()))
         .unwrap_or(false)
 }
 
