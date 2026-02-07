@@ -3,7 +3,12 @@ use gpui::{App, AsyncApp};
 use tracing::error;
 
 /// Create a new model
-pub fn create_model(config: ModelConfig, cx: &mut App) {
+pub fn create_model(mut config: ModelConfig, cx: &mut App) {
+    // Auto-set capabilities based on provider type
+    let (supports_images, supports_pdf) = config.provider_type.default_capabilities();
+    config.supports_images = supports_images;
+    config.supports_pdf = supports_pdf;
+
     // 1. Apply update immediately (optimistic update)
     let model = cx.global_mut::<ModelsModel>();
     model.add_model(config);

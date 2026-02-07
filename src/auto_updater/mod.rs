@@ -280,7 +280,7 @@ impl AutoUpdater {
                         }
                     }
                 })
-                .ok();
+                .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
             }
         })
         .detach();
@@ -316,7 +316,7 @@ impl AutoUpdater {
                                     ));
                                 });
                             })
-                            .ok();
+                            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                             return;
                         }
                     };
@@ -331,7 +331,7 @@ impl AutoUpdater {
                                 updater.status = AutoUpdateStatus::Idle;
                             });
                         })
-                        .ok();
+                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                     }
                 }
                 Ok(None) => {
@@ -341,7 +341,7 @@ impl AutoUpdater {
                             updater.status = AutoUpdateStatus::Idle;
                         });
                     })
-                    .ok();
+                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                 }
                 Err(e) => {
                     error!(error = ?e, "Failed to check for updates");
@@ -350,7 +350,7 @@ impl AutoUpdater {
                             updater.status = AutoUpdateStatus::Error(format!("Update check failed: {}", e));
                         });
                     })
-                    .ok();
+                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                 }
             }
         })
@@ -379,7 +379,7 @@ impl AutoUpdater {
                             updater.status = AutoUpdateStatus::Idle;
                         });
                     })
-                    .ok();
+                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
 
                     // On macOS and Linux, restart immediately
                     #[cfg(not(target_os = "windows"))]
@@ -391,7 +391,7 @@ impl AutoUpdater {
                         cx.update(|cx| {
                             cx.quit();
                         })
-                        .ok();
+                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                     }
                 }
                 Err(e) => {
@@ -402,7 +402,7 @@ impl AutoUpdater {
                                 AutoUpdateStatus::Error(format!("Installation failed: {}", e));
                         });
                     })
-                    .ok();
+                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                 }
             }
         })
@@ -499,8 +499,8 @@ fn find_matching_asset(assets: &[GitHubAsset], os: &str, arch: &str) -> Option<G
     let expected_name = match (os, arch) {
         ("macos", "aarch64") => "chatty-macos-aarch64.dmg",
         ("macos", "x86_64") => "chatty-macos-x86_64.dmg",
-        ("linux", "x86_64") => "chatty-linux-x86_64.tar.gz",
-        ("linux", "aarch64") => "chatty-linux-aarch64.tar.gz",
+        ("linux", "x86_64") => "chatty-linux-x86_64.AppImage",
+        ("linux", "aarch64") => "chatty-linux-aarch64.AppImage",
         ("windows", "x86_64") => "chatty-windows-x86_64.exe",
         _ => {
             warn!(os = os, arch = arch, "Unsupported platform");
@@ -522,7 +522,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
             updater.status = AutoUpdateStatus::Downloading(0.0);
         });
     })
-    .ok();
+    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
 
     info!(
         url = &asset.download_url,
@@ -541,7 +541,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                         AutoUpdateStatus::Error(format!("Failed to create temp dir: {}", e));
                 });
             })
-            .ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
             return;
         }
     };
@@ -581,7 +581,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                                 );
                             });
                         })
-                        .ok();
+                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                         return;
                     }
                     Err(e) => {
@@ -597,7 +597,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                                 ));
                             });
                         })
-                        .ok();
+                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                         return;
                     }
                 }
@@ -618,7 +618,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                         );
                     });
                 })
-                .ok();
+                .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
                 return;
             }
 
@@ -630,7 +630,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                     updater.status = AutoUpdateStatus::Ready(asset.version.clone(), final_path);
                 });
             })
-            .ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
         }
         Err(e) => {
             error!(error = ?e, "Download failed");
@@ -639,7 +639,7 @@ async fn download_update(asset: ReleaseAsset, cx: &mut AsyncApp) {
                     updater.status = AutoUpdateStatus::Error(format!("Download failed: {}", e));
                 });
             })
-            .ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
         }
     }
 }
@@ -675,7 +675,7 @@ async fn download_file(
                     updater.status = AutoUpdateStatus::Downloading(progress);
                 });
             })
-            .ok();
+            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI")).ok();
         }
     }
 
@@ -693,6 +693,18 @@ fn restart_application() {
         Err(e) => {
             error!(error = ?e, "Failed to get current executable path");
             return;
+        }
+    };
+
+    // On Linux, when the executable is replaced while running, the path may have
+    // " (deleted)" appended. Strip this suffix to get the actual path.
+    #[cfg(target_os = "linux")]
+    let current_exe = {
+        let path_str = current_exe.to_string_lossy();
+        if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
+            std::path::PathBuf::from(stripped)
+        } else {
+            current_exe
         }
     };
 
@@ -734,7 +746,7 @@ mod tests {
                 browser_download_url: "https://example.com/macos-arm".to_string(),
             },
             GitHubAsset {
-                name: "chatty-linux-x86_64.tar.gz".to_string(),
+                name: "chatty-linux-x86_64.AppImage".to_string(),
                 browser_download_url: "https://example.com/linux-x64".to_string(),
             },
         ];
@@ -745,7 +757,7 @@ mod tests {
 
         let result = find_matching_asset(&assets, "linux", "x86_64");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().name, "chatty-linux-x86_64.tar.gz");
+        assert_eq!(result.unwrap().name, "chatty-linux-x86_64.AppImage");
 
         let result = find_matching_asset(&assets, "windows", "x86_64");
         assert!(result.is_none());

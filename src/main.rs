@@ -204,6 +204,7 @@ fn register_actions(cx: &mut App) {
     });
     cx.on_action(|_: &Quit, cx: &mut App| {
         debug!("Quit action triggered");
+        chatty::services::cleanup_thumbnails();
         cx.quit();
     });
     cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
@@ -270,6 +271,7 @@ fn main() {
                         // Apply theme from loaded settings
                         apply_theme_from_settings(cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to apply theme from loaded settings"))
                     .ok();
                 }
                 Err(e) => {
@@ -286,6 +288,12 @@ fn main() {
 
         // Initialize models model with empty state - will be populated async
         cx.set_global(settings::models::ModelsModel::new());
+
+        // Initialize models notifier entity for event subscriptions
+        let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
+        cx.set_global(settings::models::GlobalModelsNotifier {
+            entity: Some(models_notifier.downgrade()),
+        });
 
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
@@ -360,6 +368,7 @@ fn main() {
                         info!("Providers loaded");
                         check_fn_1(cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global providers after load"))
                     .ok();
                 }
                 Err(e) => {
@@ -378,10 +387,33 @@ fn main() {
                 Ok(models) => {
                     cx.update(|cx| {
                         cx.update_global::<settings::models::ModelsModel, _>(|model, _cx| {
+                            // Apply default capabilities for models that don't have them set
+                            let models: Vec<_> = models
+                                .into_iter()
+                                .map(|mut m| {
+                                    if !m.supports_images && !m.supports_pdf {
+                                        let (img, pdf) = m.provider_type.default_capabilities();
+                                        m.supports_images = img;
+                                        m.supports_pdf = pdf;
+                                    }
+                                    m
+                                })
+                                .collect();
                             model.replace_all(models);
                         });
 
                         models_loaded_clone.store(true, Ordering::SeqCst);
+
+                        // Emit ModelsReady event for subscribers
+                        if let Some(weak_notifier) = cx
+                            .try_global::<settings::models::GlobalModelsNotifier>()
+                            .and_then(|g| g.entity.clone())
+                            && let Some(notifier) = weak_notifier.upgrade()
+                        {
+                            notifier.update(cx, |_notifier, cx| {
+                                cx.emit(settings::models::ModelsNotifierEvent::ModelsReady);
+                            });
+                        }
                         info!("Models loaded");
 
                         // Always attempt to auto-discover Ollama models on startup
@@ -404,6 +436,7 @@ fn main() {
                         cx.spawn(async move |cx: &mut AsyncApp| {
                             settings::providers::sync_ollama_models(&ollama_base_url, cx)
                                 .await
+                                .map_err(|e| warn!(error = ?e, "Failed to sync Ollama models"))
                                 .ok();
                         })
                         .detach();
@@ -413,6 +446,7 @@ fn main() {
 
                         check_fn_2(cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to update models after load"))
                     .ok();
                 }
                 Err(e) => {
@@ -436,3 +470,4 @@ fn main() {
         .expect("Failed to open main window");
     });
 }
+

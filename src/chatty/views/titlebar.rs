@@ -2,7 +2,7 @@ use super::SidebarView;
 use gpui::*;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use gpui_component::{Icon, IconName, Sizable, TitleBar, button::Button};
+use gpui_component::{Icon, IconName, Sizable, TitleBar, button::Button, h_flex};
 
 /// Custom titlebar component for Linux and Windows.
 /// On macOS, this renders nothing (uses native traffic lights).

@@ -26,11 +26,26 @@ pub struct ModelConfig {
     /// Cost per million output tokens in USD (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_million_output_tokens: Option<f64>,
+    /// Whether this model supports image inputs
+    #[serde(default)]
+    pub supports_images: bool,
+    /// Whether this model supports PDF document inputs
+    #[serde(default)]
+    pub supports_pdf: bool,
+    /// Whether this model supports the temperature parameter
+    /// Some models (like OpenAI reasoning models) don't support temperature
+    #[serde(default = "default_supports_temperature")]
+    pub supports_temperature: bool,
 }
 
 fn default_temperature() -> f32 {
     1.0
 }
+
+fn default_supports_temperature() -> bool {
+    true // Most models support temperature
+}
+
 
 impl ModelConfig {
     pub fn new(
@@ -51,6 +66,9 @@ impl ModelConfig {
             extra_params: HashMap::new(),
             cost_per_million_input_tokens: None,
             cost_per_million_output_tokens: None,
+            supports_images: false,
+            supports_pdf: false,
+            supports_temperature: true,
         }
     }
 }

@@ -1,4 +1,5 @@
 use gpui::*;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
@@ -45,7 +46,7 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
-        let app = Self {
+        let mut app = Self {
             chat_view,
             sidebar_view,
             conversation_repo,
@@ -70,24 +71,62 @@ impl ChattyApp {
         // Initialize chat input with available models
         app.initialize_models(cx);
 
-        // Auto-create first conversation if none exist
-        let has_convs = cx
-            .try_global::<ConversationsStore>()
-            .map(|store| store.count() > 0)
+        // Subscribe to models ready event to create first conversation if needed
+        if let Some(weak_notifier) = cx
+            .try_global::<crate::settings::models::GlobalModelsNotifier>()
+            .and_then(|g| g.entity.clone())
+            && let Some(notifier) = weak_notifier.upgrade()
+        {
+                cx.subscribe(
+                    &notifier,
+                    |app, _notifier, event: &crate::settings::models::ModelsNotifierEvent, cx| {
+                        if matches!(event, crate::settings::models::ModelsNotifierEvent::ModelsReady) {
+                            // Check if we need to create initial conversation
+                            let has_convs = cx
+                                .try_global::<ConversationsStore>()
+                                .map(|store| store.count() > 0)
+                                .unwrap_or(false);
+
+                            if !has_convs {
+                                info!("Models ready and no conversations exist, creating initial one");
+                                let app_entity = cx.entity();
+                                cx.spawn(async move |_, cx| {
+                                    let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
+                                        app_entity.update(cx, |app, cx| app.create_new_conversation(cx));
+                                    if let Ok(task) = task_result {
+                                        let _ = task.await;
+                                    }
+                                    let _: Result<(), _> = app_entity.update(cx, |app, cx| {
+                                        app.is_ready = true;
+                                        info!("App is now ready (initial conversation created)");
+                                        cx.notify();
+                                    });
+                                    Ok::<_, anyhow::Error>(())
+                                })
+                                .detach();
+                            } else {
+                                app.is_ready = true;
+                            }
+                        }
+                    },
+                )
+                .detach();
+        }
+
+        // If models are already loaded, check now
+        let has_models = cx
+            .try_global::<ModelsModel>()
+            .map(|m| !m.models().is_empty())
             .unwrap_or(false);
 
-        if !has_convs {
-            info!("No conversations, creating initial one");
-
-            // Check if models are available
-            let has_models = cx
-                .try_global::<ModelsModel>()
-                .map(|m| !m.models().is_empty())
+        if has_models {
+            let has_convs = cx
+                .try_global::<ConversationsStore>()
+                .map(|store| store.count() > 0)
                 .unwrap_or(false);
 
-            if has_models {
-                // Models already loaded, create immediately and wait for completion
-                info!("Models available, creating now");
+            if !has_convs {
+                info!("Models available at startup, creating initial conversation");
                 let app_entity = cx.entity();
                 cx.spawn(async move |_, cx| {
                     let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
@@ -104,39 +143,7 @@ impl ChattyApp {
                 })
                 .detach();
             } else {
-                // Models not loaded yet, defer until after first render
-                info!("Models not ready, will defer creation");
-                let app_entity = cx.entity();
-                cx.defer(move |cx| {
-                    app_entity.update(cx, |_app, cx| {
-                        let has_models = cx
-                            .try_global::<ModelsModel>()
-                            .map(|m| !m.models().is_empty())
-                            .unwrap_or(false);
-
-                        if has_models {
-                            info!("Models now available, creating conversation");
-                            let app_entity_inner = cx.entity();
-                            cx.spawn(async move |_, cx| {
-                                let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
-                                    app_entity_inner
-                                        .update(cx, |app, cx| app.create_new_conversation(cx));
-                                if let Ok(task) = task_result {
-                                    let _ = task.await;
-                                }
-                                let _: Result<(), _> = app_entity_inner.update(cx, |app, cx| {
-                                    app.is_ready = true;
-                                    info!("App is now ready (deferred conversation created)");
-                                    cx.notify();
-                                });
-                                Ok::<_, anyhow::Error>(())
-                            })
-                            .detach();
-                        } else {
-                            warn!("Models still not available");
-                        }
-                    });
-                });
+                app.is_ready = true;
             }
         }
 
@@ -218,15 +225,15 @@ impl ChattyApp {
             let app_for_send = app_entity.clone();
             input_state.update(cx, |state, _cx| {
                 debug!("Setting up on_send callback for chat input");
-                state.set_on_send(move |message, cx| {
-                    debug!(message = %message, "on_send callback triggered");
+                state.set_on_send(move |message, attachments, cx| {
+                    debug!(message = %message, attachment_count = attachments.len(), "on_send callback triggered");
                     let app = app_for_send.clone();
                     let msg = message.clone();
+                    let att = attachments.clone();
 
-                    // Update directly without defer
                     debug!("Calling send_message directly via entity");
                     app.update(cx, |app, cx| {
-                        app.send_message(msg, cx);
+                        app.send_message(msg, att, cx);
                     });
                 });
             });
@@ -241,10 +248,27 @@ impl ChattyApp {
                 state.set_on_model_change(move |model_id, cx| {
                     debug!(model_id = %model_id, "on_model_change callback triggered");
                     let app = app_for_model.clone();
-                    let model_id = model_id.clone();
+                    let mid = model_id.clone();
 
                     app.update(cx, |app, cx| {
-                        app.change_conversation_model(model_id, cx);
+                        // Defer capability update to avoid re-entering ChatInputState
+                        let chat_view = app.chat_view.clone();
+                        let mid_for_defer = mid.clone();
+                        cx.defer(move |cx| {
+                            let capabilities = cx
+                                .global::<ModelsModel>()
+                                .get_model(&mid_for_defer)
+                                .map(|m| (m.supports_images, m.supports_pdf))
+                                .unwrap_or((false, false));
+
+                            chat_view.update(cx, |view, cx| {
+                                view.chat_input_state().update(cx, |state, _cx| {
+                                    state.set_capabilities(capabilities.0, capabilities.1);
+                                });
+                            });
+                        });
+
+                        app.change_conversation_model(mid, cx);
                     });
                 });
             });
@@ -265,10 +289,18 @@ impl ChattyApp {
 
             let default_model_id = models_list.first().map(|(id, _)| id.clone());
 
+            // Get capabilities of the default model
+            let default_capabilities = models_model
+                .models()
+                .first()
+                .map(|m| (m.supports_images, m.supports_pdf))
+                .unwrap_or((false, false));
+
             // Set available models on chat input
             chat_view.update(cx, |view, cx| {
                 view.chat_input_state().update(cx, |state, _cx| {
                     state.set_available_models(models_list, default_model_id);
+                    state.set_capabilities(default_capabilities.0, default_capabilities.1);
                 });
             });
         }
@@ -342,6 +374,7 @@ impl ChattyApp {
                                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                             store.add_conversation(conversation);
                                         })
+                                        .map_err(|e| warn!(error = ?e, "Failed to add restored conversation to store"))
                                         .ok();
 
                                         restored_count += 1;
@@ -363,7 +396,8 @@ impl ChattyApp {
                                 debug!(active_before = ?store.active_id(), "Clearing active conversation after load");
                                 store.clear_active();
                                 debug!("Active conversation cleared");
-                            }).ok();
+                            }).map_err(|e| warn!(error = ?e, "Failed to clear active conversation"))
+                            .ok();
 
                             // Update sidebar with all conversations
                             sidebar
@@ -381,6 +415,7 @@ impl ChattyApp {
                                     // This ensures the first message creates a NEW conversation
                                     sidebar.set_active_conversation(None, cx);
                                 })
+                                .map_err(|e| warn!(error = ?e, "Failed to update sidebar after load"))
                                 .ok();
 
                             // Don't set any conversation as active in the store or chat view
@@ -391,6 +426,7 @@ impl ChattyApp {
                                     view.clear_messages(cx);
                                     cx.notify();
                                 })
+                                .map_err(|e| warn!(error = ?e, "Failed to clear chat view on startup"))
                                 .ok();
 
                             // Mark app as ready
@@ -423,11 +459,24 @@ impl ChattyApp {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<String>> {
         info!("Creating new conversation");
-        // Get first available model
+        // Use the selected model from chat input, falling back to first available
+        let selected_model_id = self
+            .chat_view
+            .read(cx)
+            .chat_input_state()
+            .read(cx)
+            .selected_model_id()
+            .cloned();
+
         let models = cx.global::<ModelsModel>();
         let providers = cx.global::<ProviderModel>();
 
-        if let Some(model_config) = models.models().first() {
+        let model_config = selected_model_id
+            .as_ref()
+            .and_then(|id| models.get_model(id).cloned())
+            .or_else(|| models.models().first().cloned());
+
+        if let Some(model_config) = model_config {
             // Find the provider for this model
             if let Some(provider_config) = providers
                 .providers()
@@ -497,6 +546,7 @@ impl ChattyApp {
 
                         view.chat_input_state().update(cx, |state, _cx| {
                             state.set_available_models(models_list, Some(model_config.id.clone()));
+                            state.set_capabilities(model_config.supports_images, model_config.supports_pdf);
                         });
                     })?;
 
@@ -513,6 +563,7 @@ impl ChattyApp {
                         message_history: "[]".to_string(),
                         system_traces: "[]".to_string(),
                         token_usage: "{}".to_string(),
+                        attachment_paths: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -560,18 +611,26 @@ impl ChattyApp {
                     (
                         conv.history().to_vec(),
                         conv.system_traces().to_vec(),
+                        conv.attachment_paths().to_vec(),
                         conv.model_id().to_string(),
                     )
                 });
 
-        if let Some((history, traces, model_id)) = conversation_data {
+        if let Some((history, traces, attachment_paths, model_id)) = conversation_data {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone());
-                view.load_history(&history, &traces, cx);
+                view.load_history(&history, &traces, &attachment_paths, cx);
 
-                // Update the selected model in the chat input
+                // Update the selected model and capabilities in the chat input
+                let model_capabilities = cx
+                    .global::<ModelsModel>()
+                    .get_model(&model_id)
+                    .map(|m| (m.supports_images, m.supports_pdf))
+                    .unwrap_or((false, false));
+
                 view.chat_input_state().update(cx, |state, _cx| {
                     state.set_selected_model_id(model_id);
+                    state.set_capabilities(model_capabilities.0, model_capabilities.1);
                 });
             });
         }
@@ -645,6 +704,9 @@ impl ChattyApp {
                                         token_usage: conv
                                             .serialize_token_usage()
                                             .unwrap_or_else(|_| "{}".to_string()),
+                                        attachment_paths: conv
+                                            .serialize_attachment_paths()
+                                            .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
                                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -729,14 +791,34 @@ impl ChattyApp {
 
         // Delete from disk
         cx.spawn(async move |_weak, _cx| {
-            repo.delete(&conv_id).await.ok();
+            if let Err(e) = repo.delete(&conv_id).await {
+                warn!(error = ?e, conv_id = %conv_id, "Failed to delete conversation from disk");
+            }
             Ok::<_, anyhow::Error>(())
         })
         .detach();
     }
 
-    fn send_message(&mut self, message: String, cx: &mut Context<Self>) {
-        debug!(message = %message, "send_message called");
+    /// Send a message to the LLM and stream the response
+    ///
+    /// This is the main message-handling function with the following phases:
+    /// 1. Ensure conversation exists (create if needed)
+    /// 2. Update UI with user message
+    /// 3. Filter attachments based on provider capabilities
+    /// 4. Stream LLM response and update UI incrementally
+    /// 5. Finalize response and save to conversation
+    /// 6. Generate title for first exchange
+    /// 7. Update token usage and persist to disk
+    ///
+    /// # Note
+    /// This function is complex (400+ lines) and could benefit from extraction
+    /// of helper functions in future refactoring. The main complexity comes from:
+    /// - Async/await with GPUI entity updates
+    /// - Stream processing with multiple chunk types
+    /// - UI synchronization during streaming
+    /// - Title generation and token usage tracking
+    fn send_message(&mut self, message: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
+        debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
         // Block message sending until app is ready (initial conversation created/loaded)
         if !self.is_ready {
@@ -754,7 +836,7 @@ impl ChattyApp {
         cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
                 debug!("Async task started");
 
-                // Get active conversation ID, or create a new one if it doesn't exist
+                // PHASE 1: Ensure conversation exists (create if needed)
                 let conv_id: String = match cx
                     .update_global::<ConversationsStore, _>(|store, _| store.active_id().cloned())
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -780,12 +862,12 @@ impl ChattyApp {
                     }
                 };
 
-                // Now we have a conversation ID for sure, set it on the chat view
+                // PHASE 2: Initialize UI with user and assistant messages
                 // and add the user/assistant messages AFTER conversation exists
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone());
                     // Add user message to UI
-                    view.add_user_message(message.clone(), cx);
+                    view.add_user_message(message.clone(), attachments.clone(), cx);
                     debug!("User message added to UI");
                     // Start assistant message in UI
                     view.start_assistant_message(cx);
@@ -798,13 +880,29 @@ impl ChattyApp {
                 // This ensures the new conversation appears immediately
                 sidebar.update(cx, |_sidebar, cx| {
                     cx.notify();
-                }).ok();
+                }).map_err(|e| warn!(error = ?e, "Failed to refresh sidebar after creating conversation"))
+                .ok();
 
-                // Extract agent and history synchronously (to avoid blocking in async context)
-                let (agent, history) = cx
-                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                // Extract agent, history, model_id, and capabilities synchronously
+                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images) = cx
+                    .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
-                            Ok((conv.agent().clone(), conv.history().to_vec()))
+                            let model_id = conv.model_id().to_string();
+                            
+                            // Get capabilities from ModelsModel
+                            let (supports_pdf, supports_images) = cx
+                                .global::<ModelsModel>()
+                                .get_model(&model_id)
+                                .map(|m| (m.supports_pdf, m.supports_images))
+                                .unwrap_or((false, false)); // Safe fallback if model not found
+                            
+                            Ok((
+                                conv.agent().clone(),
+                                conv.history().to_vec(),
+                                model_id,
+                                supports_pdf,
+                                supports_images
+                            ))
                         } else {
                             Err(anyhow::anyhow!(
                                 "Could not find conversation after creation/lookup"
@@ -813,20 +911,38 @@ impl ChattyApp {
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
-                // Create stream asynchronously (outside update_global to avoid blocking)
+                // PHASE 3: Prepare message contents with attachment filtering
                 debug!("Calling stream_prompt()");
-                let contents = vec![rig::message::UserContent::Text(
+                let mut contents = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
                         text: message.clone(),
                     },
                 )];
+
+                // Convert file attachments to UserContent
+                // Filter based on model capabilities to prevent panics in rig-core
+                for path in &attachments {
+                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    if is_pdf && !provider_supports_pdf {
+                        warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
+                        continue;
+                    }
+                    if !is_pdf && !provider_supports_images {
+                        warn!(?path, "Skipping image attachment: provider does not support images");
+                        continue;
+                    }
+                    match attachment_to_user_content(path).await {
+                        Ok(content) => contents.push(content),
+                        Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
+                    }
+                }
                 let (mut stream, user_message) =
                     stream_prompt(&agent, &history, contents).await?;
 
                 // Update history synchronously with user message
                 cx.update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.add_user_message_to_history(user_message);
+                        conv.add_user_message_with_attachments(user_message, attachments.clone());
                     }
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -837,7 +953,7 @@ impl ChattyApp {
                 let mut chunk_count = 0;
                 let mut token_usage: Option<(u32, u32)> = None;
 
-                // Process stream
+                // PHASE 4: Process LLM response stream
                 debug!("Entering stream processing loop");
                 while let Some(chunk_result) = stream.next().await {
                     chunk_count += 1;
@@ -916,7 +1032,7 @@ impl ChattyApp {
                     }
                 }
 
-                // Stream loop finished - now perform all finalization
+                // PHASE 5: Finalize response in conversation and UI
                 debug!("Stream loop finished, starting finalization");
 
                 // Extract trace before finalizing
@@ -962,7 +1078,7 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                // Generate title if this was the first exchange
+                // PHASE 6: Generate title for first conversation exchange
                 if should_generate_title {
                     // Extract agent and history synchronously
                     let title_data = cx
@@ -991,6 +1107,7 @@ impl ChattyApp {
                                         }
                                     },
                                 )
+                                .map_err(|e| warn!(error = ?e, "Failed to update conversation title in store"))
                                 .ok();
 
                                 // Update sidebar to show new title
@@ -1006,6 +1123,7 @@ impl ChattyApp {
                                             .collect::<Vec<_>>();
                                         sidebar.set_conversations(convs, cx);
                                     })
+                                    .map_err(|e| warn!(error = ?e, "Failed to update sidebar with new title"))
                                     .ok();
                             }
                             Err(e) => {
@@ -1015,7 +1133,7 @@ impl ChattyApp {
                     }
                 }
 
-                // Update token usage if available
+                // PHASE 7: Update token usage and save conversation
                 if let Some((input_tokens, output_tokens)) = token_usage {
                     debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Processing token usage");
 
@@ -1043,7 +1161,8 @@ impl ChattyApp {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                     conv.add_token_usage(usage);
                                 }
-                            }).ok();
+                            }).map_err(|e| warn!(error = ?e, "Failed to update token usage in store"))
+                            .ok();
 
                             debug!(cost_usd = ?cost_usd, "Token usage updated in conversation");
 
@@ -1099,6 +1218,9 @@ impl ChattyApp {
                                 token_usage: conv
                                     .serialize_token_usage()
                                     .unwrap_or_else(|_| "{}".to_string()),
+                                attachment_paths: conv
+                                    .serialize_attachment_paths()
+                                    .unwrap_or_else(|_| "[]".to_string()),
                                 created_at: conv
                                     .created_at()
                                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -1118,5 +1240,49 @@ impl ChattyApp {
                 Ok(())
             })
             .detach();
+    }
+}
+
+/// Convert a file attachment to a rig-core UserContent
+async fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message::UserContent> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let data = tokio::fs::read(path).await?;
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+
+    match ext.as_str() {
+        "png" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::PNG),
+            None,
+        )),
+        "jpg" | "jpeg" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::JPEG),
+            None,
+        )),
+        "gif" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::GIF),
+            None,
+        )),
+        "webp" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::WEBP),
+            None,
+        )),
+        "svg" => Ok(rig::message::UserContent::image_base64(
+            b64,
+            Some(rig::completion::message::ImageMediaType::SVG),
+            None,
+        )),
+        "pdf" => Ok(rig::message::UserContent::document(
+            b64,
+            Some(rig::completion::message::DocumentMediaType::PDF),
+        )),
+        _ => Err(anyhow::anyhow!("Unsupported file type: {}", ext)),
     }
 }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
 
@@ -20,6 +21,7 @@ pub struct Conversation {
     agent: AgentClient,
     history: Vec<Message>,
     system_traces: Vec<Option<serde_json::Value>>,
+    attachment_paths: Vec<Vec<PathBuf>>,
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
@@ -57,6 +59,7 @@ impl Conversation {
             agent,
             history: Vec::new(),
             system_traces: Vec::new(),
+            attachment_paths: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
@@ -93,6 +96,10 @@ impl Conversation {
         let system_traces = Self::deserialize_traces(&data.system_traces)
             .context("Failed to deserialize system traces")?;
 
+        // Deserialize attachment paths
+        let attachment_paths = Self::deserialize_attachment_paths(&data.attachment_paths)
+            .unwrap_or_default();
+
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
             .unwrap_or_else(|_| ConversationTokenUsage::new());
@@ -108,16 +115,18 @@ impl Conversation {
             agent,
             history,
             system_traces,
+            attachment_paths,
             token_usage,
             created_at,
             updated_at,
         })
     }
 
-    /// Add user message to history
-    pub fn add_user_message_to_history(&mut self, message: Message) {
+    /// Add user message to history with attachment paths
+    pub fn add_user_message_with_attachments(&mut self, message: Message, attachments: Vec<PathBuf>) {
         self.history.push(message);
         self.system_traces.push(None);
+        self.attachment_paths.push(attachments);
         self.updated_at = SystemTime::now();
     }
 
@@ -131,6 +140,7 @@ impl Conversation {
         };
 
         self.history.push(assistant_message);
+        self.attachment_paths.push(Vec::new());
         self.updated_at = SystemTime::now();
     }
 
@@ -204,6 +214,21 @@ impl Conversation {
     /// Deserialize system traces from JSON string
     pub fn deserialize_traces(json: &str) -> Result<Vec<Option<serde_json::Value>>> {
         serde_json::from_str(json).context("Failed to deserialize system traces")
+    }
+
+    /// Get attachment paths (parallel to history)
+    pub fn attachment_paths(&self) -> &[Vec<PathBuf>] {
+        &self.attachment_paths
+    }
+
+    /// Serialize attachment paths to JSON string
+    pub fn serialize_attachment_paths(&self) -> Result<String> {
+        serde_json::to_string(&self.attachment_paths).context("Failed to serialize attachment paths")
+    }
+
+    /// Deserialize attachment paths from JSON string
+    pub fn deserialize_attachment_paths(json: &str) -> Result<Vec<Vec<PathBuf>>> {
+        serde_json::from_str(json).context("Failed to deserialize attachment paths")
     }
 
     /// Get the agent

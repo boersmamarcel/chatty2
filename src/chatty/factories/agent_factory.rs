@@ -46,10 +46,14 @@ impl AgentClient {
                     api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
 
                 let client = rig::providers::openai::Client::new(&key)?;
-                let builder = client
+                let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
-                    .temperature(model_config.temperature as f64);
+                    .preamble(&model_config.preamble);
+
+                // Only set temperature if the model supports it
+                if model_config.supports_temperature {
+                    builder = builder.temperature(model_config.temperature as f64);
+                }
 
                 Ok(AgentClient::OpenAI(builder.build()))
             }
@@ -98,4 +102,17 @@ impl AgentClient {
             }
         }
     }
+
+    /// Returns the provider name for logging/debugging.
+    #[allow(dead_code)]
+    pub fn provider_name(&self) -> &'static str {
+        match self {
+            AgentClient::Anthropic(_) => "Anthropic",
+            AgentClient::OpenAI(_) => "OpenAI",
+            AgentClient::Gemini(_) => "Gemini",
+            AgentClient::Ollama(_) => "Ollama",
+            AgentClient::Mistral(_) => "Mistral",
+        }
+    }
+
 }

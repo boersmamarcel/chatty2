@@ -7,6 +7,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::skeleton::Skeleton;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 use super::chat_input::{ChatInput, ChatInputState};
@@ -83,8 +84,8 @@ impl ChatView {
     }
 
     /// Add a user message to the chat
-    pub fn add_user_message(&mut self, text: String, cx: &mut Context<Self>) {
-        debug!(message = %text, "Adding user message");
+    pub fn add_user_message(&mut self, text: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
+        debug!(message = %text, attachment_count = attachments.len(), "Adding user message");
 
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
@@ -93,6 +94,7 @@ impl ChatView {
             system_trace_view: None,
             live_trace: None,
             is_markdown: false,
+            attachments,
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -111,6 +113,7 @@ impl ChatView {
             system_trace_view: None,
             live_trace: Some(SystemTrace::new()),
             is_markdown: true,
+            attachments: Vec::new(),
         });
         self.active_tool_calls.clear();
 
@@ -423,6 +426,7 @@ impl ChatView {
         &mut self,
         history: &[rig::completion::Message],
         traces: &[Option<serde_json::Value>],
+        attachment_paths: &[Vec<PathBuf>],
         cx: &mut Context<Self>,
     ) {
         use rig::completion::Message;
@@ -433,7 +437,11 @@ impl ChatView {
             match msg {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
-                    if !user_msg.text.is_empty() {
+                    let attachments = attachment_paths
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !user_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,
                             content: user_msg.text,
@@ -441,6 +449,7 @@ impl ChatView {
                             system_trace_view: None,
                             live_trace: None,
                             is_markdown: false,
+                            attachments,
                         });
                     }
                 }

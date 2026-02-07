@@ -4,41 +4,61 @@ use gpui_component::ActiveTheme;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
-/// Callback type for sending messages
-pub type SendMessageCallback = Arc<dyn Fn(String, &mut Context<ChatInputState>) + Send + Sync>;
+use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
+use super::attachment_validation::{validate_attachment, is_image_extension, PDF_EXTENSION};
+use std::collections::HashMap;
+use tokio::sync::RwLock;
+
+
+
+/// Callback type for sending messages (with attachments)
+pub type SendMessageCallback =
+    Arc<dyn Fn(String, Vec<PathBuf>, &mut Context<ChatInputState>) + Send + Sync>;
 
 /// Callback type for model selection changes
 pub type ModelChangeCallback = Arc<dyn Fn(String, &mut Context<ChatInputState>) + Send + Sync>;
 
 /// State for the chat input component
+/// Cache for PDF thumbnails: maps PDF path -> thumbnail path or error
+type ThumbnailCache = Arc<RwLock<HashMap<PathBuf, Result<PathBuf, String>>>>;
+
 pub struct ChatInputState {
     pub input: Entity<InputState>,
+    attachments: Vec<PathBuf>,
     should_clear: bool,
     on_send: Option<SendMessageCallback>,
     on_model_change: Option<ModelChangeCallback>,
     selected_model_id: Option<String>,
     available_models: Vec<(String, String)>, // (id, display_name)
+    supports_images: bool,
+    supports_pdf: bool,
+    thumbnail_cache: ThumbnailCache,
 }
 
 impl ChatInputState {
     pub fn new(input: Entity<InputState>) -> Self {
         Self {
             input,
+            attachments: Vec::new(),
             should_clear: false,
             on_send: None,
             on_model_change: None,
             selected_model_id: None,
+            thumbnail_cache: Arc::new(RwLock::new(HashMap::new())),
             available_models: Vec::new(),
+            supports_images: false,
+            supports_pdf: false,
         }
     }
 
     /// Set the callback for sending messages
     pub fn set_on_send<F>(&mut self, callback: F)
     where
-        F: Fn(String, &mut Context<ChatInputState>) + Send + Sync + 'static,
+        F: Fn(String, Vec<PathBuf>, &mut Context<ChatInputState>) + Send + Sync + 'static,
     {
         self.on_send = Some(Arc::new(callback));
     }
@@ -75,27 +95,112 @@ impl ChatInputState {
         self.selected_model_id = Some(model_id);
     }
 
+    /// Set model capabilities for the currently selected model
+    pub fn set_capabilities(&mut self, supports_images: bool, supports_pdf: bool) {
+        self.supports_images = supports_images;
+        self.supports_pdf = supports_pdf;
+    }
+
+    /// Add file attachments with validation
+    pub fn add_attachments(&mut self, paths: Vec<PathBuf>, _cx: &mut Context<Self>) {
+        for path in paths {
+            if self.attachments.contains(&path) {
+                warn!(?path, "File already attached");
+                continue;
+            }
+
+            match validate_attachment(&path) {
+                Ok(()) => {
+                    // Start thumbnail generation for PDFs immediately in background
+                    if is_pdf(&path) {
+                        self.start_thumbnail_generation_for_pdf(path.clone());
+                    }
+                    self.attachments.push(path);
+                }
+                Err(err) => {
+                    warn!(?path, ?err, "File validation failed");
+                }
+            }
+        }
+    }
+
+    /// Remove attachment by index
+    pub fn remove_attachment(&mut self, index: usize) {
+        if index < self.attachments.len() {
+            self.attachments.remove(index);
+        }
+    }
+
+    /// Get current attachments
+    pub fn get_attachments(&self) -> &[PathBuf] {
+        &self.attachments
+    }
+
+    /// Clear all attachments
+    pub fn clear_attachments(&mut self) {
+        self.attachments.clear();
+    }
+
+    /// Start background thumbnail generation for a PDF (called when attachment is added)
+    fn start_thumbnail_generation_for_pdf(&self, pdf_path: PathBuf) {
+        let cache = self.thumbnail_cache.clone();
+
+        // Check if already cached or in progress
+        if let Ok(guard) = cache.try_read()
+            && guard.contains_key(&pdf_path)
+        {
+            return; // Already generating or cached
+        }
+
+        // Mark as in-progress immediately to prevent duplicate work
+        if let Ok(mut cache_write) = cache.try_write() {
+            cache_write.entry(pdf_path.clone()).or_insert_with(|| Err("Generating...".to_string()));
+        }
+
+        // Spawn background task on the tokio runtime
+        let cache_for_task = cache.clone();
+        let pdf_path_for_result = pdf_path.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                render_pdf_thumbnail(&pdf_path)
+                    .map_err(|e| format!("Failed to generate thumbnail: {}", e))
+            }).await;
+
+            let thumbnail_result = match result {
+                Ok(res) => res,
+                Err(e) => Err(format!("Task error: {}", e)),
+            };
+
+            // Update cache with result
+            if let Ok(mut cache_write) = cache_for_task.try_write() {
+                cache_write.insert(pdf_path_for_result, thumbnail_result);
+            }
+            
+            // Note: UI will be updated on next render when attachments are displayed
+        });
+    }
+
     /// Send the current message
     pub fn send_message(&mut self, cx: &mut Context<Self>) {
         let message = self.input.read(cx).text().to_string();
+        let attachments = self.attachments.clone();
 
-        debug!(message = %message, "send_message called");
+        debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
-        if message.trim().is_empty() {
-            warn!("Message is empty, not sending");
+        if message.trim().is_empty() && attachments.is_empty() {
+            warn!("Message is empty and no attachments, not sending");
             return;
         }
 
-        // Call the callback if set
         if let Some(on_send) = &self.on_send {
             debug!("on_send callback exists, calling it");
-            on_send(message.clone(), cx);
+            on_send(message, attachments, cx);
         } else {
             error!("on_send callback is NOT set");
         }
 
-        // Mark that we should clear on next render
         self.should_clear = true;
+        self.clear_attachments();
         debug!("Marked input for clearing");
     }
 
@@ -107,6 +212,11 @@ impl ChatInputState {
             });
             self.should_clear = false;
         }
+    }
+
+    /// Get the selected model ID
+    pub fn selected_model_id(&self) -> Option<&String> {
+        self.selected_model_id.as_ref()
     }
 
     /// Get display name for selected model
@@ -129,6 +239,98 @@ impl ChatInputState {
     }
 }
 
+fn is_image(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| is_image_extension(&ext.to_string_lossy()))
+        .unwrap_or(false)
+}
+
+fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase() == PDF_EXTENSION)
+        .unwrap_or(false)
+}
+
+fn render_file_chip(
+    path: &Path,
+    index: usize,
+    state: &Entity<ChatInputState>,
+    thumbnail_cache: &ThumbnailCache,
+) -> impl IntoElement {
+    let state_clone = state.clone();
+
+    // Determine display path based on file type
+    let display_path = if is_image(path) {
+        // Images can be displayed directly
+        Some(path.to_path_buf())
+    } else if is_pdf(path) {
+        // For PDFs, check cache (generation started in add_attachments)
+        // Use blocking read since we're not in a window context
+        // Check the thumbnail cache (non-blocking)
+        thumbnail_cache.try_read().ok().and_then(|guard| {
+            guard.get(path).and_then(|r| r.as_ref().ok()).cloned()
+        })
+    } else {
+        None
+    };
+
+    div()
+        .relative()
+        .w_16()
+        .h_16()
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .rounded_md()
+        .when_some(display_path.clone(), |div, img_path| {
+            div.child(
+                img(img_path)
+                    .w_full()
+                    .h_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
+        })
+        .when(display_path.is_none(), |d| {
+            // Show placeholder for PDFs (loading or no preview)
+            d.child(
+                div()
+                    .w_full()
+                    .h_full()
+                    .bg(rgb(0xe5e7eb))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(0x6b7280))
+                    .child("PDF"),
+            )
+        })
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .w_5()
+                .h_5()
+                .bg(rgb(0x374151))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(rgb(0xffffff))
+                .text_xs()
+                .hover(|style| style.bg(rgb(0x111827)))
+                .child("×")
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    state_clone.update(cx, |state, _cx| {
+                        state.remove_attachment(index);
+                    });
+                }),
+        )
+}
+
 /// Chat input component for rendering
 #[derive(IntoElement)]
 pub struct ChatInput {
@@ -145,7 +347,18 @@ impl RenderOnce for ChatInput {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state_for_send = self.state.clone();
         let state_for_model = self.state.clone();
+        let state_for_image = self.state.clone();
+        let state_for_pdf = self.state.clone();
         let input_entity = self.state.read(cx).input.clone();
+
+        // Read capabilities and attachments
+        let supports_images = self.state.read(cx).supports_images;
+        let supports_pdf = self.state.read(cx).supports_pdf;
+        let show_attachment_button = supports_images || supports_pdf;
+        let attachments = self.state.read(cx).get_attachments().to_vec();
+        
+        // Read thumbnail cache (for PDF previews)
+        let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
 
         // Model display name
         let model_display = self.state.read(cx).get_selected_model_display_name();
@@ -200,10 +413,8 @@ impl RenderOnce for ChatInput {
                                 .child(name.clone())
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                     state_for_click.update(cx, |s, cx| {
-                                        // Update selected model
                                         s.selected_model_id = Some(id_clone.clone());
 
-                                        // Call the model change callback if set
                                         if let Some(on_change) = &s.on_model_change {
                                             on_change(id_clone.clone(), cx);
                                         }
@@ -214,6 +425,125 @@ impl RenderOnce for ChatInput {
                         }))
                     })
             });
+
+        // Attachment button with popover (only shown when model supports it)
+        let attachment_popover = if show_attachment_button {
+            let attach_button = Button::new("attach").label("+").tooltip("Add attachments");
+
+            Some(
+                Popover::new("attachment-menu")
+                    .trigger(attach_button)
+                    .appearance(false)
+                    .content(move |_, _window, cx| {
+                        let state_img = state_for_image.clone();
+                        let state_pdf = state_for_pdf.clone();
+
+                        div()
+                            .flex()
+                            .flex_col()
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded_md()
+                            .shadow_md()
+                            .p_1()
+                            .when(supports_images, |d| {
+                                d.child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(cx.theme().secondary))
+                                        .text_sm()
+                                        .child("Image")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_event, _window, cx| {
+                                                let state = state_img.clone();
+                                                cx.spawn(async move |cx| {
+                                                    let receiver = cx
+                                                        .update(|cx| {
+                                                            cx.prompt_for_paths(
+                                                                PathPromptOptions {
+                                                                    files: true,
+                                                                    directories: false,
+                                                                    multiple: true,
+                                                                    prompt: Some(
+                                                                        "Select Images".into(),
+                                                                    ),
+                                                                },
+                                                            )
+                                                        })
+                                                        .ok()?;
+
+                                                    if let Ok(Some(paths)) =
+                                                        receiver.await.ok()?
+                                                    {
+                                                        state
+                                                            .update(cx, |state, cx| {
+                                                                state.add_attachments(paths, cx);
+                                                            })
+                                                            .ok()?;
+                                                    }
+                                                    Some(())
+                                                })
+                                                .detach();
+                                            },
+                                        ),
+                                )
+                            })
+                            .when(supports_pdf, |d| {
+                                d.child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(cx.theme().secondary))
+                                        .text_sm()
+                                        .child("PDF")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_event, _window, cx| {
+                                                let state = state_pdf.clone();
+                                                cx.spawn(async move |cx| {
+                                                    let receiver = cx
+                                                        .update(|cx| {
+                                                            cx.prompt_for_paths(
+                                                                PathPromptOptions {
+                                                                    files: true,
+                                                                    directories: false,
+                                                                    multiple: true,
+                                                                    prompt: Some(
+                                                                        "Select PDF Files".into(),
+                                                                    ),
+                                                                },
+                                                            )
+                                                        })
+                                                        .ok()?;
+
+                                                    if let Ok(Some(paths)) =
+                                                        receiver.await.ok()?
+                                                    {
+                                                        state
+                                                            .update(cx, |state, cx| {
+                                                                state.add_attachments(paths, cx);
+                                                            })
+                                                            .ok()?;
+                                                    }
+                                                    Some(())
+                                                })
+                                                .detach();
+                                            },
+                                        ),
+                                )
+                            })
+                    }),
+            )
+        } else {
+            None
+        };
 
         div()
             .border_1()
@@ -236,6 +566,7 @@ impl RenderOnce for ChatInput {
                             .flex_row()
                             .items_center()
                             .gap_2()
+                            .when_some(attachment_popover, |d, popover| d.child(popover))
                             .child(div().flex_grow())
                             .child(model_popover)
                             .child(
@@ -258,7 +589,43 @@ impl RenderOnce for ChatInput {
                                         },
                                     ),
                             ),
-                    ),
+                    )
+                    .when(!attachments.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .p_2()
+                                .mt_2()
+                                .rounded_lg()
+                                .children(
+                                    attachments
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, path)| {
+                                            render_file_chip(path, index, &self.state, &thumbnail_cache)
+                                        }),
+                                ),
+                        )
+                    }),
             )
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

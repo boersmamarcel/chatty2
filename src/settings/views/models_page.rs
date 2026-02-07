@@ -351,9 +351,12 @@ impl ModelsListView {
                                                             std::collections::HashMap::new(),
                                                         cost_per_million_input_tokens,
                                                         cost_per_million_output_tokens,
+                                                        supports_images: false,
+                                                        supports_pdf: false,
+                                                    supports_temperature: true,
                                                     };
 
-                                                    // Save the model
+                                                    // Save the model (capabilities auto-set by create_model)
                                                     models_controller::create_model(config, cx);
 
                                                     // Close dialog
@@ -707,6 +710,9 @@ impl ModelsListView {
                                                             std::collections::HashMap::new(),
                                                         cost_per_million_input_tokens,
                                                         cost_per_million_output_tokens,
+                                                        supports_images: false,
+                                                        supports_pdf: false,
+                                                    supports_temperature: true,
                                                     };
 
                                                     // Update the model

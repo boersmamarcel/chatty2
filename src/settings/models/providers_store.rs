@@ -23,6 +23,17 @@ impl ProviderType {
             ProviderType::Ollama => "Ollama",
         }
     }
+
+    /// Returns default (supports_images, supports_pdf) based on provider capabilities
+    pub fn default_capabilities(&self) -> (bool, bool) {
+        match self {
+            ProviderType::Anthropic => (true, true),
+            ProviderType::Gemini => (true, true),
+            ProviderType::OpenAI => (true, false),
+            ProviderType::Ollama => (false, false),
+            ProviderType::Mistral => (false, false),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
