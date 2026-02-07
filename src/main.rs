@@ -287,6 +287,12 @@ fn main() {
         // Initialize models model with empty state - will be populated async
         cx.set_global(settings::models::ModelsModel::new());
 
+        // Initialize models notifier entity for event subscriptions
+        let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
+        cx.set_global(settings::models::GlobalModelsNotifier {
+            entity: Some(models_notifier.downgrade()),
+        });
+
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
 
@@ -394,6 +400,17 @@ fn main() {
                         });
 
                         models_loaded_clone.store(true, Ordering::SeqCst);
+
+                        // Emit ModelsReady event for subscribers
+                        if let Some(weak_notifier) = cx
+                            .try_global::<settings::models::GlobalModelsNotifier>()
+                            .and_then(|g| g.entity.clone())
+                            && let Some(notifier) = weak_notifier.upgrade()
+                        {
+                            notifier.update(cx, |_notifier, cx| {
+                                cx.emit(settings::models::ModelsNotifierEvent::ModelsReady);
+                            });
+                        }
                         info!("Models loaded");
 
                         // Always attempt to auto-discover Ollama models on startup

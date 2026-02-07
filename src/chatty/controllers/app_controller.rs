@@ -46,7 +46,7 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
-        let app = Self {
+        let mut app = Self {
             chat_view,
             sidebar_view,
             conversation_repo,
@@ -71,24 +71,62 @@ impl ChattyApp {
         // Initialize chat input with available models
         app.initialize_models(cx);
 
-        // Auto-create first conversation if none exist
-        let has_convs = cx
-            .try_global::<ConversationsStore>()
-            .map(|store| store.count() > 0)
+        // Subscribe to models ready event to create first conversation if needed
+        if let Some(weak_notifier) = cx
+            .try_global::<crate::settings::models::GlobalModelsNotifier>()
+            .and_then(|g| g.entity.clone())
+            && let Some(notifier) = weak_notifier.upgrade()
+        {
+                cx.subscribe(
+                    &notifier,
+                    |app, _notifier, event: &crate::settings::models::ModelsNotifierEvent, cx| {
+                        if matches!(event, crate::settings::models::ModelsNotifierEvent::ModelsReady) {
+                            // Check if we need to create initial conversation
+                            let has_convs = cx
+                                .try_global::<ConversationsStore>()
+                                .map(|store| store.count() > 0)
+                                .unwrap_or(false);
+
+                            if !has_convs {
+                                info!("Models ready and no conversations exist, creating initial one");
+                                let app_entity = cx.entity();
+                                cx.spawn(async move |_, cx| {
+                                    let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
+                                        app_entity.update(cx, |app, cx| app.create_new_conversation(cx));
+                                    if let Ok(task) = task_result {
+                                        let _ = task.await;
+                                    }
+                                    let _: Result<(), _> = app_entity.update(cx, |app, cx| {
+                                        app.is_ready = true;
+                                        info!("App is now ready (initial conversation created)");
+                                        cx.notify();
+                                    });
+                                    Ok::<_, anyhow::Error>(())
+                                })
+                                .detach();
+                            } else {
+                                app.is_ready = true;
+                            }
+                        }
+                    },
+                )
+                .detach();
+        }
+
+        // If models are already loaded, check now
+        let has_models = cx
+            .try_global::<ModelsModel>()
+            .map(|m| !m.models().is_empty())
             .unwrap_or(false);
 
-        if !has_convs {
-            info!("No conversations, creating initial one");
-
-            // Check if models are available
-            let has_models = cx
-                .try_global::<ModelsModel>()
-                .map(|m| !m.models().is_empty())
+        if has_models {
+            let has_convs = cx
+                .try_global::<ConversationsStore>()
+                .map(|store| store.count() > 0)
                 .unwrap_or(false);
 
-            if has_models {
-                // Models already loaded, create immediately and wait for completion
-                info!("Models available, creating now");
+            if !has_convs {
+                info!("Models available at startup, creating initial conversation");
                 let app_entity = cx.entity();
                 cx.spawn(async move |_, cx| {
                     let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
@@ -105,39 +143,7 @@ impl ChattyApp {
                 })
                 .detach();
             } else {
-                // Models not loaded yet, defer until after first render
-                info!("Models not ready, will defer creation");
-                let app_entity = cx.entity();
-                cx.defer(move |cx| {
-                    app_entity.update(cx, |_app, cx| {
-                        let has_models = cx
-                            .try_global::<ModelsModel>()
-                            .map(|m| !m.models().is_empty())
-                            .unwrap_or(false);
-
-                        if has_models {
-                            info!("Models now available, creating conversation");
-                            let app_entity_inner = cx.entity();
-                            cx.spawn(async move |_, cx| {
-                                let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
-                                    app_entity_inner
-                                        .update(cx, |app, cx| app.create_new_conversation(cx));
-                                if let Ok(task) = task_result {
-                                    let _ = task.await;
-                                }
-                                let _: Result<(), _> = app_entity_inner.update(cx, |app, cx| {
-                                    app.is_ready = true;
-                                    info!("App is now ready (deferred conversation created)");
-                                    cx.notify();
-                                });
-                                Ok::<_, anyhow::Error>(())
-                            })
-                            .detach();
-                        } else {
-                            warn!("Models still not available");
-                        }
-                    });
-                });
+                app.is_ready = true;
             }
         }
 
