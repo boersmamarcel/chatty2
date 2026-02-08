@@ -2,9 +2,6 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use tracing::{info, warn};
-use sha2::{Sha256, Digest};
-use resvg::usvg;
-use resvg::tiny_skia;
 
 use crate::chatty::services::MathRendererService;
 
@@ -42,77 +39,36 @@ impl RenderOnce for MathComponent {
             Ok(svg_data) => {
                 info!(content = %self.content, "Rendered math to SVG");
 
-                // Use SHA-256 hash for stable, unique filenames
-                let mut hasher = Sha256::new();
-                hasher.update(&self.content);
-                hasher.update(if self.is_inline { b"inline" } else { b"block " });
-                let hash = format!("{:x}", hasher.finalize());
-                let filename = format!("chatty_math_{}.png", &hash[..16]);
-
-                // Use same temp directory as PDF thumbnails
-                use crate::chatty::services::pdf_thumbnail::get_thumbnail_dir;
+                // Encode SVG as base64 data URI
+                use base64::engine::general_purpose::STANDARD;
+                use base64::Engine;
                 
-                let cache_dir = match get_thumbnail_dir() {
-                    Ok(dir) => dir,
-                    Err(e) => {
-                        warn!(error = ?e, "Failed to get thumbnail directory");
-                        return self.render_fallback(cx, "Failed to get temp directory");
-                    }
-                };
+                let data_uri = format!(
+                    "data:image/svg+xml;base64,{}",
+                    STANDARD.encode(svg_data.as_bytes())
+                );
 
-                let png_path = cache_dir.join(&filename);
-
-                // Check if already cached
-                if !png_path.exists() {
-                    info!("Math cache miss, rendering: {:?}", png_path);
-                    
-                    // Convert SVG to PNG
-                    if let Err(e) = svg_to_png(&svg_data, &png_path) {
-                        warn!(error = ?e, "Failed to convert SVG to PNG");
-                        return self.render_fallback(cx, &format!("Failed to convert SVG: {}", e));
-                    }
-                    
-                    info!("Wrote math PNG to file: {:?}", png_path);
-                } else {
-                    info!("Math cache hit: {:?}", png_path);
-                }
-
-                // Match render_file_chip pattern exactly
-                // Canonicalize path to ensure it's absolute
-                let png_path_opt = png_path.canonicalize().ok();
-                
-                if png_path_opt.is_none() {
-                    warn!("Failed to canonicalize path: {:?}", png_path);
-                    return self.render_fallback(cx, "Failed to resolve image path");
-                }
-
+                // Render using SVG data URI directly
                 if self.is_inline {
                     div()
                         .id(self.element_id.clone())
                         .flex()
                         .items_center()
-                        .when_some(png_path_opt.clone(), |div, img_path| {
-                            info!("Inline math: passing path to img(): {:?}", img_path);
-                            div.child(
-                                img(img_path)
-                                    .max_w(px(200.))
-                                    .max_h(px(40.))
-                            )
-                        })
+                        .child(
+                            img(data_uri)
+                                .h(px(20.))
+                        )
                 } else {
                     div()
                         .id(self.element_id.clone())
                         .flex()
                         .justify_center()
                         .my_3()
-                        .when_some(png_path_opt, |div, img_path| {
-                            info!("Block math: passing path to img(): {:?}", img_path);
-                            div.child(
-                                img(img_path)
-                                    .max_w(px(600.))
-                                    .max_h(px(300.))
-                            )
-                        })
+                        .child(
+                            img(data_uri)
+                                .max_w(px(600.))
+                                .max_h(px(200.))
+                        )
                 }
             }
             Err(e) => {
@@ -171,29 +127,4 @@ impl MathComponent {
                 )
         }
     }
-}
-
-
-/// Convert SVG data to PNG file
-fn svg_to_png(svg_data: &str, output_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse SVG
-    let opts = usvg::Options::default();
-    let tree = usvg::Tree::from_str(svg_data, &opts)?;
-
-    // Get size
-    let size = tree.size();
-    let width = size.width() as u32;
-    let height = size.height() as u32;
-
-    // Create pixmap
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or("Failed to create pixmap")?;
-
-    // Render
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
-
-    // Save as PNG
-    pixmap.save_png(output_path)?;
-
-    Ok(())
 }
