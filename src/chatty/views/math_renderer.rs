@@ -5,6 +5,40 @@ use tracing::{debug, warn};
 
 use crate::chatty::services::MathRendererService;
 
+
+/// Inject CSS color styling into SVG content
+fn inject_svg_color(svg_content: &str, color: gpui::Hsla) -> String {
+    // Convert GPUI Hsla to hex color
+    let rgb = color.to_rgb();
+    let hex_color = format!(
+        "#{:02x}{:02x}{:02x}",
+        (rgb.r * 255.0) as u8,
+        (rgb.g * 255.0) as u8,
+        (rgb.b * 255.0) as u8
+    );
+    
+    // Find the opening <svg tag and inject a <style> element
+    // Note: Typst renders math as <path> elements (vector graphics), not <text> elements
+    if let Some(svg_pos) = svg_content.find("<svg") {
+        if let Some(tag_end) = svg_content[svg_pos..].find('>') {
+            let insert_pos = svg_pos + tag_end + 1;
+            let style_tag = format!(
+                r#"<style>path {{ fill: {} !important; }} text, tspan {{ fill: {} !important; }}</style>"#,
+                hex_color, hex_color
+            );
+            
+            let mut result = String::with_capacity(svg_content.len() + style_tag.len());
+            result.push_str(&svg_content[..insert_pos]);
+            result.push_str(&style_tag);
+            result.push_str(&svg_content[insert_pos..]);
+            return result;
+        }
+    }
+    
+    // If we couldn't inject the style, return original
+    svg_content.to_string()
+}
+
 /// Component for rendering LaTeX math expressions as SVG
 #[derive(IntoElement, Clone)]
 pub struct MathComponent {
@@ -111,32 +145,108 @@ impl RenderOnce for MathComponent {
 
         match svg_path_result {
             Ok(svg_path) => {
-        
-
-                // Render using SVG file path (NOT data URI)
-                if is_inline {
-                    div()
-                        .id(element_id.clone())
-                        .flex()
-                        .items_center()
-                        .child(
-                            img(svg_path)
-                                .max_h(px(32.))
-                                .max_w(px(200.))
-                                .object_fit(gpui::ObjectFit::Contain)
-                        )
-                } else {
-                    div()
-                        .id(element_id.clone())
-                        .flex()
-                        .justify_center()
-                        .my_3()
-                        .child(
-                            img(svg_path)
-                                .max_w(px(800.))
-                                .max_h(px(400.))
-                                .object_fit(gpui::ObjectFit::Contain)
-                        )
+                // Read SVG file and inject theme-aware CSS styling
+                let text_color = cx.theme().foreground;
+                
+                match std::fs::read_to_string(&svg_path) {
+                    Ok(svg_content) => {
+                        // Inject CSS color styling
+                        let styled_svg = inject_svg_color(&svg_content, text_color);
+                        
+                        // Write styled SVG to a theme-specific file (GPUI requires file paths)
+                        // Include theme color in filename so it updates when theme changes
+                        let color_hash = format!("{:02x}{:02x}{:02x}",
+                            (text_color.to_rgb().r * 255.0) as u8,
+                            (text_color.to_rgb().g * 255.0) as u8,
+                            (text_color.to_rgb().b * 255.0) as u8
+                        );
+                        let temp_path = svg_path.with_extension(format!("styled.{}.svg", color_hash));
+                        match std::fs::write(&temp_path, styled_svg) {
+                            Ok(_) => {
+                                // Render using styled SVG
+                                if is_inline {
+                                    div()
+                                        .id(element_id.clone())
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            img(temp_path)
+                                                .max_h(px(32.))
+                                                .max_w(px(200.))
+                                                .object_fit(gpui::ObjectFit::Contain)
+                                        )
+                                } else {
+                                    div()
+                                        .id(element_id.clone())
+                                        .flex()
+                                        .justify_center()
+                                        .my_3()
+                                        .child(
+                                            img(temp_path)
+                                                .max_w(px(800.))
+                                                .max_h(px(400.))
+                                                .object_fit(gpui::ObjectFit::Contain)
+                                        )
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = ?e, "Failed to write styled SVG, using original");
+                                // Fallback to original SVG
+                                if is_inline {
+                                    div()
+                                        .id(element_id.clone())
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            img(svg_path)
+                                                .max_h(px(32.))
+                                                .max_w(px(200.))
+                                                .object_fit(gpui::ObjectFit::Contain)
+                                        )
+                                } else {
+                                    div()
+                                        .id(element_id.clone())
+                                        .flex()
+                                        .justify_center()
+                                        .my_3()
+                                        .child(
+                                            img(svg_path)
+                                                .max_w(px(800.))
+                                                .max_h(px(400.))
+                                                .object_fit(gpui::ObjectFit::Contain)
+                                        )
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to read SVG file, using original");
+                        // Fallback to original SVG
+                        if is_inline {
+                            div()
+                                .id(element_id.clone())
+                                .flex()
+                                .items_center()
+                                .child(
+                                    img(svg_path)
+                                        .max_h(px(32.))
+                                        .max_w(px(200.))
+                                        .object_fit(gpui::ObjectFit::Contain)
+                                )
+                        } else {
+                            div()
+                                .id(element_id.clone())
+                                .flex()
+                                .justify_center()
+                                .my_3()
+                                .child(
+                                    img(svg_path)
+                                        .max_w(px(800.))
+                                        .max_h(px(400.))
+                                        .object_fit(gpui::ObjectFit::Contain)
+                                )
+                        }
+                    }
                 }
             }
             Err(e) => {
