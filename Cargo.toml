@@ -43,6 +43,16 @@ rust-embed = "8.0"
 pdfium-render = "0.8"
 image = "0.25"
 
+# Math rendering with Typst
+typst = "0.14"
+typst-svg = "0.14"
+mitex = "0.2"
+typst-assets = { version = "0.14", features = ["fonts"] }
+resvg = "0.44"
+tiny-skia = "0.11"
+usvg = "0.44"
+comemo = "0.4"
+
 [build-dependencies]
 # Windows icon embedding
 winres = "0.1"

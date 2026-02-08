@@ -4,6 +4,8 @@ pub mod chat_input;
 pub mod chat_view;
 pub mod conversation_item;
 pub mod footer;
+pub mod math_parser;
+pub mod math_renderer;
 pub mod message_component;
 pub mod message_types;
 pub mod sidebar_view;

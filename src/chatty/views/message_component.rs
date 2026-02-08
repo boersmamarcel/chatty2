@@ -2,8 +2,10 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
 use std::path::PathBuf;
-use tracing::debug;
+use tracing::{debug, info};
 
+use super::math_parser::{MathSegment, parse_math_segments};
+use super::math_renderer::MathComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::trace_components::SystemTraceView;
 
@@ -74,6 +76,69 @@ impl RenderOnce for MarkdownContent {
 
         TextView::markdown(id, self.content, window, cx).selectable(true)
     }
+}
+
+/// Render content with math awareness
+///
+/// This function parses content for math expressions and renders them appropriately.
+/// Math expressions are rendered using MathComponent while regular text uses MarkdownContent.
+fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec<AnyElement> {
+    info!(content_len = content.len(), base_index, "render_math_aware_content called");
+    let math_segments = parse_math_segments(content);
+
+    // Debug: log what segments were parsed
+    info!(
+        segments_count = math_segments.len(),
+        has_block_math = math_segments
+            .iter()
+            .any(|s| matches!(s, MathSegment::BlockMath(_))),
+        has_inline_math = math_segments
+            .iter()
+            .any(|s| matches!(s, MathSegment::InlineMath(_))),
+        "Parsing math segments"
+    );
+    for (idx, seg) in math_segments.iter().enumerate() {
+        match seg {
+            MathSegment::Text(t) => info!(idx, text_len = t.len(), "Text segment"),
+            MathSegment::InlineMath(m) => info!(idx, math = %m, "Inline math segment"),
+            MathSegment::BlockMath(m) => info!(idx, math = %m, "Block math segment"),
+        }
+    }
+
+    let mut elements = Vec::new();
+
+    for (seg_idx, segment) in math_segments.iter().enumerate() {
+        let element_index = base_index * 1000 + seg_idx;
+
+        match segment {
+            MathSegment::Text(text) => {
+                // Render as markdown
+                elements.push(
+                    MarkdownContent {
+                        content: text.clone(),
+                        message_index: element_index,
+                    }
+                    .into_any_element(),
+                );
+            }
+            MathSegment::InlineMath(math_content) => {
+                // Render inline math
+                let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
+                elements.push(
+                    MathComponent::new(math_content.clone(), true, element_id).into_any_element(),
+                );
+            }
+            MathSegment::BlockMath(math_content) => {
+                // Render block math
+                let element_id = ElementId::Name(format!("math-block-{}", element_index).into());
+                elements.push(
+                    MathComponent::new(math_content.clone(), false, element_id).into_any_element(),
+                );
+            }
+        }
+    }
+
+    elements
 }
 
 /// Parse content to extract thinking blocks and regular text segments
@@ -258,7 +323,7 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
     if matches!(msg.role, MessageRole::Assistant) {
         let segments = parse_content_segments(&msg.content);
 
-        debug!(
+        info!(
             content_len = msg.content.len(),
             segments_count = segments.len(),
             has_thinking = segments.iter().any(|s| matches!(s, ContentSegment::Thinking(_))),
@@ -274,19 +339,16 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
             let children: Vec<AnyElement> = segments
                 .iter()
                 .enumerate()
-                .map(|(seg_idx, segment)| match segment {
+                .flat_map(|(seg_idx, segment)| match segment {
                     ContentSegment::Thinking(content) => {
-                        render_thinking_block(content, index, seg_idx, cx).into_any_element()
+                        vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
                     }
                     ContentSegment::Text(text) => {
                         if msg.is_markdown && !msg.is_streaming {
-                            MarkdownContent {
-                                content: text.clone(),
-                                message_index: index * 100 + seg_idx,
-                            }
-                            .into_any_element()
+                            // Parse this text segment for math
+                            render_math_aware_content(text, index * 100 + seg_idx, cx)
                         } else {
-                            div().child(text.clone()).into_any_element()
+                            vec![div().child(text.clone()).into_any_element()]
                         }
                     }
                 })
@@ -298,13 +360,23 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
 
     // Render content based on whether it's markdown (no thinking blocks found)
     // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
+    info!(
+        is_markdown = msg.is_markdown,
+        is_streaming = msg.is_streaming,
+        role = ?msg.role,
+        "Checking render conditions"
+    );
     if msg.is_markdown && !msg.is_streaming && matches!(msg.role, MessageRole::Assistant) {
-        container.child(MarkdownContent {
-            content: msg.content.clone(),
-            message_index: index,
-        })
+        info!("Conditions met - calling render_math_aware_content");
+        // Parse for math expressions
+        let math_aware_elements = render_math_aware_content(&msg.content, index, cx);
+        container.children(math_aware_elements)
     } else {
+        info!("Conditions NOT met - using plain text");
         // Use plain text for streaming messages for better performance
         container.child(msg.content.clone())
     }
 }
+
+
+
