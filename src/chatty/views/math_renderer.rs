@@ -47,7 +47,7 @@ impl RenderOnce for MathComponent {
                         .items_center()
                         .child(
                             img(svg_path)
-                                .h(px(20.))
+                                .max_h(px(24.))
                                 .object_fit(gpui::ObjectFit::Contain)
                         )
                 } else {
@@ -58,8 +58,8 @@ impl RenderOnce for MathComponent {
                         .my_3()
                         .child(
                             img(svg_path)
-                                .max_w(px(600.))
-                                .max_h(px(200.))
+                                .max_w(px(700.))
+                                .max_h(px(300.))
                                 .object_fit(gpui::ObjectFit::Contain)
                         )
                 }
