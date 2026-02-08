@@ -1,9 +1,12 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::{Icon, Sizable};
+use gpui_component::button::{Button, ButtonVariants};
 use tracing::{debug, warn};
 
 use crate::chatty::services::MathRendererService;
+use crate::assets::CustomIcon;
 
 
 /// Inject CSS color styling into SVG content
@@ -178,6 +181,7 @@ impl RenderOnce for MathComponent {
                                 } else {
                                     div()
                                         .id(element_id.clone())
+                                        .relative()
                                         .flex()
                                         .justify_center()
                                         .my_3()
@@ -186,6 +190,29 @@ impl RenderOnce for MathComponent {
                                                 .max_w(px(800.))
                                                 .max_h(px(400.))
                                                 .object_fit(gpui::ObjectFit::Contain)
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .right_0()
+                                                .child(
+                                                    Button::new(ElementId::Name(
+                                                        format!("copy-math-{}", element_id.clone()).into(),
+                                                    ))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(Icon::new(CustomIcon::Copy))
+                                                    .tooltip("Copy LaTeX")
+                                                    .on_click({
+                                                        let latex = content_clone.clone();
+                                                        move |_event, _window, cx| {
+                                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                                latex.clone(),
+                                                            ));
+                                                        }
+                                                    })
+                                                )
                                         )
                                 }
                             }
@@ -206,6 +233,7 @@ impl RenderOnce for MathComponent {
                                 } else {
                                     div()
                                         .id(element_id.clone())
+                                        .relative()
                                         .flex()
                                         .justify_center()
                                         .my_3()
@@ -214,6 +242,29 @@ impl RenderOnce for MathComponent {
                                                 .max_w(px(800.))
                                                 .max_h(px(400.))
                                                 .object_fit(gpui::ObjectFit::Contain)
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .right_0()
+                                                .child(
+                                                    Button::new(ElementId::Name(
+                                                        format!("copy-math-fallback-{}", element_id.clone()).into(),
+                                                    ))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(Icon::new(CustomIcon::Copy))
+                                                    .tooltip("Copy LaTeX")
+                                                    .on_click({
+                                                        let latex = content_clone.clone();
+                                                        move |_event, _window, cx| {
+                                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                                latex.clone(),
+                                                            ));
+                                                        }
+                                                    })
+                                                )
                                         )
                                 }
                             }
@@ -236,6 +287,7 @@ impl RenderOnce for MathComponent {
                         } else {
                             div()
                                 .id(element_id.clone())
+                                .relative()
                                 .flex()
                                 .justify_center()
                                 .my_3()
@@ -244,6 +296,29 @@ impl RenderOnce for MathComponent {
                                         .max_w(px(800.))
                                         .max_h(px(400.))
                                         .object_fit(gpui::ObjectFit::Contain)
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .child(
+                                            Button::new(ElementId::Name(
+                                                format!("copy-math-original-{}", element_id.clone()).into(),
+                                            ))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(Icon::new(CustomIcon::Copy))
+                                            .tooltip("Copy LaTeX")
+                                            .on_click({
+                                                let latex = content_clone.clone();
+                                                move |_event, _window, cx| {
+                                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                                        latex.clone(),
+                                                    ));
+                                                }
+                                            })
+                                        )
                                 )
                         }
                     }
