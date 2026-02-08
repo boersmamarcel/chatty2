@@ -441,7 +441,42 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
 }
 
 /// Render a message in the chat view
-pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl IntoElement {
+
+/// Render a lightweight placeholder for messages outside viewport
+fn render_message_placeholder(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElement {
+    let bg = match msg.role {
+        MessageRole::User => cx.theme().muted_foreground.opacity(0.05),
+        MessageRole::Assistant => cx.theme().background,
+    };
+    
+    // Estimate height based on content length
+    let estimated_lines = (msg.content.len() / 80).max(1).min(10);
+    let estimated_height = px((estimated_lines * 24 + 32) as f32);
+    
+    div()
+        .id(("msg-placeholder", index))
+        .p_4()
+        .bg(bg)
+        .rounded_md()
+        .h(estimated_height)
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("Message {}", index + 1))
+        )
+        .into_any_element()
+}
+
+
+pub fn render_message(msg: &DisplayMessage, index: usize, should_render_full: bool, cx: &App) -> AnyElement {
+    // If not in viewport window, render lightweight placeholder
+    if !should_render_full && !msg.is_streaming {
+        return render_message_placeholder(msg, index, cx);
+    }
+    
+    // Full render for messages in viewport
     let mut container = div()
         .max_w(relative(1.)) // Max 100% of container width
         .p_3()
@@ -534,6 +569,15 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
 
     // Render content based on whether it's markdown (no thinking blocks found)
     // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
+
+    debug!(
+        index = index,
+        is_markdown = msg.is_markdown,
+        is_streaming = msg.is_streaming,
+        content_len = msg.content.len(),
+        should_render_full = should_render_full,
+        "render_message: deciding markdown path"
+    );
 
     let final_container = if msg.is_markdown && !msg.is_streaming {
         // Parse for math expressions
