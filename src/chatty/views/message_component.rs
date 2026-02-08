@@ -84,19 +84,11 @@ impl RenderOnce for MarkdownContent {
 /// Math expressions are rendered using MathComponent while regular text uses MarkdownContent.
 fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec<AnyElement> {
     info!(content_len = content.len(), base_index, "render_math_aware_content called");
+
+    // Parse for math segments
     let math_segments = parse_math_segments(content);
 
-    // Debug: log what segments were parsed
-    info!(
-        segments_count = math_segments.len(),
-        has_block_math = math_segments
-            .iter()
-            .any(|s| matches!(s, MathSegment::BlockMath(_))),
-        has_inline_math = math_segments
-            .iter()
-            .any(|s| matches!(s, MathSegment::InlineMath(_))),
-        "Parsing math segments"
-    );
+    // Log what we found
     for (idx, seg) in math_segments.iter().enumerate() {
         match seg {
             MathSegment::Text(t) => info!(idx, text_len = t.len(), "Text segment"),
@@ -106,14 +98,17 @@ fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec
     }
 
     let mut elements = Vec::new();
+    let mut inline_row: Vec<AnyElement> = Vec::new();
+    let mut seg_idx = 0;
 
-    for (seg_idx, segment) in math_segments.iter().enumerate() {
+    for segment in math_segments.iter() {
         let element_index = base_index * 1000 + seg_idx;
+        seg_idx += 1;
 
         match segment {
             MathSegment::Text(text) => {
-                // Render as markdown
-                elements.push(
+                // Add text to inline row
+                inline_row.push(
                     MarkdownContent {
                         content: text.clone(),
                         message_index: element_index,
@@ -122,14 +117,27 @@ fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec
                 );
             }
             MathSegment::InlineMath(math_content) => {
-                // Render inline math
+                // Add inline math to inline row
                 let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
-                elements.push(
+                inline_row.push(
                     MathComponent::new(math_content.clone(), true, element_id).into_any_element(),
                 );
             }
             MathSegment::BlockMath(math_content) => {
-                // Render block math
+                // Flush any pending inline content first
+                if !inline_row.is_empty() {
+                    elements.push(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .children(inline_row.drain(..))
+                            .into_any_element()
+                    );
+                }
+                
+                // Render block math as its own element
                 let element_id = ElementId::Name(format!("math-block-{}", element_index).into());
                 elements.push(
                     MathComponent::new(math_content.clone(), false, element_id).into_any_element(),
@@ -138,9 +146,21 @@ fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec
         }
     }
 
+    // Flush any remaining inline content
+    if !inline_row.is_empty() {
+        elements.push(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .children(inline_row)
+                .into_any_element()
+        );
+    }
+
     elements
 }
-
 /// Parse content to extract thinking blocks and regular text segments
 /// Supports <think>...</think> and <thinking>...</thinking> patterns
 fn parse_content_segments(content: &str) -> Vec<ContentSegment> {

@@ -165,6 +165,46 @@ $ {typst_code} $")
         Ok(svg)
     }
 
+    /// Render LaTeX to SVG and write to persistent cache file
+    ///
+    /// This method generates an SVG file from LaTeX math and stores it in a persistent
+    /// cache directory (~/.config/chatty/math_cache/). The cache survives app restarts
+    /// and allows GPUI to load the SVG images as file paths (which GPUI requires).
+    ///
+    /// Returns the PathBuf to the cached SVG file.
+    pub fn render_to_svg_file(&self, latex: &str, is_inline: bool) -> Result<std::path::PathBuf> {
+        // Get or generate SVG (uses existing in-memory cache)
+        let svg_data = self.render_to_svg(latex, is_inline)?;
+        
+        // Create persistent cache directory
+        let cache_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?
+            .join("chatty")
+            .join("math_cache");
+        
+        std::fs::create_dir_all(&cache_dir)
+            .context("Failed to create math cache directory")?;
+        
+        // Use hash as filename for deterministic caching
+        let cache_key = self.make_cache_key(latex, is_inline);
+        let svg_path = cache_dir.join(format!("{}.svg", cache_key));
+        
+        // Only write if file doesn't exist (cache hit)
+        if !svg_path.exists() {
+            // Strip width/height attributes from SVG to allow GPUI to scale it
+            // Typst generates SVGs with small pt dimensions that GPUI respects literally
+            let svg_without_dims = self.strip_svg_dimensions(&svg_data);
+            
+            std::fs::write(&svg_path, svg_without_dims)
+                .context("Failed to write SVG to cache")?;
+            info!(path = ?svg_path, "Wrote math SVG to persistent cache");
+        } else {
+            debug!(path = ?svg_path, "Math SVG cache hit");
+        }
+        
+        Ok(svg_path)
+    }
+
     fn make_cache_key(&self, latex: &str, is_inline: bool) -> String {
         let mut hasher = Sha256::new();
         hasher.update(latex.as_bytes());
@@ -200,6 +240,37 @@ $ {typst_code} $")
         if let Ok(mut cache) = self.cache.lock() {
             cache.clear();
         }
+    }
+
+    /// Strip width and height attributes from SVG to allow proper scaling
+    fn strip_svg_dimensions(&self, svg: &str) -> String {
+        // Remove width="..." and height="..." attributes
+        // Keep viewBox as it's needed for aspect ratio
+        let mut result = svg.to_string();
+        
+        // Find and remove width attribute
+        if let Some(width_start) = result.find(r#" width=""#) {
+            if let Some(width_end) = result[width_start..].find('"') {
+                // Find the closing quote
+                let quote_pos = width_start + width_end + 1;
+                if let Some(closing_quote) = result[quote_pos..].find('"') {
+                    result.replace_range(width_start..quote_pos + closing_quote + 1, "");
+                }
+            }
+        }
+        
+        // Find and remove height attribute
+        if let Some(height_start) = result.find(r#" height=""#) {
+            if let Some(height_end) = result[height_start..].find('"') {
+                // Find the closing quote
+                let quote_pos = height_start + height_end + 1;
+                if let Some(closing_quote) = result[quote_pos..].find('"') {
+                    result.replace_range(height_start..quote_pos + closing_quote + 1, "");
+                }
+            }
+        }
+        
+        result
     }
 
     /// Get the number of cached items

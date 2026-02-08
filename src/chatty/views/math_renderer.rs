@@ -27,36 +27,28 @@ impl RenderOnce for MathComponent {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         info!("MathComponent::render called for: {}", self.content);
 
-        // Try to get the math renderer service
-        let svg_result = if let Some(service) = cx.try_global::<MathRendererService>() {
-            service.render_to_svg(&self.content, self.is_inline)
+        // Get SVG file path from service
+        let svg_path_result = if let Some(service) = cx.try_global::<MathRendererService>() {
+            service.render_to_svg_file(&self.content, self.is_inline)
         } else {
             warn!("Math renderer service not initialized");
             Err(anyhow::anyhow!("Service not available"))
         };
 
-        match svg_result {
-            Ok(svg_data) => {
-                info!(content = %self.content, "Rendered math to SVG");
+        match svg_path_result {
+            Ok(svg_path) => {
+                info!(path = ?svg_path, "Rendering math from SVG file");
 
-                // Encode SVG as base64 data URI
-                use base64::engine::general_purpose::STANDARD;
-                use base64::Engine;
-                
-                let data_uri = format!(
-                    "data:image/svg+xml;base64,{}",
-                    STANDARD.encode(svg_data.as_bytes())
-                );
-
-                // Render using SVG data URI directly
+                // Render using SVG file path (NOT data URI)
                 if self.is_inline {
                     div()
                         .id(self.element_id.clone())
                         .flex()
                         .items_center()
                         .child(
-                            img(data_uri)
+                            img(svg_path)
                                 .h(px(20.))
+                                .object_fit(gpui::ObjectFit::Contain)
                         )
                 } else {
                     div()
@@ -65,9 +57,10 @@ impl RenderOnce for MathComponent {
                         .justify_center()
                         .my_3()
                         .child(
-                            img(data_uri)
+                            img(svg_path)
                                 .max_w(px(600.))
                                 .max_h(px(200.))
+                                .object_fit(gpui::ObjectFit::Contain)
                         )
                 }
             }
