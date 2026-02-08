@@ -119,6 +119,7 @@ impl MathRendererService {
         typst_code = typst_code.replace("mitexsqrt", "sqrt");
         typst_code = typst_code.replace("mitexmathbf", "bold");
         typst_code = typst_code.replace("tfrac", "frac");
+        typst_code = typst_code.replace("dfrac", "frac");
         typst_code = typst_code.replace("pmatrix", "mat");
         typst_code = typst_code.replace("aligned", "cases");  // Approximation for aligned environments
         

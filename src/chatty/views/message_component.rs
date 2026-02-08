@@ -3,6 +3,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
 use std::path::PathBuf;
 use tracing::{debug, info};
+use crate::chatty::services::MathRendererService;
 
 use super::math_parser::{MathSegment, parse_math_segments};
 use super::math_renderer::MathComponent;
@@ -82,20 +83,13 @@ impl RenderOnce for MarkdownContent {
 ///
 /// This function parses content for math expressions and renders them appropriately.
 /// Math expressions are rendered using MathComponent while regular text uses MarkdownContent.
-fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec<AnyElement> {
-    info!(content_len = content.len(), base_index, "render_math_aware_content called");
+fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
+
 
     // Parse for math segments
     let math_segments = parse_math_segments(content);
 
-    // Log what we found
-    for (idx, seg) in math_segments.iter().enumerate() {
-        match seg {
-            MathSegment::Text(t) => info!(idx, text_len = t.len(), "Text segment"),
-            MathSegment::InlineMath(m) => info!(idx, math = %m, "Inline math segment"),
-            MathSegment::BlockMath(m) => info!(idx, math = %m, "Block math segment"),
-        }
-    }
+
 
     let mut elements = Vec::new();
     let mut inline_row: Vec<AnyElement> = Vec::new();
@@ -119,9 +113,19 @@ fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec
             MathSegment::InlineMath(math_content) => {
                 // Add inline math to inline row
                 let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
-                inline_row.push(
-                    MathComponent::new(math_content.clone(), true, element_id).into_any_element(),
-                );
+                
+                // Pre-compute SVG path to avoid re-render loop
+                let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
+                    if let Ok(svg_path) = service.render_to_svg_file(math_content, true) {
+                        MathComponent::with_svg_path(math_content.clone(), true, element_id, svg_path)
+                    } else {
+                        MathComponent::new(math_content.clone(), true, element_id)
+                    }
+                } else {
+                    MathComponent::new(math_content.clone(), true, element_id)
+                };
+                
+                inline_row.push(math_elem.into_any_element());
             }
             MathSegment::BlockMath(math_content) => {
                 // Flush any pending inline content first
@@ -139,9 +143,19 @@ fn render_math_aware_content(content: &str, base_index: usize, _cx: &App) -> Vec
                 
                 // Render block math as its own element
                 let element_id = ElementId::Name(format!("math-block-{}", element_index).into());
-                elements.push(
-                    MathComponent::new(math_content.clone(), false, element_id).into_any_element(),
-                );
+                
+                // Pre-compute SVG path to avoid re-render loop
+                let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
+                    if let Ok(svg_path) = service.render_to_svg_file(math_content, false) {
+                        MathComponent::with_svg_path(math_content.clone(), false, element_id, svg_path)
+                    } else {
+                        MathComponent::new(math_content.clone(), false, element_id)
+                    }
+                } else {
+                    MathComponent::new(math_content.clone(), false, element_id)
+                };
+                
+                elements.push(math_elem.into_any_element());
             }
         }
     }
@@ -380,19 +394,14 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
 
     // Render content based on whether it's markdown (no thinking blocks found)
     // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
-    info!(
-        is_markdown = msg.is_markdown,
-        is_streaming = msg.is_streaming,
-        role = ?msg.role,
-        "Checking render conditions"
-    );
-    if msg.is_markdown && !msg.is_streaming && matches!(msg.role, MessageRole::Assistant) {
-        info!("Conditions met - calling render_math_aware_content");
+
+    if msg.is_markdown && !msg.is_streaming {
+
         // Parse for math expressions
         let math_aware_elements = render_math_aware_content(&msg.content, index, cx);
         container.children(math_aware_elements)
     } else {
-        info!("Conditions NOT met - using plain text");
+
         // Use plain text for streaming messages for better performance
         container.child(msg.content.clone())
     }
