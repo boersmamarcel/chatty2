@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "chatty"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -962,7 +962,9 @@ dependencies = [
  "image",
  "lazy_static",
  "mitex",
+ "once_cell",
  "pdfium-render",
+ "regex",
  "reqwest",
  "rig-core",
  "rust-embed",
@@ -970,6 +972,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syntect",
  "tar",
  "tempfile",
  "thiserror 1.0.69",
@@ -4742,6 +4745,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
+name = "onig"
+version = "6.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "336b9c63443aceef14bea841b899035ae3abe89b7c486aaf4c5bd8aafedac3f0"
+dependencies = [
+ "bitflags 2.10.0",
+ "libc",
+ "once_cell",
+ "onig_sys",
+]
+
+[[package]]
+name = "onig_sys"
+version = "69.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f86c6eef3d6df15f23bcfb6af487cbd2fed4e5581d58d5bf1f5f8b7f6727dc"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "oo7"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6910,6 +6935,7 @@ dependencies = [
  "flate2",
  "fnv",
  "once_cell",
+ "onig",
  "plist",
  "regex-syntax 0.8.8",
  "serde",

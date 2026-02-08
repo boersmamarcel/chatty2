@@ -1,20 +1,91 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
+use gpui_component::{Icon, Sizable};
+use gpui_component::button::{Button, ButtonVariants};
 use std::path::PathBuf;
 use tracing::debug;
 use crate::chatty::services::MathRendererService;
+use crate::assets::CustomIcon;
 
 use super::math_parser::{MathSegment, parse_math_segments};
 use super::math_renderer::MathComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::trace_components::SystemTraceView;
+use super::code_block_component::CodeBlockComponent;
 
 /// Message role indicator
 #[derive(Clone, Debug)]
 pub enum MessageRole {
     User,
     Assistant,
+}
+
+
+use regex::Regex;
+use lazy_static::lazy_static;
+
+/// Represents a segment of content - either text or a code block
+#[derive(Clone, Debug)]
+enum MarkdownSegment {
+    Text(String),
+    CodeBlock { language: Option<String>, code: String },
+}
+
+lazy_static! {
+    // Regex to match fenced code blocks: ```language\ncode\n```
+    static ref CODE_BLOCK_REGEX: Regex = Regex::new(
+        r"(?s)```([a-zA-Z0-9_+-]*)\n(.*?)\n```"
+    ).unwrap();
+}
+
+/// Parse markdown content into segments of text and code blocks
+fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut last_end = 0;
+
+    for cap in CODE_BLOCK_REGEX.captures_iter(content) {
+        let match_start = cap.get(0).unwrap().start();
+        let match_end = cap.get(0).unwrap().end();
+
+        // Add text before this code block
+        if match_start > last_end {
+            let text = content[last_end..match_start].to_string();
+            if !text.trim().is_empty() {
+                segments.push(MarkdownSegment::Text(text));
+            }
+        }
+
+        // Add the code block
+        let language = cap.get(1).map(|m| m.as_str().to_string());
+        let code = cap.get(2).unwrap().as_str().to_string();
+        
+        segments.push(MarkdownSegment::CodeBlock {
+            language: if language.as_ref().map_or(false, |l| !l.is_empty()) {
+                language
+            } else {
+                None
+            },
+            code,
+        });
+
+        last_end = match_end;
+    }
+
+    // Add remaining text after last code block
+    if last_end < content.len() {
+        let text = content[last_end..].to_string();
+        if !text.trim().is_empty() {
+            segments.push(MarkdownSegment::Text(text));
+        }
+    }
+
+    // If no segments were found, return the entire content as text
+    if segments.is_empty() {
+        segments.push(MarkdownSegment::Text(content.to_string()));
+    }
+
+    segments
 }
 
 /// Represents a parsed segment of message content
@@ -175,6 +246,46 @@ fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<
 
     elements
 }
+
+/// Render content with code block awareness, then math awareness
+/// 
+/// This function:
+/// 1. First parses for fenced code blocks (```)
+/// 2. Renders code blocks with copy buttons
+/// 3. For text segments, parses for math expressions
+fn render_content_with_code_blocks(
+    content: &str,
+    base_index: usize,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let markdown_segments = parse_markdown_segments(content);
+    let mut elements = Vec::new();
+    let mut code_block_index = 0;
+
+    for segment in markdown_segments {
+        match segment {
+            MarkdownSegment::CodeBlock { language, code } => {
+                // Render code block with copy button
+                let code_block = CodeBlockComponent::new(
+                    language, 
+                    code, 
+                    base_index * 100 + code_block_index
+                );
+                elements.push(code_block.into_any_element());
+                code_block_index += 1;
+            }
+            MarkdownSegment::Text(text) => {
+                // Parse text for math expressions
+                let math_elements = render_math_aware_content(&text, base_index, cx);
+                elements.extend(math_elements);
+            }
+        }
+    }
+
+    elements
+}
+
+
 /// Parse content to extract thinking blocks and regular text segments
 /// Supports <think>...</think> and <thinking>...</thinking> patterns
 fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
@@ -380,7 +491,7 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
                     ContentSegment::Text(text) => {
                         if msg.is_markdown && !msg.is_streaming {
                             // Parse this text segment for math
-                            render_math_aware_content(text, index * 100 + seg_idx, cx)
+                            render_content_with_code_blocks(text, index * 100 + seg_idx, cx)
                         } else {
                             vec![div().child(text.clone()).into_any_element()]
                         }
@@ -388,24 +499,79 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
                 })
                 .collect();
 
-            return container.children(children);
+            let message_with_content = container.children(children);
+            
+            // Wrap with copy button for assistant messages
+            return match msg.role {
+                MessageRole::Assistant => {
+                    div()
+                        .child(message_with_content)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .pt_2()
+                                .child(
+                                    Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(CustomIcon::Copy))
+                                        .tooltip("Copy message")
+                                        .on_click({
+                                            let content = msg.content.clone();
+                                            move |_event, _window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                                            }
+                                        })
+                                )
+                        )
+                        .into_any_element()
+                }
+                MessageRole::User => message_with_content.into_any_element(),
+            };
         }
     }
 
     // Render content based on whether it's markdown (no thinking blocks found)
     // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
 
-    if msg.is_markdown && !msg.is_streaming {
-
+    let final_container = if msg.is_markdown && !msg.is_streaming {
         // Parse for math expressions
-        let math_aware_elements = render_math_aware_content(&msg.content, index, cx);
-        container.children(math_aware_elements)
+        let content_elements = render_content_with_code_blocks(&msg.content, index, cx);
+        container.children(content_elements)
     } else {
-
         // Use plain text for streaming messages for better performance
         container.child(msg.content.clone())
+    };
+
+    // Wrap with copy button for assistant messages
+    match msg.role {
+        MessageRole::Assistant => {
+            div()
+                .child(final_container)
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .pt_2()
+                        .child(
+                            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(CustomIcon::Copy))
+                                .tooltip("Copy message")
+                                .on_click({
+                                    let content = msg.content.clone();
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                                    }
+                                })
+                        )
+                )
+                .into_any_element()
+        }
+        MessageRole::User => final_container.into_any_element(),
     }
 }
-
 
 
