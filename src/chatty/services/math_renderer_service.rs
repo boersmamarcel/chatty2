@@ -144,11 +144,11 @@ impl MathRendererService {
 
         // Wrap in Typst document template with minimal page size
         let doc_content = if is_inline {
-            format!("#set page(width: auto, height: auto, margin: 2pt)
+            format!("#set page(width: auto, height: auto, margin: (x: 4pt, y: 6pt))
 ${typst_code}$")
         } else {
             // Spaces around content make it display math
-            format!("#set page(width: auto, height: auto, margin: 5pt)
+            format!("#set page(width: auto, height: auto, margin: (x: 8pt, y: 10pt))
 $ {typst_code} $")
         };
 
@@ -242,7 +242,7 @@ $ {typst_code} $")
         }
     }
 
-    /// Strip width and height attributes from SVG to allow proper scaling
+    /// Strip width and height attributes from SVG and add proper scaling
     fn strip_svg_dimensions(&self, svg: &str) -> String {
         // Remove width="..." and height="..." attributes
         // Keep viewBox as it's needed for aspect ratio
@@ -266,6 +266,29 @@ $ {typst_code} $")
                 let quote_pos = height_start + height_end + 1;
                 if let Some(closing_quote) = result[quote_pos..].find('"') {
                     result.replace_range(height_start..quote_pos + closing_quote + 1, "");
+                }
+            }
+        }
+        
+        // Add width/height based on viewBox but scaled up 2x for better visibility
+        // Extract viewBox to calculate dimensions
+        if let Some(viewbox_start) = result.find(r#"viewBox=""#) {
+            let vb_start = viewbox_start + 9; // length of 'viewBox="'
+            if let Some(vb_end) = result[vb_start..].find('"') {
+                let viewbox = &result[vb_start..vb_start + vb_end];
+                let parts: Vec<&str> = viewbox.split_whitespace().collect();
+                if parts.len() == 4 {
+                    // viewBox format: "minX minY width height"
+                    if let (Ok(width), Ok(height)) = (parts[2].parse::<f64>(), parts[3].parse::<f64>()) {
+                        // Scale by 1.5x for better readability (matches typical font sizes)
+                        let scaled_width = width * 1.5;
+                        let scaled_height = height * 1.5;
+                        
+                        // Insert width and height attributes after viewBox
+                        let insert_pos = vb_start + vb_end + 1; // after closing quote of viewBox
+                        let size_attrs = format!(r#" width="{}pt" height="{}pt""#, scaled_width, scaled_height);
+                        result.insert_str(insert_pos, &size_attrs);
+                    }
                 }
             }
         }
