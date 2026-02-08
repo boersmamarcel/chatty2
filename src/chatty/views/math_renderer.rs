@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::ActiveTheme;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::chatty::services::MathRendererService;
 
@@ -140,7 +140,7 @@ impl RenderOnce for MathComponent {
                 }
             }
             Err(e) => {
-                warn!(error = ?e, content = %content_clone, "Failed to render math");
+                debug!(error = ?e, content = %content_clone, "Failed to render math");
                 render_fallback_static(&content_clone, is_inline, &element_id, cx, &format!("Math render error: {}", e))
             }
         }

@@ -141,7 +141,7 @@ impl MathRendererService {
             }
         }
 
-        info!(typst_code = %typst_code, "MiTeX converted LaTeX to Typst (after fixes)");
+        debug!(typst_code = %typst_code, "MiTeX converted LaTeX to Typst (after fixes)");
 
         // Wrap in Typst document template with minimal page size
         let doc_content = if is_inline {

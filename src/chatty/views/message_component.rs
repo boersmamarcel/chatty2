@@ -2,7 +2,7 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::debug;
 use crate::chatty::services::MathRendererService;
 
 use super::math_parser::{MathSegment, parse_math_segments};
@@ -357,7 +357,7 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
     if matches!(msg.role, MessageRole::Assistant) {
         let segments = parse_content_segments(&msg.content);
 
-        info!(
+        debug!(
             content_len = msg.content.len(),
             segments_count = segments.len(),
             has_thinking = segments.iter().any(|s| matches!(s, ContentSegment::Thinking(_))),
