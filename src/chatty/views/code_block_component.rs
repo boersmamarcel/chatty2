@@ -3,7 +3,14 @@ use gpui_component::ActiveTheme;
 use gpui_component::{Icon, Sizable};
 use gpui_component::button::{Button, ButtonVariants};
 use crate::assets::CustomIcon;
-use super::syntax_highlighter;
+use super::syntax_highlighter::{self, HighlightedSpan};
+use once_cell::sync::Lazy;
+use std::sync::RwLock;
+use std::collections::HashMap;
+
+// Global cache for highlighted code spans
+type HighlightCache = HashMap<(String, Option<String>), Vec<HighlightedSpan>>;
+static HIGHLIGHT_CACHE: Lazy<RwLock<HighlightCache>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// A code block component with syntax highlighting and a copy button
 #[derive(IntoElement, Clone)]
@@ -21,6 +28,32 @@ impl CodeBlockComponent {
             block_index,
         }
     }
+    
+    /// Get highlighted spans from cache or compute them
+    fn get_highlighted_spans(&self, cx: &App) -> Vec<HighlightedSpan> {
+        let cache_key = (self.code.clone(), self.language.clone());
+        
+        // Try to get from cache first
+        if let Ok(cache) = HIGHLIGHT_CACHE.read() {
+            if let Some(cached_spans) = cache.get(&cache_key) {
+                return cached_spans.clone();
+            }
+        }
+        
+        // Cache miss - compute highlights
+        let spans = syntax_highlighter::highlight_code(
+            &self.code,
+            self.language.as_deref(),
+            cx,
+        );
+        
+        // Store in cache
+        if let Ok(mut cache) = HIGHLIGHT_CACHE.write() {
+            cache.insert(cache_key, spans.clone());
+        }
+        
+        spans
+    }
 }
 
 impl RenderOnce for CodeBlockComponent {
@@ -28,12 +61,8 @@ impl RenderOnce for CodeBlockComponent {
         let bg_color = cx.theme().muted;
         let border_color = cx.theme().border;
 
-        // Highlight the code using syntect
-        let highlighted_spans = syntax_highlighter::highlight_code(
-            &self.code,
-            self.language.as_deref(),
-            cx,
-        );
+        // Get highlighted spans (cached or computed)
+        let highlighted_spans = self.get_highlighted_spans(cx);
 
         div()
             .relative() // For absolute positioning of copy button
@@ -89,10 +118,10 @@ impl RenderOnce for CodeBlockComponent {
 }
 
 impl CodeBlockComponent {
-    /// Render highlighted spans as lines
-    fn render_lines(&self, spans: Vec<syntax_highlighter::HighlightedSpan>) -> Vec<Div> {
+    /// Render highlighted spans as lines (Phase 2: simplified DOM structure)
+    fn render_lines(&self, spans: Vec<HighlightedSpan>) -> Vec<Div> {
         let mut lines = Vec::new();
-        let mut current_line = Vec::new();
+        let mut current_line_parts: Vec<(String, Hsla)> = Vec::new();
         
         for span in spans {
             // Split span by newlines
@@ -100,35 +129,42 @@ impl CodeBlockComponent {
             
             for (i, part) in parts.iter().enumerate() {
                 if i > 0 {
-                    // We hit a newline, push current line and start new one
-                    lines.push(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .children(current_line.drain(..).collect::<Vec<_>>())
-                    );
+                    // We hit a newline - flush current line
+                    if !current_line_parts.is_empty() {
+                        lines.push(self.render_single_line(current_line_parts.drain(..).collect()));
+                    } else {
+                        // Empty line - still need a div for spacing
+                        lines.push(div().flex().flex_row().child(""));
+                    }
                 }
                 
                 if !part.is_empty() {
-                    current_line.push(
-                        div()
-                            .text_color(span.color)
-                            .child(part.to_string())
-                    );
+                    current_line_parts.push((part.to_string(), span.color));
                 }
             }
         }
         
         // Push final line if any
-        if !current_line.is_empty() {
-            lines.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .children(current_line)
-            );
+        if !current_line_parts.is_empty() {
+            lines.push(self.render_single_line(current_line_parts));
         }
         
         lines
+    }
+    
+    /// Render a single line with multiple colored parts
+    /// Phase 2 optimization: combine adjacent parts into fewer elements
+    fn render_single_line(&self, parts: Vec<(String, Hsla)>) -> Div {
+        let mut line = div().flex().flex_row();
+        
+        for (text, color) in parts {
+            line = line.child(
+                div()
+                    .text_color(color)
+                    .child(text)
+            );
+        }
+        
+        line
     }
 }
