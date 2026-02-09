@@ -1,4 +1,3 @@
-use crate::settings::utils::theme_utils::get_syntect_theme_name;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use once_cell::sync::Lazy;
@@ -49,6 +48,15 @@ fn syntect_color_to_hsla(color: syntect::highlighting::Color) -> Hsla {
 }
 
 /// Highlight code and return a vector of styled spans
+/// Get the appropriate syntect theme based on GPUI's current theme mode
+fn get_syntect_theme_name(cx: &App) -> &'static str {
+    if cx.theme().mode.is_dark() {
+        "Solarized (dark)"
+    } else {
+        "Solarized (light)"
+    }
+}
+
 pub fn highlight_code(code: &str, language: Option<&str>, cx: &App) -> Vec<HighlightedSpan> {
     let mut spans = Vec::new();
 

@@ -27,3 +27,10 @@ TEST_SUMMARY.md
 
 # Inspiration/reference code (should be external)
 /inspiration/
+
+# Backup files
+*.bak
+*.bak[0-9]
+*.backup
+*.backup[0-9]
+*.old

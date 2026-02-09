@@ -1,5 +1,5 @@
 use gpui::{App, SharedString};
-use gpui_component::{ActiveTheme, ThemeRegistry};
+use gpui_component::ThemeRegistry;
 use std::collections::HashSet;
 
 /// Extract the base theme name by removing " Light" or " Dark" suffixes.
@@ -61,14 +61,4 @@ pub fn get_all_base_theme_names(cx: &App) -> Vec<(SharedString, SharedString)> {
 
     theme_options.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
     theme_options
-}
-
-/// Get the appropriate syntect theme name based on GPUI's current theme mode.
-/// Returns a theme name that syntect can use for syntax highlighting.
-pub fn get_syntect_theme_name(cx: &App) -> &'static str {
-    if cx.theme().mode.is_dark() {
-        "Solarized (dark)"
-    } else {
-        "Solarized (light)"
-    }
 }

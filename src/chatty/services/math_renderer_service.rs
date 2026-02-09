@@ -369,6 +369,14 @@ $ {typst_code} $")
         Ok(svg_data)
     }
 
+    /// Clear the math rendering cache (tested in tests::test_clear_cache)
+    #[allow(dead_code)]
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
+    }
+
     /// Strip width and height attributes from SVG and add proper scaling
     fn strip_svg_dimensions(&self, svg: &str) -> String {
         // Remove width="..." and height="..." attributes
@@ -469,5 +477,70 @@ $ {typst_code} $")
         }
 
         Ok(())
+    }
+
+    /// Get the number of cached items (tested in tests::test_cache_*)
+    #[allow(dead_code)]
+    pub fn cache_size(&self) -> usize {
+        self.cache.lock().map(|c| c.len()).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_starts_empty() {
+        let service = MathRendererService::new();
+        assert_eq!(service.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_cache_populates_after_render() {
+        let service = MathRendererService::new();
+        service.render_to_svg("x^2", true).unwrap();
+        assert_eq!(service.cache_size(), 1);
+    }
+
+    #[test]
+    fn test_cache_deduplicates_same_input() {
+        let service = MathRendererService::new();
+        service.render_to_svg("x^2", true).unwrap();
+        service.render_to_svg("x^2", true).unwrap();
+        assert_eq!(service.cache_size(), 1);
+    }
+
+    #[test]
+    fn test_cache_distinguishes_inline_vs_block() {
+        let service = MathRendererService::new();
+        service.render_to_svg("x^2", true).unwrap();
+        service.render_to_svg("x^2", false).unwrap();
+        assert_eq!(service.cache_size(), 2);
+    }
+
+    #[test]
+    fn test_clear_cache() {
+        let service = MathRendererService::new();
+        service.render_to_svg("x^2", true).unwrap();
+        service.render_to_svg("y^2", false).unwrap();
+        assert_eq!(service.cache_size(), 2);
+
+        service.clear_cache();
+        assert_eq!(service.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_render_simple_inline_math() {
+        let service = MathRendererService::new();
+        let svg = service.render_to_svg("x^2 + y^2", true).unwrap();
+        assert!(svg.contains("<svg"), "Output should be SVG");
+    }
+
+    #[test]
+    fn test_render_block_math() {
+        let service = MathRendererService::new();
+        let svg = service.render_to_svg("\\frac{a}{b}", false).unwrap();
+        assert!(svg.contains("<svg"), "Output should be SVG");
     }
 }
