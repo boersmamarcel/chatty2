@@ -1,3 +1,4 @@
+use crate::settings::utils::theme_utils::get_syntect_theme_name;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use once_cell::sync::Lazy;
@@ -5,7 +6,6 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-use crate::settings::utils::theme_utils::get_syntect_theme_name;
 
 /// Global syntax set for language definitions (initialized once)
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);

@@ -90,7 +90,7 @@ impl CodeBlockComponent {
                         div()
                             .flex()
                             .flex_row()
-                            .children(current_line.drain(..).collect::<Vec<_>>()),
+                            .children(std::mem::take(&mut current_line)),
                     );
                 }
 

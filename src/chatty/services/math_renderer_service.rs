@@ -107,10 +107,12 @@ impl MathRendererService {
 
         // Pattern 1: \operatorname{name} or operatorname{name}
         let re1 = Regex::new(r"\\?operatorname\{([^}]+)\}").unwrap();
-        result = re1.replace_all(&result, |caps: &regex::Captures| {
-            let name = &caps[1];
-            format!(r#"op("{}")"#, name)
-        }).to_string();
+        result = re1
+            .replace_all(&result, |caps: &regex::Captures| {
+                let name = &caps[1];
+                format!(r#"op("{}")"#, name)
+            })
+            .to_string();
 
         // Pattern 2: Plain "operatorname" keyword (MiTeX might strip backslash and braces)
         result = result.replace("operatorname", "op");
@@ -325,11 +327,15 @@ $ {typst_code} $")
 
         // Replace fill="#000000" or fill="#000" with theme color
         let fill_black_regex = Regex::new(r##"fill="#000000?""##).unwrap();
-        themed_svg = fill_black_regex.replace_all(&themed_svg, format!(r#"fill="{}""#, hex_color).as_str()).to_string();
+        themed_svg = fill_black_regex
+            .replace_all(&themed_svg, format!(r#"fill="{}""#, hex_color).as_str())
+            .to_string();
 
         // Replace stroke="#000000" or stroke="#000" with theme color
         let stroke_black_regex = Regex::new(r##"stroke="#000000?""##).unwrap();
-        themed_svg = stroke_black_regex.replace_all(&themed_svg, format!(r#"stroke="{}""#, hex_color).as_str()).to_string();
+        themed_svg = stroke_black_regex
+            .replace_all(&themed_svg, format!(r#"stroke="{}""#, hex_color).as_str())
+            .to_string();
 
         // Return the themed SVG with replaced colors
         themed_svg
@@ -361,13 +367,6 @@ $ {typst_code} $")
         let svg_data = typst_svg::svg_frame(&document.pages[0].frame);
 
         Ok(svg_data)
-    }
-
-    /// Clear the math rendering cache
-    pub fn clear_cache(&self) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.clear();
-        }
     }
 
     /// Strip width and height attributes from SVG and add proper scaling
@@ -470,10 +469,5 @@ $ {typst_code} $")
         }
 
         Ok(())
-    }
-
-    /// Get the number of cached items
-    pub fn cache_size(&self) -> usize {
-        self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }
 }

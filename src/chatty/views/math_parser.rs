@@ -146,10 +146,7 @@ fn extract_environment_name(chars: &[char], start_pos: usize) -> Option<(String,
 }
 
 /// Parse LaTeX environment: \begin{env}...\end{env}
-fn parse_latex_environment(
-    chars: &[char],
-    start_pos: usize,
-) -> Option<(String, usize)> {
+fn parse_latex_environment(chars: &[char], start_pos: usize) -> Option<(String, usize)> {
     // start_pos should point to '\' in \begin
     if start_pos + 7 >= chars.len() {
         return None;
@@ -220,18 +217,17 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
             && chars[i] == '\\'
             && chars[i + 1..i + 6] == ['b', 'e', 'g', 'i', 'n']
             && chars[i + 6] == '{'
+            && let Some((env_content, new_pos)) = parse_latex_environment(&chars, i)
         {
-            if let Some((env_content, new_pos)) = parse_latex_environment(&chars, i) {
-                // Save any accumulated text
-                if !current_text.is_empty() {
-                    segments.push(MathSegment::Text(current_text.clone()));
-                    current_text.clear();
-                }
-
-                segments.push(MathSegment::BlockMath(env_content));
-                i = new_pos;
-                continue;
+            // Save any accumulated text
+            if !current_text.is_empty() {
+                segments.push(MathSegment::Text(current_text.clone()));
+                current_text.clear();
             }
+
+            segments.push(MathSegment::BlockMath(env_content));
+            i = new_pos;
+            continue;
         }
 
         // Check for LaTeX display math: \[
@@ -512,9 +508,11 @@ mod tests {
         let input = "Consider: $$\nx^2 + y^2 = z^2\n$$";
         let segments = parse_math_segments(input);
         // Should recognize as block math despite intro text (has newlines)
-        assert!(segments
-            .iter()
-            .any(|s| matches!(s, MathSegment::BlockMath(_))));
+        assert!(
+            segments
+                .iter()
+                .any(|s| matches!(s, MathSegment::BlockMath(_)))
+        );
     }
 
     #[test]
@@ -550,10 +548,16 @@ mod tests {
         // Test that all existing delimiter patterns work correctly
         let input = "Inline $x$ and \\(y\\) and block\n$$z$$\nand \\[w\\] and ```math\na\n```";
         let segments = parse_math_segments(input);
-        
-        let inline_count = segments.iter().filter(|s| matches!(s, MathSegment::InlineMath(_))).count();
-        let block_count = segments.iter().filter(|s| matches!(s, MathSegment::BlockMath(_))).count();
-        
+
+        let inline_count = segments
+            .iter()
+            .filter(|s| matches!(s, MathSegment::InlineMath(_)))
+            .count();
+        let block_count = segments
+            .iter()
+            .filter(|s| matches!(s, MathSegment::BlockMath(_)))
+            .count();
+
         // Inline: $x$ and \(y\) = 2
         // Block: $$z$$ (has newlines), \[w\], ```math = 3
         assert_eq!(inline_count, 2);

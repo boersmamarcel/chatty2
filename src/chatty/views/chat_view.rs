@@ -589,9 +589,7 @@ impl Render for ChatView {
                                                 // Skip empty streaming messages (we show skeleton instead)
                                                 !(msg.is_streaming && msg.content.is_empty())
                                             })
-                                            .map(|(index, msg)| {
-                                                render_message(msg, index, cx)
-                                            }),
+                                            .map(|(index, msg)| render_message(msg, index, cx)),
                                     )
                                     .when(is_awaiting, |this| {
                                         this.child(self.render_loading_skeleton())

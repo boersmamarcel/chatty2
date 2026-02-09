@@ -450,12 +450,7 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         }))
 }
 
-
-pub fn render_message(
-    msg: &DisplayMessage,
-    index: usize,
-    cx: &App,
-) -> AnyElement {
+pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElement {
     // If not in viewport window, render lightweight placeholder
     // Full render for messages in viewport
     let mut container = div()
