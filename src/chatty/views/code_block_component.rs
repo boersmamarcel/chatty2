@@ -1,3 +1,4 @@
+use super::line_splitter::split_spans_into_lines;
 use super::syntax_highlighter;
 use crate::assets::CustomIcon;
 use gpui::*;
@@ -76,35 +77,16 @@ impl RenderOnce for CodeBlockComponent {
 impl CodeBlockComponent {
     /// Render highlighted spans as lines
     fn render_lines(&self, spans: Vec<syntax_highlighter::HighlightedSpan>) -> Vec<Div> {
-        let mut lines = Vec::new();
-        let mut current_line = Vec::new();
-
-        for span in spans {
-            // Split span by newlines
-            let parts: Vec<&str> = span.text.split('\n').collect();
-
-            for (i, part) in parts.iter().enumerate() {
-                if i > 0 {
-                    // We hit a newline, push current line and start new one
-                    lines.push(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .children(current_line.drain(..).collect::<Vec<_>>()),
-                    );
-                }
-
-                if !part.is_empty() {
-                    current_line.push(div().text_color(span.color).child(part.to_string()));
-                }
-            }
-        }
-
-        // Push final line if any
-        if !current_line.is_empty() {
-            lines.push(div().flex().flex_row().children(current_line));
-        }
-
-        lines
+        split_spans_into_lines(spans)
+            .into_iter()
+            .map(|line_spans| {
+                div().flex().flex_row().children(
+                    line_spans
+                        .into_iter()
+                        .map(|ls| div().text_color(ls.color).child(ls.text))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect()
     }
 }
