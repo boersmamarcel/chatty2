@@ -1,9 +1,16 @@
+use crate::assets::CustomIcon;
+use crate::chatty::services::MathRendererService;
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::text::TextView;
+use gpui_component::{Icon, Sizable};
 use std::path::PathBuf;
-use tracing::debug;
+use tracing::{debug, warn};
 
+use super::code_block_component::CodeBlockComponent;
+use super::math_parser::{MathSegment, parse_math_segments};
+use super::math_renderer::MathComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::trace_components::SystemTraceView;
 
@@ -12,6 +19,80 @@ use super::trace_components::SystemTraceView;
 pub enum MessageRole {
     User,
     Assistant,
+}
+
+use lazy_static::lazy_static;
+use regex::Regex;
+
+/// Represents a segment of content - either text or a code block
+#[derive(Clone, Debug)]
+enum MarkdownSegment {
+    Text(String),
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
+}
+
+lazy_static! {
+    // Regex to match fenced code blocks: ```language\ncode\n```
+    static ref CODE_BLOCK_REGEX: Regex = Regex::new(
+        r"(?s)```([a-zA-Z0-9_+-]*)
+(.*?)
+```"
+    ).expect("CODE_BLOCK_REGEX pattern is valid");
+}
+
+/// Parse markdown content into segments of text and code blocks
+fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut last_end = 0;
+
+    for cap in CODE_BLOCK_REGEX.captures_iter(content) {
+        let match_start = cap.get(0).unwrap().start();
+        let match_end = cap.get(0).unwrap().end();
+
+        // Add text before this code block
+        if match_start > last_end {
+            let text = content[last_end..match_start].to_string();
+            if !text.trim().is_empty() {
+                segments.push(MarkdownSegment::Text(text));
+            }
+        }
+
+        // Add the code block
+        let language = cap.get(1).map(|m| m.as_str().to_string());
+        let code = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+
+        segments.push(MarkdownSegment::CodeBlock {
+            language: if language.as_ref().is_some_and(|l| !l.is_empty()) {
+                language
+            } else {
+                None
+            },
+            code,
+        });
+
+        last_end = match_end;
+    }
+
+    // Add remaining text after last code block
+    if last_end < content.len() {
+        let text = content[last_end..].to_string();
+        if !text.trim().is_empty() {
+            segments.push(MarkdownSegment::Text(text));
+        }
+    }
+
+    // If no segments were found, return the entire content as text
+    if segments.is_empty() {
+        segments.push(MarkdownSegment::Text(content.to_string()));
+    }
+
+    segments
 }
 
 /// Represents a parsed segment of message content
@@ -74,6 +155,145 @@ impl RenderOnce for MarkdownContent {
 
         TextView::markdown(id, self.content, window, cx).selectable(true)
     }
+}
+
+/// Render content with math awareness
+///
+/// This function parses content for math expressions and renders them appropriately.
+/// Math expressions are rendered using MathComponent while regular text uses MarkdownContent.
+fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
+    // Parse for math segments
+    let math_segments = parse_math_segments(content);
+
+    let mut elements = Vec::new();
+    let mut inline_row: Vec<AnyElement> = Vec::new();
+    for (seg_idx, segment) in math_segments.iter().enumerate() {
+        let element_index = base_index * 1000 + seg_idx;
+
+        match segment {
+            MathSegment::Text(text) => {
+                // Add text to inline row
+                inline_row.push(
+                    MarkdownContent {
+                        content: text.clone(),
+                        message_index: element_index,
+                    }
+                    .into_any_element(),
+                );
+            }
+            MathSegment::InlineMath(math_content) => {
+                // Add inline math to inline row
+                let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
+
+                // Pre-compute styled SVG path with theme color
+                let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
+                    let theme_color = cx.theme().foreground;
+                    match service.render_to_styled_svg_file(math_content, true, theme_color) {
+                        Ok(svg_path) => MathComponent::with_svg_path(
+                            math_content.clone(),
+                            true,
+                            element_id,
+                            svg_path,
+                        ),
+                        Err(e) => {
+                            warn!(error = ?e, content = %math_content, is_inline = true, "Failed to pre-render inline math");
+                            MathComponent::new(math_content.clone(), true, element_id)
+                        }
+                    }
+                } else {
+                    warn!(content = %math_content, "Math renderer service unavailable for inline math");
+                    MathComponent::new(math_content.clone(), true, element_id)
+                };
+
+                inline_row.push(math_elem.into_any_element());
+            }
+            MathSegment::BlockMath(math_content) => {
+                // Flush any pending inline content first
+                if !inline_row.is_empty() {
+                    elements.push(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .children(inline_row.drain(..))
+                            .into_any_element(),
+                    );
+                }
+
+                // Render block math as its own element
+                let element_id = ElementId::Name(format!("math-block-{}", element_index).into());
+
+                // Pre-compute styled SVG path with theme color
+                let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
+                    let theme_color = cx.theme().foreground;
+                    match service.render_to_styled_svg_file(math_content, false, theme_color) {
+                        Ok(svg_path) => MathComponent::with_svg_path(
+                            math_content.clone(),
+                            false,
+                            element_id,
+                            svg_path,
+                        ),
+                        Err(e) => {
+                            warn!(error = ?e, content = %math_content, is_inline = false, "Failed to pre-render block math");
+                            MathComponent::new(math_content.clone(), false, element_id)
+                        }
+                    }
+                } else {
+                    warn!(content = %math_content, "Math renderer service unavailable for block math");
+                    MathComponent::new(math_content.clone(), false, element_id)
+                };
+
+                elements.push(math_elem.into_any_element());
+            }
+        }
+    }
+
+    // Flush any remaining inline content
+    if !inline_row.is_empty() {
+        elements.push(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .children(inline_row)
+                .into_any_element(),
+        );
+    }
+
+    elements
+}
+
+/// Render content with code block awareness, then math awareness
+///
+/// This function:
+/// 1. First parses for fenced code blocks (```)
+/// 2. Renders code blocks with copy buttons
+/// 3. For text segments, parses for math expressions
+fn render_content_with_code_blocks(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
+    let markdown_segments = parse_markdown_segments(content);
+    let mut elements = Vec::new();
+    let mut code_block_index = 0;
+
+    for segment in markdown_segments {
+        match segment {
+            MarkdownSegment::CodeBlock { language, code } => {
+                // Render code block with copy button
+                let code_block =
+                    CodeBlockComponent::new(language, code, base_index * 100 + code_block_index);
+                elements.push(code_block.into_any_element());
+                code_block_index += 1;
+            }
+            MarkdownSegment::Text(text) => {
+                // Parse text for math expressions
+                let math_elements = render_math_aware_content(&text, base_index, cx);
+                elements.extend(math_elements);
+            }
+        }
+    }
+
+    elements
 }
 
 /// Parse content to extract thinking blocks and regular text segments
@@ -230,8 +450,9 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         }))
 }
 
-/// Render a message in the chat view
-pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl IntoElement {
+pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElement {
+    // If not in viewport window, render lightweight placeholder
+    // Full render for messages in viewport
     let mut container = div()
         .max_w(relative(1.)) // Max 100% of container width
         .p_3()
@@ -274,37 +495,90 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> impl Into
             let children: Vec<AnyElement> = segments
                 .iter()
                 .enumerate()
-                .map(|(seg_idx, segment)| match segment {
+                .flat_map(|(seg_idx, segment)| match segment {
                     ContentSegment::Thinking(content) => {
-                        render_thinking_block(content, index, seg_idx, cx).into_any_element()
+                        vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
                     }
                     ContentSegment::Text(text) => {
                         if msg.is_markdown && !msg.is_streaming {
-                            MarkdownContent {
-                                content: text.clone(),
-                                message_index: index * 100 + seg_idx,
-                            }
-                            .into_any_element()
+                            // Parse this text segment for math
+                            render_content_with_code_blocks(text, index * 100 + seg_idx, cx)
                         } else {
-                            div().child(text.clone()).into_any_element()
+                            vec![div().child(text.clone()).into_any_element()]
                         }
                     }
                 })
                 .collect();
 
-            return container.children(children);
+            let message_with_content = container.children(children);
+
+            // Wrap with copy button for assistant messages
+            return match msg.role {
+                MessageRole::Assistant => div()
+                    .child(message_with_content)
+                    .child(
+                        div().flex().justify_end().pt_2().child(
+                            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(CustomIcon::Copy))
+                                .tooltip("Copy message")
+                                .on_click({
+                                    let content = msg.content.clone();
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            content.clone(),
+                                        ));
+                                    }
+                                }),
+                        ),
+                    )
+                    .into_any_element(),
+                MessageRole::User => message_with_content.into_any_element(),
+            };
         }
     }
 
     // Render content based on whether it's markdown (no thinking blocks found)
     // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
-    if msg.is_markdown && !msg.is_streaming && matches!(msg.role, MessageRole::Assistant) {
-        container.child(MarkdownContent {
-            content: msg.content.clone(),
-            message_index: index,
-        })
+
+    debug!(
+        index = index,
+        is_markdown = msg.is_markdown,
+        is_streaming = msg.is_streaming,
+        content_len = msg.content.len(),
+        "render_message: deciding markdown path"
+    );
+
+    let final_container = if msg.is_markdown && !msg.is_streaming {
+        // Parse for math expressions
+        let content_elements = render_content_with_code_blocks(&msg.content, index, cx);
+        container.children(content_elements)
     } else {
         // Use plain text for streaming messages for better performance
         container.child(msg.content.clone())
+    };
+
+    // Wrap with copy button for assistant messages
+    match msg.role {
+        MessageRole::Assistant => div()
+            .child(final_container)
+            .child(
+                div().flex().justify_end().pt_2().child(
+                    Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(CustomIcon::Copy))
+                        .tooltip("Copy message")
+                        .on_click({
+                            let content = msg.content.clone();
+                            move |_event, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                            }
+                        }),
+                ),
+            )
+            .into_any_element(),
+        MessageRole::User => final_container.into_any_element(),
     }
 }

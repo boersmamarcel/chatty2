@@ -98,7 +98,7 @@ impl ChatView {
             is_streaming: false,
             system_trace_view: None,
             live_trace: None,
-            is_markdown: false,
+            is_markdown: true,
             attachments,
         });
 
@@ -450,7 +450,7 @@ impl ChatView {
                             is_streaming: false,
                             system_trace_view: None,
                             live_trace: None,
-                            is_markdown: false,
+                            is_markdown: true,
                             attachments,
                         });
                     }

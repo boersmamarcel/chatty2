@@ -1,6 +1,6 @@
 [package]
 name = "chatty"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 
 [dependencies]
@@ -20,6 +20,7 @@ uuid = { version = "1.0", features = ["v4"] }
 # Chat functionality dependencies
 futures = "0.3"
 anyhow = "1.0"
+regex = "1.10"
 base64 = "0.22"
 async-stream = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -42,6 +43,17 @@ rust-embed = "8.0"
 # pdf and image upload
 pdfium-render = "0.8"
 image = "0.25"
+
+# Math rendering with Typst
+typst = "0.14"
+typst-svg = "0.14"
+mitex = "0.2"
+typst-assets = { version = "0.14", features = ["fonts"] }
+comemo = "0.4"
+
+# Syntax highlighting
+syntect = "5.3"
+once_cell = "1.19"
 
 [build-dependencies]
 # Windows icon embedding

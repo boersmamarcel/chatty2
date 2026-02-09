@@ -87,6 +87,13 @@ sudo apt-get install -y \
 - **Global State**: Uses GPUI's global state system (`cx.set_global`, `cx.global`) for app-wide state like providers, models, and settings.
 - **Async Loading**: Providers, models, and settings are loaded asynchronously to avoid blocking the UI during startup.
 - **Theme System**: Themes are loaded from `./themes` directory. User preferences (theme name + dark mode) are persisted to JSON.
+- **Math Cache**: LaTeX math expressions are compiled to SVG using Typst and cached in platform-specific directories:
+  - **macOS**: `~/Library/Application Support/chatty/math_cache/`
+  - **Linux**: `~/.local/share/chatty/math_cache/` or `$XDG_DATA_HOME/chatty/math_cache/`
+  - **Windows**: `%APPDATA%\chatty\math_cache\`
+  - Base SVGs (`{hash}.svg`) are cached indefinitely for reuse
+  - Styled SVGs (`{hash}.styled.{color_hash}.svg`) are theme-specific variants that are cleaned up on app restart
+  - The `inject_svg_color()` method strips inline color attributes and injects CSS to apply theme colors
 
 ## CI/CD
 
