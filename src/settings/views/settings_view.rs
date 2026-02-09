@@ -3,6 +3,7 @@ use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
+use crate::settings::views::mcp_tools_page::mcp_tools_page;
 
 use gpui::*;
 
@@ -163,6 +164,7 @@ impl Render for SettingsView {
                             )]),
                     ]),
                 providers_page(),
+                mcp_tools_page(),
             ]))
             .children(dialog_layer)
     }

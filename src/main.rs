@@ -16,7 +16,7 @@ use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
     GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
-    JsonModelsRepository, ModelsRepository, ProviderRepository,
+    JsonModelsRepository, JsonMcpRepository, McpRepository, ModelsRepository, ProviderRepository,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +46,12 @@ lazy_static::lazy_static! {
     static ref MODELS_REPOSITORY: Arc<dyn ModelsRepository> = {
         let repo = JsonModelsRepository::new()
             .expect("Failed to initialize models repository");
+        Arc::new(repo)
+    };
+
+    static ref MCP_REPOSITORY: Arc<dyn McpRepository> = {
+        let repo = JsonMcpRepository::new()
+            .expect("Failed to initialize MCP repository");
         Arc::new(repo)
     };
 }
@@ -205,6 +211,16 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx: &mut App| {
         debug!("Quit action triggered");
         chatty::services::cleanup_thumbnails();
+        
+        // Shutdown all MCP servers
+        let mcp_service = cx.global::<chatty::services::McpService>().clone();
+        cx.spawn(|_cx: &mut AsyncApp| async move {
+            if let Err(e) = mcp_service.stop_all().await {
+                error!(error = ?e, "Failed to stop MCP servers during shutdown");
+            }
+        })
+        .detach();
+        
         cx.quit();
     });
     cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
@@ -303,6 +319,9 @@ fn main() {
         // Initialize models model with empty state - will be populated async
         cx.set_global(settings::models::ModelsModel::new());
 
+        // Initialize MCP servers model with empty state - will be populated async
+        cx.set_global(settings::models::McpServersModel::new());
+
         // Initialize models notifier entity for event subscriptions
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
         cx.set_global(settings::models::GlobalModelsNotifier {
@@ -330,6 +349,11 @@ fn main() {
         if let Err(e) = chatty::services::MathRendererService::cleanup_old_styled_svgs() {
             warn!(error = ?e, "Failed to cleanup old math SVG files");
         }
+        // Initialize MCP service for managing MCP server connections
+        let mcp_service = chatty::services::McpService::new();
+        cx.set_global(mcp_service);
+        info!("MCP service initialized");
+
 
         // Use Arc<AtomicBool> to track when both providers and models are loaded
 
@@ -475,6 +499,37 @@ fn main() {
                 }
                 Err(e) => {
                     error!(error = ?e, "Failed to load models");
+                }
+            }
+        })
+        .detach();
+
+        // Load MCP server configurations asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = MCP_REPOSITORY.clone();
+            match repo.load_all().await {
+                Ok(servers) => {
+                    let servers_clone = servers.clone();
+                    cx.update(|cx| {
+                        cx.update_global::<settings::models::McpServersModel, _>(|model, _cx| {
+                            model.replace_all(servers);
+                        });
+                        info!("MCP server configurations loaded");
+                        
+                        // Start all enabled MCP servers
+                        let mcp_service = cx.global::<chatty::services::McpService>().clone();
+                        cx.spawn(|_cx: &mut AsyncApp| async move {
+                            if let Err(e) = mcp_service.start_all(servers_clone).await {
+                                error!(error = ?e, "Failed to start MCP servers");
+                            }
+                        })
+                        .detach();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global MCP servers after load"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load MCP server configurations");
                 }
             }
         })

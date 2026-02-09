@@ -21,6 +21,15 @@ impl AgentClient {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
     ) -> Result<Self> {
+        Self::from_model_config_with_tools(model_config, provider_config, None).await
+    }
+
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools
+    pub async fn from_model_config_with_tools(
+        model_config: &ModelConfig,
+        provider_config: &ProviderConfig,
+        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+    ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
 
@@ -39,7 +48,29 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                Ok(AgentClient::Anthropic(builder.build()))
+                // Add MCP tools if available and build
+                let agent = if let Some(tools_list) = mcp_tools {
+                    // Combine all tools from all servers
+                    let mut all_tools = Vec::new();
+                    let mut server_sink = None;
+                    
+                    for (tools, sink) in tools_list {
+                        all_tools.extend(tools);
+                        if server_sink.is_none() {
+                            server_sink = Some(sink);
+                        }
+                    }
+                    
+                    if !all_tools.is_empty() && server_sink.is_some() {
+                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    } else {
+                        builder.build()
+                    }
+                } else {
+                    builder.build()
+                };
+
+                Ok(AgentClient::Anthropic(agent))
             }
             ProviderType::OpenAI => {
                 let key =
@@ -55,19 +86,61 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
-                Ok(AgentClient::OpenAI(builder.build()))
+                // Add MCP tools if available and build
+                let agent = if let Some(tools_list) = mcp_tools {
+                    let mut all_tools = Vec::new();
+                    let mut server_sink = None;
+                    
+                    for (tools, sink) in tools_list {
+                        all_tools.extend(tools);
+                        if server_sink.is_none() {
+                            server_sink = Some(sink);
+                        }
+                    }
+                    
+                    if !all_tools.is_empty() && server_sink.is_some() {
+                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    } else {
+                        builder.build()
+                    }
+                } else {
+                    builder.build()
+                };
+
+                Ok(AgentClient::OpenAI(agent))
             }
             ProviderType::Gemini => {
                 let key =
                     api_key.ok_or_else(|| anyhow!("API key not configured for Gemini provider"))?;
 
                 let client = rig::providers::gemini::Client::new(&key)?;
-                let builder = client
+                let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                Ok(AgentClient::Gemini(builder.build()))
+                // Add MCP tools if available and build
+                let agent = if let Some(tools_list) = mcp_tools {
+                    let mut all_tools = Vec::new();
+                    let mut server_sink = None;
+                    
+                    for (tools, sink) in tools_list {
+                        all_tools.extend(tools);
+                        if server_sink.is_none() {
+                            server_sink = Some(sink);
+                        }
+                    }
+                    
+                    if !all_tools.is_empty() && server_sink.is_some() {
+                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    } else {
+                        builder.build()
+                    }
+                } else {
+                    builder.build()
+                };
+
+                Ok(AgentClient::Gemini(agent))
             }
             ProviderType::Mistral => {
                 let key = api_key
@@ -83,7 +156,28 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                Ok(AgentClient::Mistral(builder.build()))
+                // Add MCP tools if available and build
+                let agent = if let Some(tools_list) = mcp_tools {
+                    let mut all_tools = Vec::new();
+                    let mut server_sink = None;
+                    
+                    for (tools, sink) in tools_list {
+                        all_tools.extend(tools);
+                        if server_sink.is_none() {
+                            server_sink = Some(sink);
+                        }
+                    }
+                    
+                    if !all_tools.is_empty() && server_sink.is_some() {
+                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    } else {
+                        builder.build()
+                    }
+                } else {
+                    builder.build()
+                };
+
+                Ok(AgentClient::Mistral(agent))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -93,12 +187,33 @@ impl AgentClient {
                     .base_url(&url)
                     .build()?;
 
-                let builder = client
+                let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                Ok(AgentClient::Ollama(builder.build()))
+                // Add MCP tools if available and build
+                let agent = if let Some(tools_list) = mcp_tools {
+                    let mut all_tools = Vec::new();
+                    let mut server_sink = None;
+                    
+                    for (tools, sink) in tools_list {
+                        all_tools.extend(tools);
+                        if server_sink.is_none() {
+                            server_sink = Some(sink);
+                        }
+                    }
+                    
+                    if !all_tools.is_empty() && server_sink.is_some() {
+                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    } else {
+                        builder.build()
+                    }
+                } else {
+                    builder.build()
+                };
+
+                Ok(AgentClient::Ollama(agent))
             }
         }
     }

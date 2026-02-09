@@ -51,8 +51,14 @@ macro_rules! process_agent_stream {
                                 yield Ok(StreamChunk::Text(text.text));
                             }
                             rig::streaming::StreamedAssistantContent::ToolCall(tool_call) => {
+                                use tracing::info;
                                 let tool_id = tool_call.call_id.clone()
                                     .unwrap_or_else(|| tool_call.id.clone());
+                                info!(
+                                    tool_id = %tool_id,
+                                    tool_name = %tool_call.function.name,
+                                    "ToolCall detected in stream"
+                                );
                                 yield Ok(StreamChunk::ToolCallStarted {
                                     id: tool_id.clone(),
                                     name: tool_call.function.name.clone(),
@@ -87,11 +93,23 @@ macro_rules! process_agent_stream {
                             || content_text.trim_start().starts_with("error:");
 
                         if is_error {
+                            use tracing::warn;
+                            warn!(
+                                tool_id = %call_id,
+                                error = %content_text,
+                                "ToolResult: Error detected"
+                            );
                             yield Ok(StreamChunk::ToolCallError {
                                 id: call_id,
                                 error: content_text,
                             });
                         } else {
+                            use tracing::info;
+                            info!(
+                                tool_id = %call_id,
+                                result_length = content_text.len(),
+                                "ToolResult: Success"
+                            );
                             yield Ok(StreamChunk::ToolCallResult {
                                 id: call_id,
                                 result: content_text,
