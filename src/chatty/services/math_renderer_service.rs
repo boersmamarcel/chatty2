@@ -301,8 +301,16 @@ $ {typst_code} $")
         Ok(styled_path)
     }
 
-    /// Inject CSS color styling into SVG content
+    /// Inject theme color into SVG by replacing black color attributes
+    ///
+    /// Replaces inline fill and stroke attributes that use black (#000000 or #000)
+    /// with the provided theme color. This approach:
+    /// - Preserves all non-black colors and attributes like fill="none"
+    /// - Avoids CSS selector warnings from the SVG rendering library
+    /// - Works for all math elements including fraction lines
     fn inject_svg_color(&self, svg_content: &str, color: gpui::Hsla) -> String {
+        use regex::Regex;
+
         // Convert GPUI Hsla to hex color
         let rgb = color.to_rgb();
         let hex_color = format!(
@@ -312,25 +320,19 @@ $ {typst_code} $")
             (rgb.b * 255.0) as u8
         );
 
-        // Find the opening <svg tag and inject a <style> element
-        if let Some(svg_pos) = svg_content.find("<svg")
-            && let Some(tag_end) = svg_content[svg_pos..].find('>')
-        {
-            let insert_pos = svg_pos + tag_end + 1;
-            let style_tag = format!(
-                r#"<style>path {{ fill: {} !important; }} text, tspan {{ fill: {} !important; }}</style>"#,
-                hex_color, hex_color
-            );
+        // Replace black colors (#000000, #000) with theme color in inline attributes
+        let mut themed_svg = svg_content.to_string();
 
-            let mut result = String::with_capacity(svg_content.len() + style_tag.len());
-            result.push_str(&svg_content[..insert_pos]);
-            result.push_str(&style_tag);
-            result.push_str(&svg_content[insert_pos..]);
-            return result;
-        }
+        // Replace fill="#000000" or fill="#000" with theme color
+        let fill_black_regex = Regex::new(r##"fill="#000000?""##).unwrap();
+        themed_svg = fill_black_regex.replace_all(&themed_svg, format!(r#"fill="{}""#, hex_color).as_str()).to_string();
 
-        // If we couldn't inject the style, return original
-        svg_content.to_string()
+        // Replace stroke="#000000" or stroke="#000" with theme color
+        let stroke_black_regex = Regex::new(r##"stroke="#000000?""##).unwrap();
+        themed_svg = stroke_black_regex.replace_all(&themed_svg, format!(r#"stroke="{}""#, hex_color).as_str()).to_string();
+
+        // Return the themed SVG with replaced colors
+        themed_svg
     }
 
     fn make_cache_key(&self, latex: &str, is_inline: bool) -> String {
