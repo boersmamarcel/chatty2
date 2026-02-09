@@ -317,6 +317,7 @@ impl ChattyApp {
         data: ConversationData,
         models: &ModelsModel,
         providers: &ProviderModel,
+        mcp_service: &crate::chatty::services::McpService,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
@@ -338,8 +339,18 @@ impl ChattyApp {
                 )
             })?;
 
+        // Get MCP tools for restoring conversation
+        let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok()
+            .and_then(|tools| {
+                if tools.is_empty() {
+                    None
+                } else {
+                    Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
+                }
+            });
+
         // Restore conversation using factory method
-        Conversation::from_data(data, model_config, provider_config).await
+        Conversation::from_data(data, model_config, provider_config, mcp_tools).await
     }
 
     /// Load all conversations from disk
@@ -358,9 +369,11 @@ impl ChattyApp {
                         cx.update_global::<ModelsModel, _>(|models, _| models.clone());
                     let providers_result =
                         cx.update_global::<ProviderModel, _>(|providers, _| providers.clone());
+                    let mcp_service_result =
+                        cx.update_global::<crate::chatty::services::McpService, _>(|svc, _| svc.clone());
 
-                    match (models_result, providers_result) {
-                        (Ok(models), Ok(providers)) => {
+                    match (models_result, providers_result, mcp_service_result) {
+                        (Ok(models), Ok(providers), Ok(mcp_service)) => {
                             let mut restored_count = 0;
                             let mut failed_count = 0;
 
@@ -369,7 +382,7 @@ impl ChattyApp {
                                 let conv_id = data.id.clone();
 
                                 match Self::restore_conversation_from_data(
-                                    data, &models, &providers,
+                                    data, &models, &providers, &mcp_service,
                                 )
                                 .await
                                 {
@@ -498,11 +511,24 @@ impl ChattyApp {
                     let conv_id = uuid::Uuid::new_v4().to_string();
                     let title = "New Chat".to_string();
 
+                    // Get MCP tools
+                    let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|svc, _| svc.clone())
+                        .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
+                    let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok()
+                        .and_then(|tools| {
+                            if tools.is_empty() {
+                                None
+                            } else {
+                                Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
+                            }
+                        });
+
                     let conversation = Conversation::new(
                         conv_id.clone(),
                         title.clone(),
                         &model_config,
                         &provider_config,
+                        mcp_tools,
                     )
                     .await?;
 

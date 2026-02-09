@@ -34,6 +34,7 @@ impl Conversation {
         title: String,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
+        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -46,7 +47,7 @@ impl Conversation {
             provider_config.provider_type, url_info, model_config.model_identifier
         );
 
-        let agent = AgentClient::from_model_config(model_config, provider_config)
+        let agent = AgentClient::from_model_config_with_tools(model_config, provider_config, mcp_tools)
             .await
             .context("Failed to create agent from config")?;
 
@@ -71,6 +72,7 @@ impl Conversation {
         data: ConversationData,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
+        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -84,7 +86,7 @@ impl Conversation {
         );
 
         // Reconstruct agent
-        let agent = AgentClient::from_model_config(model_config, provider_config)
+        let agent = AgentClient::from_model_config_with_tools(model_config, provider_config, mcp_tools)
             .await
             .context("Failed to create agent from config")?;
 

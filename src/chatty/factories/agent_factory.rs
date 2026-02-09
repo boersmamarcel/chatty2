@@ -61,8 +61,12 @@ impl AgentClient {
                         }
                     }
                     
-                    if !all_tools.is_empty() && server_sink.is_some() {
-                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    if !all_tools.is_empty() {
+                        if let Some(sink) = server_sink {
+                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
+                        } else {
+                            builder.build()
+                        }
                     } else {
                         builder.build()
                     }
@@ -98,8 +102,12 @@ impl AgentClient {
                         }
                     }
                     
-                    if !all_tools.is_empty() && server_sink.is_some() {
-                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    if !all_tools.is_empty() {
+                        if let Some(sink) = server_sink {
+                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
+                        } else {
+                            builder.build()
+                        }
                     } else {
                         builder.build()
                     }
@@ -131,8 +139,12 @@ impl AgentClient {
                         }
                     }
                     
-                    if !all_tools.is_empty() && server_sink.is_some() {
-                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    if !all_tools.is_empty() {
+                        if let Some(sink) = server_sink {
+                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
+                        } else {
+                            builder.build()
+                        }
                     } else {
                         builder.build()
                     }
@@ -168,8 +180,12 @@ impl AgentClient {
                         }
                     }
                     
-                    if !all_tools.is_empty() && server_sink.is_some() {
-                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    if !all_tools.is_empty() {
+                        if let Some(sink) = server_sink {
+                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
+                        } else {
+                            builder.build()
+                        }
                     } else {
                         builder.build()
                     }
@@ -204,8 +220,12 @@ impl AgentClient {
                         }
                     }
                     
-                    if !all_tools.is_empty() && server_sink.is_some() {
-                        builder.rmcp_tools(all_tools.clone(), server_sink.unwrap().clone()).build()
+                    if !all_tools.is_empty() {
+                        if let Some(sink) = server_sink {
+                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
+                        } else {
+                            builder.build()
+                        }
                     } else {
                         builder.build()
                     }

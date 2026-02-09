@@ -186,6 +186,9 @@ impl ChatView {
 
     /// Handle tool call started event
     pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        use tracing::info;
+        info!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
+        
         let tool_call = ToolCallBlock {
             tool_name: name.clone(),
             display_name: name,
@@ -200,13 +203,19 @@ impl ChatView {
 
         // Update live trace
         if let Some(last) = self.messages.last_mut() {
+            info!(has_last_message = true, is_streaming = last.is_streaming, has_live_trace = last.live_trace.is_some(), "Checking live_trace availability");
             if last.is_streaming {
                 if let Some(ref mut trace) = last.live_trace {
+                    info!("Adding tool call to live_trace");
                     let index = trace.items.len();
                     trace.add_tool_call(tool_call);
                     trace.set_active_tool(index);
                 }
-            }
+            } else {
+            info!("live_trace not available for tool call");
+        }
+        } else {
+            info!("Last message is not streaming");
         }
 
         cx.notify();
@@ -271,7 +280,11 @@ impl ChatView {
 
     /// Handle tool call result event
     pub fn handle_tool_call_result(&mut self, id: String, result: String, cx: &mut Context<Self>) {
+        use tracing::info;
+        info!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
+        
         if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
+            info!("Found active tool call, updating result");
             tool_call.output = Some(result.clone());
             tool_call.output_preview = Some(result.clone());
             tool_call.state = ToolCallState::Success;
@@ -326,13 +339,19 @@ impl ChatView {
 
         // Update live trace
         if let Some(last) = self.messages.last_mut() {
+            info!(has_last_message = true, is_streaming = last.is_streaming, has_live_trace = last.live_trace.is_some(), "Checking live_trace availability");
             if last.is_streaming {
                 if let Some(ref mut trace) = last.live_trace {
+                    info!("Adding tool call to live_trace");
                     let index = trace.items.len();
                     trace.add_thinking(thinking);
                     trace.set_active_tool(index);
                 }
-            }
+            } else {
+            info!("live_trace not available for tool call");
+        }
+        } else {
+            info!("Last message is not streaming");
         }
 
         cx.notify();
