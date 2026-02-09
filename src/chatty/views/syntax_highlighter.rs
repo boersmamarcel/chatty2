@@ -5,6 +5,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+use crate::settings::utils::theme_utils::get_syntect_theme_name;
 
 /// Global syntax set for language definitions (initialized once)
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
@@ -45,15 +46,6 @@ fn syntect_color_to_hsla(color: syntect::highlighting::Color) -> Hsla {
     let a = color.a as f32 / 255.0;
 
     Hsla::from(Rgba { r, g, b, a })
-}
-
-/// Get the appropriate syntect theme based on GPUI's current theme mode
-fn get_syntect_theme_name(cx: &App) -> &'static str {
-    if cx.theme().mode.is_dark() {
-        "Solarized (dark)"
-    } else {
-        "Solarized (light)"
-    }
 }
 
 /// Highlight code and return a vector of styled spans
