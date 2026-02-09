@@ -43,7 +43,7 @@ fn syntect_color_to_hsla(color: syntect::highlighting::Color) -> Hsla {
     let g = color.g as f32 / 255.0;
     let b = color.b as f32 / 255.0;
     let a = color.a as f32 / 255.0;
-    
+
     Hsla::from(Rgba { r, g, b, a })
 }
 
@@ -57,13 +57,9 @@ fn get_syntect_theme_name(cx: &App) -> &'static str {
 }
 
 /// Highlight code and return a vector of styled spans
-pub fn highlight_code(
-    code: &str,
-    language: Option<&str>,
-    cx: &App,
-) -> Vec<HighlightedSpan> {
+pub fn highlight_code(code: &str, language: Option<&str>, cx: &App) -> Vec<HighlightedSpan> {
     let mut spans = Vec::new();
-    
+
     // Get the syntax definition for the language
     let syntax = if let Some(lang_name) = language {
         let normalized = normalize_language(lang_name);
@@ -74,7 +70,7 @@ pub fn highlight_code(
     } else {
         None
     };
-    
+
     // If no syntax found, return plain text with foreground color
     let Some(syntax) = syntax else {
         let foreground = cx.theme().foreground;
@@ -84,19 +80,19 @@ pub fn highlight_code(
         });
         return spans;
     };
-    
+
     // Get the theme
     let theme_name = get_syntect_theme_name(cx);
     let theme = &THEME_SET.themes[theme_name];
-    
+
     // Highlight the code line by line
     let mut highlighter = HighlightLines::new(syntax, theme);
-    
+
     for line in LinesWithEndings::from(code) {
         let ranges = highlighter
             .highlight_line(line, &SYNTAX_SET)
             .unwrap_or_default();
-        
+
         for (style, text) in ranges {
             let color = syntect_color_to_hsla(style.foreground);
             spans.push(HighlightedSpan {
@@ -105,6 +101,6 @@ pub fn highlight_code(
             });
         }
     }
-    
+
     spans
 }

@@ -326,6 +326,11 @@ fn main() {
         cx.set_global(math_renderer);
         info!("Math renderer service initialized");
 
+        // Clean up old styled SVG files from previous sessions
+        if let Err(e) = chatty::services::MathRendererService::cleanup_old_styled_svgs() {
+            warn!(error = ?e, "Failed to cleanup old math SVG files");
+        }
+
         // Use Arc<AtomicBool> to track when both providers and models are loaded
 
         let providers_loaded = Arc::new(AtomicBool::new(false));

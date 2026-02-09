@@ -1,18 +1,18 @@
+use crate::assets::CustomIcon;
+use crate::chatty::services::MathRendererService;
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::text::TextView;
 use gpui_component::{Icon, Sizable};
-use gpui_component::button::{Button, ButtonVariants};
 use std::path::PathBuf;
-use tracing::debug;
-use crate::chatty::services::MathRendererService;
-use crate::assets::CustomIcon;
+use tracing::{debug, warn};
 
+use super::code_block_component::CodeBlockComponent;
 use super::math_parser::{MathSegment, parse_math_segments};
 use super::math_renderer::MathComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::trace_components::SystemTraceView;
-use super::code_block_component::CodeBlockComponent;
 
 /// Message role indicator
 #[derive(Clone, Debug)]
@@ -21,22 +21,26 @@ pub enum MessageRole {
     Assistant,
 }
 
-
-use regex::Regex;
 use lazy_static::lazy_static;
+use regex::Regex;
 
 /// Represents a segment of content - either text or a code block
 #[derive(Clone, Debug)]
 enum MarkdownSegment {
     Text(String),
-    CodeBlock { language: Option<String>, code: String },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
 }
 
 lazy_static! {
     // Regex to match fenced code blocks: ```language\ncode\n```
     static ref CODE_BLOCK_REGEX: Regex = Regex::new(
-        r"(?s)```([a-zA-Z0-9_+-]*)\n(.*?)\n```"
-    ).unwrap();
+        r"(?s)```([a-zA-Z0-9_+-]*)
+(.*?)
+```"
+    ).expect("CODE_BLOCK_REGEX pattern is valid");
 }
 
 /// Parse markdown content into segments of text and code blocks
@@ -58,10 +62,13 @@ fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
 
         // Add the code block
         let language = cap.get(1).map(|m| m.as_str().to_string());
-        let code = cap.get(2).unwrap().as_str().to_string();
-        
+        let code = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+
         segments.push(MarkdownSegment::CodeBlock {
-            language: if language.as_ref().map_or(false, |l| !l.is_empty()) {
+            language: if language.as_ref().is_some_and(|l| !l.is_empty()) {
                 language
             } else {
                 None
@@ -155,20 +162,13 @@ impl RenderOnce for MarkdownContent {
 /// This function parses content for math expressions and renders them appropriately.
 /// Math expressions are rendered using MathComponent while regular text uses MarkdownContent.
 fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
-
-
     // Parse for math segments
     let math_segments = parse_math_segments(content);
 
-
-
     let mut elements = Vec::new();
     let mut inline_row: Vec<AnyElement> = Vec::new();
-    let mut seg_idx = 0;
-
-    for segment in math_segments.iter() {
+    for (seg_idx, segment) in math_segments.iter().enumerate() {
         let element_index = base_index * 1000 + seg_idx;
-        seg_idx += 1;
 
         match segment {
             MathSegment::Text(text) => {
@@ -184,18 +184,27 @@ fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<
             MathSegment::InlineMath(math_content) => {
                 // Add inline math to inline row
                 let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
-                
-                // Pre-compute SVG path to avoid re-render loop
+
+                // Pre-compute styled SVG path with theme color
                 let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
-                    if let Ok(svg_path) = service.render_to_svg_file(math_content, true) {
-                        MathComponent::with_svg_path(math_content.clone(), true, element_id, svg_path)
-                    } else {
-                        MathComponent::new(math_content.clone(), true, element_id)
+                    let theme_color = cx.theme().foreground;
+                    match service.render_to_styled_svg_file(math_content, true, theme_color) {
+                        Ok(svg_path) => MathComponent::with_svg_path(
+                            math_content.clone(),
+                            true,
+                            element_id,
+                            svg_path,
+                        ),
+                        Err(e) => {
+                            warn!(error = ?e, content = %math_content, is_inline = true, "Failed to pre-render inline math");
+                            MathComponent::new(math_content.clone(), true, element_id)
+                        }
                     }
                 } else {
+                    warn!(content = %math_content, "Math renderer service unavailable for inline math");
                     MathComponent::new(math_content.clone(), true, element_id)
                 };
-                
+
                 inline_row.push(math_elem.into_any_element());
             }
             MathSegment::BlockMath(math_content) => {
@@ -208,24 +217,33 @@ fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<
                             .flex_wrap()
                             .items_center()
                             .children(inline_row.drain(..))
-                            .into_any_element()
+                            .into_any_element(),
                     );
                 }
-                
+
                 // Render block math as its own element
                 let element_id = ElementId::Name(format!("math-block-{}", element_index).into());
-                
-                // Pre-compute SVG path to avoid re-render loop
+
+                // Pre-compute styled SVG path with theme color
                 let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
-                    if let Ok(svg_path) = service.render_to_svg_file(math_content, false) {
-                        MathComponent::with_svg_path(math_content.clone(), false, element_id, svg_path)
-                    } else {
-                        MathComponent::new(math_content.clone(), false, element_id)
+                    let theme_color = cx.theme().foreground;
+                    match service.render_to_styled_svg_file(math_content, false, theme_color) {
+                        Ok(svg_path) => MathComponent::with_svg_path(
+                            math_content.clone(),
+                            false,
+                            element_id,
+                            svg_path,
+                        ),
+                        Err(e) => {
+                            warn!(error = ?e, content = %math_content, is_inline = false, "Failed to pre-render block math");
+                            MathComponent::new(math_content.clone(), false, element_id)
+                        }
                     }
                 } else {
+                    warn!(content = %math_content, "Math renderer service unavailable for block math");
                     MathComponent::new(math_content.clone(), false, element_id)
                 };
-                
+
                 elements.push(math_elem.into_any_element());
             }
         }
@@ -240,7 +258,7 @@ fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<
                 .flex_wrap()
                 .items_center()
                 .children(inline_row)
-                .into_any_element()
+                .into_any_element(),
         );
     }
 
@@ -248,16 +266,12 @@ fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<
 }
 
 /// Render content with code block awareness, then math awareness
-/// 
+///
 /// This function:
 /// 1. First parses for fenced code blocks (```)
 /// 2. Renders code blocks with copy buttons
 /// 3. For text segments, parses for math expressions
-fn render_content_with_code_blocks(
-    content: &str,
-    base_index: usize,
-    cx: &App,
-) -> Vec<AnyElement> {
+fn render_content_with_code_blocks(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
     let markdown_segments = parse_markdown_segments(content);
     let mut elements = Vec::new();
     let mut code_block_index = 0;
@@ -266,11 +280,8 @@ fn render_content_with_code_blocks(
         match segment {
             MarkdownSegment::CodeBlock { language, code } => {
                 // Render code block with copy button
-                let code_block = CodeBlockComponent::new(
-                    language, 
-                    code, 
-                    base_index * 100 + code_block_index
-                );
+                let code_block =
+                    CodeBlockComponent::new(language, code, base_index * 100 + code_block_index);
                 elements.push(code_block.into_any_element());
                 code_block_index += 1;
             }
@@ -284,7 +295,6 @@ fn render_content_with_code_blocks(
 
     elements
 }
-
 
 /// Parse content to extract thinking blocks and regular text segments
 /// Supports <think>...</think> and <thinking>...</thinking> patterns
@@ -440,19 +450,17 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         }))
 }
 
-/// Render a message in the chat view
-
 /// Render a lightweight placeholder for messages outside viewport
 fn render_message_placeholder(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElement {
     let bg = match msg.role {
         MessageRole::User => cx.theme().muted_foreground.opacity(0.05),
         MessageRole::Assistant => cx.theme().background,
     };
-    
+
     // Estimate height based on content length
-    let estimated_lines = (msg.content.len() / 80).max(1).min(10);
+    let estimated_lines = (msg.content.len() / 80).clamp(1, 10);
     let estimated_height = px((estimated_lines * 24 + 32) as f32);
-    
+
     div()
         .id(("msg-placeholder", index))
         .p_4()
@@ -464,18 +472,22 @@ fn render_message_placeholder(msg: &DisplayMessage, index: usize, cx: &App) -> A
         .child(
             div()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!("Message {}", index + 1))
+                .child(format!("Message {}", index + 1)),
         )
         .into_any_element()
 }
 
-
-pub fn render_message(msg: &DisplayMessage, index: usize, should_render_full: bool, cx: &App) -> AnyElement {
+pub fn render_message(
+    msg: &DisplayMessage,
+    index: usize,
+    should_render_full: bool,
+    cx: &App,
+) -> AnyElement {
     // If not in viewport window, render lightweight placeholder
     if !should_render_full && !msg.is_streaming {
         return render_message_placeholder(msg, index, cx);
     }
-    
+
     // Full render for messages in viewport
     let mut container = div()
         .max_w(relative(1.)) // Max 100% of container width
@@ -535,33 +547,29 @@ pub fn render_message(msg: &DisplayMessage, index: usize, should_render_full: bo
                 .collect();
 
             let message_with_content = container.children(children);
-            
+
             // Wrap with copy button for assistant messages
             return match msg.role {
-                MessageRole::Assistant => {
-                    div()
-                        .child(message_with_content)
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .pt_2()
-                                .child(
-                                    Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(Icon::new(CustomIcon::Copy))
-                                        .tooltip("Copy message")
-                                        .on_click({
-                                            let content = msg.content.clone();
-                                            move |_event, _window, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
-                                            }
-                                        })
-                                )
-                        )
-                        .into_any_element()
-                }
+                MessageRole::Assistant => div()
+                    .child(message_with_content)
+                    .child(
+                        div().flex().justify_end().pt_2().child(
+                            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(CustomIcon::Copy))
+                                .tooltip("Copy message")
+                                .on_click({
+                                    let content = msg.content.clone();
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            content.clone(),
+                                        ));
+                                    }
+                                }),
+                        ),
+                    )
+                    .into_any_element(),
                 MessageRole::User => message_with_content.into_any_element(),
             };
         }
@@ -590,32 +598,24 @@ pub fn render_message(msg: &DisplayMessage, index: usize, should_render_full: bo
 
     // Wrap with copy button for assistant messages
     match msg.role {
-        MessageRole::Assistant => {
-            div()
-                .child(final_container)
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .pt_2()
-                        .child(
-                            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(CustomIcon::Copy))
-                                .tooltip("Copy message")
-                                .on_click({
-                                    let content = msg.content.clone();
-                                    move |_event, _window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
-                                    }
-                                })
-                        )
-                )
-                .into_any_element()
-        }
+        MessageRole::Assistant => div()
+            .child(final_container)
+            .child(
+                div().flex().justify_end().pt_2().child(
+                    Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(CustomIcon::Copy))
+                        .tooltip("Copy message")
+                        .on_click({
+                            let content = msg.content.clone();
+                            move |_event, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                            }
+                        }),
+                ),
+            )
+            .into_any_element(),
         MessageRole::User => final_container.into_any_element(),
     }
 }
-
-

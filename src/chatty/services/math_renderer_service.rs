@@ -9,8 +9,17 @@ use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst::text::{Font, FontBook};
-use typst::{Library, LibraryExt, World};
 use typst::utils::LazyHash;
+use typst::{Library, LibraryExt, World};
+
+// Typst margins for math rendering (in points)
+const INLINE_MARGIN_X: f64 = 4.0;
+const INLINE_MARGIN_Y: f64 = 6.0;
+const BLOCK_MARGIN_X: f64 = 8.0;
+const BLOCK_MARGIN_Y: f64 = 10.0;
+
+// SVG scaling factor for high-DPI displays
+const SVG_SCALE_FACTOR: f64 = 1.5;
 
 impl Global for MathRendererService {}
 
@@ -28,9 +37,9 @@ impl MathWorld {
         let library = LazyHash::new(Library::builder().build());
 
         // Use Typst's embedded fonts
-        let fonts = typst_assets::fonts().map(|data| {
-            Font::new(Bytes::new(data), 0).unwrap()
-        }).collect::<Vec<_>>();
+        let fonts = typst_assets::fonts()
+            .map(|data| Font::new(Bytes::new(data), 0).unwrap())
+            .collect::<Vec<_>>();
 
         let book = LazyHash::new(FontBook::from_fonts(fonts.iter()));
 
@@ -102,11 +111,11 @@ impl MathRendererService {
         let cache_key = self.make_cache_key(latex, is_inline);
 
         // Check cache first
-        if let Ok(cache) = self.cache.lock() {
-            if let Some(svg) = cache.get(&cache_key) {
-                debug!(latex, "Math cache hit");
-                return Ok(svg.clone());
-            }
+        if let Ok(cache) = self.cache.lock()
+            && let Some(svg) = cache.get(&cache_key)
+        {
+            debug!(latex, "Math cache hit");
+            return Ok(svg.clone());
         }
 
         debug!(latex, is_inline, "Rendering math to SVG");
@@ -121,8 +130,8 @@ impl MathRendererService {
         typst_code = typst_code.replace("tfrac", "frac");
         typst_code = typst_code.replace("dfrac", "frac");
         typst_code = typst_code.replace("pmatrix", "mat");
-        typst_code = typst_code.replace("aligned", "cases");  // Approximation for aligned environments
-        
+        typst_code = typst_code.replace("aligned", "cases"); // Approximation for aligned environments
+
         // Fix textmath - MiTeX wraps text in #textmath[...] but Typst doesn't have textmath
         // Replace with proper text function or quoted strings
         while let Some(start) = typst_code.find("#textmath[") {
@@ -145,11 +154,11 @@ impl MathRendererService {
 
         // Wrap in Typst document template with minimal page size
         let doc_content = if is_inline {
-            format!("#set page(width: auto, height: auto, margin: (x: 4pt, y: 6pt))
+            format!("#set page(width: auto, height: auto, margin: (x: {INLINE_MARGIN_X}pt, y: {INLINE_MARGIN_Y}pt))
 ${typst_code}$")
         } else {
             // Spaces around content make it display math
-            format!("#set page(width: auto, height: auto, margin: (x: 8pt, y: 10pt))
+            format!("#set page(width: auto, height: auto, margin: (x: {BLOCK_MARGIN_X}pt, y: {BLOCK_MARGIN_Y}pt))
 $ {typst_code} $")
         };
 
@@ -176,34 +185,125 @@ $ {typst_code} $")
     pub fn render_to_svg_file(&self, latex: &str, is_inline: bool) -> Result<std::path::PathBuf> {
         // Get or generate SVG (uses existing in-memory cache)
         let svg_data = self.render_to_svg(latex, is_inline)?;
-        
+
         // Create persistent cache directory
         let cache_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("No config directory"))?
             .join("chatty")
             .join("math_cache");
-        
-        std::fs::create_dir_all(&cache_dir)
-            .context("Failed to create math cache directory")?;
-        
+
+        std::fs::create_dir_all(&cache_dir).context("Failed to create math cache directory")?;
+
         // Use hash as filename for deterministic caching
         let cache_key = self.make_cache_key(latex, is_inline);
         let svg_path = cache_dir.join(format!("{}.svg", cache_key));
-        
+
         // Only write if file doesn't exist (cache hit)
         if !svg_path.exists() {
             // Strip width/height attributes from SVG to allow GPUI to scale it
             // Typst generates SVGs with small pt dimensions that GPUI respects literally
             let svg_without_dims = self.strip_svg_dimensions(&svg_data);
-            
-            std::fs::write(&svg_path, svg_without_dims)
-                .context("Failed to write SVG to cache")?;
+
+            std::fs::write(&svg_path, svg_without_dims).context("Failed to write SVG to cache")?;
             info!(path = ?svg_path, "Wrote math SVG to persistent cache");
         } else {
             debug!(path = ?svg_path, "Math SVG cache hit");
         }
-        
+
         Ok(svg_path)
+    }
+
+    /// Render LaTeX to styled SVG file with theme color injected
+    ///
+    /// This method pre-computes styled SVG variants for different theme colors.
+    /// Styled SVGs are cached on disk with filenames like: {hash}.styled.{color_hash}.svg
+    ///
+    /// This allows theme switching without re-rendering or re-injecting colors
+    /// during the render phase, significantly improving performance.
+    ///
+    /// Returns the PathBuf to the styled SVG file.
+    pub fn render_to_styled_svg_file(
+        &self,
+        latex: &str,
+        is_inline: bool,
+        theme_color: gpui::Hsla,
+    ) -> Result<std::path::PathBuf> {
+        use sha2::Digest;
+
+        // 1. Generate base SVG (uses existing cache)
+        let base_svg_path = self.render_to_svg_file(latex, is_inline)?;
+
+        // 2. Compute color hash for styled variant filename
+        let rgb = theme_color.to_rgb();
+        let hex_color = format!(
+            "{:02x}{:02x}{:02x}",
+            (rgb.r * 255.0) as u8,
+            (rgb.g * 255.0) as u8,
+            (rgb.b * 255.0) as u8
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(hex_color.as_bytes());
+        let color_hash = format!("{:x}", hasher.finalize());
+
+        // 3. Build styled variant path
+        let base_name = base_svg_path
+            .file_stem()
+            .ok_or_else(|| anyhow::anyhow!("Invalid SVG path"))?
+            .to_string_lossy();
+
+        let styled_path =
+            base_svg_path.with_file_name(format!("{}.styled.{}.svg", base_name, &color_hash[..16]));
+
+        // 4. Return cached styled variant if it exists
+        if styled_path.exists() {
+            debug!(path = ?styled_path, "Styled SVG cache hit");
+            return Ok(styled_path);
+        }
+
+        // 5. Read base SVG, inject color, write styled variant
+        let svg_content =
+            std::fs::read_to_string(&base_svg_path).context("Failed to read base SVG")?;
+
+        let styled_svg = self.inject_svg_color(&svg_content, theme_color);
+
+        std::fs::write(&styled_path, styled_svg).context("Failed to write styled SVG")?;
+
+        info!(path = ?styled_path, color = %hex_color, "Created styled SVG variant");
+
+        Ok(styled_path)
+    }
+
+    /// Inject CSS color styling into SVG content
+    fn inject_svg_color(&self, svg_content: &str, color: gpui::Hsla) -> String {
+        // Convert GPUI Hsla to hex color
+        let rgb = color.to_rgb();
+        let hex_color = format!(
+            "#{:02x}{:02x}{:02x}",
+            (rgb.r * 255.0) as u8,
+            (rgb.g * 255.0) as u8,
+            (rgb.b * 255.0) as u8
+        );
+
+        // Find the opening <svg tag and inject a <style> element
+        if let Some(svg_pos) = svg_content.find("<svg")
+            && let Some(tag_end) = svg_content[svg_pos..].find('>')
+        {
+            let insert_pos = svg_pos + tag_end + 1;
+            let style_tag = format!(
+                r#"<style>path {{ fill: {} !important; }} text, tspan {{ fill: {} !important; }}</style>"#,
+                hex_color, hex_color
+            );
+
+            let mut result = String::with_capacity(svg_content.len() + style_tag.len());
+            result.push_str(&svg_content[..insert_pos]);
+            result.push_str(&style_tag);
+            result.push_str(&svg_content[insert_pos..]);
+            return result;
+        }
+
+        // If we couldn't inject the style, return original
+        svg_content.to_string()
     }
 
     fn make_cache_key(&self, latex: &str, is_inline: bool) -> String {
@@ -223,10 +323,8 @@ $ {typst_code} $")
 
         // Extract the document, handling any errors
         let document = warned_result.output.map_err(|errors| {
-            let error_messages: Vec<String> = errors
-                .iter()
-                .map(|e| format!("{}", e.message))
-                .collect();
+            let error_messages: Vec<String> =
+                errors.iter().map(|e| format!("{}", e.message)).collect();
             anyhow::anyhow!("Typst compilation failed: {}", error_messages.join(", "))
         })?;
 
@@ -248,29 +346,29 @@ $ {typst_code} $")
         // Remove width="..." and height="..." attributes
         // Keep viewBox as it's needed for aspect ratio
         let mut result = svg.to_string();
-        
+
         // Find and remove width attribute
-        if let Some(width_start) = result.find(r#" width=""#) {
-            if let Some(width_end) = result[width_start..].find('"') {
-                // Find the closing quote
-                let quote_pos = width_start + width_end + 1;
-                if let Some(closing_quote) = result[quote_pos..].find('"') {
-                    result.replace_range(width_start..quote_pos + closing_quote + 1, "");
-                }
+        if let Some(width_start) = result.find(r#" width=""#)
+            && let Some(width_end) = result[width_start..].find('"')
+        {
+            // Find the closing quote
+            let quote_pos = width_start + width_end + 1;
+            if let Some(closing_quote) = result[quote_pos..].find('"') {
+                result.replace_range(width_start..quote_pos + closing_quote + 1, "");
             }
         }
-        
+
         // Find and remove height attribute
-        if let Some(height_start) = result.find(r#" height=""#) {
-            if let Some(height_end) = result[height_start..].find('"') {
-                // Find the closing quote
-                let quote_pos = height_start + height_end + 1;
-                if let Some(closing_quote) = result[quote_pos..].find('"') {
-                    result.replace_range(height_start..quote_pos + closing_quote + 1, "");
-                }
+        if let Some(height_start) = result.find(r#" height=""#)
+            && let Some(height_end) = result[height_start..].find('"')
+        {
+            // Find the closing quote
+            let quote_pos = height_start + height_end + 1;
+            if let Some(closing_quote) = result[quote_pos..].find('"') {
+                result.replace_range(height_start..quote_pos + closing_quote + 1, "");
             }
         }
-        
+
         // Add width/height based on viewBox but scaled up 2x for better visibility
         // Extract viewBox to calculate dimensions
         if let Some(viewbox_start) = result.find(r#"viewBox=""#) {
@@ -280,21 +378,69 @@ $ {typst_code} $")
                 let parts: Vec<&str> = viewbox.split_whitespace().collect();
                 if parts.len() == 4 {
                     // viewBox format: "minX minY width height"
-                    if let (Ok(width), Ok(height)) = (parts[2].parse::<f64>(), parts[3].parse::<f64>()) {
+                    if let (Ok(width), Ok(height)) =
+                        (parts[2].parse::<f64>(), parts[3].parse::<f64>())
+                    {
                         // Scale by 1.5x for better readability (matches typical font sizes)
-                        let scaled_width = width * 1.5;
-                        let scaled_height = height * 1.5;
-                        
+                        let scaled_width = width * SVG_SCALE_FACTOR;
+                        let scaled_height = height * SVG_SCALE_FACTOR;
+
                         // Insert width and height attributes after viewBox
                         let insert_pos = vb_start + vb_end + 1; // after closing quote of viewBox
-                        let size_attrs = format!(r#" width="{}pt" height="{}pt""#, scaled_width, scaled_height);
+                        let size_attrs = format!(
+                            r#" width="{}pt" height="{}pt""#,
+                            scaled_width, scaled_height
+                        );
                         result.insert_str(insert_pos, &size_attrs);
                     }
                 }
             }
         }
-        
+
         result
+    }
+
+    /// Get the cache directory path
+    fn cache_dir() -> Result<std::path::PathBuf> {
+        let cache_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?
+            .join("chatty")
+            .join("math_cache");
+        Ok(cache_dir)
+    }
+
+    /// Cleans up old styled SVG variants from previous sessions
+    ///
+    /// Keeps base SVG files (no "styled" in filename) but removes theme variants.
+    /// This prevents unbounded disk usage from accumulating styled SVG files
+    /// as users switch themes.
+    pub fn cleanup_old_styled_svgs() -> Result<()> {
+        let cache_dir = Self::cache_dir()?;
+
+        if !cache_dir.exists() {
+            return Ok(());
+        }
+
+        let mut removed_count = 0;
+
+        for entry in std::fs::read_dir(&cache_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                // Remove files matching pattern: {hash}.styled.{color_hash}.svg
+                if filename.contains(".styled.") && filename.ends_with(".svg") {
+                    std::fs::remove_file(&path)?;
+                    removed_count += 1;
+                }
+            }
+        }
+
+        if removed_count > 0 {
+            info!(count = removed_count, "Cleaned up old styled math SVGs");
+        }
+
+        Ok(())
     }
 
     /// Get the number of cached items
