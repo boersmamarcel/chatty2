@@ -25,7 +25,7 @@ pub struct ChatView {
     scroll_handle: ScrollHandle,
     active_tool_calls: HashMap<String, ToolCallBlock>,
     /// Number of recent messages to render fully (viewport optimization)
-    render_window_size: usize,
+    _render_window_size: usize,
 }
 
 impl ChatView {
@@ -67,7 +67,7 @@ impl ChatView {
             conversation_id: None,
             scroll_handle,
             active_tool_calls: HashMap::new(),
-            render_window_size: 20, // Render last 20 messages fully
+            _render_window_size: 20, // Render last 20 messages fully
         }
     }
 
