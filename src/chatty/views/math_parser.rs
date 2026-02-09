@@ -2,7 +2,8 @@
 //!
 //! Supports:
 //! - Inline math: $...$, \(...\)
-//! - Block math: $$...$$ (on own lines), ```math\n...\n```, \[...\]
+//! - Block math: $$...$$ (on own lines), ```math\n...\n```, ```latex\n...\n```, \[...\]
+//! - LaTeX environments: \begin{equation}, \begin{align}, \begin{cases}, etc.
 //! - Escaped dollars: \$ (not treated as math)
 
 /// Represents a segment of content that may contain math or text
@@ -15,6 +16,35 @@ pub enum MathSegment {
     /// Block/display math expression (content in ```math blocks)
     BlockMath(String),
 }
+
+/// Common LaTeX environments that should be treated as block math
+const LATEX_ENVIRONMENTS: &[&str] = &[
+    // Equation environments
+    "equation",
+    "equation*",
+    "align",
+    "align*",
+    "gather",
+    "gather*",
+    // Multi-line environments
+    "multline",
+    "multline*",
+    "split",
+    "alignat",
+    "alignat*",
+    // Matrix/cases environments
+    "matrix",
+    "pmatrix",
+    "bmatrix",
+    "Bmatrix",
+    "vmatrix",
+    "Vmatrix",
+    "cases",
+    // Nested/alignment environments
+    "aligned",
+    "gathered",
+    "alignedat",
+];
 
 /// Check if $$ at position i should be treated as block math start
 fn is_block_math_delimiter(chars: &[char], pos: usize) -> bool {
@@ -35,6 +65,148 @@ fn is_block_math_delimiter(chars: &[char], pos: usize) -> bool {
     true
 }
 
+/// Helper function to parse math code blocks (```math or ```latex)
+fn parse_math_code_block(
+    chars: &[char],
+    start_pos: usize,
+    language: &str,
+) -> Option<(String, usize)> {
+    let lang_chars: Vec<char> = language.chars().collect();
+    let lang_len = lang_chars.len();
+
+    // Check if it matches the expected language
+    if start_pos + 3 + lang_len >= chars.len() {
+        return None;
+    }
+
+    if chars[start_pos..start_pos + 3] != ['`', '`', '`'] {
+        return None;
+    }
+
+    if chars[start_pos + 3..start_pos + 3 + lang_len] != lang_chars[..] {
+        return None;
+    }
+
+    // Check if it's actually ```<lang> (not ```<lang>something or similar)
+    if start_pos + 3 + lang_len < chars.len()
+        && !(chars[start_pos + 3 + lang_len] == '\n' || chars[start_pos + 3 + lang_len] == '\r')
+    {
+        return None;
+    }
+
+    // Find the closing ```
+    let mut i = start_pos + 3 + lang_len;
+    while i < chars.len() && (chars[i] == '\n' || chars[i] == '\r') {
+        i += 1; // Skip newlines after ```<lang>
+    }
+
+    let math_start = i;
+    while i + 2 < chars.len() {
+        if chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            // Found closing ```
+            let math_content: String = chars[math_start..i].iter().collect();
+            i += 3; // Skip closing ```
+
+            if !math_content.trim().is_empty() {
+                return Some((math_content.trim().to_string(), i));
+            }
+            return None;
+        }
+        i += 1;
+    }
+
+    // No closing ``` found
+    None
+}
+
+/// Helper function to extract environment name from \begin{...}
+fn extract_environment_name(chars: &[char], start_pos: usize) -> Option<(String, usize)> {
+    // start_pos should point to the '{' after \begin
+    let mut i = start_pos;
+    if i >= chars.len() || chars[i] != '{' {
+        return None;
+    }
+
+    i += 1; // Skip '{'
+    let name_start = i;
+
+    // Find closing '}'
+    while i < chars.len() && chars[i] != '}' {
+        i += 1;
+    }
+
+    if i >= chars.len() {
+        return None;
+    }
+
+    let name: String = chars[name_start..i].iter().collect();
+    i += 1; // Skip '}'
+
+    Some((name, i))
+}
+
+/// Parse LaTeX environment: \begin{env}...\end{env}
+fn parse_latex_environment(
+    chars: &[char],
+    start_pos: usize,
+) -> Option<(String, usize)> {
+    // start_pos should point to '\' in \begin
+    if start_pos + 7 >= chars.len() {
+        return None;
+    }
+
+    // Check for \begin{
+    if chars[start_pos..start_pos + 7] != ['\\', 'b', 'e', 'g', 'i', 'n', '{'] {
+        return None;
+    }
+
+    // Extract environment name
+    let (env_name, pos_after_name) = extract_environment_name(chars, start_pos + 6)?;
+
+    // Check if it's a recognized environment
+    if !LATEX_ENVIRONMENTS.contains(&env_name.as_str()) {
+        return None;
+    }
+
+    // Find matching \end{env_name}
+    let end_pattern = format!("\\end{{{}}}", env_name);
+    let end_chars: Vec<char> = end_pattern.chars().collect();
+
+    let mut i = pos_after_name;
+    let mut depth = 1; // Track nesting depth
+
+    while i < chars.len() {
+        // Check for nested \begin{env_name}
+        if i + 7 + env_name.len() < chars.len() {
+            let potential_begin = format!("\\begin{{{}}}", env_name);
+            let begin_chars: Vec<char> = potential_begin.chars().collect();
+            if i + begin_chars.len() <= chars.len()
+                && chars[i..i + begin_chars.len()] == begin_chars[..]
+            {
+                depth += 1;
+                i += begin_chars.len();
+                continue;
+            }
+        }
+
+        // Check for \end{env_name}
+        if i + end_chars.len() <= chars.len() && chars[i..i + end_chars.len()] == end_chars[..] {
+            depth -= 1;
+            if depth == 0 {
+                // Found matching \end
+                let content: String = chars[start_pos..i + end_chars.len()].iter().collect();
+                return Some((content, i + end_chars.len()));
+            }
+            i += end_chars.len();
+            continue;
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
 /// Parse content into segments of text and math expressions
 pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
     let mut segments = Vec::new();
@@ -43,6 +215,25 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
     let mut current_text = String::new();
 
     while i < chars.len() {
+        // Check for LaTeX environments: \begin{...}
+        if i + 7 < chars.len()
+            && chars[i] == '\\'
+            && chars[i + 1..i + 6] == ['b', 'e', 'g', 'i', 'n']
+            && chars[i + 6] == '{'
+        {
+            if let Some((env_content, new_pos)) = parse_latex_environment(&chars, i) {
+                // Save any accumulated text
+                if !current_text.is_empty() {
+                    segments.push(MathSegment::Text(current_text.clone()));
+                    current_text.clear();
+                }
+
+                segments.push(MathSegment::BlockMath(env_content));
+                i = new_pos;
+                continue;
+            }
+        }
+
         // Check for LaTeX display math: \[
         if i + 1 < chars.len() && chars[i] == '\\' && chars[i + 1] == '[' {
             // Save any accumulated text
@@ -114,50 +305,31 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
             continue;
         }
 
-        // Check for block math: ```math
-        if i + 7 < chars.len()
-            && chars[i] == '`'
-            && chars[i + 1] == '`'
-            && chars[i + 2] == '`'
-            && chars[i + 3..i + 7] == ['m', 'a', 't', 'h']
-        {
-            // Check if it's actually ```math (not ```mathematics or similar)
-            if i + 7 < chars.len() && (chars[i + 7] == '\n' || chars[i + 7] == '\r') {
+        // Check for block math: ```math or ```latex
+        if i + 7 < chars.len() && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            // Try ```math first
+            if let Some((math_content, new_pos)) = parse_math_code_block(&chars, i, "math") {
                 // Save any accumulated text
                 if !current_text.is_empty() {
                     segments.push(MathSegment::Text(current_text.clone()));
                     current_text.clear();
                 }
 
-                // Find the closing ```
-                i += 7; // Skip ```math
-                while i < chars.len() && (chars[i] == '\n' || chars[i] == '\r') {
-                    i += 1; // Skip newlines after ```math
+                segments.push(MathSegment::BlockMath(math_content));
+                i = new_pos;
+                continue;
+            }
+
+            // Try ```latex
+            if let Some((math_content, new_pos)) = parse_math_code_block(&chars, i, "latex") {
+                // Save any accumulated text
+                if !current_text.is_empty() {
+                    segments.push(MathSegment::Text(current_text.clone()));
+                    current_text.clear();
                 }
 
-                let math_start = i;
-                let mut math_content = String::new();
-                let mut found_close = false;
-
-                while i + 2 < chars.len() {
-                    if chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-                        // Found closing ```
-                        math_content = chars[math_start..i].iter().collect();
-                        found_close = true;
-                        i += 3; // Skip closing ```
-                        break;
-                    }
-                    i += 1;
-                }
-
-                if found_close && !math_content.trim().is_empty() {
-                    segments.push(MathSegment::BlockMath(math_content.trim().to_string()));
-                } else if !found_close {
-                    // Unclosed block math - treat as literal text
-                    current_text.push_str("```math");
-                    current_text.push_str(&chars[math_start..i].iter().collect::<String>());
-                }
-
+                segments.push(MathSegment::BlockMath(math_content));
+                i = new_pos;
                 continue;
             }
         }
@@ -174,8 +346,13 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
             // Look for closing $$
             let mut j = i + 2;
             let mut found_close = false;
+            let mut has_newlines = false;
 
             while j + 1 < chars.len() {
+                if chars[j] == '\n' || chars[j] == '\r' {
+                    has_newlines = true;
+                }
+
                 if chars[j] == '$' && chars[j + 1] == '$' {
                     // Check for escaped $$
                     if j > 0 && chars[j - 1] == '\\' {
@@ -210,8 +387,9 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
                             current_text.clear();
                         }
 
-                        // Decide if it's block or inline based on position
-                        if is_block_start && is_block_end {
+                        // Decide if it's block or inline based on position and content
+                        // If content has newlines, bias towards block math
+                        if (is_block_start && is_block_end) || has_newlines {
                             segments.push(MathSegment::BlockMath(math_content.trim().to_string()));
                         } else {
                             segments.push(MathSegment::InlineMath(math_content.trim().to_string()));
@@ -288,4 +466,118 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_latex_code_block() {
+        let input = "Here's an equation:\n```latex\nx = y + 2\n```\nDone.";
+        let segments = parse_math_segments(input);
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(segments[1], MathSegment::BlockMath(_)));
+        if let MathSegment::BlockMath(content) = &segments[1] {
+            assert_eq!(content, "x = y + 2");
+        }
+    }
+
+    #[test]
+    fn test_equation_environment() {
+        let input = "\\begin{equation}\nx^2 + y^2 = z^2\n\\end{equation}";
+        let segments = parse_math_segments(input);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(segments[0], MathSegment::BlockMath(_)));
+    }
+
+    #[test]
+    fn test_align_environment() {
+        let input = "\\begin{align}\na &= b + c \\\\\nd &= e + f\n\\end{align}";
+        let segments = parse_math_segments(input);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(segments[0], MathSegment::BlockMath(_)));
+    }
+
+    #[test]
+    fn test_nested_environments() {
+        let input = "\\begin{equation}\nx = \\begin{cases}\n1 & \\text{if } x > 0 \\\\\n0 & \\text{otherwise}\n\\end{cases}\n\\end{equation}";
+        let segments = parse_math_segments(input);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(segments[0], MathSegment::BlockMath(_)));
+    }
+
+    #[test]
+    fn test_block_math_with_intro_text() {
+        let input = "Consider: $$\nx^2 + y^2 = z^2\n$$";
+        let segments = parse_math_segments(input);
+        // Should recognize as block math despite intro text (has newlines)
+        assert!(segments
+            .iter()
+            .any(|s| matches!(s, MathSegment::BlockMath(_))));
+    }
+
+    #[test]
+    fn test_mixed_delimiters() {
+        let input = "Inline $x = 2$ and block:\n$$\ny = mx + b\n$$\nAlso \\[z = a + b\\]";
+        let segments = parse_math_segments(input);
+        assert_eq!(
+            segments
+                .iter()
+                .filter(|s| matches!(s, MathSegment::InlineMath(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .filter(|s| matches!(s, MathSegment::BlockMath(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_mismatched_environment_tags() {
+        let input = "\\begin{align}\nx = 2\n\\end{equation}";
+        let segments = parse_math_segments(input);
+        // Should NOT recognize as math due to mismatch
+        assert!(segments.iter().all(|s| matches!(s, MathSegment::Text(_))));
+    }
+
+    #[test]
+    fn test_existing_patterns_preserved() {
+        // Test that all existing delimiter patterns work correctly
+        let input = "Inline $x$ and \\(y\\) and block\n$$z$$\nand \\[w\\] and ```math\na\n```";
+        let segments = parse_math_segments(input);
+        
+        let inline_count = segments.iter().filter(|s| matches!(s, MathSegment::InlineMath(_))).count();
+        let block_count = segments.iter().filter(|s| matches!(s, MathSegment::BlockMath(_))).count();
+        
+        // Inline: $x$ and \(y\) = 2
+        // Block: $$z$$ (has newlines), \[w\], ```math = 3
+        assert_eq!(inline_count, 2);
+        assert_eq!(block_count, 3);
+    }
+
+    #[test]
+    fn test_math_and_latex_code_blocks() {
+        let input = "```math\nx = 1\n```\nand\n```latex\ny = 2\n```";
+        let segments = parse_math_segments(input);
+        assert_eq!(
+            segments
+                .iter()
+                .filter(|s| matches!(s, MathSegment::BlockMath(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_matrix_environment() {
+        let input = "\\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix}";
+        let segments = parse_math_segments(input);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(segments[0], MathSegment::BlockMath(_)));
+    }
 }

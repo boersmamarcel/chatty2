@@ -99,6 +99,25 @@ pub struct MathRendererService {
 }
 
 impl MathRendererService {
+    /// Fix \operatorname{...} by converting to op("...") for Typst
+    fn fix_operatorname(code: &str) -> String {
+        use regex::Regex;
+
+        let mut result = code.to_string();
+
+        // Pattern 1: \operatorname{name} or operatorname{name}
+        let re1 = Regex::new(r"\\?operatorname\{([^}]+)\}").unwrap();
+        result = re1.replace_all(&result, |caps: &regex::Captures| {
+            let name = &caps[1];
+            format!(r#"op("{}")"#, name)
+        }).to_string();
+
+        // Pattern 2: Plain "operatorname" keyword (MiTeX might strip backslash and braces)
+        result = result.replace("operatorname", "op");
+
+        result
+    }
+
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
@@ -131,6 +150,14 @@ impl MathRendererService {
         typst_code = typst_code.replace("dfrac", "frac");
         typst_code = typst_code.replace("pmatrix", "mat");
         typst_code = typst_code.replace("aligned", "cases"); // Approximation for aligned environments
+
+        // Fix \operatorname{...} - convert to op("...") for Typst
+        // MiTeX may pass through \operatorname as-is or convert it incorrectly
+        if typst_code.contains("operatorname") {
+            debug!(before_operatorname_fix = %typst_code, "Found operatorname in Typst code");
+            typst_code = Self::fix_operatorname(&typst_code);
+            debug!(after_operatorname_fix = %typst_code, "After operatorname fix");
+        }
 
         // Fix textmath - MiTeX wraps text in #textmath[...] but Typst doesn't have textmath
         // Replace with proper text function or quoted strings
