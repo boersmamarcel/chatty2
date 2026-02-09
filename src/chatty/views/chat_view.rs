@@ -24,8 +24,6 @@ pub struct ChatView {
     conversation_id: Option<String>,
     scroll_handle: ScrollHandle,
     active_tool_calls: HashMap<String, ToolCallBlock>,
-    /// Number of recent messages to render fully (viewport optimization)
-    render_window_size: usize,
 }
 
 impl ChatView {
@@ -67,7 +65,6 @@ impl ChatView {
             conversation_id: None,
             scroll_handle,
             active_tool_calls: HashMap::new(),
-            render_window_size: 20, // Render last 20 messages fully
         }
     }
 
@@ -593,9 +590,7 @@ impl Render for ChatView {
                                                 !(msg.is_streaming && msg.content.is_empty())
                                             })
                                             .map(|(index, msg)| {
-                                                // TEMP: Disable viewport optimization for debugging
-                                                let should_render_full = true; // Always render fully
-                                                render_message(msg, index, should_render_full, cx)
+                                                render_message(msg, index, cx)
                                             }),
                                     )
                                     .when(is_awaiting, |this| {
