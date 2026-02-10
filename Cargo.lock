@@ -962,6 +962,7 @@ dependencies = [
  "image",
  "lazy_static",
  "mitex",
+ "nix 0.29.0",
  "once_cell",
  "pdfium-render",
  "regex",
@@ -5993,16 +5994,13 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
- "http",
  "pastey 0.2.1",
  "pin-project-lite",
  "process-wrap",
- "reqwest",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
- "sse-stream",
  "thiserror 2.0.17",
  "tokio",
  "tokio-stream",
@@ -6738,19 +6736,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.10.0",
-]
-
-[[package]]
-name = "sse-stream"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb4dc4d33c68ec1f27d386b5610a351922656e1fdf5c05bbaad930cd1519479a"
-dependencies = [
- "bytes",
- "futures-util",
- "http-body",
- "http-body-util",
- "pin-project-lite",
 ]
 
 [[package]]

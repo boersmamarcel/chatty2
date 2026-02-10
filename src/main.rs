@@ -212,8 +212,12 @@ fn register_actions(cx: &mut App) {
         debug!("Quit action triggered");
         chatty::services::cleanup_thumbnails();
         
-        // Shutdown all MCP servers
+        // Shutdown all MCP servers.
+        // kill_all_sync() sends SIGTERM synchronously to all child processes before
+        // the process exits, preventing orphaned MCP server processes. The async
+        // stop_all() provides a best-effort graceful shutdown attempt.
         let mcp_service = cx.global::<chatty::services::McpService>().clone();
+        mcp_service.kill_all_sync();
         cx.spawn(|_cx: &mut AsyncApp| async move {
             if let Err(e) = mcp_service.stop_all().await {
                 error!(error = ?e, "Failed to stop MCP servers during shutdown");

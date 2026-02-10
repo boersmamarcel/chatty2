@@ -8,4 +8,4 @@ pub use general_model::GeneralSettingsModel;
 pub use models_notifier::{GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent};
 pub use models_store::ModelsModel;
 pub use providers_store::ProviderModel;
-pub use mcp_store::{McpServerConfig, McpServersModel};
+pub use mcp_store::McpServersModel;

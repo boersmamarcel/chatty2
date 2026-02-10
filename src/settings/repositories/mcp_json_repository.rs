@@ -45,32 +45,4 @@ impl McpRepository for JsonMcpRepository {
         })
     }
 
-    fn save_all(&self, servers: Vec<McpServerConfig>) -> BoxFuture<'static, RepositoryResult<()>> {
-        let path = self.file_path.clone();
-
-        Box::pin(async move {
-            // Serialize to JSON
-            let json = serde_json::to_string_pretty(&servers)
-                .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
-
-            // Create directory if needed
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-            }
-
-            // Write atomically using temp file + rename
-            let temp_path = path.with_extension("json.tmp");
-            tokio::fs::write(&temp_path, &json)
-                .await
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-            tokio::fs::rename(&temp_path, &path)
-                .await
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-            Ok(())
-        })
-    }
 }

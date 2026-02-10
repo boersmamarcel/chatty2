@@ -339,7 +339,11 @@ impl ChattyApp {
                 )
             })?;
 
-        // Get MCP tools for restoring conversation
+        // Get MCP tools for restoring conversation.
+        // NOTE: MCP tools are fetched once at conversation creation/restore time and baked
+        // into the AgentClient. If an MCP server is added, removed, or restarted after this
+        // point, the existing conversation will retain its original tool set. Open a new
+        // conversation to pick up updated tool registrations.
         let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok()
             .and_then(|tools| {
                 if tools.is_empty() {
@@ -511,7 +515,11 @@ impl ChattyApp {
                     let conv_id = uuid::Uuid::new_v4().to_string();
                     let title = "New Chat".to_string();
 
-                    // Get MCP tools
+                    // Get MCP tools.
+                    // NOTE: MCP tools are fetched once at conversation creation time and baked
+                    // into the AgentClient. If an MCP server is added, removed, or restarted
+                    // after this point, the existing conversation will retain its original tool
+                    // set. Open a new conversation to pick up updated tool registrations.
                     let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|svc, _| svc.clone())
                         .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
                     let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok()

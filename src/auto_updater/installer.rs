@@ -7,15 +7,18 @@
 //!   async tokio I/O so the Tokio runtime stays responsive.
 //! - Windows: Launch the silent installer; it handles file replacement and relaunch.
 
+#[cfg(not(target_os = "macos"))]
 use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::process::Command;
 
+#[cfg(not(target_os = "macos"))]
 use tracing::info;
 #[cfg(target_os = "windows")]
 use tracing::warn;
 
 /// Error type for installation operations
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
     #[error("IO error: {0}")]

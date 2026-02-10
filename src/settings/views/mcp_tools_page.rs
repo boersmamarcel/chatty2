@@ -1,5 +1,4 @@
 use crate::settings::models::mcp_store::McpServersModel;
-use gpui::App;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 
 /// Get platform-specific config path for display
