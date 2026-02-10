@@ -91,10 +91,6 @@ pub struct AutoUpdater {
     current_version: Version,
     /// HTTP client for GitHub API
     client: reqwest::Client,
-    /// Flag indicating if a restart is required (Windows only)
-    pub should_restart_on_quit: bool,
-    /// Path to pending update (Windows only)
-    pending_update_path: Option<PathBuf>,
 }
 
 impl Global for AutoUpdater {}
@@ -132,8 +128,6 @@ impl AutoUpdater {
             status: AutoUpdateStatus::Idle,
             current_version: version,
             client,
-            should_restart_on_quit: false,
-            pending_update_path: None,
         }
     }
 
@@ -413,34 +407,44 @@ impl AutoUpdater {
             }
         }
 
-        // PHASE 2 (Linux / Windows): In-process installation then restart
+        // PHASE 2 (Linux / Windows): In-process installation then graceful quit
+        //
+        // Both platforms keep the Installing status visible right up to quit —
+        // there is no intermediate Idle flash.  The new process is spawned
+        // (Linux) or already running (Windows installer) before cx.quit() is
+        // called so GPUI can close windows with its normal animations.
         #[cfg(not(target_os = "macos"))]
         cx.spawn(async move |cx: &mut AsyncApp| {
             match install_release(&update_path).await {
-                Ok(needs_restart) => {
-                    cx.update(|cx| {
-                        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
-                            if needs_restart {
-                                updater.should_restart_on_quit = true;
-                                updater.pending_update_path = Some(update_path.clone());
-                            }
-                            updater.status = AutoUpdateStatus::Idle;
-                        });
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
-                    .ok();
-
-                    // Linux: relaunch the process (AppImage replacement is done)
+                Ok(_) => {
+                    // Linux: the AppImage on disk has already been atomically
+                    // replaced.  Spawn the new binary, then quit gracefully.
                     #[cfg(target_os = "linux")]
-                    restart_application();
+                    {
+                        if let Err(e) = relaunch_linux_process() {
+                            error!(error = ?e, "Failed to spawn updated AppImage");
+                            cx.update(|cx| {
+                                cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                                    updater.status = AutoUpdateStatus::Error(
+                                        format!("Failed to relaunch: {}", e),
+                                    );
+                                });
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
+                            .ok();
+                            return;
+                        }
+                        cx.update(|cx| cx.quit())
+                            .map_err(|e| warn!(error = ?e, "Failed to quit after Linux update"))
+                            .ok();
+                    }
 
-                    // Windows: quit and let the installer handle the relaunch
+                    // Windows: the silent installer is already running and will
+                    // handle file replacement and relaunch on its own.
                     #[cfg(target_os = "windows")]
-                    cx.update(|cx| {
-                        cx.quit();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to quit for Windows update"))
-                    .ok();
+                    cx.update(|cx| cx.quit())
+                        .map_err(|e| warn!(error = ?e, "Failed to quit for Windows update"))
+                        .ok();
                 }
                 Err(e) => {
                     error!(error = ?e, "Installation failed");
@@ -739,41 +743,30 @@ async fn download_file(
     Ok(())
 }
 
-/// Restart the application after a Linux AppImage update.
+/// Spawn the updated AppImage binary on Linux.
 ///
-/// The old executable was atomically replaced by the installer, so we just
-/// re-exec the path (stripping any " (deleted)" suffix the kernel may have
-/// appended) and then exit the current process.
+/// The on-disk executable was atomically replaced by the installer before this
+/// is called.  We only spawn — the caller is responsible for quitting the
+/// current process gracefully via `cx.quit()`.
+///
+/// Linux appends " (deleted)" to `/proc/self/exe` when the running file has
+/// been replaced; we strip that suffix to get the actual path.
 #[cfg(target_os = "linux")]
-fn restart_application() {
+fn relaunch_linux_process() -> std::io::Result<()> {
     use std::process::Command;
 
-    let current_exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(e) => {
-            error!(error = ?e, "Failed to get current executable path");
-            return;
-        }
+    let current_exe = std::env::current_exe()?;
+
+    let path_str = current_exe.to_string_lossy();
+    let actual_exe = if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
+        std::path::PathBuf::from(stripped)
+    } else {
+        current_exe
     };
 
-    // On Linux, when the executable is replaced while running, the path may have
-    // " (deleted)" appended. Strip this suffix to get the actual path.
-    let current_exe = {
-        let path_str = current_exe.to_string_lossy();
-        if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
-            std::path::PathBuf::from(stripped)
-        } else {
-            current_exe
-        }
-    };
-
-    info!(path = ?current_exe, "Restarting application");
-
-    if let Err(e) = Command::new(&current_exe).spawn() {
-        error!(error = ?e, "Failed to restart application");
-    }
-
-    std::process::exit(0);
+    info!(path = ?actual_exe, "Spawning updated AppImage");
+    Command::new(&actual_exe).spawn()?;
+    Ok(())
 }
 
 /// Write and spawn a detached shell script that installs the macOS update
