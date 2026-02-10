@@ -30,19 +30,17 @@ impl RenderOnce for AutoUpdateView {
         let status = updater.status();
         let version = updater.current_version();
 
-        let (icon, text, tooltip, enabled, highlighted) = match status {
+        let (icon, text, tooltip, enabled) = match status {
             AutoUpdateStatus::Idle => (
                 CustomIcon::Refresh,
                 format!("v{}", version),
                 "Check for updates".to_string(),
                 true,
-                false,
             ),
             AutoUpdateStatus::Checking => (
                 CustomIcon::Loader,
                 "Checking...".to_string(),
                 "Checking for updates".to_string(),
-                false,
                 false,
             ),
             AutoUpdateStatus::Downloading(progress) => (
@@ -50,20 +48,17 @@ impl RenderOnce for AutoUpdateView {
                 format!("{:.0}%", progress * 100.0),
                 "Downloading update".to_string(),
                 false,
-                false,
             ),
             AutoUpdateStatus::Ready(version, _) => (
                 CustomIcon::CheckCircle,
-                "Restart to update".to_string(),
+                format!("v{} ready", version),
                 format!("Click to restart and install v{}", version),
                 true,
-                true, // Highlight ready state
             ),
             AutoUpdateStatus::Installing => (
                 CustomIcon::Loader,
                 "Installing...".to_string(),
                 "Installing update, app will restart shortly".to_string(),
-                false,
                 false,
             ),
             AutoUpdateStatus::Error(msg) => (
@@ -71,7 +66,6 @@ impl RenderOnce for AutoUpdateView {
                 "Update failed".to_string(),
                 msg.clone(),
                 true,
-                false,
             ),
         };
 
@@ -92,12 +86,6 @@ impl RenderOnce for AutoUpdateView {
                     ),
             );
 
-        // Highlight ready state
-        if highlighted {
-            button = button.primary();
-        }
-
-        // Enable click handler for interactive states
         if enabled && let Some(handler) = self.on_click {
             button = button.on_click(move |_event, window, cx| {
                 handler(window, cx);
