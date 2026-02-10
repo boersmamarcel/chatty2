@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, warn};
 
 mod installer;
+#[cfg(not(target_os = "macos"))]
 use installer::install_release;
 
 /// Polling interval for checking updates (1 hour)
@@ -43,6 +44,10 @@ pub enum AutoUpdateStatus {
     Downloading(f32),
     /// Update ready, waiting for restart (version, path)
     Ready(String, PathBuf),
+    /// Installing the update — on macOS this means the app is quitting gracefully
+    /// so a helper script can replace the bundle and relaunch. On other platforms
+    /// this is a brief transient state before the process exits.
+    Installing,
     /// Something went wrong
     Error(String),
 }
@@ -358,7 +363,17 @@ impl AutoUpdater {
         .detach();
     }
 
-    /// Install the downloaded update and restart the application
+    /// Install the downloaded update and restart the application.
+    ///
+    /// On macOS this uses a Zed-style deferred approach for smooth UX:
+    /// 1. Set status to Installing for visual feedback
+    /// 2. Write a helper shell script to /tmp that will mount the DMG,
+    ///    rsync the .app bundle, and relaunch the app
+    /// 3. Spawn the helper as a detached process (it sleeps 2s first)
+    /// 4. Call cx.quit() for a graceful GPUI shutdown with window animations
+    ///
+    /// On Linux/Windows the existing in-process approach is used, now with
+    /// async I/O to keep the Tokio runtime unblocked.
     pub fn install_and_restart(&mut self, cx: &mut App) {
         let update_path = match &self.status {
             AutoUpdateStatus::Ready(_, update_path) => update_path.clone(),
@@ -368,6 +383,38 @@ impl AutoUpdater {
             }
         };
 
+        // Show Installing status immediately for visual feedback
+        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+            updater.status = AutoUpdateStatus::Installing;
+        });
+
+        // PHASE 1 (macOS): Deferred installation via helper script + graceful quit
+        #[cfg(target_os = "macos")]
+        {
+            let app_bundle = std::env::current_exe().ok().and_then(|exe| {
+                exe.ancestors()
+                    .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
+                    .map(|p| p.to_path_buf())
+            });
+
+            match app_bundle {
+                Some(bundle) => {
+                    launch_macos_install_helper(&update_path, &bundle);
+                    cx.quit();
+                }
+                None => {
+                    error!("Could not find current app bundle for macOS update");
+                    cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                        updater.status = AutoUpdateStatus::Error(
+                            "Could not find app bundle path for update installation".to_string(),
+                        );
+                    });
+                }
+            }
+        }
+
+        // PHASE 2 (Linux / Windows): In-process installation then restart
+        #[cfg(not(target_os = "macos"))]
         cx.spawn(async move |cx: &mut AsyncApp| {
             match install_release(&update_path).await {
                 Ok(needs_restart) => {
@@ -383,19 +430,17 @@ impl AutoUpdater {
                     .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
                     .ok();
 
-                    // On macOS and Linux, restart immediately
-                    #[cfg(not(target_os = "windows"))]
+                    // Linux: relaunch the process (AppImage replacement is done)
+                    #[cfg(target_os = "linux")]
                     restart_application();
 
-                    // On Windows, request quit (installer will handle restart)
+                    // Windows: quit and let the installer handle the relaunch
                     #[cfg(target_os = "windows")]
-                    {
-                        cx.update(|cx| {
-                            cx.quit();
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
-                        .ok();
-                    }
+                    cx.update(|cx| {
+                        cx.quit();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to quit for Windows update"))
+                    .ok();
                 }
                 Err(e) => {
                     error!(error = ?e, "Installation failed");
@@ -694,8 +739,12 @@ async fn download_file(
     Ok(())
 }
 
-/// Restart the application (macOS and Linux only)
-#[cfg(not(target_os = "windows"))]
+/// Restart the application after a Linux AppImage update.
+///
+/// The old executable was atomically replaced by the installer, so we just
+/// re-exec the path (stripping any " (deleted)" suffix the kernel may have
+/// appended) and then exit the current process.
+#[cfg(target_os = "linux")]
 fn restart_application() {
     use std::process::Command;
 
@@ -709,7 +758,6 @@ fn restart_application() {
 
     // On Linux, when the executable is replaced while running, the path may have
     // " (deleted)" appended. Strip this suffix to get the actual path.
-    #[cfg(target_os = "linux")]
     let current_exe = {
         let path_str = current_exe.to_string_lossy();
         if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
@@ -726,6 +774,112 @@ fn restart_application() {
     }
 
     std::process::exit(0);
+}
+
+/// Write and spawn a detached shell script that installs the macOS update
+/// after the app has fully exited.
+///
+/// The script:
+/// 1. Sleeps 2 s to let the app finish its GPUI shutdown
+/// 2. Mounts the downloaded .dmg with `hdiutil`
+/// 3. Rsyncs the new .app bundle over the current installation
+/// 4. Unmounts the .dmg
+/// 5. Relaunches the updated app with `open`
+#[cfg(target_os = "macos")]
+pub fn launch_macos_install_helper(dmg_path: &std::path::Path, app_bundle: &std::path::Path) {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dmg = dmg_path.to_string_lossy();
+    let bundle = app_bundle.to_string_lossy();
+
+    let script = format!(
+        r#"#!/bin/bash
+set -e
+
+DMG_PATH="{dmg}"
+APP_BUNDLE="{bundle}"
+
+# Wait for the app to fully exit
+sleep 2
+
+# Mount the DMG and capture plist output
+MOUNT_OUTPUT=$(hdiutil attach -nobrowse -plist "$DMG_PATH" 2>/dev/null)
+
+# Extract mount point from plist output
+MOUNT_POINT=$(echo "$MOUNT_OUTPUT" \
+    | grep -A1 "mount-point" \
+    | grep "<string>" \
+    | sed 's/.*<string>\(.*\)<\/string>.*/\1/' \
+    | head -1)
+
+# Fallback: scan for /Volumes/ path if plist parse failed
+if [ -z "$MOUNT_POINT" ]; then
+    MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep -o '/Volumes/[^<"]*' | head -1 | tr -d '[:space:]')
+fi
+
+if [ -z "$MOUNT_POINT" ]; then
+    exit 1
+fi
+
+# Find the .app bundle inside the mounted volume
+APP_IN_DMG=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" | head -1)
+
+if [ -z "$APP_IN_DMG" ]; then
+    hdiutil detach -force "$MOUNT_POINT" 2>/dev/null || true
+    exit 1
+fi
+
+# Replace the current installation with the new bundle
+rsync -a --delete "$APP_IN_DMG/" "$APP_BUNDLE/"
+
+# Unmount
+hdiutil detach -force "$MOUNT_POINT" 2>/dev/null || true
+
+# Relaunch the updated app
+open "$APP_BUNDLE"
+"#,
+        dmg = dmg,
+        bundle = bundle,
+    );
+
+    let script_path = std::path::PathBuf::from("/tmp/chatty_update_helper.sh");
+
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&script_path)?;
+        file.write_all(script.as_bytes())?;
+        let mut perms = file.metadata()?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms)?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        error!(error = ?e, "Failed to write macOS install helper script");
+        return;
+    }
+
+    // Spawn as a detached process — it must outlive the current process
+    match std::process::Command::new("bash")
+        .arg(&script_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            // Drop the handle immediately so we don't wait for the child
+            drop(child);
+            info!(
+                script = ?script_path,
+                dmg = ?dmg_path,
+                "macOS install helper launched; quitting app for graceful restart"
+            );
+        }
+        Err(e) => {
+            error!(error = ?e, "Failed to launch macOS install helper");
+        }
+    }
 }
 
 #[cfg(test)]

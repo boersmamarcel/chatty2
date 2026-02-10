@@ -59,6 +59,13 @@ impl RenderOnce for AutoUpdateView {
                 true,
                 true, // Highlight ready state
             ),
+            AutoUpdateStatus::Installing => (
+                CustomIcon::Loader,
+                "Installing...".to_string(),
+                "Installing update, app will restart shortly".to_string(),
+                false,
+                false,
+            ),
             AutoUpdateStatus::Error(msg) => (
                 CustomIcon::AlertCircle,
                 "Update failed".to_string(),
