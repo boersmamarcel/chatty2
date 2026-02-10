@@ -19,8 +19,18 @@ impl SystemTraceView {
         }
     }
 
+    /// Allow updating trace during streaming
+    pub fn update_trace(&mut self, trace: SystemTrace) {
+        self.trace = trace;
+    }
+
+    /// Toggle the collapsed state
+    pub fn toggle_collapsed(&mut self) {
+        self.is_collapsed = !self.is_collapsed;
+    }
+
     /// Render the trace container header with active status
-    fn render_header(&self, cx: &App) -> impl IntoElement {
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Active status styling
         let has_active = self.trace.active_tool_index.is_some();
 
@@ -52,6 +62,13 @@ impl SystemTraceView {
                     .text_sm()
                     .text_color(muted_text)
                     .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _event, _window, cx| {
+                            view.toggle_collapsed();
+                            cx.notify();
+                        }),
+                    )
                     .child(collapse_icon),
             )
             .child(
@@ -96,10 +113,22 @@ impl SystemTraceView {
                     }
                 };
 
-                let step_container = div()
+                let mut step_container = div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_1();
+
+                // Add indicator when active
+                if is_active {
+                    step_container = step_container.child(
+                        div()
+                            .text_xs()
+                            .text_color(color)
+                            .child("⟳"),
+                    );
+                }
+
+                step_container = step_container
                     .child(
                         div()
                             .text_xs()
