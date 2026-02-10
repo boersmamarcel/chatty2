@@ -16,7 +16,7 @@ use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
     GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
-    JsonModelsRepository, JsonMcpRepository, McpRepository, ModelsRepository, ProviderRepository,
+    JsonMcpRepository, JsonModelsRepository, McpRepository, ModelsRepository, ProviderRepository,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -211,7 +211,7 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx: &mut App| {
         debug!("Quit action triggered");
         chatty::services::cleanup_thumbnails();
-        
+
         // Shutdown all MCP servers.
         // kill_all_sync() sends SIGTERM synchronously to all child processes before
         // the process exits, preventing orphaned MCP server processes. The async
@@ -224,7 +224,7 @@ fn register_actions(cx: &mut App) {
             }
         })
         .detach();
-        
+
         cx.quit();
     });
     cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
@@ -357,7 +357,6 @@ fn main() {
         let mcp_service = chatty::services::McpService::new();
         cx.set_global(mcp_service);
         info!("MCP service initialized");
-
 
         // Use Arc<AtomicBool> to track when both providers and models are loaded
 
@@ -519,7 +518,7 @@ fn main() {
                             model.replace_all(servers);
                         });
                         info!("MCP server configurations loaded");
-                        
+
                         // Start all enabled MCP servers
                         let mcp_service = cx.global::<chatty::services::McpService>().clone();
                         cx.spawn(|_cx: &mut AsyncApp| async move {
@@ -529,7 +528,9 @@ fn main() {
                         })
                         .detach();
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to update global MCP servers after load"))
+                    .map_err(
+                        |e| warn!(error = ?e, "Failed to update global MCP servers after load"),
+                    )
                     .ok();
                 }
                 Err(e) => {

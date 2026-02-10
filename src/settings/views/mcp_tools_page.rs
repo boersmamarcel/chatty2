@@ -20,10 +20,7 @@ fn get_config_path_display() -> &'static str {
 pub fn mcp_tools_page() -> SettingPage {
     SettingPage::new("Tools")
         .resettable(false)
-        .groups(vec![
-            mcp_info_group(),
-            mcp_servers_list_group(),
-        ])
+        .groups(vec![mcp_info_group(), mcp_servers_list_group()])
 }
 
 fn mcp_info_group() -> SettingGroup {
@@ -35,7 +32,7 @@ fn mcp_info_group() -> SettingGroup {
 
 fn mcp_servers_list_group() -> SettingGroup {
     let config_path = get_config_path_display();
-    
+
     SettingGroup::new()
         .title("Configured Servers")
         .description("MCP servers provide tools that the AI can use during conversations")
@@ -44,10 +41,10 @@ fn mcp_servers_list_group() -> SettingGroup {
                 "Active Servers",
                 SettingField::render(move |_options, _window, cx| {
                     let servers = cx.global::<McpServersModel>().servers().to_vec();
-                    
+
                     use gpui::*;
                     use gpui_component::*;
-                    
+
                     if servers.is_empty() {
                         let empty_message = format!("No MCP servers configured. Add a server by editing {}", config_path);
                         div()
@@ -67,9 +64,9 @@ fn mcp_servers_list_group() -> SettingGroup {
                                 } else {
                                     cx.theme().muted_foreground
                                 };
-                                
+
                                 let status_text = if server.enabled { "Enabled" } else { "Disabled" };
-                                
+
                                 div()
                                     .flex()
                                     .items_center()

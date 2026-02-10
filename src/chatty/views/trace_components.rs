@@ -113,19 +113,12 @@ impl SystemTraceView {
                     }
                 };
 
-                let mut step_container = div()
-                    .flex()
-                    .items_center()
-                    .gap_1();
+                let mut step_container = div().flex().items_center().gap_1();
 
                 // Add indicator when active
                 if is_active {
-                    step_container = step_container.child(
-                        div()
-                            .text_xs()
-                            .text_color(color)
-                            .child("⟳"),
-                    );
+                    step_container =
+                        step_container.child(div().text_xs().text_color(color).child("⟳"));
                 }
 
                 step_container = step_container

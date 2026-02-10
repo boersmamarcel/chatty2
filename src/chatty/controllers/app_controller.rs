@@ -344,7 +344,10 @@ impl ChattyApp {
         // into the AgentClient. If an MCP server is added, removed, or restarted after this
         // point, the existing conversation will retain its original tool set. Open a new
         // conversation to pick up updated tool registrations.
-        let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok()
+        let mcp_tools = mcp_service
+            .get_all_tools_with_sinks()
+            .await
+            .ok()
             .and_then(|tools| {
                 if tools.is_empty() {
                     None
@@ -520,16 +523,23 @@ impl ChattyApp {
                     // into the AgentClient. If an MCP server is added, removed, or restarted
                     // after this point, the existing conversation will retain its original tool
                     // set. Open a new conversation to pick up updated tool registrations.
-                    let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|svc, _| svc.clone())
+                    let mcp_service = cx
+                        .update_global::<crate::chatty::services::McpService, _>(|svc, _| {
+                            svc.clone()
+                        })
                         .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
-                    let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok()
-                        .and_then(|tools| {
-                            if tools.is_empty() {
-                                None
-                            } else {
-                                Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
-                            }
-                        });
+                    let mcp_tools =
+                        mcp_service
+                            .get_all_tools_with_sinks()
+                            .await
+                            .ok()
+                            .and_then(|tools| {
+                                if tools.is_empty() {
+                                    None
+                                } else {
+                                    Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
+                                }
+                            });
 
                     let conversation = Conversation::new(
                         conv_id.clone(),
@@ -707,13 +717,13 @@ impl ChattyApp {
                     // Update the conversation model
                     cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
                         // Get MCP service
-                        let mcp_service = cx.update(|cx| {
-                            cx.global::<crate::chatty::services::McpService>().clone()
-                        }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        
+                        let mcp_service = cx
+                            .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
                         // Get MCP tools from active servers (outside of cx.update)
                         let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok();
-                        
+
                         // Transform from (String, Vec<Tool>, ServerSink) to (Vec<Tool>, ServerSink)
                         let mcp_tools = mcp_tools.and_then(|tools| {
                             if tools.is_empty() {
@@ -722,12 +732,19 @@ impl ChattyApp {
                                 Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
                             }
                         });
-                        
-                        debug!(has_mcp_tools = mcp_tools.is_some(), "Creating agent with MCP tools");
-                        
+
+                        debug!(
+                            has_mcp_tools = mcp_tools.is_some(),
+                            "Creating agent with MCP tools"
+                        );
+
                         // Create new agent asynchronously with MCP tools
-                        let new_agent =
-                            AgentClient::from_model_config_with_tools(&model_config, &provider_config, mcp_tools).await?;
+                        let new_agent = AgentClient::from_model_config_with_tools(
+                            &model_config,
+                            &provider_config,
+                            mcp_tools,
+                        )
+                        .await?;
 
                         // Update the conversation's agent synchronously
                         cx.update_global::<ConversationsStore, _>(|store, _cx| {

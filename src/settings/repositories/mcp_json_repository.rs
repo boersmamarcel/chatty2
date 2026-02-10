@@ -44,5 +44,4 @@ impl McpRepository for JsonMcpRepository {
             Ok(configs)
         })
     }
-
 }

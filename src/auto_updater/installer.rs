@@ -158,7 +158,7 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 

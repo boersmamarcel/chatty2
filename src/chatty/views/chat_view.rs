@@ -12,10 +12,10 @@ use tracing::{debug, info, warn};
 
 use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
-use super::trace_components::SystemTraceView;
 use super::message_types::{
     SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, TraceItem, UserMessage,
 };
+use super::trace_components::SystemTraceView;
 use crate::settings::models::models_store::ModelsModel;
 
 /// Main chat view component
@@ -195,7 +195,7 @@ impl ChatView {
     /// Handle tool call started event
     pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
-        
+
         let tool_call = ToolCallBlock {
             tool_name: name.clone(),
             display_name: name,
@@ -210,7 +210,12 @@ impl ChatView {
 
         // Update live trace and create/update system_trace_view entity
         if let Some(last) = self.messages.last_mut() {
-            debug!(has_last_message = true, is_streaming = last.is_streaming, has_live_trace = last.live_trace.is_some(), "Checking live_trace availability");
+            debug!(
+                has_last_message = true,
+                is_streaming = last.is_streaming,
+                has_live_trace = last.live_trace.is_some(),
+                "Checking live_trace availability"
+            );
             if last.is_streaming {
                 if let Some(ref mut trace) = last.live_trace {
                     debug!("Adding tool call to live_trace");
@@ -221,9 +226,8 @@ impl ChatView {
                     // Create or update the trace view entity for rendering
                     let trace_clone = trace.clone();
                     if last.system_trace_view.is_none() {
-                        last.system_trace_view = Some(cx.new(|_cx| {
-                            SystemTraceView::new(trace_clone)
-                        }));
+                        last.system_trace_view =
+                            Some(cx.new(|_cx| SystemTraceView::new(trace_clone)));
                     } else if let Some(ref view_entity) = last.system_trace_view {
                         view_entity.update(cx, |view, cx| {
                             view.update_trace(trace_clone);
@@ -316,7 +320,7 @@ impl ChatView {
     /// Handle tool call result event
     pub fn handle_tool_call_result(&mut self, id: String, result: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
-        
+
         if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
             debug!("Found active tool call, updating result");
             tool_call.output = Some(result.clone());
@@ -387,7 +391,12 @@ impl ChatView {
 
         // Update live trace
         if let Some(last) = self.messages.last_mut() {
-            debug!(has_last_message = true, is_streaming = last.is_streaming, has_live_trace = last.live_trace.is_some(), "Checking live_trace availability");
+            debug!(
+                has_last_message = true,
+                is_streaming = last.is_streaming,
+                has_live_trace = last.live_trace.is_some(),
+                "Checking live_trace availability"
+            );
             if last.is_streaming {
                 if let Some(ref mut trace) = last.live_trace {
                     debug!("Adding tool call to live_trace");
@@ -396,8 +405,8 @@ impl ChatView {
                     trace.set_active_tool(index);
                 }
             } else {
-            debug!("live_trace not available for tool call");
-        }
+                debug!("live_trace not available for tool call");
+            }
         } else {
             debug!("Last message is not streaming");
         }

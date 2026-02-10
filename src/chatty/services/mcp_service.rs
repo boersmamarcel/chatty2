@@ -105,7 +105,6 @@ impl McpConnection {
 
         Ok(())
     }
-
 }
 
 /// Global service for managing MCP server connections
@@ -141,7 +140,9 @@ impl McpService {
             let pid_i32 = *pid as i32;
             match kill(Pid::from_raw(pid_i32), Signal::SIGTERM) {
                 Ok(()) => info!(server = %name, pid = pid_i32, "Sent SIGTERM to MCP server"),
-                Err(e) => warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server"),
+                Err(e) => {
+                    warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server")
+                }
             }
         }
     }
@@ -224,10 +225,7 @@ impl McpService {
         }
 
         if !errors.is_empty() {
-            warn!(
-                failed = errors.len(),
-                "Some MCP servers failed to start"
-            );
+            warn!(failed = errors.len(), "Some MCP servers failed to start");
         }
 
         Ok(())
@@ -260,7 +258,9 @@ impl McpService {
     ///
     /// Tool lists are cached after the first successful fetch per server and
     /// invalidated when a server is restarted via restart_server().
-    pub async fn get_all_tools_with_sinks(&self) -> Result<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {
+    pub async fn get_all_tools_with_sinks(
+        &self,
+    ) -> Result<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {
         let mut connections = self.connections.write().await;
         let mut result = Vec::new();
 
@@ -298,11 +298,204 @@ impl McpService {
 
         Ok(result)
     }
-
 }
 
 impl Default for McpService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::models::mcp_store::McpServerConfig;
+    use std::collections::HashMap;
+
+    fn disabled_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            command: "true".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            enabled: false,
+        }
+    }
+
+    // --- McpService::new / Default ---
+
+    #[test]
+    fn test_new_service_has_no_connections() {
+        let svc = McpService::new();
+        let pids = svc.pids.lock().unwrap();
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn test_default_equals_new() {
+        let svc = McpService::default();
+        let pids = svc.pids.lock().unwrap();
+        assert!(pids.is_empty());
+    }
+
+    // --- kill_all_sync with empty pids ---
+
+    #[test]
+    fn test_kill_all_sync_empty_does_not_panic() {
+        let svc = McpService::new();
+        // Should complete without panicking when no pids are tracked
+        svc.kill_all_sync();
+    }
+
+    // --- stop_server on unknown name ---
+
+    #[tokio::test]
+    async fn test_stop_server_unknown_is_ok() {
+        let svc = McpService::new();
+        // Stopping a server that was never started should succeed (logs a warning)
+        let result = svc.stop_server("nonexistent").await;
+        assert!(result.is_ok());
+    }
+
+    // --- start_all skips disabled servers ---
+
+    #[tokio::test]
+    async fn test_start_all_skips_disabled_servers() {
+        let svc = McpService::new();
+        let configs = vec![disabled_config("disabled-a"), disabled_config("disabled-b")];
+        let result = svc.start_all(configs).await;
+        assert!(result.is_ok());
+
+        // No connections should have been registered for disabled servers
+        let connections = svc.connections.read().await;
+        assert!(connections.is_empty());
+
+        let pids = svc.pids.lock().unwrap();
+        assert!(pids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_start_all_empty_list_is_ok() {
+        let svc = McpService::new();
+        let result = svc.start_all(vec![]).await;
+        assert!(result.is_ok());
+    }
+
+    // --- get_all_tools_with_sinks with no connections ---
+
+    #[tokio::test]
+    async fn test_get_all_tools_no_connections_returns_empty() {
+        let svc = McpService::new();
+        let result = svc.get_all_tools_with_sinks().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // --- stop_all with no connections ---
+
+    #[tokio::test]
+    async fn test_stop_all_empty_is_ok() {
+        let svc = McpService::new();
+        let result = svc.stop_all().await;
+        assert!(result.is_ok());
+    }
+
+    // --- start_server with a bad command ---
+    //
+    // We cannot construct a McpConnection without spawn(), so we verify the
+    // error path: a command that does not exist should cause start_server to
+    // return Err and leave the connections map empty.
+
+    #[tokio::test]
+    async fn test_start_server_bad_command_returns_err_and_no_connection() {
+        let svc = McpService::new();
+        let bad_config = McpServerConfig {
+            name: "bad-server".to_string(),
+            command: "/nonexistent/command".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            enabled: true,
+        };
+
+        let result = svc.start_server(bad_config).await;
+        assert!(result.is_err(), "Expected Err for nonexistent command");
+
+        // Failed spawn must not leave a partial connection
+        let connections = svc.connections.read().await;
+        assert!(connections.is_empty());
+
+        let pids = svc.pids.lock().unwrap();
+        assert!(pids.is_empty());
+    }
+
+    // --- Verify pids are cleaned up on stop_server ---
+    //
+    // Manually pre-insert a PID (simulating a partially-cleaned state where the
+    // connection was already removed but the pid index was not), then verify
+    // stop_server clears it.
+
+    #[tokio::test]
+    async fn test_stop_server_clears_pid_entry() {
+        let svc = McpService::new();
+
+        // Manually insert a fake PID entry
+        {
+            let mut pids = svc.pids.lock().unwrap();
+            pids.insert("fake-server".to_string(), 99999);
+        }
+
+        // stop_server should remove the pid even though no live connection exists
+        let result = svc.stop_server("fake-server").await;
+        assert!(result.is_ok());
+
+        let pids = svc.pids.lock().unwrap();
+        assert!(
+            !pids.contains_key("fake-server"),
+            "PID entry should be removed after stop_server"
+        );
+    }
+
+    // --- Tool cache: get_all_tools idempotent with no connections ---
+    //
+    // McpConnection::spawn requires a real MCP-compatible process, so we verify
+    // the observable: repeated calls to get_all_tools_with_sinks are idempotent
+    // when there are no connections.
+
+    #[tokio::test]
+    async fn test_get_all_tools_idempotent_no_connections() {
+        let svc = McpService::new();
+        let r1 = svc.get_all_tools_with_sinks().await.unwrap();
+        let r2 = svc.get_all_tools_with_sinks().await.unwrap();
+        assert_eq!(r1.len(), r2.len());
+    }
+
+    // --- start_all: partial failure returns Ok (non-fatal) ---
+    //
+    // start_all is designed to continue starting remaining servers when one
+    // fails; it returns Ok(()) even if some servers fail, only logging errors.
+
+    #[tokio::test]
+    async fn test_start_all_partial_failure_returns_ok() {
+        let svc = McpService::new();
+        let configs = vec![
+            McpServerConfig {
+                name: "bad-1".to_string(),
+                command: "/no/such/binary".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                enabled: true,
+            },
+            McpServerConfig {
+                name: "bad-2".to_string(),
+                command: "/also/missing".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                enabled: true,
+            },
+        ];
+
+        let result = svc.start_all(configs).await;
+        // start_all returns Ok even when all servers fail
+        assert!(result.is_ok());
     }
 }

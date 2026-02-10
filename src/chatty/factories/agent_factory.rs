@@ -5,7 +5,6 @@ use rig::client::CompletionClient;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 
-
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
         match $mcp_tools {
