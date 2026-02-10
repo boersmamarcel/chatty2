@@ -425,9 +425,10 @@ impl AutoUpdater {
                             error!(error = ?e, "Failed to spawn updated AppImage");
                             cx.update(|cx| {
                                 cx.update_global::<AutoUpdater, _>(|updater, _cx| {
-                                    updater.status = AutoUpdateStatus::Error(
-                                        format!("Failed to relaunch: {}", e),
-                                    );
+                                    updater.status = AutoUpdateStatus::Error(format!(
+                                        "Failed to relaunch: {}",
+                                        e
+                                    ));
                                 });
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to update auto-updater UI"))
