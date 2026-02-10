@@ -48,25 +48,15 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add MCP tools if available and build
+                // Add MCP tools per-server so each tool is bound to its own ServerSink
                 let agent = if let Some(tools_list) = mcp_tools {
-                    // Combine all tools from all servers
-                    let mut all_tools = Vec::new();
-                    let mut server_sink = None;
-                    
-                    for (tools, sink) in tools_list {
-                        all_tools.extend(tools);
-                        if server_sink.is_none() {
-                            server_sink = Some(sink);
+                    let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
+                    if let Some((first_tools, first_sink)) = iter.next() {
+                        let mut b = builder.rmcp_tools(first_tools, first_sink);
+                        for (tools, sink) in iter {
+                            b = b.rmcp_tools(tools, sink);
                         }
-                    }
-                    
-                    if !all_tools.is_empty() {
-                        if let Some(sink) = server_sink {
-                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
-                        } else {
-                            builder.build()
-                        }
+                        b.build()
                     } else {
                         builder.build()
                     }
@@ -90,24 +80,15 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
-                // Add MCP tools if available and build
+                // Add MCP tools per-server so each tool is bound to its own ServerSink
                 let agent = if let Some(tools_list) = mcp_tools {
-                    let mut all_tools = Vec::new();
-                    let mut server_sink = None;
-                    
-                    for (tools, sink) in tools_list {
-                        all_tools.extend(tools);
-                        if server_sink.is_none() {
-                            server_sink = Some(sink);
+                    let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
+                    if let Some((first_tools, first_sink)) = iter.next() {
+                        let mut b = builder.rmcp_tools(first_tools, first_sink);
+                        for (tools, sink) in iter {
+                            b = b.rmcp_tools(tools, sink);
                         }
-                    }
-                    
-                    if !all_tools.is_empty() {
-                        if let Some(sink) = server_sink {
-                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
-                        } else {
-                            builder.build()
-                        }
+                        b.build()
                     } else {
                         builder.build()
                     }
@@ -127,24 +108,15 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                // Add MCP tools if available and build
+                // Add MCP tools per-server so each tool is bound to its own ServerSink
                 let agent = if let Some(tools_list) = mcp_tools {
-                    let mut all_tools = Vec::new();
-                    let mut server_sink = None;
-                    
-                    for (tools, sink) in tools_list {
-                        all_tools.extend(tools);
-                        if server_sink.is_none() {
-                            server_sink = Some(sink);
+                    let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
+                    if let Some((first_tools, first_sink)) = iter.next() {
+                        let mut b = builder.rmcp_tools(first_tools, first_sink);
+                        for (tools, sink) in iter {
+                            b = b.rmcp_tools(tools, sink);
                         }
-                    }
-                    
-                    if !all_tools.is_empty() {
-                        if let Some(sink) = server_sink {
-                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
-                        } else {
-                            builder.build()
-                        }
+                        b.build()
                     } else {
                         builder.build()
                     }
@@ -168,24 +140,15 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add MCP tools if available and build
+                // Add MCP tools per-server so each tool is bound to its own ServerSink
                 let agent = if let Some(tools_list) = mcp_tools {
-                    let mut all_tools = Vec::new();
-                    let mut server_sink = None;
-                    
-                    for (tools, sink) in tools_list {
-                        all_tools.extend(tools);
-                        if server_sink.is_none() {
-                            server_sink = Some(sink);
+                    let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
+                    if let Some((first_tools, first_sink)) = iter.next() {
+                        let mut b = builder.rmcp_tools(first_tools, first_sink);
+                        for (tools, sink) in iter {
+                            b = b.rmcp_tools(tools, sink);
                         }
-                    }
-                    
-                    if !all_tools.is_empty() {
-                        if let Some(sink) = server_sink {
-                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
-                        } else {
-                            builder.build()
-                        }
+                        b.build()
                     } else {
                         builder.build()
                     }
@@ -208,24 +171,15 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                // Add MCP tools if available and build
+                // Add MCP tools per-server so each tool is bound to its own ServerSink
                 let agent = if let Some(tools_list) = mcp_tools {
-                    let mut all_tools = Vec::new();
-                    let mut server_sink = None;
-                    
-                    for (tools, sink) in tools_list {
-                        all_tools.extend(tools);
-                        if server_sink.is_none() {
-                            server_sink = Some(sink);
+                    let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
+                    if let Some((first_tools, first_sink)) = iter.next() {
+                        let mut b = builder.rmcp_tools(first_tools, first_sink);
+                        for (tools, sink) in iter {
+                            b = b.rmcp_tools(tools, sink);
                         }
-                    }
-                    
-                    if !all_tools.is_empty() {
-                        if let Some(sink) = server_sink {
-                            builder.rmcp_tools(all_tools.clone(), sink.clone()).build()
-                        } else {
-                            builder.build()
-                        }
+                        b.build()
                     } else {
                         builder.build()
                     }
