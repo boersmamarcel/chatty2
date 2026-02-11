@@ -1,5 +1,5 @@
 use crate::settings::controllers::providers_controller;
-use crate::settings::models::providers_store::{ProviderModel, ProviderType};
+use crate::settings::models::providers_store::{AzureAuthMethod, ProviderModel, ProviderType};
 use gpui::{App, SharedString};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 
@@ -84,6 +84,23 @@ fn create_azure_openai_group() -> SettingGroup {
         )
         .items(vec![
             SettingItem::new(
+                "Use Entra ID",
+                SettingField::switch(
+                    |cx: &App| {
+                        cx.global::<ProviderModel>()
+                            .providers()
+                            .iter()
+                            .find(|p| p.provider_type == ProviderType::AzureOpenAI)
+                            .map(|p| p.azure_auth_method() == AzureAuthMethod::EntraId)
+                            .unwrap_or(false)
+                    },
+                    |use_entra_id: bool, cx: &mut App| {
+                        providers_controller::update_azure_auth_method(cx, use_entra_id);
+                    },
+                ),
+            )
+            .description("Authenticate using Entra ID (Azure AD) instead of API key"),
+            SettingItem::new(
                 "API Key",
                 SettingField::input(
                     |cx: &App| azure_api_key(cx).into(),
@@ -93,7 +110,7 @@ fn create_azure_openai_group() -> SettingGroup {
                     },
                 ),
             )
-            .description("Your Azure OpenAI API key"),
+            .description("Azure API key (not needed if using Entra ID)"),
             SettingItem::new(
                 "Endpoint URL",
                 SettingField::input(
@@ -104,7 +121,7 @@ fn create_azure_openai_group() -> SettingGroup {
                     },
                 ),
             )
-            .description("Azure resource base URL (e.g., https://my-resource.openai.azure.com) - do not include /openai/deployments path"),
+            .description("Azure resource URL (e.g., https://my-resource.openai.azure.com)"),
         ])
 }
 

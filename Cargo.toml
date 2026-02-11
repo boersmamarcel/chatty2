@@ -39,6 +39,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 
+# Azure authentication for Entra ID
+azure_identity = "0.20"
+azure_core = "0.20"
+
 # Asset embedding
 rust-embed = "8.0"
 

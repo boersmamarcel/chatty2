@@ -4,6 +4,19 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AzureAuthMethod {
+    ApiKey,
+    EntraId,
+}
+
+impl Default for AzureAuthMethod {
+    fn default() -> Self {
+        AzureAuthMethod::ApiKey
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum ProviderType {
     OpenAI,
@@ -72,6 +85,28 @@ impl ProviderConfig {
         self.base_url = Some(base_url);
         self
     }
+
+    /// Get Azure authentication method from extra_config
+    pub fn azure_auth_method(&self) -> AzureAuthMethod {
+        self.extra_config
+            .get("auth_method")
+            .and_then(|v| match v.as_str() {
+                "entra_id" => Some(AzureAuthMethod::EntraId),
+                "api_key" => Some(AzureAuthMethod::ApiKey),
+                _ => None,
+            })
+            .unwrap_or(AzureAuthMethod::ApiKey) // Default for backward compatibility
+    }
+
+    /// Set Azure authentication method
+    pub fn set_azure_auth_method(&mut self, method: AzureAuthMethod) {
+        let value = match method {
+            AzureAuthMethod::ApiKey => "api_key",
+            AzureAuthMethod::EntraId => "entra_id",
+        };
+        self.extra_config
+            .insert("auth_method".to_string(), value.to_string());
+    }
 }
 
 #[derive(Clone)]
@@ -120,10 +155,13 @@ impl ProviderModel {
             .filter(|p| match p.provider_type {
                 // Include Ollama regardless of API key
                 ProviderType::Ollama => true,
-                // Azure requires both API key and endpoint URL
+                // Azure requires endpoint URL AND (API key OR Entra ID)
                 ProviderType::AzureOpenAI => {
-                    p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                    let has_endpoint = p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty());
+                    let has_api_key = p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+                    let uses_entra_id = p.azure_auth_method() == AzureAuthMethod::EntraId;
+
+                    has_endpoint && (has_api_key || uses_entra_id)
                 }
                 // Include others only if they have a non-empty API key
                 _ => p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),

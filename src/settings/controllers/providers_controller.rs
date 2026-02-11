@@ -1,5 +1,7 @@
 use crate::PROVIDER_REPOSITORY;
-use crate::settings::models::providers_store::{ProviderConfig, ProviderModel, ProviderType};
+use crate::settings::models::providers_store::{
+    AzureAuthMethod, ProviderConfig, ProviderModel, ProviderType,
+};
 use gpui::{App, AsyncApp};
 use tracing::error;
 
@@ -144,6 +146,49 @@ pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
     cx.refresh_windows();
 
     // 4. Save async with error handling using GPUI's async runtime
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = PROVIDER_REPOSITORY.clone();
+        if let Err(e) = repo.save_all(providers_to_save).await {
+            error!(error = ?e, "Failed to save providers, changes will be lost on restart");
+        }
+    })
+    .detach();
+}
+
+/// Update Azure authentication method
+pub fn update_azure_auth_method(cx: &mut App, use_entra_id: bool) {
+    let method = if use_entra_id {
+        AzureAuthMethod::EntraId
+    } else {
+        AzureAuthMethod::ApiKey
+    };
+
+    // 1. Update in-memory state
+    let model = cx.global_mut::<ProviderModel>();
+
+    if let Some(provider) = model
+        .providers_mut()
+        .iter_mut()
+        .find(|p| p.provider_type == ProviderType::AzureOpenAI)
+    {
+        provider.set_azure_auth_method(method);
+    } else {
+        // Create new Azure provider with auth method
+        let mut config = ProviderConfig::new(
+            ProviderType::AzureOpenAI.display_name().to_string(),
+            ProviderType::AzureOpenAI,
+        );
+        config.set_azure_auth_method(method);
+        model.add_provider(config);
+    }
+
+    // 2. Get updated state for async save
+    let providers_to_save = cx.global::<ProviderModel>().providers().to_vec();
+
+    // 3. Refresh UI immediately
+    cx.refresh_windows();
+
+    // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = PROVIDER_REPOSITORY.clone();
         if let Err(e) = repo.save_all(providers_to_save).await {

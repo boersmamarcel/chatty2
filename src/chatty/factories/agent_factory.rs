@@ -1,9 +1,10 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 
+use crate::chatty::auth::azure_auth;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
-use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
@@ -133,8 +134,6 @@ impl AgentClient {
                 Ok(AgentClient::Ollama(agent))
             }
             ProviderType::AzureOpenAI => {
-                let key = api_key
-                    .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
                 let raw_endpoint = base_url.ok_or_else(|| {
                     anyhow!("Endpoint URL not configured for Azure OpenAI provider")
                 })?;
@@ -186,15 +185,33 @@ impl AgentClient {
                     ));
                 }
 
+                // NEW: Determine auth method and build credentials
+                let auth = match provider_config.azure_auth_method() {
+                    AzureAuthMethod::EntraId => {
+                        tracing::info!("Using Entra ID authentication for Azure OpenAI");
+                        let token = azure_auth::fetch_entra_id_token()
+                            .await
+                            .context("Failed to fetch Entra ID token for Azure OpenAI")?;
+                        rig::providers::azure::AzureOpenAIAuth::Token(token)
+                    }
+                    AzureAuthMethod::ApiKey => {
+                        tracing::info!("Using API Key authentication for Azure OpenAI");
+                        let key = api_key.ok_or_else(|| {
+                            anyhow!("API key not configured for Azure OpenAI provider")
+                        })?;
+                        rig::providers::azure::AzureOpenAIAuth::ApiKey(key)
+                    }
+                };
+
                 // Log the normalized endpoint for debugging
                 tracing::info!(
                     endpoint = %endpoint,
                     deployment = %model_config.model_identifier,
                     api_version = %api_version,
+                    auth_method = ?provider_config.azure_auth_method(),
                     "Building Azure OpenAI client"
                 );
 
-                let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(key);
                 let client = rig::providers::azure::Client::builder()
                     .api_key(auth)
                     .azure_endpoint(endpoint.clone())
