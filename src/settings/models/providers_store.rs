@@ -2,17 +2,12 @@ use gpui::Global;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AzureAuthMethod {
+    #[default]
     ApiKey,
     EntraId,
-}
-
-impl Default for AzureAuthMethod {
-    fn default() -> Self {
-        AzureAuthMethod::ApiKey
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
