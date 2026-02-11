@@ -33,6 +33,7 @@ pub enum AgentClient {
     Gemini(Agent<rig::providers::gemini::completion::CompletionModel>),
     Mistral(Agent<rig::providers::mistral::completion::CompletionModel>),
     Ollama(Agent<rig::providers::ollama::CompletionModel>),
+    AzureOpenAI(Agent<rig::providers::azure::CompletionModel>),
 }
 
 impl AgentClient {
@@ -131,6 +132,40 @@ impl AgentClient {
 
                 Ok(AgentClient::Ollama(agent))
             }
+            ProviderType::AzureOpenAI => {
+                let key = api_key
+                    .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
+                let endpoint = base_url.ok_or_else(|| {
+                    anyhow!("Endpoint URL not configured for Azure OpenAI provider")
+                })?;
+                let api_version = model_config
+                    .extra_params
+                    .get("api_version")
+                    .map(|s| s.as_str())
+                    .unwrap_or("2024-10-21");
+
+                let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(key);
+                let client = rig::providers::azure::Client::builder()
+                    .api_key(auth)
+                    .azure_endpoint(endpoint)
+                    .api_version(api_version)
+                    .build()?;
+                let mut builder = client
+                    .agent(&model_config.model_identifier)
+                    .preamble(&model_config.preamble);
+
+                if model_config.supports_temperature {
+                    builder = builder.temperature(model_config.temperature as f64);
+                }
+
+                if let Some(max_tokens) = model_config.max_tokens {
+                    builder = builder.max_tokens(max_tokens as u64);
+                }
+
+                let agent = build_with_mcp_tools!(builder, mcp_tools);
+
+                Ok(AgentClient::AzureOpenAI(agent))
+            }
         }
     }
 
@@ -143,6 +178,7 @@ impl AgentClient {
             AgentClient::Gemini(_) => "Gemini",
             AgentClient::Ollama(_) => "Ollama",
             AgentClient::Mistral(_) => "Mistral",
+            AgentClient::AzureOpenAI(_) => "Azure OpenAI",
         }
     }
 }

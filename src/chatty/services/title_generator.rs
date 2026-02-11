@@ -116,6 +116,7 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
         AgentClient::Gemini(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::Mistral(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::Ollama(agent) => agent.prompt(&title_prompt).await?,
+        AgentClient::AzureOpenAI(agent) => agent.prompt(&title_prompt).await?,
     };
 
     debug!(response = %response_text, "LLM response received");

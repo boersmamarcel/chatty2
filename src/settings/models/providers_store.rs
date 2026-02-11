@@ -11,6 +11,8 @@ pub enum ProviderType {
     Gemini,
     Mistral,
     Ollama,
+    #[serde(rename = "azure_openai")]
+    AzureOpenAI,
 }
 
 impl ProviderType {
@@ -21,6 +23,7 @@ impl ProviderType {
             ProviderType::Gemini => "Google Gemini",
             ProviderType::Mistral => "Mistral",
             ProviderType::Ollama => "Ollama",
+            ProviderType::AzureOpenAI => "Azure OpenAI",
         }
     }
 
@@ -30,6 +33,7 @@ impl ProviderType {
             ProviderType::Anthropic => (true, true),
             ProviderType::Gemini => (true, true),
             ProviderType::OpenAI => (true, false),
+            ProviderType::AzureOpenAI => (true, false),
             ProviderType::Ollama => (false, false),
             ProviderType::Mistral => (false, false),
         }
@@ -113,11 +117,16 @@ impl ProviderModel {
     pub fn configured_providers(&self) -> Vec<&ProviderConfig> {
         self.providers
             .iter()
-            .filter(|p| {
+            .filter(|p| match p.provider_type {
                 // Include Ollama regardless of API key
-                matches!(p.provider_type, ProviderType::Ollama) ||
+                ProviderType::Ollama => true,
+                // Azure requires both API key and endpoint URL
+                ProviderType::AzureOpenAI => {
+                    p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                }
                 // Include others only if they have a non-empty API key
-                p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty())
+                _ => p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
             })
             .collect()
     }

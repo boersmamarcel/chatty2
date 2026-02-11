@@ -199,6 +199,14 @@ pub async fn stream_prompt(
                 .await;
             process_agent_stream!(stream)
         }
+        AgentClient::AzureOpenAI(agent) => {
+            let mut stream = agent
+                .stream_prompt(user_message.clone())
+                .with_history(history_snapshot)
+                .multi_turn(10)
+                .await;
+            process_agent_stream!(stream)
+        }
     };
 
     Ok((stream, user_message))

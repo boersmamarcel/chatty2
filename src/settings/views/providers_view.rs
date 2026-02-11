@@ -10,6 +10,7 @@ pub fn providers_page() -> SettingPage {
         create_gemini_group(),
         create_mistral_group(),
         create_ollama_group(),
+        create_azure_openai_group(),
     ])
 }
 
@@ -73,6 +74,56 @@ fn create_ollama_group() -> SettingGroup {
             )
             .description("Ollama server URL (default: http://localhost:11434)"),
         ])
+}
+
+fn create_azure_openai_group() -> SettingGroup {
+    SettingGroup::new()
+        .title("Azure OpenAI")
+        .description(
+            "Configure Azure OpenAI - use Azure-hosted GPT-4o, GPT-4, and other OpenAI models",
+        )
+        .items(vec![
+            SettingItem::new(
+                "API Key",
+                SettingField::input(
+                    |cx: &App| azure_api_key(cx).into(),
+                    |val: SharedString, cx: &mut App| {
+                        let endpoint = azure_endpoint(cx);
+                        providers_controller::update_or_create_azure(cx, val.to_string(), endpoint);
+                    },
+                ),
+            )
+            .description("Your Azure OpenAI API key"),
+            SettingItem::new(
+                "Endpoint URL",
+                SettingField::input(
+                    |cx: &App| azure_endpoint(cx).into(),
+                    |val: SharedString, cx: &mut App| {
+                        let api_key = azure_api_key(cx);
+                        providers_controller::update_or_create_azure(cx, api_key, val.to_string());
+                    },
+                ),
+            )
+            .description("Azure OpenAI endpoint (e.g. https://my-resource.openai.azure.com)"),
+        ])
+}
+
+fn azure_api_key(cx: &App) -> String {
+    cx.global::<ProviderModel>()
+        .providers()
+        .iter()
+        .find(|p| p.provider_type == ProviderType::AzureOpenAI)
+        .and_then(|p| p.api_key.clone())
+        .unwrap_or_default()
+}
+
+fn azure_endpoint(cx: &App) -> String {
+    cx.global::<ProviderModel>()
+        .providers()
+        .iter()
+        .find(|p| p.provider_type == ProviderType::AzureOpenAI)
+        .and_then(|p| p.base_url.clone())
+        .unwrap_or_default()
 }
 
 // Generic helper to create a provider group with API key (only shows API key, not base URL)
