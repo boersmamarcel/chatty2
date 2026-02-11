@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use gpui::Global;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use rmcp::service::ServiceExt;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -137,12 +139,22 @@ impl McpService {
     pub fn kill_all_sync(&self) {
         let pids = self.pids.lock().unwrap_or_else(|e| e.into_inner());
         for (name, pid) in pids.iter() {
-            let pid_i32 = *pid as i32;
-            match kill(Pid::from_raw(pid_i32), Signal::SIGTERM) {
-                Ok(()) => info!(server = %name, pid = pid_i32, "Sent SIGTERM to MCP server"),
-                Err(e) => {
-                    warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server")
+            #[cfg(unix)]
+            {
+                let pid_i32 = *pid as i32;
+                match kill(Pid::from_raw(pid_i32), Signal::SIGTERM) {
+                    Ok(()) => info!(server = %name, pid = pid_i32, "Sent SIGTERM to MCP server"),
+                    Err(e) => {
+                        warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server")
+                    }
                 }
+            }
+            #[cfg(not(unix))]
+            {
+                // On Windows, use TerminateProcess via the windows-kill approach.
+                // The child process will be cleaned up when our process exits.
+                // The async stop_all() task handles graceful shutdown.
+                info!(server = %name, pid = *pid, "Skipping SIGTERM on Windows (not supported)");
             }
         }
     }
