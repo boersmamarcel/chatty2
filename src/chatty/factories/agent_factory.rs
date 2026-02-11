@@ -179,6 +179,14 @@ impl AgentClient {
 
                 let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(key);
 
+                // Validate the endpoint is a valid absolute URL
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    return Err(anyhow!(
+                        "Invalid Azure endpoint URL (must start with https://): '{}'",
+                        endpoint
+                    ));
+                }
+
                 // Log the normalized endpoint for debugging
                 tracing::info!(
                     endpoint = %endpoint,
@@ -189,9 +197,16 @@ impl AgentClient {
 
                 let client = rig::providers::azure::Client::builder()
                     .api_key(auth)
-                    .azure_endpoint(endpoint)
+                    .azure_endpoint(endpoint.clone())
                     .api_version(api_version)
-                    .build()?;
+                    .build()
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to build Azure client with endpoint '{}': {}",
+                            endpoint,
+                            e
+                        )
+                    })?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble);
