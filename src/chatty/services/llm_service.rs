@@ -50,7 +50,7 @@ macro_rules! process_agent_stream {
                             rig::streaming::StreamedAssistantContent::Text(text) => {
                                 yield Ok(StreamChunk::Text(text.text));
                             }
-                            rig::streaming::StreamedAssistantContent::ToolCall(tool_call) => {
+                            rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id: _ } => {
                                 use tracing::info;
                                 let tool_id = tool_call.call_id.clone()
                                     .unwrap_or_else(|| tool_call.id.clone());
@@ -76,7 +76,7 @@ macro_rules! process_agent_stream {
                         use rig::streaming::StreamedUserContent;
                         use rig::completion::message::ToolResultContent;
 
-                        let StreamedUserContent::ToolResult(tool_result) = user_content;
+                        let StreamedUserContent::ToolResult { tool_result, internal_call_id: _ } = user_content;
                         let content_text = tool_result.content.iter()
                             .filter_map(|c| match c {
                                 ToolResultContent::Text(text) => Some(text.text.clone()),

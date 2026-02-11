@@ -133,8 +133,6 @@ impl AgentClient {
                 Ok(AgentClient::Ollama(agent))
             }
             ProviderType::AzureOpenAI => {
-                // WORKAROUND: Use OpenAI client with custom base_url for Azure
-                // This avoids rig-core 0.28.0 Azure client bug with URL construction
                 let key = api_key
                     .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
                 let raw_endpoint = base_url.ok_or_else(|| {
@@ -173,6 +171,7 @@ impl AgentClient {
                         endpoint.truncate(path_start + pos);
                     }
                 }
+
                 let api_version = model_config
                     .extra_params
                     .get("api_version")
@@ -187,27 +186,30 @@ impl AgentClient {
                     ));
                 }
 
-                // Azure OpenAI uses: {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}
-                // OpenAI client appends /{model}/chat/completions to base_url
-                // So we construct base_url as: {endpoint}/openai/deployments
-                // And use deployment name as the "model", which gives us the correct path
-                let base_url = format!("{}/openai/deployments", endpoint);
-
+                // Log the normalized endpoint for debugging
                 tracing::info!(
-                    base_url = %base_url,
+                    endpoint = %endpoint,
                     deployment = %model_config.model_identifier,
                     api_version = %api_version,
-                    "Building Azure OpenAI client (via OpenAI client workaround)"
+                    "Building Azure OpenAI client"
                 );
 
-                // Use OpenAI client pointed at Azure endpoint (workaround for rig-core 0.28.0 Azure bug)
-                let client = rig::providers::openai::Client::builder()
-                    .api_key(&key)
-                    .base_url(&base_url)
-                    .build()?;
+                let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(key);
+                let client = rig::providers::azure::Client::builder()
+                    .api_key(auth)
+                    .azure_endpoint(endpoint.clone())
+                    .api_version(api_version)
+                    .build()
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to build Azure client with endpoint '{}': {}",
+                            endpoint,
+                            e
+                        )
+                    })?;
 
                 let mut builder = client
-                    .agent(&model_config.model_identifier) // This becomes the deployment name in the URL
+                    .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble);
 
                 if model_config.supports_temperature {
@@ -220,7 +222,7 @@ impl AgentClient {
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
 
-                Ok(AgentClient::OpenAI(agent))
+                Ok(AgentClient::AzureOpenAI(agent))
             }
         }
     }
