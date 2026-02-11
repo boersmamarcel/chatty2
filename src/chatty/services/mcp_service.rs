@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use gpui::Global;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use rmcp::service::ServiceExt;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -128,21 +130,56 @@ impl McpService {
         }
     }
 
-    /// Synchronously send SIGTERM to all child processes.
+    /// Synchronously send SIGTERM (Unix) or taskkill (Windows) to all child processes.
     ///
     /// This is called from the synchronous quit handler before cx.quit() to give
-    /// child MCP processes a best-effort signal before the process exits. The async
-    /// stop_all() task is also spawned for graceful shutdown, but may not complete
-    /// before the process terminates.
+    /// child MCP processes a best-effort signal before the process exits.
     pub fn kill_all_sync(&self) {
         let pids = self.pids.lock().unwrap_or_else(|e| e.into_inner());
+
         for (name, pid) in pids.iter() {
-            let pid_i32 = *pid as i32;
-            match kill(Pid::from_raw(pid_i32), Signal::SIGTERM) {
-                Ok(()) => info!(server = %name, pid = pid_i32, "Sent SIGTERM to MCP server"),
-                Err(e) => {
-                    warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server")
+            #[cfg(unix)]
+            {
+                let pid_i32 = *pid as i32;
+                match kill(Pid::from_raw(pid_i32), Signal::SIGTERM) {
+                    Ok(()) => info!(server = %name, pid = pid_i32, "Sent SIGTERM to MCP server"),
+                    Err(e) => {
+                        warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server")
+                    }
                 }
+            }
+
+            #[cfg(windows)]
+            {
+                // On Windows, use `taskkill` to forcefully terminate the process.
+                // We use std::process::Command here because we are in a sync context.
+                let pid_str = pid.to_string();
+                match std::process::Command::new("taskkill")
+                    .arg("/F") // Forcefully terminate the process
+                    .arg("/PID") // Specify Process ID
+                    .arg(&pid_str)
+                    // We capture output to avoid polluting stdout/stderr unless there's an error
+                    .output()
+                {
+                    Ok(output) => {
+                        if output.status.success() {
+                            info!(server = %name, pid = pid, "Sent taskkill /F to MCP server");
+                        } else {
+                            // Convert stderr to string for logging if it failed (e.g., access denied or process gone)
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            warn!(server = %name, pid = pid, error = %stderr, "Failed to taskkill MCP server");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(server = %name, pid = pid, error = ?e, "Failed to execute taskkill command");
+                    }
+                }
+            }
+
+            #[cfg(not(any(unix, windows)))]
+            {
+                // Fallback for other platforms (e.g. WASM, Redox)
+                warn!(server = %name, pid = pid, "Skipping synchronous kill: unsupported platform");
             }
         }
     }
