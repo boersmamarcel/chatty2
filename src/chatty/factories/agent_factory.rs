@@ -5,6 +5,26 @@ use rig::client::CompletionClient;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 
+macro_rules! build_with_mcp_tools {
+    ($builder:expr, $mcp_tools:expr) => {{
+        match $mcp_tools {
+            Some(tools_list) => {
+                let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
+                if let Some((first_tools, first_sink)) = iter.next() {
+                    let mut b = $builder.rmcp_tools(first_tools, first_sink);
+                    for (tools, sink) in iter {
+                        b = b.rmcp_tools(tools, sink);
+                    }
+                    b.build()
+                } else {
+                    $builder.build()
+                }
+            }
+            None => $builder.build(),
+        }
+    }};
+}
+
 /// Enum-based agent wrapper for multi-provider support
 #[derive(Clone)]
 pub enum AgentClient {
@@ -16,10 +36,11 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig
-    pub async fn from_model_config(
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools
+    pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
+        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
     ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -39,7 +60,9 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                Ok(AgentClient::Anthropic(builder.build()))
+                let agent = build_with_mcp_tools!(builder, mcp_tools);
+
+                Ok(AgentClient::Anthropic(agent))
             }
             ProviderType::OpenAI => {
                 let key =
@@ -55,7 +78,9 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
-                Ok(AgentClient::OpenAI(builder.build()))
+                let agent = build_with_mcp_tools!(builder, mcp_tools);
+
+                Ok(AgentClient::OpenAI(agent))
             }
             ProviderType::Gemini => {
                 let key =
@@ -67,7 +92,9 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                Ok(AgentClient::Gemini(builder.build()))
+                let agent = build_with_mcp_tools!(builder, mcp_tools);
+
+                Ok(AgentClient::Gemini(agent))
             }
             ProviderType::Mistral => {
                 let key = api_key
@@ -83,7 +110,9 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                Ok(AgentClient::Mistral(builder.build()))
+                let agent = build_with_mcp_tools!(builder, mcp_tools);
+
+                Ok(AgentClient::Mistral(agent))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -98,7 +127,9 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                Ok(AgentClient::Ollama(builder.build()))
+                let agent = build_with_mcp_tools!(builder, mcp_tools);
+
+                Ok(AgentClient::Ollama(agent))
             }
         }
     }

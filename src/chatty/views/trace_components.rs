@@ -1,7 +1,8 @@
 #![allow(clippy::collapsible_if)]
 
+use crate::assets::CustomIcon;
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon};
 
 use super::message_types::{SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem};
 
@@ -19,8 +20,18 @@ impl SystemTraceView {
         }
     }
 
+    /// Allow updating trace during streaming
+    pub fn update_trace(&mut self, trace: SystemTrace) {
+        self.trace = trace;
+    }
+
+    /// Toggle the collapsed state
+    pub fn toggle_collapsed(&mut self) {
+        self.is_collapsed = !self.is_collapsed;
+    }
+
     /// Render the trace container header with active status
-    fn render_header(&self, cx: &App) -> impl IntoElement {
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Active status styling
         let has_active = self.trace.active_tool_index.is_some();
 
@@ -52,6 +63,13 @@ impl SystemTraceView {
                     .text_sm()
                     .text_color(muted_text)
                     .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _event, _window, cx| {
+                            view.toggle_collapsed();
+                            cx.notify();
+                        }),
+                    )
                     .child(collapse_icon),
             )
             .child(
@@ -96,10 +114,18 @@ impl SystemTraceView {
                     }
                 };
 
-                let step_container = div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
+                let mut step_container = div().flex().items_center().gap_1();
+
+                // Add indicator when active
+                if is_active {
+                    step_container = step_container.child(
+                        Icon::new(CustomIcon::Refresh)
+                            .size(px(12.0))
+                            .text_color(color),
+                    );
+                }
+
+                step_container = step_container
                     .child(
                         div()
                             .text_xs()
