@@ -1,7 +1,8 @@
 #![allow(clippy::collapsible_if)]
 
+use crate::assets::CustomIcon;
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon};
 
 use super::message_types::{SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem};
 
@@ -117,8 +118,11 @@ impl SystemTraceView {
 
                 // Add indicator when active
                 if is_active {
-                    step_container =
-                        step_container.child(div().text_xs().text_color(color).child("⟳"));
+                    step_container = step_container.child(
+                        Icon::new(CustomIcon::Refresh)
+                            .size(px(12.0))
+                            .text_color(color),
+                    );
                 }
 
                 step_container = step_container
