@@ -164,3 +164,140 @@ impl ProviderModel {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_azure_auth_method_default() {
+        // Provider without auth_method in extra_config should default to ApiKey
+        let provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        assert_eq!(provider.azure_auth_method(), AzureAuthMethod::ApiKey);
+    }
+
+    #[test]
+    fn test_azure_auth_method_api_key() {
+        // Provider with explicit "api_key" value
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider
+            .extra_config
+            .insert("auth_method".to_string(), "api_key".to_string());
+        assert_eq!(provider.azure_auth_method(), AzureAuthMethod::ApiKey);
+    }
+
+    #[test]
+    fn test_azure_auth_method_entra_id() {
+        // Provider with explicit "entra_id" value
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider
+            .extra_config
+            .insert("auth_method".to_string(), "entra_id".to_string());
+        assert_eq!(provider.azure_auth_method(), AzureAuthMethod::EntraId);
+    }
+
+    #[test]
+    fn test_azure_auth_method_invalid_value() {
+        // Invalid value should default to ApiKey
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider
+            .extra_config
+            .insert("auth_method".to_string(), "invalid".to_string());
+        assert_eq!(provider.azure_auth_method(), AzureAuthMethod::ApiKey);
+    }
+
+    #[test]
+    fn test_set_azure_auth_method_api_key() {
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider.set_azure_auth_method(AzureAuthMethod::ApiKey);
+        assert_eq!(
+            provider.extra_config.get("auth_method"),
+            Some(&"api_key".to_string())
+        );
+        assert_eq!(provider.azure_auth_method(), AzureAuthMethod::ApiKey);
+    }
+
+    #[test]
+    fn test_set_azure_auth_method_entra_id() {
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider.set_azure_auth_method(AzureAuthMethod::EntraId);
+        assert_eq!(
+            provider.extra_config.get("auth_method"),
+            Some(&"entra_id".to_string())
+        );
+        assert_eq!(provider.azure_auth_method(), AzureAuthMethod::EntraId);
+    }
+
+    #[test]
+    fn test_configured_providers_azure_with_api_key() {
+        let mut model = ProviderModel::new();
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider.base_url = Some("https://test.openai.azure.com".to_string());
+        provider.api_key = Some("test-key".to_string());
+        model.add_provider(provider);
+
+        let configured = model.configured_providers();
+        assert_eq!(configured.len(), 1);
+        assert_eq!(configured[0].name, "test");
+    }
+
+    #[test]
+    fn test_configured_providers_azure_with_entra_id() {
+        let mut model = ProviderModel::new();
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider.base_url = Some("https://test.openai.azure.com".to_string());
+        provider.set_azure_auth_method(AzureAuthMethod::EntraId);
+        model.add_provider(provider);
+
+        let configured = model.configured_providers();
+        assert_eq!(configured.len(), 1);
+        assert_eq!(configured[0].name, "test");
+    }
+
+    #[test]
+    fn test_configured_providers_azure_missing_endpoint() {
+        let mut model = ProviderModel::new();
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        // No base_url set
+        provider.api_key = Some("test-key".to_string());
+        model.add_provider(provider);
+
+        let configured = model.configured_providers();
+        assert_eq!(configured.len(), 0); // Should be filtered out
+    }
+
+    #[test]
+    fn test_configured_providers_azure_missing_credentials() {
+        let mut model = ProviderModel::new();
+        let mut provider = ProviderConfig::new("test".to_string(), ProviderType::AzureOpenAI);
+        provider.base_url = Some("https://test.openai.azure.com".to_string());
+        // No API key and no Entra ID
+        model.add_provider(provider);
+
+        let configured = model.configured_providers();
+        assert_eq!(configured.len(), 0); // Should be filtered out
+    }
+
+    #[test]
+    fn test_provider_type_default_capabilities() {
+        assert_eq!(ProviderType::Anthropic.default_capabilities(), (true, true));
+        assert_eq!(ProviderType::Gemini.default_capabilities(), (true, true));
+        assert_eq!(ProviderType::OpenAI.default_capabilities(), (true, false));
+        assert_eq!(
+            ProviderType::AzureOpenAI.default_capabilities(),
+            (true, false)
+        );
+        assert_eq!(ProviderType::Ollama.default_capabilities(), (false, false));
+        assert_eq!(ProviderType::Mistral.default_capabilities(), (false, false));
+    }
+
+    #[test]
+    fn test_provider_type_display_name() {
+        assert_eq!(ProviderType::OpenAI.display_name(), "OpenAI");
+        assert_eq!(ProviderType::Anthropic.display_name(), "Anthropic");
+        assert_eq!(ProviderType::Gemini.display_name(), "Google Gemini");
+        assert_eq!(ProviderType::Mistral.display_name(), "Mistral");
+        assert_eq!(ProviderType::Ollama.display_name(), "Ollama");
+        assert_eq!(ProviderType::AzureOpenAI.display_name(), "Azure OpenAI");
+    }
+}

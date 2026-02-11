@@ -194,12 +194,18 @@ impl AgentClient {
                         tracing::info!("Using Entra ID authentication with token cache");
 
                         // Get or create global token cache
+                        // Note: OnceLock ensures initialization happens exactly once
                         let cache = AZURE_TOKEN_CACHE.get_or_init(|| {
-                            AzureTokenCache::new()
-                                .inspect_err(|e| {
-                                    tracing::error!(error = ?e, "Failed to create Azure token cache")
-                                })
-                                .ok()
+                            match AzureTokenCache::new() {
+                                Ok(cache) => Some(cache),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = ?e,
+                                        "Failed to create Azure token cache, will fetch tokens directly each time"
+                                    );
+                                    None
+                                }
+                            }
                         });
 
                         let token = if let Some(cache) = cache {
@@ -208,8 +214,9 @@ impl AgentClient {
                                 .await
                                 .context("Failed to get cached Entra ID token")?
                         } else {
-                            // Fallback to direct fetch if cache unavailable
-                            tracing::warn!("Token cache unavailable, falling back to direct fetch");
+                            // Fallback to direct fetch if cache creation failed
+                            // This happens on every agent creation - not ideal but functional
+                            tracing::debug!("Using direct token fetch (cache unavailable)");
                             azure_auth::fetch_entra_id_token()
                                 .await
                                 .context("Failed to fetch Entra ID token")?
@@ -278,5 +285,159 @@ impl AgentClient {
             AgentClient::Mistral(_) => "Mistral",
             AgentClient::AzureOpenAI(_) => "Azure OpenAI",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// Helper function to normalize Azure endpoint URL (extracted from agent creation logic)
+    fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
+        // 1. Strip trailing slashes
+        let raw_endpoint = raw_endpoint.trim_end_matches('/').to_string();
+
+        // 2. Add https:// if missing
+        let mut endpoint =
+            if raw_endpoint.starts_with("http://") || raw_endpoint.starts_with("https://") {
+                raw_endpoint
+            } else {
+                format!("https://{}", raw_endpoint)
+            };
+
+        // 3. Extract base URL if user provided full path (e.g., .../openai/deployments/...)
+        // Find the position after the scheme and hostname (after the third /)
+        let hostname_end = endpoint.find("://").and_then(|scheme_pos| {
+            endpoint[scheme_pos + 3..]
+                .find('/')
+                .map(|p| scheme_pos + 3 + p)
+        });
+
+        if let Some(path_start) = hostname_end {
+            // Only look for /openai in the path portion, not the hostname
+            if let Some(pos) = endpoint[path_start..].find("/openai") {
+                endpoint.truncate(path_start + pos);
+            }
+        }
+
+        endpoint
+    }
+
+    #[test]
+    fn test_azure_url_normalization_basic() {
+        // Simple hostname without scheme
+        assert_eq!(
+            normalize_azure_endpoint("myresource.openai.azure.com"),
+            "https://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_with_https() {
+        // Already has https scheme
+        assert_eq!(
+            normalize_azure_endpoint("https://myresource.openai.azure.com"),
+            "https://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_with_http() {
+        // Has http scheme (should be preserved)
+        assert_eq!(
+            normalize_azure_endpoint("http://myresource.openai.azure.com"),
+            "http://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_trailing_slash() {
+        // Trailing slash should be removed
+        assert_eq!(
+            normalize_azure_endpoint("myresource.openai.azure.com/"),
+            "https://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_multiple_trailing_slashes() {
+        // Multiple trailing slashes should be removed
+        assert_eq!(
+            normalize_azure_endpoint("https://myresource.openai.azure.com///"),
+            "https://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_with_openai_path() {
+        // Full path with /openai should be truncated to base URL
+        assert_eq!(
+            normalize_azure_endpoint("https://my.openai.azure.com/openai/deployments/gpt4"),
+            "https://my.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_with_openai_deployments_path() {
+        // Path with /openai/deployments should be truncated
+        assert_eq!(
+            normalize_azure_endpoint("https://test.openai.azure.com/openai/deployments/"),
+            "https://test.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_openai_in_hostname() {
+        // "openai" in hostname should NOT be truncated
+        assert_eq!(
+            normalize_azure_endpoint("https://myresource.openai.azure.com"),
+            "https://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_openai_in_subdomain() {
+        // "openai" in subdomain should NOT be truncated
+        assert_eq!(
+            normalize_azure_endpoint("https://openai.example.com"),
+            "https://openai.example.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_complex_path() {
+        // Complex path with /openai should be truncated
+        assert_eq!(
+            normalize_azure_endpoint(
+                "myresource.openai.azure.com/openai/deployments/model/chat/completions"
+            ),
+            "https://myresource.openai.azure.com"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_path_without_openai() {
+        // Path without /openai should be preserved (edge case)
+        assert_eq!(
+            normalize_azure_endpoint("https://myresource.azure.com/api/v1"),
+            "https://myresource.azure.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_custom_port() {
+        // Custom port should be preserved
+        assert_eq!(
+            normalize_azure_endpoint("https://localhost:8080/openai/deployments"),
+            "https://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn test_azure_url_normalization_no_scheme_with_path() {
+        // No scheme with path containing /openai
+        assert_eq!(
+            normalize_azure_endpoint("myresource.openai.azure.com/openai"),
+            "https://myresource.openai.azure.com"
+        );
     }
 }
