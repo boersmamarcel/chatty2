@@ -104,7 +104,7 @@ fn create_azure_openai_group() -> SettingGroup {
                     },
                 ),
             )
-            .description("Azure OpenAI endpoint (e.g. https://my-resource.openai.azure.com)"),
+            .description("Azure resource base URL (e.g., https://my-resource.openai.azure.com) - do not include /openai/deployments path"),
         ])
 }
 

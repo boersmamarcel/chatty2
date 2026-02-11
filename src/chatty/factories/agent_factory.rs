@@ -135,9 +135,31 @@ impl AgentClient {
             ProviderType::AzureOpenAI => {
                 let key = api_key
                     .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
-                let endpoint = base_url.ok_or_else(|| {
+                let raw_endpoint = base_url.ok_or_else(|| {
                     anyhow!("Endpoint URL not configured for Azure OpenAI provider")
                 })?;
+
+                // Normalize the endpoint URL:
+                // 1. Strip trailing slashes
+                // 2. Add https:// if missing
+                // 3. Extract base URL if user provided full path (e.g., .../openai/deployments/...)
+                let raw_endpoint = raw_endpoint.trim_end_matches('/').to_string();
+                let mut endpoint = if raw_endpoint.starts_with("http://")
+                    || raw_endpoint.starts_with("https://")
+                {
+                    raw_endpoint
+                } else {
+                    format!("https://{}", raw_endpoint)
+                };
+
+                // If the endpoint contains /openai/deployments, extract just the base URL
+                // Azure endpoint should be just https://myresource.openai.azure.com
+                // rig-core appends /openai/deployments/{model}/chat/completions itself
+                if let Some(pos) = endpoint.find("/openai/deployments") {
+                    endpoint.truncate(pos);
+                } else if let Some(pos) = endpoint.find("/openai") {
+                    endpoint.truncate(pos);
+                }
                 let api_version = model_config
                     .extra_params
                     .get("api_version")
@@ -145,6 +167,15 @@ impl AgentClient {
                     .unwrap_or(AZURE_DEFAULT_API_VERSION);
 
                 let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(key);
+
+                // Log the normalized endpoint for debugging
+                tracing::info!(
+                    endpoint = %endpoint,
+                    deployment = %model_config.model_identifier,
+                    api_version = %api_version,
+                    "Building Azure OpenAI client"
+                );
+
                 let client = rig::providers::azure::Client::builder()
                     .api_key(auth)
                     .azure_endpoint(endpoint)
