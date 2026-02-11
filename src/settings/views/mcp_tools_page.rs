@@ -1,20 +1,15 @@
 use crate::settings::models::mcp_store::McpServersModel;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 
-/// Get platform-specific config path for display
-fn get_config_path_display() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "~/Library/Application Support/chatty/mcp_servers.json"
-    }
-    #[cfg(target_os = "linux")]
-    {
-        "~/.config/chatty/mcp_servers.json (or $XDG_CONFIG_HOME/chatty/mcp_servers.json)"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "%APPDATA%\\chatty\\mcp_servers.json"
-    }
+fn get_config_path_display() -> String {
+    dirs::config_dir()
+        .map(|p| {
+            p.join("chatty")
+                .join("mcp_servers.json")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "chatty/mcp_servers.json".to_string())
 }
 
 pub fn mcp_tools_page() -> SettingPage {
@@ -31,8 +26,6 @@ fn mcp_info_group() -> SettingGroup {
 }
 
 fn mcp_servers_list_group() -> SettingGroup {
-    let config_path = get_config_path_display();
-
     SettingGroup::new()
         .title("Configured Servers")
         .description("MCP servers provide tools that the AI can use during conversations")
@@ -46,12 +39,11 @@ fn mcp_servers_list_group() -> SettingGroup {
                     use gpui_component::*;
 
                     if servers.is_empty() {
-                        let empty_message = format!("No MCP servers configured. Add a server by editing {}", config_path);
                         div()
                             .p_4()
                             .text_color(cx.theme().muted_foreground)
                             .text_sm()
-                            .child(empty_message)
+                            .child("No MCP servers configured.")
                             .into_any_element()
                     } else {
                         div()
@@ -65,7 +57,11 @@ fn mcp_servers_list_group() -> SettingGroup {
                                     cx.theme().muted_foreground
                                 };
 
-                                let status_text = if server.enabled { "Enabled" } else { "Disabled" };
+                                let status_text = if server.enabled {
+                                    "Enabled"
+                                } else {
+                                    "Disabled"
+                                };
 
                                 div()
                                     .flex()
@@ -86,14 +82,18 @@ fn mcp_servers_list_group() -> SettingGroup {
                                                     .text_sm()
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(cx.theme().foreground)
-                                                    .child(server.name.clone())
+                                                    .child(server.name.clone()),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
-                                                    .child(format!("{} {}", server.command, server.args.join(" ")))
-                                            )
+                                                    .child(format!(
+                                                        "{} {}",
+                                                        server.command,
+                                                        server.args.join(" ")
+                                                    )),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -104,13 +104,16 @@ fn mcp_servers_list_group() -> SettingGroup {
                                             .text_color(status_color)
                                             .border_1()
                                             .border_color(status_color)
-                                            .child(status_text)
+                                            .child(status_text),
                                     )
                             }))
                             .into_any_element()
                     }
                 }),
             )
-            .description("Configure servers by editing the config file at the platform-specific location shown above"),
+            .description(format!(
+                "Configure servers by editing: {}",
+                get_config_path_display()
+            )),
         ])
 }
