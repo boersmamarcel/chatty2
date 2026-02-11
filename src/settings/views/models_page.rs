@@ -1,5 +1,5 @@
 use crate::settings::controllers::models_controller;
-use crate::settings::models::models_store::{ModelConfig, ModelsModel};
+use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::{ProviderModel, ProviderType};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Global, IntoElement, Render, Styled, Window, div,
@@ -12,7 +12,7 @@ use gpui_component::{
     input::{Input, InputState},
     list::{List, ListDelegate, ListItem, ListState},
     scroll::ScrollableElement,
-    select::{Select, SelectState},
+    select::{Select, SelectEvent, SelectState},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -115,6 +115,24 @@ impl ModelsListView {
             .map(|p| p.provider_type == ProviderType::AzureOpenAI)
             .unwrap_or(false);
         let is_azure_cell = std::rc::Rc::new(std::cell::Cell::new(initial_is_azure));
+
+        // Keep is_azure_cell in sync when the user changes the provider selection.
+        cx.subscribe(&provider_select, {
+            let is_azure_cell = is_azure_cell.clone();
+            let provider_select = provider_select.clone();
+            move |_this, _entity, event: &SelectEvent<Vec<String>>, cx| {
+                if matches!(event, SelectEvent::Confirm(_)) {
+                    let providers = cx.global::<ProviderModel>().configured_providers();
+                    let selected = provider_select.read(cx).selected_index(cx);
+                    let is_azure = selected
+                        .and_then(|idx| providers.get(idx.row))
+                        .map(|p| p.provider_type == ProviderType::AzureOpenAI)
+                        .unwrap_or(false);
+                    is_azure_cell.set(is_azure);
+                }
+            }
+        })
+        .detach();
 
         let view = cx.entity().clone();
 
@@ -235,9 +253,10 @@ impl ModelsListView {
                                                 this.child(
                                                     v_flex()
                                                         .gap_1()
-                                                        .child(div().text_sm().child(
-                                                            "API Version (default: 2024-10-21)",
-                                                        ))
+                                                        .child(div().text_sm().child(format!(
+                                                            "API Version (default: {})",
+                                                            AZURE_DEFAULT_API_VERSION
+                                                        )))
                                                         .child(Input::new(&api_version_input)),
                                                 )
                                             })
@@ -483,6 +502,14 @@ impl ModelsListView {
             }
             state
         });
+        let api_version_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .placeholder(format!("e.g., {}", AZURE_DEFAULT_API_VERSION));
+            if let Some(api_version) = existing_model.extra_params.get("api_version") {
+                state.set_value(api_version.clone(), window, cx);
+            }
+            state
+        });
 
         // Get configured providers and find the index of the current provider
         let configured_providers = cx.global::<ProviderModel>().configured_providers();
@@ -500,6 +527,7 @@ impl ModelsListView {
 
         let view = cx.entity().clone();
         let model_id_for_update = model_id.clone();
+        let is_azure = matches!(existing_model.provider_type, ProviderType::AzureOpenAI);
 
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
@@ -613,6 +641,17 @@ impl ModelsListView {
                                                     ))
                                                     .child(Input::new(&cost_output_input)),
                                             )
+                                            .when(is_azure, |this| {
+                                                this.child(
+                                                    v_flex()
+                                                        .gap_1()
+                                                        .child(div().text_sm().child(format!(
+                                                            "API Version (default: {})",
+                                                            AZURE_DEFAULT_API_VERSION
+                                                        )))
+                                                        .child(Input::new(&api_version_input)),
+                                                )
+                                            })
                                     }
                                 })
                                 .child(
@@ -636,6 +675,7 @@ impl ModelsListView {
                                                 let top_p_input = top_p_input.clone();
                                                 let cost_input_input = cost_input_input.clone();
                                                 let cost_output_input = cost_output_input.clone();
+                                                let api_version_input = api_version_input.clone();
                                                 let provider_select = provider_select.clone();
                                                 let model_id_for_update =
                                                     model_id_for_update.clone();
@@ -733,6 +773,21 @@ impl ModelsListView {
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
+                                                    let api_version_str =
+                                                        api_version_input.read(cx).value();
+                                                    let mut extra_params =
+                                                        std::collections::HashMap::new();
+                                                    if matches!(
+                                                        provider_type,
+                                                        ProviderType::AzureOpenAI
+                                                    ) && !api_version_str.trim().is_empty()
+                                                    {
+                                                        extra_params.insert(
+                                                            "api_version".to_string(),
+                                                            api_version_str.trim().to_string(),
+                                                        );
+                                                    }
+
                                                     let config = ModelConfig {
                                                         id: model_id_for_update.clone(),
                                                         name: name.trim().to_string(),
@@ -744,8 +799,7 @@ impl ModelsListView {
                                                         preamble: preamble.to_string(),
                                                         max_tokens,
                                                         top_p,
-                                                        extra_params:
-                                                            std::collections::HashMap::new(),
+                                                        extra_params,
                                                         cost_per_million_input_tokens,
                                                         cost_per_million_output_tokens,
                                                         supports_images: false,

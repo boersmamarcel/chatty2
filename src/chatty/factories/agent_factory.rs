@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 
-use crate::settings::models::models_store::ModelConfig;
+use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 
 macro_rules! build_with_mcp_tools {
@@ -142,7 +142,7 @@ impl AgentClient {
                     .extra_params
                     .get("api_version")
                     .map(|s| s.as_str())
-                    .unwrap_or("2024-10-21");
+                    .unwrap_or(AZURE_DEFAULT_API_VERSION);
 
                 let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(key);
                 let client = rig::providers::azure::Client::builder()
