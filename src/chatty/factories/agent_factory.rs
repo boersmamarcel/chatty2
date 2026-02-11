@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
+use std::sync::OnceLock;
 
-use crate::chatty::auth::azure_auth;
+use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
+
+static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
@@ -188,10 +191,30 @@ impl AgentClient {
                 // NEW: Determine auth method and build credentials
                 let auth = match provider_config.azure_auth_method() {
                     AzureAuthMethod::EntraId => {
-                        tracing::info!("Using Entra ID authentication for Azure OpenAI");
-                        let token = azure_auth::fetch_entra_id_token()
-                            .await
-                            .context("Failed to fetch Entra ID token for Azure OpenAI")?;
+                        tracing::info!("Using Entra ID authentication with token cache");
+
+                        // Get or create global token cache
+                        let cache = AZURE_TOKEN_CACHE.get_or_init(|| {
+                            AzureTokenCache::new()
+                                .inspect_err(|e| {
+                                    tracing::error!(error = ?e, "Failed to create Azure token cache")
+                                })
+                                .ok()
+                        });
+
+                        let token = if let Some(cache) = cache {
+                            cache
+                                .get_token()
+                                .await
+                                .context("Failed to get cached Entra ID token")?
+                        } else {
+                            // Fallback to direct fetch if cache unavailable
+                            tracing::warn!("Token cache unavailable, falling back to direct fetch");
+                            azure_auth::fetch_entra_id_token()
+                                .await
+                                .context("Failed to fetch Entra ID token")?
+                        };
+
                         rig::providers::azure::AzureOpenAIAuth::Token(token)
                     }
                     AzureAuthMethod::ApiKey => {

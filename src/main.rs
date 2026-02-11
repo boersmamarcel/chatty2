@@ -417,6 +417,35 @@ fn main() {
 
                         providers_loaded_clone.store(true, Ordering::SeqCst);
                         info!("Providers loaded");
+
+                        // Initialize Azure token cache if any providers use Entra ID
+                        let needs_cache = cx
+                            .global::<settings::models::ProviderModel>()
+                            .providers()
+                            .iter()
+                            .any(|p| {
+                                p.provider_type == settings::models::providers_store::ProviderType::AzureOpenAI
+                                    && p.azure_auth_method() == settings::models::providers_store::AzureAuthMethod::EntraId
+                            });
+
+                        if needs_cache {
+                            tracing::info!("Pre-initializing Azure token cache");
+                            cx.spawn(|_cx: &mut AsyncApp| async move {
+                                if let Ok(cache) = chatty::auth::AzureTokenCache::new() {
+                                    // Pre-warm cache with initial token
+                                    if let Err(e) = cache.get_token().await {
+                                        tracing::warn!(error = ?e, "Failed to pre-fetch Azure token");
+                                    } else {
+                                        tracing::info!("Azure token cache pre-warmed successfully");
+                                    }
+
+                                    // Note: Cache is also lazily initialized in agent_factory.rs
+                                    // This pre-warming is just an optimization to avoid first-message delay
+                                }
+                            })
+                            .detach();
+                        }
+
                         check_fn_1(cx);
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to update global providers after load"))

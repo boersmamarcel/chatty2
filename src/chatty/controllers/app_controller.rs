@@ -1100,6 +1100,14 @@ impl ChattyApp {
                         }
                         Ok(StreamChunk::Error(err)) => {
                             error!(error = %err, "Stream error");
+
+                            // Detect authentication errors (401/Unauthorized)
+                            if err.contains("401") || err.contains("Unauthorized") {
+                                tracing::warn!("Detected Azure auth error, token may be expired");
+                                // Future enhancement: trigger token refresh and agent recreation
+                                // For now, just log the error for visibility
+                            }
+
                             break;
                         }
                         Err(e) => {
