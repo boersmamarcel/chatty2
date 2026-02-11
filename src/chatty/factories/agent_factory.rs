@@ -152,13 +152,24 @@ impl AgentClient {
                     format!("https://{}", raw_endpoint)
                 };
 
-                // If the endpoint contains /openai/deployments, extract just the base URL
+                // If the endpoint contains /openai/deployments or /openai as a PATH component,
+                // extract just the base URL. We need to be careful not to match "openai" in the hostname
+                // (e.g., https://myresource.openai.azure.com should NOT be truncated)
                 // Azure endpoint should be just https://myresource.openai.azure.com
                 // rig-core appends /openai/deployments/{model}/chat/completions itself
-                if let Some(pos) = endpoint.find("/openai/deployments") {
-                    endpoint.truncate(pos);
-                } else if let Some(pos) = endpoint.find("/openai") {
-                    endpoint.truncate(pos);
+
+                // Find the position after the scheme and hostname (after the third /)
+                let hostname_end = endpoint.find("://").and_then(|scheme_pos| {
+                    endpoint[scheme_pos + 3..]
+                        .find('/')
+                        .map(|p| scheme_pos + 3 + p)
+                });
+
+                if let Some(path_start) = hostname_end {
+                    // Only look for /openai in the path portion, not the hostname
+                    if let Some(pos) = endpoint[path_start..].find("/openai") {
+                        endpoint.truncate(path_start + pos);
+                    }
                 }
                 let api_version = model_config
                     .extra_params
