@@ -143,15 +143,18 @@ impl AutoUpdater {
             "CHECKSUMS",
         ];
 
+        info!("Looking for checksums file in release");
+
         for pattern in &checksum_patterns {
             if let Some(checksum_asset) = release
                 .assets
                 .iter()
                 .find(|a| a.name.to_lowercase() == pattern.to_lowercase())
             {
-                debug!(
+                info!(
+                    pattern = pattern,
                     url = &checksum_asset.browser_download_url,
-                    "Found checksums file"
+                    "Found checksums file, downloading..."
                 );
 
                 match client
@@ -160,16 +163,35 @@ impl AutoUpdater {
                     .await
                 {
                     Ok(response) => {
-                        if let Ok(text) = response.text().await {
-                            return Self::parse_checksums(&text);
+                        let status = response.status();
+                        debug!(status = ?status, "Received response for checksums file");
+
+                        match response.text().await {
+                            Ok(text) => {
+                                debug!(
+                                    length = text.len(),
+                                    preview = &text.chars().take(100).collect::<String>(),
+                                    "Successfully downloaded checksums file"
+                                );
+                                return Self::parse_checksums(&text);
+                            }
+                            Err(e) => {
+                                warn!(error = ?e, "Failed to read checksums response body");
+                            }
                         }
                     }
                     Err(e) => {
-                        debug!(error = ?e, "Failed to fetch checksums file");
+                        warn!(error = ?e, "Failed to fetch checksums file");
                     }
                 }
             }
         }
+
+        let available_assets: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
+        warn!(
+            available_assets = ?available_assets,
+            "No checksums file found in release assets"
+        );
 
         std::collections::HashMap::new()
     }
@@ -178,7 +200,7 @@ impl AutoUpdater {
     fn parse_checksums(text: &str) -> std::collections::HashMap<String, String> {
         let mut checksums = std::collections::HashMap::new();
 
-        for line in text.lines() {
+        for (line_num, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -191,6 +213,12 @@ impl AutoUpdater {
                 let filename = parts[1..].join(" ");
 
                 if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    debug!(
+                        line = line_num + 1,
+                        filename = &filename,
+                        hash = &hash[..16],
+                        "Parsed checksum entry"
+                    );
                     checksums.insert(filename, hash.to_lowercase());
                     continue;
                 }
@@ -202,12 +230,28 @@ impl AutoUpdater {
                 let filename = filename.trim();
 
                 if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    debug!(
+                        line = line_num + 1,
+                        filename = filename,
+                        hash = &hash[..16],
+                        "Parsed checksum entry"
+                    );
                     checksums.insert(filename.to_string(), hash.to_lowercase());
                 }
             }
         }
 
-        debug!(count = checksums.len(), "Parsed checksums");
+        let filenames: Vec<&str> = checksums.keys().map(|s| s.as_str()).collect();
+        info!(
+            checksum_count = checksums.len(),
+            filenames = ?filenames,
+            "Successfully parsed checksums"
+        );
+
+        if checksums.is_empty() {
+            warn!("No checksums were successfully parsed from checksums file");
+        }
+
         checksums
     }
 
@@ -385,7 +429,28 @@ impl AutoUpdater {
         // PHASE 1 (macOS): Deferred installation via helper script + graceful quit
         #[cfg(target_os = "macos")]
         {
-            let app_bundle = std::env::current_exe().ok().and_then(|exe| {
+            let current_exe_result = std::env::current_exe();
+            debug!(current_exe = ?current_exe_result, "Looking for app bundle");
+
+            let app_bundle = current_exe_result.ok().and_then(|exe| {
+                debug!(exe_path = ?exe, "Current executable path");
+
+                // Log all ancestors to help debug
+                let ancestors: Vec<_> = exe.ancestors().collect();
+                debug!(
+                    ancestor_count = ancestors.len(),
+                    "Searching ancestors for .app bundle"
+                );
+
+                for (i, ancestor) in ancestors.iter().enumerate() {
+                    debug!(
+                        level = i,
+                        path = ?ancestor,
+                        extension = ?ancestor.extension(),
+                        "Checking ancestor"
+                    );
+                }
+
                 exe.ancestors()
                     .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
                     .map(|p| p.to_path_buf())
@@ -393,16 +458,38 @@ impl AutoUpdater {
 
             match app_bundle {
                 Some(bundle) => {
+                    info!(bundle = ?bundle, "Found app bundle, launching install helper");
                     launch_macos_install_helper(&update_path, &bundle);
                     cx.quit();
                 }
                 None => {
-                    error!("Could not find current app bundle for macOS update");
-                    cx.update_global::<AutoUpdater, _>(|updater, _cx| {
-                        updater.status = AutoUpdateStatus::Error(
-                            "Could not find app bundle path for update installation".to_string(),
+                    // Check if we're running in development mode (not from a .app bundle)
+                    let is_dev_mode = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.to_str().map(|s| s.contains("/target/")))
+                        .unwrap_or(false);
+
+                    if is_dev_mode {
+                        warn!(
+                            "Skipping auto-update installation in development mode (not running from .app bundle)"
                         );
-                    });
+                        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                            updater.status = AutoUpdateStatus::Error(
+                                "Auto-updates are only available when running from a packaged .app bundle. \
+                                 Build with ./scripts/package-macos.sh to test updates."
+                                    .to_string(),
+                            );
+                        });
+                    } else {
+                        error!("Could not find current app bundle for macOS update");
+                        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                            updater.status = AutoUpdateStatus::Error(
+                                "Could not find app bundle path for update installation. \
+                                 This may occur when running outside of a packaged .app bundle."
+                                    .to_string(),
+                            );
+                        });
+                    }
                 }
             }
         }
@@ -524,7 +611,18 @@ async fn fetch_latest_release(
             let sha256 = checksums.get(&asset.name).cloned();
 
             if sha256.is_none() {
-                debug!(asset = &asset.name, "Warning: No checksum found for asset");
+                let available_checksums: Vec<&str> = checksums.keys().map(|s| s.as_str()).collect();
+                warn!(
+                    asset = &asset.name,
+                    available_checksums = ?available_checksums,
+                    "No checksum found for asset"
+                );
+            } else {
+                debug!(
+                    asset = &asset.name,
+                    hash = sha256.as_ref().map(|h| &h[..16]),
+                    "Found checksum for asset"
+                );
             }
 
             info!(
@@ -750,23 +848,22 @@ async fn download_file(
 /// is called.  We only spawn — the caller is responsible for quitting the
 /// current process gracefully via `cx.quit()`.
 ///
-/// Linux appends " (deleted)" to `/proc/self/exe` when the running file has
-/// been replaced; we strip that suffix to get the actual path.
+/// Uses the APPIMAGE environment variable to get the correct path to the
+/// AppImage file (same approach as the installer uses).
 #[cfg(target_os = "linux")]
 fn relaunch_linux_process() -> std::io::Result<()> {
     use std::process::Command;
 
-    let current_exe = std::env::current_exe()?;
-
-    let path_str = current_exe.to_string_lossy();
-    let actual_exe = if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
-        std::path::PathBuf::from(stripped)
+    // Use APPIMAGE env var when available (running as AppImage)
+    // Otherwise fall back to current_exe for non-AppImage installs
+    let appimage_path = if let Ok(appimage_env) = std::env::var("APPIMAGE") {
+        std::path::PathBuf::from(appimage_env)
     } else {
-        current_exe
+        std::env::current_exe()?
     };
 
-    info!(path = ?actual_exe, "Spawning updated AppImage");
-    Command::new(&actual_exe).spawn()?;
+    info!(path = ?appimage_path, "Spawning updated AppImage");
+    Command::new(&appimage_path).spawn()?;
     Ok(())
 }
 
