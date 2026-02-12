@@ -163,18 +163,20 @@ impl SystemTrace {
     }
 
     /// Add an approval prompt to the trace
+    #[allow(dead_code)]
     pub fn add_approval(&mut self, approval: ApprovalBlock) {
         self.items.push(TraceItem::ApprovalPrompt(approval));
     }
 
     /// Update the state of an approval prompt by ID
+    #[allow(dead_code)]
     pub fn update_approval_state(&mut self, id: &str, state: ApprovalState) {
         for item in &mut self.items {
-            if let TraceItem::ApprovalPrompt(approval) = item {
-                if approval.id == id {
-                    approval.state = state;
-                    break;
-                }
+            if let TraceItem::ApprovalPrompt(approval) = item
+                && approval.id == id
+            {
+                approval.state = state;
+                break;
             }
         }
     }

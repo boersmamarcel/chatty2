@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -126,11 +125,11 @@ impl BashExecutor {
         match self.settings.approval_mode {
             ApprovalMode::AutoApproveAll => {
                 debug!("Auto-approving command (AutoApproveAll mode)");
-                return Ok(true);
+                Ok(true)
             }
             ApprovalMode::AutoApproveSandboxed if is_sandboxed => {
                 debug!("Auto-approving sandboxed command (AutoApproveSandboxed mode)");
-                return Ok(true);
+                Ok(true)
             }
             ApprovalMode::AlwaysAsk | ApprovalMode::AutoApproveSandboxed => {
                 // Create oneshot channel for response

@@ -63,6 +63,94 @@ impl PathValidator {
         Ok(canonical)
     }
 
+    /// Validate a path for a file that may not yet exist (write operations).
+    /// Ensures the parent directory exists and is within the workspace root.
+    /// Returns the resolved absolute path.
+    pub fn validate_new_path(&self, path: &str) -> Result<PathBuf> {
+        if path.is_empty() {
+            return Err(anyhow!("Path cannot be empty"));
+        }
+
+        let requested = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.workspace_root.join(path)
+        };
+
+        // The parent directory must exist
+        let parent = requested
+            .parent()
+            .ok_or_else(|| anyhow!("Invalid path: no parent directory for '{}'", path))?;
+
+        if !parent.exists() {
+            return Err(anyhow!(
+                "Parent directory does not exist for '{}'. Use create_directory first.",
+                path
+            ));
+        }
+
+        // Canonicalize the parent to check workspace boundary
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|e| anyhow!("Failed to resolve parent path for '{}': {}", path, e))?;
+
+        if !canonical_parent.starts_with(&self.workspace_root) {
+            return Err(anyhow!(
+                "Access denied: path '{}' is outside the workspace root",
+                path
+            ));
+        }
+
+        // Return parent + filename (canonical parent with the original filename)
+        let filename = requested
+            .file_name()
+            .ok_or_else(|| anyhow!("Invalid path: no filename in '{}'", path))?;
+
+        Ok(canonical_parent.join(filename))
+    }
+
+    /// Validate a path for creating directories (ancestors may not exist).
+    /// Ensures the resolved path would be within the workspace root.
+    pub fn validate_mkdir_path(&self, path: &str) -> Result<PathBuf> {
+        if path.is_empty() {
+            return Err(anyhow!("Path cannot be empty"));
+        }
+
+        let requested = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.workspace_root.join(path)
+        };
+
+        // Walk up to find an existing ancestor and canonicalize it
+        let mut check = requested.as_path();
+        loop {
+            if check.exists() {
+                let canonical = check
+                    .canonicalize()
+                    .map_err(|e| anyhow!("Failed to resolve path '{}': {}", check.display(), e))?;
+                if !canonical.starts_with(&self.workspace_root) {
+                    return Err(anyhow!(
+                        "Access denied: path '{}' is outside the workspace root",
+                        path
+                    ));
+                }
+                break;
+            }
+            check = match check.parent() {
+                Some(p) => p,
+                None => {
+                    return Err(anyhow!(
+                        "Access denied: path '{}' is outside the workspace root",
+                        path
+                    ));
+                }
+            };
+        }
+
+        Ok(requested)
+    }
+
     /// Validate a path that may not exist yet (for glob patterns).
     /// Returns the resolved path without canonicalization.
     #[allow(dead_code)]

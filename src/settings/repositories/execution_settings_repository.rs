@@ -6,6 +6,7 @@ use crate::settings::models::execution_settings::ExecutionSettingsModel;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+#[allow(dead_code)]
 pub trait ExecutionSettingsRepository: Send + Sync + 'static {
     /// Load execution settings from storage
     fn load(&self) -> BoxFuture<'static, RepositoryResult<ExecutionSettingsModel>>;

@@ -692,6 +692,11 @@ fn friendly_tool_name(name: &str) -> String {
         "read_binary" => "Reading binary file".to_string(),
         "list_directory" => "Listing directory".to_string(),
         "glob_search" => "Searching files".to_string(),
+        "write_file" => "Writing file".to_string(),
+        "create_directory" => "Creating directory".to_string(),
+        "delete_file" => "Deleting file".to_string(),
+        "move_file" => "Moving file".to_string(),
+        "apply_diff" => "Applying diff".to_string(),
         "bash" => "Running command".to_string(),
         other => other.to_string(),
     }

@@ -12,6 +12,7 @@ pub enum ApprovalDecision {
 }
 
 /// Request for user approval to execute a command
+#[allow(dead_code)]
 pub struct ExecutionApprovalRequest {
     /// Unique ID for tracking this request
     pub id: String,
