@@ -1,8 +1,16 @@
-use rig::tool::{Tool, ToolDefinition};
+use rig::completion::ToolDefinition;
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::bash_executor::{BashExecutor, BashToolInput, BashToolOutput};
+
+/// Error type for bash tool execution
+#[derive(Debug, thiserror::Error)]
+pub enum BashToolError {
+    #[error("Execution error: {0}")]
+    ExecutionError(#[from] anyhow::Error),
+}
 
 /// Bash command execution tool arguments
 #[derive(Deserialize, Serialize)]
@@ -24,7 +32,7 @@ impl BashTool {
 
 impl Tool for BashTool {
     const NAME: &'static str = "bash";
-    type Error = anyhow::Error;
+    type Error = BashToolError;
     type Args = BashToolArgs;
     type Output = BashToolOutput;
 
@@ -64,6 +72,6 @@ impl Tool for BashTool {
         let input = BashToolInput {
             command: args.command,
         };
-        self.executor.execute(input).await
+        self.executor.execute(input).await.map_err(BashToolError::ExecutionError)
     }
 }

@@ -1,10 +1,11 @@
 #![allow(clippy::collapsible_if)]
 
 use crate::assets::CustomIcon;
+use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon};
+use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 
-use super::message_types::{SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem};
+use super::message_types::{ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem};
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
@@ -173,19 +174,7 @@ impl SystemTraceView {
                         .render_tool_call_block(index, tool_call, cx)
                         .into_any_element(),
                     TraceItem::ApprovalPrompt(approval) => {
-                        // Placeholder for approval prompt rendering
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(format!("Approval: {} ({})",
-                                approval.command,
-                                match approval.state {
-                                    crate::chatty::views::message_types::ApprovalState::Pending => "pending",
-                                    crate::chatty::views::message_types::ApprovalState::Approved => "approved",
-                                    crate::chatty::views::message_types::ApprovalState::Denied => "denied",
-                                }
-                            ))
+                        self.render_approval_block(index, approval, cx)
                             .into_any_element()
                     }
                 }
@@ -429,6 +418,139 @@ impl SystemTraceView {
         }
 
         container
+    }
+
+    /// Render an approval prompt block (for code execution)
+    fn render_approval_block(
+        &self,
+        _index: usize,
+        approval: &crate::chatty::views::message_types::ApprovalBlock,
+        cx: &App,
+    ) -> impl IntoElement {
+        let (prefix, prefix_color, state_label) = match &approval.state {
+            ApprovalState::Pending => ("?", cx.theme().primary, "awaiting approval"),
+            ApprovalState::Approved => ("✓", cx.theme().accent, "approved"),
+            ApprovalState::Denied => ("✗", cx.theme().ring, "denied"),
+        };
+
+        let is_pending = matches!(approval.state, ApprovalState::Pending);
+        let muted_text = cx.theme().muted_foreground;
+        let border_color = cx.theme().border;
+        let text_color = cx.theme().foreground;
+        let panel_bg = cx.theme().muted;
+        let badge_text = cx.theme().primary_foreground;
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            // Header with status
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .font_family("monospace")
+                    .text_sm()
+                    .child(
+                        div()
+                            .text_color(prefix_color)
+                            .font_weight(FontWeight::BOLD)
+                            .child(prefix),
+                    )
+                    .child(
+                        div()
+                            .text_color(text_color)
+                            .font_weight(FontWeight::BOLD)
+                            .child("Execution approval requested"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .px_2()
+                            .py(px(0.5))
+                            .rounded_sm()
+                            .bg(prefix_color)
+                            .text_color(badge_text)
+                            .child(state_label),
+                    ),
+            )
+            // Command display
+            .child(
+                div()
+                    .ml_4()
+                    .pl_3()
+                    .border_l_2()
+                    .border_color(border_color)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(muted_text)
+                            .child("command:"),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_sm()
+                            .px_2()
+                            .py_1()
+                            .bg(panel_bg)
+                            .rounded_sm()
+                            .text_color(text_color)
+                            .child(approval.command.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_text)
+                            .child(if approval.is_sandboxed {
+                                "🔒 sandboxed execution"
+                            } else {
+                                "⚠️  unsandboxed execution"
+                            }),
+                    ),
+            )
+            // Buttons (only when pending)
+            .when(is_pending, |this| {
+                let approval_id = approval.id.clone();
+                this.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new(ElementId::Name(format!("approve-{}", approval.id).into()))
+                                .label("Approve")
+                                .small()
+                                .on_click({
+                                    let id = approval_id.clone();
+                                    move |_event, _window, cx| {
+                                        if let Some(store) = cx.try_global::<ExecutionApprovalStore>() {
+                                            store.resolve(&id, ApprovalDecision::Approved);
+                                        }
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new(ElementId::Name(format!("deny-{}", approval.id).into()))
+                                .label("Deny")
+                                .small()
+                                .on_click({
+                                    let id = approval_id;
+                                    move |_event, _window, cx| {
+                                        if let Some(store) = cx.try_global::<ExecutionApprovalStore>() {
+                                            store.resolve(&id, ApprovalDecision::Denied);
+                                        }
+                                    }
+                                }),
+                        ),
+                )
+            })
     }
 }
 

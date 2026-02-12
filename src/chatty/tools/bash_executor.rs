@@ -192,20 +192,18 @@ impl BashExecutor {
     async fn run_command(&self, command: &str, is_sandboxed: bool) -> Result<std::process::Output> {
         let timeout_duration = Duration::from_secs(self.settings.timeout_seconds as u64);
 
-        let child_future = if is_sandboxed {
-            self.run_sandboxed(command)
+        let result = if is_sandboxed {
+            timeout(timeout_duration, self.run_sandboxed(command)).await
         } else {
-            self.run_unsandboxed(command)
+            timeout(timeout_duration, self.run_unsandboxed(command)).await
         };
 
-        timeout(timeout_duration, child_future)
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "Command execution timed out after {} seconds",
-                    self.settings.timeout_seconds
-                )
-            })?
+        result.map_err(|_| {
+            anyhow!(
+                "Command execution timed out after {} seconds",
+                self.settings.timeout_seconds
+            )
+        })?
     }
 
     /// Execute command in sandbox (Linux: Bubblewrap, macOS: sandbox-exec)

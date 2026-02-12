@@ -83,12 +83,13 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add bash tool if enabled
-                if let Some(tool) = &bash_tool {
-                    builder = builder.tool(tool.clone());
-                }
-
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with tools (type changes after adding tool)
+                let agent = if let Some(tool) = &bash_tool {
+                    let builder_with_tool = builder.tool(tool.clone());
+                    build_with_mcp_tools!(builder_with_tool, mcp_tools)
+                } else {
+                    build_with_mcp_tools!(builder, mcp_tools)
+                };
 
                 Ok(AgentClient::Anthropic(agent))
             }
@@ -106,12 +107,13 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
-                // Add bash tool if enabled
-                if let Some(tool) = &bash_tool {
-                    builder = builder.tool(tool.clone());
-                }
-
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with tools (type changes after adding tool)
+                let agent = if let Some(tool) = &bash_tool {
+                    let builder_with_tool = builder.tool(tool.clone());
+                    build_with_mcp_tools!(builder_with_tool, mcp_tools)
+                } else {
+                    build_with_mcp_tools!(builder, mcp_tools)
+                };
 
                 Ok(AgentClient::OpenAI(agent))
             }
@@ -120,17 +122,18 @@ impl AgentClient {
                     api_key.ok_or_else(|| anyhow!("API key not configured for Gemini provider"))?;
 
                 let client = rig::providers::gemini::Client::new(&key)?;
-                let mut builder = client
+                let builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                // Add bash tool if enabled
-                if let Some(tool) = &bash_tool {
-                    builder = builder.tool(tool.clone());
-                }
-
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with tools (type changes after adding tool)
+                let agent = if let Some(tool) = &bash_tool {
+                    let builder_with_tool = builder.tool(tool.clone());
+                    build_with_mcp_tools!(builder_with_tool, mcp_tools)
+                } else {
+                    build_with_mcp_tools!(builder, mcp_tools)
+                };
 
                 Ok(AgentClient::Gemini(agent))
             }
@@ -148,12 +151,13 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add bash tool if enabled
-                if let Some(tool) = &bash_tool {
-                    builder = builder.tool(tool.clone());
-                }
-
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with tools (type changes after adding tool)
+                let agent = if let Some(tool) = &bash_tool {
+                    let builder_with_tool = builder.tool(tool.clone());
+                    build_with_mcp_tools!(builder_with_tool, mcp_tools)
+                } else {
+                    build_with_mcp_tools!(builder, mcp_tools)
+                };
 
                 Ok(AgentClient::Mistral(agent))
             }
@@ -165,17 +169,18 @@ impl AgentClient {
                     .base_url(&url)
                     .build()?;
 
-                let mut builder = client
+                let builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                // Add bash tool if enabled
-                if let Some(tool) = &bash_tool {
-                    builder = builder.tool(tool.clone());
-                }
-
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with tools (type changes after adding tool)
+                let agent = if let Some(tool) = &bash_tool {
+                    let builder_with_tool = builder.tool(tool.clone());
+                    build_with_mcp_tools!(builder_with_tool, mcp_tools)
+                } else {
+                    build_with_mcp_tools!(builder, mcp_tools)
+                };
 
                 Ok(AgentClient::Ollama(agent))
             }
@@ -310,12 +315,13 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add bash tool if enabled
-                if let Some(tool) = &bash_tool {
-                    builder = builder.tool(tool.clone());
-                }
-
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with tools (type changes after adding tool)
+                let agent = if let Some(tool) = &bash_tool {
+                    let builder_with_tool = builder.tool(tool.clone());
+                    build_with_mcp_tools!(builder_with_tool, mcp_tools)
+                } else {
+                    build_with_mcp_tools!(builder, mcp_tools)
+                };
 
                 Ok(AgentClient::AzureOpenAI(agent))
             }
