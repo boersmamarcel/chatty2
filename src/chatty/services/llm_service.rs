@@ -28,6 +28,15 @@ pub enum StreamChunk {
         id: String,
         error: String,
     },
+    ApprovalRequested {
+        id: String,
+        command: String,
+        is_sandboxed: bool,
+    },
+    ApprovalResolved {
+        id: String,
+        approved: bool,
+    },
     TokenUsage {
         input_tokens: u32,
         output_tokens: u32,

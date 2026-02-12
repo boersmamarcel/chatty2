@@ -112,6 +112,17 @@ impl SystemTraceView {
                             ("✓", "analysis", cx.theme().accent)
                         }
                     }
+                    TraceItem::ApprovalPrompt(approval) => match approval.state {
+                        crate::chatty::views::message_types::ApprovalState::Pending => {
+                            ("?", "approval", cx.theme().primary)
+                        }
+                        crate::chatty::views::message_types::ApprovalState::Approved => {
+                            ("✓", "approved", cx.theme().accent)
+                        }
+                        crate::chatty::views::message_types::ApprovalState::Denied => {
+                            ("✗", "denied", cx.theme().ring)
+                        }
+                    },
                 };
 
                 let mut step_container = div().flex().items_center().gap_1();
@@ -161,6 +172,22 @@ impl SystemTraceView {
                     TraceItem::ToolCall(tool_call) => self
                         .render_tool_call_block(index, tool_call, cx)
                         .into_any_element(),
+                    TraceItem::ApprovalPrompt(approval) => {
+                        // Placeholder for approval prompt rendering
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(format!("Approval: {} ({})",
+                                approval.command,
+                                match approval.state {
+                                    crate::chatty::views::message_types::ApprovalState::Pending => "pending",
+                                    crate::chatty::views::message_types::ApprovalState::Approved => "approved",
+                                    crate::chatty::views::message_types::ApprovalState::Denied => "denied",
+                                }
+                            ))
+                            .into_any_element()
+                    }
                 }
             }))
     }

@@ -35,7 +35,8 @@ impl Conversation {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-        native_tools: Option<Vec<std::sync::Arc<dyn rig::tool::Tool<Error = anyhow::Error> + Send + Sync>>>,
+        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -52,7 +53,8 @@ impl Conversation {
             model_config,
             provider_config,
             mcp_tools,
-            native_tools,
+            exec_settings,
+            pending_approvals,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -79,7 +81,8 @@ impl Conversation {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-        native_tools: Option<Vec<std::sync::Arc<dyn rig::tool::Tool<Error = anyhow::Error> + Send + Sync>>>,
+        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -97,7 +100,8 @@ impl Conversation {
             model_config,
             provider_config,
             mcp_tools,
-            native_tools,
+            exec_settings,
+            pending_approvals,
         )
         .await
         .context("Failed to create agent from config")?;

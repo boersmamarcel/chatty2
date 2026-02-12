@@ -318,6 +318,8 @@ impl ChattyApp {
         models: &ModelsModel,
         providers: &ProviderModel,
         mcp_service: &crate::chatty::services::McpService,
+        exec_settings: &crate::settings::models::ExecutionSettingsModel,
+        pending_approvals: crate::chatty::models::execution_approval_store::PendingApprovals,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
@@ -356,8 +358,15 @@ impl ChattyApp {
                 }
             });
 
-        // Restore conversation using factory method
-        Conversation::from_data(data, model_config, provider_config, mcp_tools).await
+        // Restore conversation using factory method (bash tool will be created in agent_factory if enabled)
+        Conversation::from_data(
+            data,
+            model_config,
+            provider_config,
+            mcp_tools,
+            Some(exec_settings.clone()),
+            Some(pending_approvals),
+        ).await
     }
 
     /// Load all conversations from disk
@@ -378,9 +387,13 @@ impl ChattyApp {
                         cx.update_global::<ProviderModel, _>(|providers, _| providers.clone());
                     let mcp_service_result =
                         cx.update_global::<crate::chatty::services::McpService, _>(|svc, _| svc.clone());
+                    let exec_settings_result =
+                        cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|settings, _| settings.clone());
+                    let pending_approvals_result =
+                        cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|store, _| store.get_pending_approvals());
 
-                    match (models_result, providers_result, mcp_service_result) {
-                        (Ok(models), Ok(providers), Ok(mcp_service)) => {
+                    match (models_result, providers_result, mcp_service_result, exec_settings_result, pending_approvals_result) {
+                        (Ok(models), Ok(providers), Ok(mcp_service), Ok(exec_settings), Ok(pending_approvals)) => {
                             let mut restored_count = 0;
                             let mut failed_count = 0;
 
@@ -389,7 +402,7 @@ impl ChattyApp {
                                 let conv_id = data.id.clone();
 
                                 match Self::restore_conversation_from_data(
-                                    data, &models, &providers, &mcp_service,
+                                    data, &models, &providers, &mcp_service, &exec_settings, pending_approvals.clone(),
                                 )
                                 .await
                                 {
@@ -541,12 +554,21 @@ impl ChattyApp {
                                 }
                             });
 
+                    // Get execution settings and approval store for bash tool
+                    let (exec_settings, pending_approvals) = cx.update(|cx| {
+                        let settings = cx.global::<crate::settings::models::ExecutionSettingsModel>().clone();
+                        let approvals = cx.global::<crate::chatty::models::ExecutionApprovalStore>().get_pending_approvals();
+                        (Some(settings), Some(approvals))
+                    })?;
+
                     let conversation = Conversation::new(
                         conv_id.clone(),
                         title.clone(),
                         &model_config,
                         &provider_config,
                         mcp_tools,
+                        exec_settings,
+                        pending_approvals,
                     )
                     .await?;
 
@@ -738,11 +760,20 @@ impl ChattyApp {
                             "Creating agent with MCP tools"
                         );
 
+                        // Get execution settings for tool creation
+                        let (exec_settings, pending_approvals) = cx.update(|cx| {
+                            let settings = cx.global::<crate::settings::models::ExecutionSettingsModel>().clone();
+                            let approvals = cx.global::<crate::chatty::models::ExecutionApprovalStore>().get_pending_approvals();
+                            (Some(settings), Some(approvals))
+                        }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
                         // Create new agent asynchronously with MCP tools
                         let new_agent = AgentClient::from_model_config_with_tools(
                             &model_config,
                             &provider_config,
                             mcp_tools,
+                            exec_settings,
+                            pending_approvals,
                         )
                         .await?;
 
@@ -1088,6 +1119,14 @@ impl ChattyApp {
                                     }
                                 })
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                        }
+                        Ok(StreamChunk::ApprovalRequested { id, command, is_sandboxed }) => {
+                            debug!(id = %id, command = %command, sandboxed = is_sandboxed, "Approval requested");
+                            // For now, just log - full approval UI integration pending
+                        }
+                        Ok(StreamChunk::ApprovalResolved { id, approved }) => {
+                            debug!(id = %id, approved = approved, "Approval resolved");
+                            // For now, just log - full approval UI integration pending
                         }
                         Ok(StreamChunk::TokenUsage { input_tokens, output_tokens }) => {
                             debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Received token usage");

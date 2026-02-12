@@ -11,6 +11,7 @@ pub struct BashToolArgs {
 }
 
 /// Bash command execution tool for rig agents
+#[derive(Clone)]
 pub struct BashTool {
     executor: Arc<BashExecutor>,
 }

@@ -41,15 +41,32 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP and native tools
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools and bash execution
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-        native_tools: Option<Vec<std::sync::Arc<dyn rig::tool::Tool<Error = anyhow::Error> + Send + Sync>>>,
+        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
     ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
+
+        // Create BashTool if execution is enabled
+        let bash_tool = if let (Some(settings), Some(approvals)) = (&exec_settings, &pending_approvals) {
+            if settings.enabled {
+                Some(crate::chatty::tools::BashTool::new(
+                    std::sync::Arc::new(crate::chatty::tools::BashExecutor::new(
+                        settings.clone(),
+                        approvals.clone(),
+                    ))
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         match &provider_config.provider_type {
             ProviderType::Anthropic => {
@@ -66,11 +83,9 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add native tools if provided
-                if let Some(tools) = native_tools {
-                    for tool in tools {
-                        builder = builder.tool(tool);
-                    }
+                // Add bash tool if enabled
+                if let Some(tool) = &bash_tool {
+                    builder = builder.tool(tool.clone());
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
@@ -91,11 +106,9 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
-                // Add native tools if provided
-                if let Some(tools) = native_tools {
-                    for tool in tools {
-                        builder = builder.tool(tool);
-                    }
+                // Add bash tool if enabled
+                if let Some(tool) = &bash_tool {
+                    builder = builder.tool(tool.clone());
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
@@ -112,11 +125,9 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                // Add native tools if provided
-                if let Some(tools) = native_tools {
-                    for tool in tools {
-                        builder = builder.tool(tool);
-                    }
+                // Add bash tool if enabled
+                if let Some(tool) = &bash_tool {
+                    builder = builder.tool(tool.clone());
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
@@ -137,11 +148,9 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add native tools if provided
-                if let Some(tools) = native_tools {
-                    for tool in tools {
-                        builder = builder.tool(tool);
-                    }
+                // Add bash tool if enabled
+                if let Some(tool) = &bash_tool {
+                    builder = builder.tool(tool.clone());
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
@@ -161,11 +170,9 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                // Add native tools if provided
-                if let Some(tools) = native_tools {
-                    for tool in tools {
-                        builder = builder.tool(tool);
-                    }
+                // Add bash tool if enabled
+                if let Some(tool) = &bash_tool {
+                    builder = builder.tool(tool.clone());
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
@@ -303,11 +310,9 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Add native tools if provided
-                if let Some(tools) = native_tools {
-                    for tool in tools {
-                        builder = builder.tool(tool);
-                    }
+                // Add bash tool if enabled
+                if let Some(tool) = &bash_tool {
+                    builder = builder.tool(tool.clone());
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
