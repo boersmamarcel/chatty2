@@ -11,8 +11,5 @@ pub trait ExecutionSettingsRepository: Send + Sync + 'static {
     fn load(&self) -> BoxFuture<'static, RepositoryResult<ExecutionSettingsModel>>;
 
     /// Save execution settings to storage
-    fn save(
-        &self,
-        settings: ExecutionSettingsModel,
-    ) -> BoxFuture<'static, RepositoryResult<()>>;
+    fn save(&self, settings: ExecutionSettingsModel) -> BoxFuture<'static, RepositoryResult<()>>;
 }

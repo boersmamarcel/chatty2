@@ -366,7 +366,8 @@ impl ChattyApp {
             mcp_tools,
             Some(exec_settings.clone()),
             Some(pending_approvals),
-        ).await
+        )
+        .await
     }
 
     /// Load all conversations from disk
@@ -556,8 +557,12 @@ impl ChattyApp {
 
                     // Get execution settings and approval store for bash tool
                     let (exec_settings, pending_approvals) = cx.update(|cx| {
-                        let settings = cx.global::<crate::settings::models::ExecutionSettingsModel>().clone();
-                        let approvals = cx.global::<crate::chatty::models::ExecutionApprovalStore>().get_pending_approvals();
+                        let settings = cx
+                            .global::<crate::settings::models::ExecutionSettingsModel>()
+                            .clone();
+                        let approvals = cx
+                            .global::<crate::chatty::models::ExecutionApprovalStore>()
+                            .get_pending_approvals();
                         (Some(settings), Some(approvals))
                     })?;
 
@@ -761,11 +766,17 @@ impl ChattyApp {
                         );
 
                         // Get execution settings for tool creation
-                        let (exec_settings, pending_approvals) = cx.update(|cx| {
-                            let settings = cx.global::<crate::settings::models::ExecutionSettingsModel>().clone();
-                            let approvals = cx.global::<crate::chatty::models::ExecutionApprovalStore>().get_pending_approvals();
-                            (Some(settings), Some(approvals))
-                        }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                        let (exec_settings, pending_approvals) = cx
+                            .update(|cx| {
+                                let settings = cx
+                                    .global::<crate::settings::models::ExecutionSettingsModel>()
+                                    .clone();
+                                let approvals = cx
+                                    .global::<crate::chatty::models::ExecutionApprovalStore>()
+                                    .get_pending_approvals();
+                                (Some(settings), Some(approvals))
+                            })
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
                         // Create new agent asynchronously with MCP tools
                         let new_agent = AgentClient::from_model_config_with_tools(

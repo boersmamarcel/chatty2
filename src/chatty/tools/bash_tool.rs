@@ -72,6 +72,9 @@ impl Tool for BashTool {
         let input = BashToolInput {
             command: args.command,
         };
-        self.executor.execute(input).await.map_err(BashToolError::ExecutionError)
+        self.executor
+            .execute(input)
+            .await
+            .map_err(BashToolError::ExecutionError)
     }
 }

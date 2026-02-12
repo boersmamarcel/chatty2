@@ -5,7 +5,9 @@ use crate::chatty::models::execution_approval_store::{ApprovalDecision, Executio
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 
-use super::message_types::{ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem};
+use super::message_types::{
+    ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem,
+};
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
@@ -173,10 +175,9 @@ impl SystemTraceView {
                     TraceItem::ToolCall(tool_call) => self
                         .render_tool_call_block(index, tool_call, cx)
                         .into_any_element(),
-                    TraceItem::ApprovalPrompt(approval) => {
-                        self.render_approval_block(index, approval, cx)
-                            .into_any_element()
-                    }
+                    TraceItem::ApprovalPrompt(approval) => self
+                        .render_approval_block(index, approval, cx)
+                        .into_any_element(),
                 }
             }))
     }
@@ -503,16 +504,13 @@ impl SystemTraceView {
                             .text_color(text_color)
                             .child(approval.command.clone()),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_text)
-                            .child(if approval.is_sandboxed {
-                                "🔒 sandboxed execution"
-                            } else {
-                                "⚠️  unsandboxed execution"
-                            }),
-                    ),
+                    .child(div().text_xs().text_color(muted_text).child(
+                        if approval.is_sandboxed {
+                            "🔒 sandboxed execution"
+                        } else {
+                            "⚠️  unsandboxed execution"
+                        },
+                    )),
             )
             // Buttons (only when pending)
             .when(is_pending, |this| {
@@ -530,7 +528,9 @@ impl SystemTraceView {
                                 .on_click({
                                     let id = approval_id.clone();
                                     move |_event, _window, cx| {
-                                        if let Some(store) = cx.try_global::<ExecutionApprovalStore>() {
+                                        if let Some(store) =
+                                            cx.try_global::<ExecutionApprovalStore>()
+                                        {
                                             store.resolve(&id, ApprovalDecision::Approved);
                                         }
                                     }
@@ -543,7 +543,9 @@ impl SystemTraceView {
                                 .on_click({
                                     let id = approval_id;
                                     move |_event, _window, cx| {
-                                        if let Some(store) = cx.try_global::<ExecutionApprovalStore>() {
+                                        if let Some(store) =
+                                            cx.try_global::<ExecutionApprovalStore>()
+                                        {
                                             store.resolve(&id, ApprovalDecision::Denied);
                                         }
                                     }

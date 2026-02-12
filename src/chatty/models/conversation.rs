@@ -36,7 +36,9 @@ impl Conversation {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -82,7 +84,9 @@ impl Conversation {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config

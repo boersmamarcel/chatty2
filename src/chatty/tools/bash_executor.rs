@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -56,9 +56,7 @@ impl BashExecutor {
         let is_sandboxed = self.can_sandbox();
 
         // 4. Check approval mode and request if needed
-        let approved = self
-            .request_approval(&input.command, is_sandboxed)
-            .await?;
+        let approved = self.request_approval(&input.command, is_sandboxed).await?;
         if !approved {
             return Err(anyhow!("Execution denied by user"));
         }
