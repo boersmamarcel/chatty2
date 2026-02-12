@@ -848,23 +848,22 @@ async fn download_file(
 /// is called.  We only spawn — the caller is responsible for quitting the
 /// current process gracefully via `cx.quit()`.
 ///
-/// Linux appends " (deleted)" to `/proc/self/exe` when the running file has
-/// been replaced; we strip that suffix to get the actual path.
+/// Uses the APPIMAGE environment variable to get the correct path to the
+/// AppImage file (same approach as the installer uses).
 #[cfg(target_os = "linux")]
 fn relaunch_linux_process() -> std::io::Result<()> {
     use std::process::Command;
 
-    let current_exe = std::env::current_exe()?;
-
-    let path_str = current_exe.to_string_lossy();
-    let actual_exe = if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
-        std::path::PathBuf::from(stripped)
+    // Use APPIMAGE env var when available (running as AppImage)
+    // Otherwise fall back to current_exe for non-AppImage installs
+    let appimage_path = if let Ok(appimage_env) = std::env::var("APPIMAGE") {
+        std::path::PathBuf::from(appimage_env)
     } else {
-        current_exe
+        std::env::current_exe()?
     };
 
-    info!(path = ?actual_exe, "Spawning updated AppImage");
-    Command::new(&actual_exe).spawn()?;
+    info!(path = ?appimage_path, "Spawning updated AppImage");
+    Command::new(&appimage_path).spawn()?;
     Ok(())
 }
 
