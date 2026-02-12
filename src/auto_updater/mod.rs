@@ -429,7 +429,28 @@ impl AutoUpdater {
         // PHASE 1 (macOS): Deferred installation via helper script + graceful quit
         #[cfg(target_os = "macos")]
         {
-            let app_bundle = std::env::current_exe().ok().and_then(|exe| {
+            let current_exe_result = std::env::current_exe();
+            debug!(current_exe = ?current_exe_result, "Looking for app bundle");
+
+            let app_bundle = current_exe_result.ok().and_then(|exe| {
+                debug!(exe_path = ?exe, "Current executable path");
+
+                // Log all ancestors to help debug
+                let ancestors: Vec<_> = exe.ancestors().collect();
+                debug!(
+                    ancestor_count = ancestors.len(),
+                    "Searching ancestors for .app bundle"
+                );
+
+                for (i, ancestor) in ancestors.iter().enumerate() {
+                    debug!(
+                        level = i,
+                        path = ?ancestor,
+                        extension = ?ancestor.extension(),
+                        "Checking ancestor"
+                    );
+                }
+
                 exe.ancestors()
                     .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
                     .map(|p| p.to_path_buf())
@@ -437,6 +458,7 @@ impl AutoUpdater {
 
             match app_bundle {
                 Some(bundle) => {
+                    info!(bundle = ?bundle, "Found app bundle, launching install helper");
                     launch_macos_install_helper(&update_path, &bundle);
                     cx.quit();
                 }
@@ -444,7 +466,9 @@ impl AutoUpdater {
                     error!("Could not find current app bundle for macOS update");
                     cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                         updater.status = AutoUpdateStatus::Error(
-                            "Could not find app bundle path for update installation".to_string(),
+                            "Could not find app bundle path for update installation. \
+                             This may occur when running outside of a packaged .app bundle."
+                                .to_string(),
                         );
                     });
                 }
