@@ -463,14 +463,33 @@ impl AutoUpdater {
                     cx.quit();
                 }
                 None => {
-                    error!("Could not find current app bundle for macOS update");
-                    cx.update_global::<AutoUpdater, _>(|updater, _cx| {
-                        updater.status = AutoUpdateStatus::Error(
-                            "Could not find app bundle path for update installation. \
-                             This may occur when running outside of a packaged .app bundle."
-                                .to_string(),
+                    // Check if we're running in development mode (not from a .app bundle)
+                    let is_dev_mode = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.to_str().map(|s| s.contains("/target/")))
+                        .unwrap_or(false);
+
+                    if is_dev_mode {
+                        warn!(
+                            "Skipping auto-update installation in development mode (not running from .app bundle)"
                         );
-                    });
+                        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                            updater.status = AutoUpdateStatus::Error(
+                                "Auto-updates are only available when running from a packaged .app bundle. \
+                                 Build with ./scripts/package-macos.sh to test updates."
+                                    .to_string(),
+                            );
+                        });
+                    } else {
+                        error!("Could not find current app bundle for macOS update");
+                        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                            updater.status = AutoUpdateStatus::Error(
+                                "Could not find app bundle path for update installation. \
+                                 This may occur when running outside of a packaged .app bundle."
+                                    .to_string(),
+                            );
+                        });
+                    }
                 }
             }
         }
