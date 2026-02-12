@@ -35,6 +35,7 @@ impl Conversation {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        native_tools: Option<Vec<std::sync::Arc<dyn rig::tool::Tool<Error = anyhow::Error> + Send + Sync>>>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -47,10 +48,14 @@ impl Conversation {
             provider_config.provider_type, url_info, model_config.model_identifier
         );
 
-        let agent =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, mcp_tools)
-                .await
-                .context("Failed to create agent from config")?;
+        let agent = AgentClient::from_model_config_with_tools(
+            model_config,
+            provider_config,
+            mcp_tools,
+            native_tools,
+        )
+        .await
+        .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -74,6 +79,7 @@ impl Conversation {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        native_tools: Option<Vec<std::sync::Arc<dyn rig::tool::Tool<Error = anyhow::Error> + Send + Sync>>>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -87,10 +93,14 @@ impl Conversation {
         );
 
         // Reconstruct agent
-        let agent =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, mcp_tools)
-                .await
-                .context("Failed to create agent from config")?;
+        let agent = AgentClient::from_model_config_with_tools(
+            model_config,
+            provider_config,
+            mcp_tools,
+            native_tools,
+        )
+        .await
+        .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)

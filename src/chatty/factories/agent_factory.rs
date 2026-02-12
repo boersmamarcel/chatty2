@@ -41,11 +41,12 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP and native tools
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        native_tools: Option<Vec<std::sync::Arc<dyn rig::tool::Tool<Error = anyhow::Error> + Send + Sync>>>,
     ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -63,6 +64,13 @@ impl AgentClient {
 
                 if let Some(max_tokens) = model_config.max_tokens {
                     builder = builder.max_tokens(max_tokens as u64);
+                }
+
+                // Add native tools if provided
+                if let Some(tools) = native_tools {
+                    for tool in tools {
+                        builder = builder.tool(tool);
+                    }
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
@@ -83,6 +91,13 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
+                // Add native tools if provided
+                if let Some(tools) = native_tools {
+                    for tool in tools {
+                        builder = builder.tool(tool);
+                    }
+                }
+
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
 
                 Ok(AgentClient::OpenAI(agent))
@@ -92,10 +107,17 @@ impl AgentClient {
                     api_key.ok_or_else(|| anyhow!("API key not configured for Gemini provider"))?;
 
                 let client = rig::providers::gemini::Client::new(&key)?;
-                let builder = client
+                let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
+
+                // Add native tools if provided
+                if let Some(tools) = native_tools {
+                    for tool in tools {
+                        builder = builder.tool(tool);
+                    }
+                }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
 
@@ -115,6 +137,13 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
+                // Add native tools if provided
+                if let Some(tools) = native_tools {
+                    for tool in tools {
+                        builder = builder.tool(tool);
+                    }
+                }
+
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
 
                 Ok(AgentClient::Mistral(agent))
@@ -127,10 +156,17 @@ impl AgentClient {
                     .base_url(&url)
                     .build()?;
 
-                let builder = client
+                let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
+
+                // Add native tools if provided
+                if let Some(tools) = native_tools {
+                    for tool in tools {
+                        builder = builder.tool(tool);
+                    }
+                }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);
 
@@ -265,6 +301,13 @@ impl AgentClient {
 
                 if let Some(max_tokens) = model_config.max_tokens {
                     builder = builder.max_tokens(max_tokens as u64);
+                }
+
+                // Add native tools if provided
+                if let Some(tools) = native_tools {
+                    for tool in tools {
+                        builder = builder.tool(tool);
+                    }
                 }
 
                 let agent = build_with_mcp_tools!(builder, mcp_tools);

@@ -45,6 +45,8 @@ pub enum TraceItem {
     Thinking(ThinkingBlock),
     /// A tool call execution
     ToolCall(ToolCallBlock),
+    /// An execution approval prompt
+    ApprovalPrompt(ApprovalBlock),
 }
 
 /// Represents a "thinking" or "reasoning" session
@@ -97,6 +99,31 @@ pub enum ToolCallState {
     Error(String),
 }
 
+/// Represents an execution approval request
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalBlock {
+    /// Unique ID for tracking this approval
+    pub id: String,
+    /// Command to be executed
+    pub command: String,
+    /// Whether execution will be sandboxed
+    pub is_sandboxed: bool,
+    /// Current approval state
+    pub state: ApprovalState,
+    /// When the approval was requested
+    pub created_at: std::time::SystemTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ApprovalState {
+    /// Awaiting user decision
+    Pending,
+    /// User approved execution
+    Approved,
+    /// User denied execution
+    Denied,
+}
+
 impl ThinkingState {
     pub fn is_processing(&self) -> bool {
         matches!(self, ThinkingState::Processing)
@@ -133,6 +160,23 @@ impl SystemTrace {
     /// Clear active tool when it completes
     pub fn clear_active_tool(&mut self) {
         self.active_tool_index = None;
+    }
+
+    /// Add an approval prompt to the trace
+    pub fn add_approval(&mut self, approval: ApprovalBlock) {
+        self.items.push(TraceItem::ApprovalPrompt(approval));
+    }
+
+    /// Update the state of an approval prompt by ID
+    pub fn update_approval_state(&mut self, id: &str, state: ApprovalState) {
+        for item in &mut self.items {
+            if let TraceItem::ApprovalPrompt(approval) = item {
+                if approval.id == id {
+                    approval.state = state;
+                    break;
+                }
+            }
+        }
     }
 }
 

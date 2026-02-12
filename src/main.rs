@@ -15,8 +15,9 @@ use auto_updater::AutoUpdater;
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
-    GeneralSettingsJsonRepository, GeneralSettingsRepository, JsonFileRepository,
-    JsonMcpRepository, JsonModelsRepository, McpRepository, ModelsRepository, ProviderRepository,
+    ExecutionSettingsJsonRepository, ExecutionSettingsRepository, GeneralSettingsJsonRepository,
+    GeneralSettingsRepository, JsonFileRepository, JsonMcpRepository, JsonModelsRepository,
+    McpRepository, ModelsRepository, ProviderRepository,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,6 +53,12 @@ lazy_static::lazy_static! {
     static ref MCP_REPOSITORY: Arc<dyn McpRepository> = {
         let repo = JsonMcpRepository::new()
             .expect("Failed to initialize MCP repository");
+        Arc::new(repo)
+    };
+
+    static ref EXECUTION_SETTINGS_REPOSITORY: Arc<dyn ExecutionSettingsRepository> = {
+        let repo = ExecutionSettingsJsonRepository::new()
+            .expect("Failed to initialize execution settings repository");
         Arc::new(repo)
     };
 }
@@ -326,6 +333,12 @@ fn main() {
         // Initialize MCP servers model with empty state - will be populated async
         cx.set_global(settings::models::McpServersModel::new());
 
+        // Initialize execution settings with default - will be populated async
+        cx.set_global(settings::models::ExecutionSettingsModel::default());
+
+        // Initialize execution approval store for tracking pending approvals
+        cx.set_global(chatty::models::ExecutionApprovalStore::new());
+
         // Initialize models notifier entity for event subscriptions
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
         cx.set_global(settings::models::GlobalModelsNotifier {
@@ -564,6 +577,25 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load MCP server configurations");
+                }
+            }
+        })
+        .detach();
+
+        // Load execution settings asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+            match repo.load().await {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        cx.set_global(settings);
+                        info!("Execution settings loaded");
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global execution settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load execution settings, using defaults");
                 }
             }
         })

@@ -1,3 +1,5 @@
+pub mod execution_settings_json_repository;
+pub mod execution_settings_repository;
 pub mod general_settings_json_repository;
 pub mod general_settings_repository;
 pub mod json_file_repository;
@@ -7,6 +9,8 @@ pub mod models_json_repository;
 pub mod models_repository;
 pub mod provider_repository;
 
+pub use execution_settings_json_repository::ExecutionSettingsJsonRepository;
+pub use execution_settings_repository::ExecutionSettingsRepository;
 pub use general_settings_json_repository::GeneralSettingsJsonRepository;
 pub use general_settings_repository::GeneralSettingsRepository;
 pub use json_file_repository::JsonFileRepository;

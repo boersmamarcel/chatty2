@@ -4,6 +4,7 @@ pub mod factories;
 pub mod models;
 pub mod repositories;
 pub mod services;
+pub mod tools;
 pub mod views;
 
 pub use controllers::{ChattyApp, GlobalChattyApp};
