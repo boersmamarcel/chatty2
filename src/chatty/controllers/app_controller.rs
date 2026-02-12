@@ -1100,6 +1100,26 @@ impl ChattyApp {
                         }
                         Ok(StreamChunk::Error(err)) => {
                             error!(error = %err, "Stream error");
+
+                            // Detect authentication errors (401/Unauthorized)
+                            if err.contains("401") || err.contains("Unauthorized") {
+                                tracing::warn!("Detected Azure auth error - token likely expired");
+
+                                // Attempt to refresh the token for next request
+                                if let Some(cache) = cx.update(|cx| {
+                                    cx.try_global::<crate::chatty::auth::AzureTokenCache>().cloned()
+                                }).ok().flatten() {
+                                    if let Err(e) = cache.refresh_token().await {
+                                        error!(error = ?e, "Failed to refresh Azure token after 401 error");
+                                    } else {
+                                        tracing::info!(
+                                            "Azure token refreshed successfully. Please retry your message - \
+                                            the next request will use a fresh token."
+                                        );
+                                    }
+                                }
+                            }
+
                             break;
                         }
                         Err(e) => {

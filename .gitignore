@@ -28,6 +28,8 @@ TEST_SUMMARY.md
 # Inspiration/reference code (should be external)
 /inspiration/
 
+.claude/
+
 # Backup files
 *.bak
 *.bak[0-9]
