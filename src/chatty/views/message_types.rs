@@ -87,6 +87,9 @@ pub struct ToolCallBlock {
     pub state: ToolCallState,
     /// Execution duration
     pub duration: Option<Duration>,
+    /// Text content that appeared before this tool call (for interleaved rendering)
+    #[serde(default)]
+    pub text_before: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

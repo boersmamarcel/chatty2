@@ -450,6 +450,83 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         }))
 }
 
+/// Render interleaved content: text segments mixed with tool calls
+fn render_interleaved_content(
+    msg: &DisplayMessage,
+    index: usize,
+    mut container: Div,
+    cx: &App,
+) -> Div {
+    use super::message_types::TraceItem;
+
+    // Get the trace items from the trace view
+    let trace_items = msg
+        .system_trace_view
+        .as_ref()
+        .map(|view_entity| view_entity.read(cx).get_trace().items.clone())
+        .unwrap_or_default();
+
+    if trace_items.is_empty() {
+        // No tool calls, just render content normally
+        if msg.is_markdown && !msg.is_streaming {
+            let content_elements = render_content_with_code_blocks(&msg.content, index, cx);
+            return container.children(content_elements);
+        } else {
+            return container.child(msg.content.clone());
+        }
+    }
+
+    // Track position in message content
+    let mut last_text_end = 0;
+    let full_content = &msg.content;
+
+    for (tool_idx, item) in trace_items.iter().enumerate() {
+        if let TraceItem::ToolCall(tool_call) = item {
+            // Render text that came before this tool call
+            let text_before = &tool_call.text_before;
+
+            // Only render if there's new text since the last segment
+            if text_before.len() > last_text_end {
+                let text_segment = &text_before[last_text_end..];
+                if !text_segment.is_empty() {
+                    if msg.is_markdown && !msg.is_streaming {
+                        let text_elements = render_content_with_code_blocks(
+                            text_segment,
+                            index * 100 + tool_idx,
+                            cx,
+                        );
+                        container = container.children(text_elements);
+                    } else {
+                        container = container.child(div().child(text_segment.to_string()));
+                    }
+                }
+                last_text_end = text_before.len();
+            }
+
+            // Render the tool call using trace_components
+            container = container.child(div().mt_2().mb_2().child(
+                super::trace_components::render_tool_call_inline(&tool_call, index, tool_idx, cx),
+            ));
+        }
+    }
+
+    // Render any remaining text after the last tool call
+    if last_text_end < full_content.len() {
+        let remaining_text = &full_content[last_text_end..];
+        if !remaining_text.is_empty() {
+            if msg.is_markdown && !msg.is_streaming {
+                let text_elements =
+                    render_content_with_code_blocks(remaining_text, index * 1000, cx);
+                container = container.children(text_elements);
+            } else {
+                container = container.child(div().child(remaining_text.to_string()));
+            }
+        }
+    }
+
+    container
+}
+
 pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElement {
     // If not in viewport window, render lightweight placeholder
     // Full render for messages in viewport
@@ -465,10 +542,9 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElemen
         MessageRole::Assistant => container, // No background, uses main bg
     };
 
-    // Add system trace if present (for tool calls, thinking, etc.)
-    if let Some(ref trace_view) = msg.system_trace_view {
-        container = container.child(trace_view.clone());
-    }
+    // Check if we should render interleaved content (tool calls mixed with text)
+    let should_interleave =
+        matches!(msg.role, MessageRole::Assistant) && msg.system_trace_view.is_some();
 
     // Render attachments (images/PDFs) if present
     if !msg.attachments.is_empty() {
@@ -547,10 +623,14 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElemen
         is_markdown = msg.is_markdown,
         is_streaming = msg.is_streaming,
         content_len = msg.content.len(),
+        should_interleave = should_interleave,
         "render_message: deciding markdown path"
     );
 
-    let final_container = if msg.is_markdown && !msg.is_streaming {
+    let final_container = if should_interleave {
+        // Render interleaved content (text mixed with tool calls)
+        render_interleaved_content(msg, index, container, cx)
+    } else if msg.is_markdown && !msg.is_streaming {
         // Parse for math expressions
         let content_elements = render_content_with_code_blocks(&msg.content, index, cx);
         container.children(content_elements)

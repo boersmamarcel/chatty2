@@ -207,6 +207,13 @@ impl ChatView {
     pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
+        // Capture current message content as "text_before" for interleaved rendering
+        let text_before = self
+            .messages
+            .last()
+            .map(|msg| msg.content.clone())
+            .unwrap_or_default();
+
         let display_name = friendly_tool_name(&name);
         let tool_call = ToolCallBlock {
             tool_name: name,
@@ -216,6 +223,7 @@ impl ChatView {
             output_preview: None,
             state: ToolCallState::Running,
             duration: None,
+            text_before,
         };
 
         self.active_tool_calls.insert(id, tool_call.clone());

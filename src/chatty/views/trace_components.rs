@@ -37,6 +37,11 @@ impl SystemTraceView {
         self.is_collapsed = collapsed;
     }
 
+    /// Get a reference to the trace (for interleaved rendering)
+    pub fn get_trace(&self) -> &SystemTrace {
+        &self.trace
+    }
+
     /// Render the trace container header with active status
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Active status styling
@@ -593,4 +598,139 @@ impl Render for SystemTraceView {
 
         container
     }
+}
+
+/// Public function to render a single tool call inline (for interleaved content)
+pub fn render_tool_call_inline(
+    tool_call: &ToolCallBlock,
+    _message_index: usize,
+    _tool_index: usize,
+    cx: &App,
+) -> impl IntoElement {
+    let (prefix, prefix_color, state_label) = match &tool_call.state {
+        ToolCallState::Running => (">", cx.theme().primary, "running"),
+        ToolCallState::Success => ("✓", cx.theme().accent, "success"),
+        ToolCallState::Error(_) => ("✗", cx.theme().ring, "error"),
+    };
+
+    let muted_text = cx.theme().muted_foreground;
+    let border_color = cx.theme().border;
+    let text_color = cx.theme().foreground;
+    let panel_bg = cx.theme().muted;
+    let badge_text = cx.theme().primary_foreground;
+
+    let mut container = div().flex().flex_col().gap_1().child(
+        // Command invocation line
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .font_family("monospace")
+            .text_sm()
+            .child(
+                div()
+                    .text_color(prefix_color)
+                    .font_weight(FontWeight::BOLD)
+                    .child(prefix),
+            )
+            .child(
+                div()
+                    .text_color(text_color)
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("$ {}", tool_call.display_name)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .px_2()
+                    .py(px(0.5))
+                    .rounded_sm()
+                    .bg(prefix_color)
+                    .text_color(badge_text)
+                    .child(state_label),
+            )
+            .when_some(tool_call.duration, |this, duration| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .child(format!("({:.1}s)", duration.as_secs_f32())),
+                )
+            }),
+    );
+
+    // Output section (if available)
+    if let Some(output) = tool_call
+        .output
+        .as_ref()
+        .or(tool_call.output_preview.as_ref())
+    {
+        container = container.child(
+            div()
+                .ml_4()
+                .pl_3()
+                .border_l_2()
+                .border_color(border_color)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_xs()
+                        .text_color(muted_text)
+                        .child("output:"),
+                )
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_xs()
+                        .px_2()
+                        .py_1()
+                        .bg(panel_bg)
+                        .rounded_sm()
+                        .text_color(text_color)
+                        .child(output.clone()),
+                ),
+        );
+    }
+
+    // Error section (if error state)
+    if let ToolCallState::Error(error) = &tool_call.state {
+        let error_color = cx.theme().ring;
+        let error_bg = cx.theme().accent;
+        let error_border = cx.theme().ring;
+
+        container = container.child(
+            div()
+                .ml_4()
+                .pl_3()
+                .border_l_2()
+                .border_color(error_border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_xs()
+                        .text_color(error_color)
+                        .font_weight(FontWeight::BOLD)
+                        .child("error:"),
+                )
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_xs()
+                        .px_2()
+                        .py_1()
+                        .bg(error_bg)
+                        .rounded_sm()
+                        .text_color(error_color)
+                        .child(error.clone()),
+                ),
+        );
+    }
+
+    container
 }
