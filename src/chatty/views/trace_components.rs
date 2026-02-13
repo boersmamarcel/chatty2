@@ -161,25 +161,29 @@ impl SystemTraceView {
     }
 
     /// Render individual trace items (always shown - terminal style)
-    fn render_items(&self, cx: &App) -> impl IntoElement {
+    fn render_items(&self, entity: WeakEntity<Self>, cx: &App) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .gap_1()
             .mt_2()
-            .children(self.trace.items.iter().enumerate().map(|(index, item)| {
-                match item {
-                    TraceItem::Thinking(thinking) => self
-                        .render_thinking_block(index, thinking, cx)
-                        .into_any_element(),
-                    TraceItem::ToolCall(tool_call) => self
-                        .render_tool_call_block(index, tool_call, cx)
-                        .into_any_element(),
-                    TraceItem::ApprovalPrompt(approval) => self
-                        .render_approval_block(index, approval, cx)
-                        .into_any_element(),
-                }
-            }))
+            .children(
+                self.trace
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, item)| match item {
+                        TraceItem::Thinking(thinking) => self
+                            .render_thinking_block(index, thinking, cx)
+                            .into_any_element(),
+                        TraceItem::ToolCall(tool_call) => self
+                            .render_tool_call_block(index, tool_call, cx)
+                            .into_any_element(),
+                        TraceItem::ApprovalPrompt(approval) => self
+                            .render_approval_block(index, approval, entity.clone(), cx)
+                            .into_any_element(),
+                    }),
+            )
     }
 
     /// Render a thinking/reasoning block (terminal style)
@@ -426,6 +430,7 @@ impl SystemTraceView {
         &self,
         _index: usize,
         approval: &crate::chatty::views::message_types::ApprovalBlock,
+        entity: WeakEntity<Self>,
         cx: &App,
     ) -> impl IntoElement {
         let (prefix, prefix_color, state_label) = match &approval.state {
@@ -515,6 +520,9 @@ impl SystemTraceView {
             // Buttons (only when pending)
             .when(is_pending, |this| {
                 let approval_id = approval.id.clone();
+                let entity_for_approve = entity.clone();
+                let entity_for_deny = entity.clone();
+
                 this.child(
                     div()
                         .ml_4()
@@ -532,6 +540,25 @@ impl SystemTraceView {
                                             cx.try_global::<ExecutionApprovalStore>()
                                         {
                                             store.resolve(&id, ApprovalDecision::Approved);
+
+                                            // Update UI state
+                                            if let Some(entity) = entity_for_approve.upgrade() {
+                                                entity.update(cx, |view, cx| {
+                                                    // Find and update the approval in the trace
+                                                    for item in &mut view.trace.items {
+                                                        if let TraceItem::ApprovalPrompt(approval) =
+                                                            item
+                                                        {
+                                                            if approval.id == id {
+                                                                approval.state =
+                                                                    ApprovalState::Approved;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            }
                                         }
                                     }
                                 }),
@@ -547,6 +574,25 @@ impl SystemTraceView {
                                             cx.try_global::<ExecutionApprovalStore>()
                                         {
                                             store.resolve(&id, ApprovalDecision::Denied);
+
+                                            // Update UI state
+                                            if let Some(entity) = entity_for_deny.upgrade() {
+                                                entity.update(cx, |view, cx| {
+                                                    // Find and update the approval in the trace
+                                                    for item in &mut view.trace.items {
+                                                        if let TraceItem::ApprovalPrompt(approval) =
+                                                            item
+                                                        {
+                                                            if approval.id == id {
+                                                                approval.state =
+                                                                    ApprovalState::Denied;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            }
                                         }
                                     }
                                 }),
@@ -558,6 +604,8 @@ impl SystemTraceView {
 
 impl Render for SystemTraceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+
         let mut container = div()
             .flex()
             .flex_col()
@@ -569,7 +617,7 @@ impl Render for SystemTraceView {
 
         // Only show items if not collapsed
         if !self.is_collapsed {
-            container = container.child(self.render_items(cx));
+            container = container.child(self.render_items(entity, cx));
         }
 
         container

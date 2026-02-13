@@ -1,6 +1,7 @@
 use crate::settings::controllers::SettingsView;
 use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
+use crate::settings::views::execution_settings_page::execution_settings_page;
 use crate::settings::views::mcp_tools_page::mcp_tools_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
@@ -165,6 +166,7 @@ impl Render for SettingsView {
                     ]),
                 providers_page(),
                 mcp_tools_page(),
+                execution_settings_page(),
             ]))
             .children(dialog_layer)
     }

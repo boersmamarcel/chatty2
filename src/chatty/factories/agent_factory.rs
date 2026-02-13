@@ -7,7 +7,7 @@ use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
     ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool, ListDirectoryTool,
-    MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -52,16 +52,17 @@ macro_rules! build_with_mcp_tools {
 }
 
 /// Build an agent with optional bash, filesystem read, and filesystem write tools,
-/// then optional MCP tools.
+/// then optional MCP tools. The list_tools tool is always included.
 ///
 /// Due to rig's type-level tool chaining, each combination of tool presence/absence
 /// produces a different builder type. This macro enumerates all 8 combinations
 /// (bash × fs_read × fs_write) explicitly.
 macro_rules! build_agent_with_tools {
-    ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $mcp_tools:expr) => {{
+    ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $list_tools:expr, $mcp_tools:expr) => {{
         match (&$bash_tool, &$fs_read, &$fs_write) {
             (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
+                    .tool($list_tools.clone())
                     .tool(bash.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
@@ -76,6 +77,7 @@ macro_rules! build_agent_with_tools {
             }
             (Some(bash), Some((rf, rb, ld, gs)), None) => {
                 let b = $builder
+                    .tool($list_tools.clone())
                     .tool(bash.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
@@ -85,6 +87,7 @@ macro_rules! build_agent_with_tools {
             }
             (Some(bash), None, Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
+                    .tool($list_tools.clone())
                     .tool(bash.clone())
                     .tool(wf.clone())
                     .tool(cd.clone())
@@ -94,11 +97,12 @@ macro_rules! build_agent_with_tools {
                 build_with_mcp_tools!(b, $mcp_tools)
             }
             (Some(bash), None, None) => {
-                let b = $builder.tool(bash.clone());
+                let b = $builder.tool($list_tools.clone()).tool(bash.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
             (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
+                    .tool($list_tools.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
                     .tool(ld.clone())
@@ -112,6 +116,7 @@ macro_rules! build_agent_with_tools {
             }
             (None, Some((rf, rb, ld, gs)), None) => {
                 let b = $builder
+                    .tool($list_tools.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
                     .tool(ld.clone())
@@ -120,6 +125,7 @@ macro_rules! build_agent_with_tools {
             }
             (None, None, Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
+                    .tool($list_tools.clone())
                     .tool(wf.clone())
                     .tool(cd.clone())
                     .tool(df.clone())
@@ -128,7 +134,8 @@ macro_rules! build_agent_with_tools {
                 build_with_mcp_tools!(b, $mcp_tools)
             }
             (None, None, None) => {
-                build_with_mcp_tools!($builder, $mcp_tools)
+                let b = $builder.tool($list_tools.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
             }
         }
     }};
@@ -216,6 +223,13 @@ impl AgentClient {
                 None => (None, None),
             };
 
+        // Create list_tools tool (always available, but shows only actually available tools)
+        let list_tools = ListToolsTool::new_with_config(
+            bash_tool.is_some(),
+            fs_read_tools.is_some(),
+            fs_write_tools.is_some(),
+        );
+
         match &provider_config.provider_type {
             ProviderType::Anthropic => {
                 let key = api_key
@@ -237,6 +251,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    list_tools,
                     mcp_tools
                 );
 
@@ -262,6 +277,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    list_tools,
                     mcp_tools
                 );
 
@@ -283,6 +299,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    list_tools,
                     mcp_tools
                 );
 
@@ -308,6 +325,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    list_tools,
                     mcp_tools
                 );
 
@@ -332,6 +350,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    list_tools,
                     mcp_tools
                 );
 
@@ -474,6 +493,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    list_tools,
                     mcp_tools
                 );
 

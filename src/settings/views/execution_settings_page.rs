@@ -1,0 +1,195 @@
+use crate::settings::controllers::execution_settings_controller;
+use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
+use gpui::{App, AppContext, IntoElement, ParentElement, Styled, div};
+use gpui_component::{
+    ActiveTheme,
+    button::Button,
+    input::{Input, InputState},
+    menu::{DropdownMenu, PopupMenuItem},
+    setting::{SettingField, SettingGroup, SettingItem, SettingPage},
+};
+
+pub fn execution_settings_page() -> SettingPage {
+    SettingPage::new("Code Execution")
+        .description("Configure code execution and filesystem access")
+        .resettable(false)
+        .groups(vec![
+            SettingGroup::new()
+                .title("Security Settings")
+                .description(
+                    "⚠️ Enabling code execution allows the AI to run shell commands. \
+                     Commands will require approval based on your approval mode setting. \
+                     After changing these settings, start a new conversation for tools to be updated.",
+                )
+                .items(vec![
+                    SettingItem::new(
+                        "Enable Code Execution",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_execution(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description("Master toggle for bash shell command execution"),
+                    SettingItem::new(
+                        "Approval Mode",
+                        SettingField::render(|_options, _window, cx| {
+                            let current_mode = cx.global::<ExecutionSettingsModel>().approval_mode.clone();
+                            let current_label = match current_mode {
+                                ApprovalMode::AlwaysAsk => "Always Ask (Safest)",
+                                ApprovalMode::AutoApproveSandboxed => "Auto-approve Sandboxed",
+                                ApprovalMode::AutoApproveAll => "Auto-approve All (Dangerous)",
+                            };
+
+                            Button::new("approval-mode-dropdown")
+                                .label(current_label)
+                                .dropdown_caret(true)
+                                .outline()
+                                .w_full()
+                                .dropdown_menu_with_anchor(
+                                    gpui::Corner::BottomLeft,
+                                    move |menu, _, _| {
+                                        menu.item(
+                                            PopupMenuItem::new("Always Ask (Safest)")
+                                                .checked(matches!(
+                                                    current_mode,
+                                                    ApprovalMode::AlwaysAsk
+                                                ))
+                                                .on_click(|_, _, cx| {
+                                                    execution_settings_controller::set_approval_mode(
+                                                        ApprovalMode::AlwaysAsk,
+                                                        cx,
+                                                    );
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new("Auto-approve Sandboxed")
+                                                .checked(matches!(
+                                                    current_mode,
+                                                    ApprovalMode::AutoApproveSandboxed
+                                                ))
+                                                .on_click(|_, _, cx| {
+                                                    execution_settings_controller::set_approval_mode(
+                                                        ApprovalMode::AutoApproveSandboxed,
+                                                        cx,
+                                                    );
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new("Auto-approve All (Dangerous)")
+                                                .checked(matches!(
+                                                    current_mode,
+                                                    ApprovalMode::AutoApproveAll
+                                                ))
+                                                .on_click(|_, _, cx| {
+                                                    execution_settings_controller::set_approval_mode(
+                                                        ApprovalMode::AutoApproveAll,
+                                                        cx,
+                                                    );
+                                                }),
+                                        )
+                                    },
+                                )
+                                .into_any_element()
+                        }),
+                    )
+                    .description(
+                        "How to handle command execution requests: \
+                         Always Ask requires confirmation for every command. \
+                         Auto-approve Sandboxed automatically allows safe commands. \
+                         Auto-approve All runs all commands without asking (use with caution).",
+                    ),
+                ]),
+            SettingGroup::new()
+                .title("Filesystem Access")
+                .description("Configure workspace directory for file read/write operations")
+                .items(vec![SettingItem::new(
+                    "Workspace Directory",
+                    SettingField::render(|_options, window, cx| {
+                        let current_dir = cx
+                            .global::<ExecutionSettingsModel>()
+                            .workspace_dir
+                            .clone()
+                            .unwrap_or_default();
+
+                        let input = cx.new(|cx| {
+                            let mut state = InputState::new(window, cx)
+                                .placeholder("/path/to/workspace (optional)");
+                            state.set_value(current_dir, window, cx);
+                            state
+                        });
+
+                        let input_clone = input.clone();
+                        cx.subscribe(
+                            &input,
+                            move |_entity, event: &gpui_component::input::InputEvent, cx| {
+                                if let gpui_component::input::InputEvent::PressEnter { .. } = event {
+                                    let value = input_clone.read(cx).value();
+                                    let workspace_dir = if value.is_empty() {
+                                        None
+                                    } else {
+                                        Some(value.to_string())
+                                    };
+                                    execution_settings_controller::set_workspace_dir(
+                                        workspace_dir,
+                                        cx,
+                                    );
+                                }
+                            },
+                        )
+                        .detach();
+
+                        div()
+                            .w_full()
+                            .child(Input::new(&input).w_full())
+                            .into_any_element()
+                    }),
+                )
+                .description(
+                    "Optional directory path for file operations. \
+                     Leave empty to disable filesystem tools (read_file, write_file, etc.). \
+                     Press Enter to save.",
+                )]),
+            SettingGroup::new()
+                .title("Execution Limits")
+                .description("Resource limits for code execution (configured in settings file)")
+                .items(vec![
+                    SettingItem::new(
+                        "Timeout",
+                        SettingField::render(|_options, _window, cx| {
+                            let timeout = cx.global::<ExecutionSettingsModel>().timeout_seconds;
+                            div()
+                                .child(format!("{} seconds", timeout))
+                                .text_color(cx.theme().muted_foreground)
+                                .into_any_element()
+                        }),
+                    )
+                    .description("Maximum execution time for commands"),
+                    SettingItem::new(
+                        "Max Output",
+                        SettingField::render(|_options, _window, cx| {
+                            let max_bytes = cx.global::<ExecutionSettingsModel>().max_output_bytes;
+                            let kb = max_bytes / 1024;
+                            div()
+                                .child(format!("{} KB", kb))
+                                .text_color(cx.theme().muted_foreground)
+                                .into_any_element()
+                        }),
+                    )
+                    .description("Maximum output size to prevent memory exhaustion"),
+                    SettingItem::new(
+                        "Network Isolation",
+                        SettingField::render(|_options, _window, cx| {
+                            let enabled = cx.global::<ExecutionSettingsModel>().network_isolation;
+                            div()
+                                .child(if enabled { "Enabled" } else { "Disabled" })
+                                .text_color(cx.theme().muted_foreground)
+                                .into_any_element()
+                        }),
+                    )
+                    .description("Enable network isolation in sandbox (when available)"),
+                ]),
+        ])
+}

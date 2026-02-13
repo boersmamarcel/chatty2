@@ -1109,13 +1109,57 @@ impl ChattyApp {
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
                         Ok(StreamChunk::ToolCallStarted { id, name }) => {
+                            let is_bash_tool = name == "bash";
+
                             chat_view
                                 .update(cx, |view, cx| {
                                     if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_tool_call_started(id, name, cx);
+                                        view.handle_tool_call_started(id.clone(), name, cx);
                                     }
                                 })
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                            // If this is a bash tool, start polling for approval requests
+                            if is_bash_tool {
+                                let chat_view_for_poll = chat_view.clone();
+                                let conv_id_for_poll = conv_id.clone();
+
+                                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                                    // Poll for approval request with short timeout
+                                    for _ in 0..50 {  // Poll for up to 5 seconds (50 * 100ms)
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                                        // Check if approval store has pending requests
+                                        let pending_approval = cx.update(|cx| {
+                                            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
+                                                let pending = store.get_pending_approvals();
+                                                let guard = pending.lock().unwrap();
+
+                                                // Get the most recent request (could improve by tracking which we've seen)
+                                                guard.values().next().map(|req| {
+                                                    (req.id.clone(), req.command.clone(), req.is_sandboxed)
+                                                })
+                                            } else {
+                                                None
+                                            }
+                                        }).ok().flatten();
+
+                                        if let Some((approval_id, command, is_sandboxed)) = pending_approval {
+                                            // Found a pending approval - display it in UI
+                                            let _ = chat_view_for_poll.update(cx, |view, cx| {
+                                                if view.conversation_id() == Some(&conv_id_for_poll) {
+                                                    view.handle_approval_requested(approval_id, command, is_sandboxed, cx);
+                                                }
+                                            });
+
+                                            // Stop polling after finding and displaying approval
+                                            break;
+                                        }
+                                    }
+
+                                    Ok::<_, anyhow::Error>(())
+                                }).detach();
+                            }
                         }
                         Ok(StreamChunk::ToolCallInput { id, arguments }) => {
                             chat_view
@@ -1146,11 +1190,27 @@ impl ChattyApp {
                         }
                         Ok(StreamChunk::ApprovalRequested { id, command, is_sandboxed }) => {
                             debug!(id = %id, command = %command, sandboxed = is_sandboxed, "Approval requested");
-                            // For now, just log - full approval UI integration pending
+
+                            // Forward to chat view for UI display
+                            chat_view
+                                .update(cx, |view, cx| {
+                                    if view.conversation_id() == Some(&conv_id) {
+                                        view.handle_approval_requested(id, command, is_sandboxed, cx);
+                                    }
+                                })
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
                         Ok(StreamChunk::ApprovalResolved { id, approved }) => {
                             debug!(id = %id, approved = approved, "Approval resolved");
-                            // For now, just log - full approval UI integration pending
+
+                            // Update approval state in UI
+                            chat_view
+                                .update(cx, |view, cx| {
+                                    if view.conversation_id() == Some(&conv_id) {
+                                        view.handle_approval_resolved(&id, approved, cx);
+                                    }
+                                })
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
                         Ok(StreamChunk::TokenUsage { input_tokens, output_tokens }) => {
                             debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Received token usage");

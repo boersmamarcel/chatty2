@@ -13,10 +13,12 @@ use tracing::{debug, info, warn};
 use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
-    SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, TraceItem, UserMessage,
+    ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
+    ToolCallState, TraceItem, UserMessage,
 };
 use super::trace_components::SystemTraceView;
 use crate::settings::models::models_store::ModelsModel;
+use std::time::SystemTime;
 
 /// Main chat view component
 pub struct ChatView {
@@ -365,6 +367,84 @@ impl ChatView {
         if let Some(last) = self.messages.last_mut() {
             if let Some(ref mut trace) = last.live_trace {
                 trace.clear_active_tool();
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone);
+                        cx.notify();
+                    });
+                }
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Handle approval requested event
+    pub fn handle_approval_requested(
+        &mut self,
+        id: String,
+        command: String,
+        is_sandboxed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        debug!(approval_id = %id, command = %command, sandboxed = is_sandboxed, "UI: handle_approval_requested called");
+
+        // Create approval block with pending state
+        let approval = ApprovalBlock {
+            id,
+            command,
+            is_sandboxed,
+            state: ApprovalState::Pending,
+            created_at: SystemTime::now(),
+        };
+
+        // Update live trace and create/update system_trace_view entity
+        if let Some(last) = self.messages.last_mut() {
+            if last.is_streaming {
+                if let Some(ref mut trace) = last.live_trace {
+                    debug!("Adding approval to live_trace");
+                    let index = trace.items.len();
+                    trace.add_approval(approval);
+                    trace.set_active_tool(index);
+
+                    // Create or update the trace view entity for rendering
+                    let trace_clone = trace.clone();
+                    if last.system_trace_view.is_none() {
+                        last.system_trace_view =
+                            Some(cx.new(|_cx| SystemTraceView::new(trace_clone)));
+                    } else if let Some(ref view_entity) = last.system_trace_view {
+                        view_entity.update(cx, |view, cx| {
+                            view.update_trace(trace_clone);
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        }
+
+        cx.notify();
+        self.scroll_to_bottom();
+    }
+
+    /// Handle approval resolved event
+    pub fn handle_approval_resolved(&mut self, id: &str, approved: bool, cx: &mut Context<Self>) {
+        debug!(approval_id = %id, approved = approved, "UI: handle_approval_resolved called");
+
+        // Update approval state in live trace
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                let new_state = if approved {
+                    ApprovalState::Approved
+                } else {
+                    ApprovalState::Denied
+                };
+                trace.update_approval_state(id, new_state);
+
+                // Clear active tool after resolution
+                trace.clear_active_tool();
+
+                // Push updated trace to view entity
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
                     view_entity.update(cx, |view, cx| {
