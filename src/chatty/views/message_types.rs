@@ -73,6 +73,9 @@ pub enum ThinkingState {
 /// Represents a single tool call and its execution
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallBlock {
+    /// Unique identifier for this tool call
+    #[serde(default)]
+    pub id: String,
     /// Name of the tool being called (e.g., "google_search", "execute_python")
     pub tool_name: String,
     /// Display-friendly name for the UI

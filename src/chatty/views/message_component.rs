@@ -451,12 +451,17 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
 }
 
 /// Render interleaved content: text segments mixed with tool calls
-fn render_interleaved_content(
+fn render_interleaved_content<F>(
     msg: &DisplayMessage,
     index: usize,
     mut container: Div,
+    collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
+    on_toggle_tool: F,
     cx: &App,
-) -> Div {
+) -> Div
+where
+    F: Fn(usize, usize, &mut App) + 'static + Clone,
+{
     use super::message_types::TraceItem;
 
     // Get the trace items from the trace view
@@ -504,8 +509,27 @@ fn render_interleaved_content(
             }
 
             // Render the tool call using trace_components
+            let is_collapsed = collapsed_tool_calls
+                .get(&(index, tool_idx))
+                .copied()
+                .unwrap_or(true); // Default to collapsed
+
+            let on_toggle_clone = on_toggle_tool.clone();
+            let msg_idx = index;
+            let toggle_callback =
+                move |_event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                    on_toggle_clone(msg_idx, tool_idx, cx);
+                };
+
             container = container.child(div().mt_2().mb_2().child(
-                super::trace_components::render_tool_call_inline(&tool_call, index, tool_idx, cx),
+                super::trace_components::render_tool_call_inline(
+                    &tool_call,
+                    index,
+                    tool_idx,
+                    is_collapsed,
+                    toggle_callback,
+                    cx,
+                ),
             ));
         }
     }
@@ -527,7 +551,16 @@ fn render_interleaved_content(
     container
 }
 
-pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElement {
+pub fn render_message<F>(
+    msg: &DisplayMessage,
+    index: usize,
+    collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
+    on_toggle_tool: F,
+    cx: &App,
+) -> AnyElement
+where
+    F: Fn(usize, usize, &mut App) + 'static + Clone,
+{
     // If not in viewport window, render lightweight placeholder
     // Full render for messages in viewport
     let mut container = div()
@@ -630,7 +663,14 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElemen
 
     let final_container = if should_interleave {
         // Render interleaved content (text mixed with tool calls)
-        render_interleaved_content(msg, index, container, cx)
+        render_interleaved_content(
+            msg,
+            index,
+            container,
+            collapsed_tool_calls,
+            on_toggle_tool,
+            cx,
+        )
     } else if msg.is_markdown && !msg.is_streaming {
         // Parse for math expressions
         let content_elements = render_content_with_code_blocks(&msg.content, index, cx);

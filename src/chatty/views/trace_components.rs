@@ -3,7 +3,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, accordion::Accordion, button::Button};
+use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 
 use super::message_types::{
     ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem,
@@ -601,12 +601,24 @@ impl Render for SystemTraceView {
 }
 
 /// Public function to render a single tool call inline (for interleaved content)
-pub fn render_tool_call_inline(
+pub fn render_tool_call_inline<F>(
     tool_call: &ToolCallBlock,
     _message_index: usize,
     _tool_index: usize,
+    collapsed: bool,
+    on_toggle: F,
     cx: &App,
-) -> impl IntoElement {
+) -> impl IntoElement
+where
+    F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+{
+    use tracing::debug;
+
+    debug!(
+        "Rendering tool call: display_name={}, state={:?}",
+        tool_call.display_name, tool_call.state
+    );
+
     let (prefix, prefix_color, state_label) = match &tool_call.state {
         ToolCallState::Running => (">", cx.theme().primary, "running"),
         ToolCallState::Success => ("✓", cx.theme().accent, "success"),
@@ -618,13 +630,23 @@ pub fn render_tool_call_inline(
     let panel_bg = cx.theme().muted;
     let badge_text = cx.theme().primary_foreground;
 
-    // Compact title for accordion (single line, similar to approval bar)
-    let accordion_title = div()
+    // Compact clickable header (always visible)
+    let header = div()
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
         .overflow_hidden()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            on_toggle(event, window, cx);
+        })
+        .child(
+            div()
+                .text_color(muted_text)
+                .flex_shrink_0()
+                .child(if collapsed { "▶" } else { "▼" }),
+        )
         .child(
             div()
                 .text_color(prefix_color)
@@ -734,11 +756,18 @@ pub fn render_tool_call_inline(
         );
     }
 
-    // Wrap everything in a single accordion
-    Accordion::new(("tool-call", _message_index as u64))
-        .xsmall()
-        .item(|item| {
-            item.title(accordion_title)
-                .child(div().flex().flex_col().gap_2().children(content_children))
-        })
+    // Return header + conditionally visible content
+    div().flex().flex_col().gap_1().child(header).when(
+        !collapsed && !content_children.is_empty(),
+        |this| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pl_4() // Indent content slightly
+                    .children(content_children),
+            )
+        },
+    )
 }

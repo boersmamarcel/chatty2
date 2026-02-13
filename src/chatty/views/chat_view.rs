@@ -35,6 +35,8 @@ pub struct ChatView {
     scroll_handle: ScrollHandle,
     active_tool_calls: HashMap<String, ToolCallBlock>,
     pending_approval: Option<PendingApprovalInfo>,
+    /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
+    collapsed_tool_calls: HashMap<(usize, usize), bool>,
 }
 
 impl ChatView {
@@ -77,6 +79,7 @@ impl ChatView {
             scroll_handle,
             active_tool_calls: HashMap::new(),
             pending_approval: None,
+            collapsed_tool_calls: HashMap::new(),
         }
     }
 
@@ -216,6 +219,7 @@ impl ChatView {
 
         let display_name = friendly_tool_name(&name);
         let tool_call = ToolCallBlock {
+            id: id.clone(),
             tool_name: name,
             display_name,
             input: String::new(),
@@ -266,6 +270,45 @@ impl ChatView {
         self.scroll_to_bottom();
     }
 
+    /// Helper method to update a tool call by ID in the live trace
+    /// This works even after active_tool_index has been cleared
+    fn update_tool_call_by_id<F>(&mut self, tool_id: &str, updater: F) -> bool
+    where
+        F: FnOnce(&mut ToolCallBlock),
+    {
+        let last_message = match self.messages.last_mut() {
+            Some(msg) => msg,
+            None => {
+                warn!("update_tool_call_by_id: No messages found");
+                return false;
+            }
+        };
+
+        let trace = match last_message.live_trace.as_mut() {
+            Some(t) => t,
+            None => {
+                warn!("update_tool_call_by_id: No live_trace in message");
+                return false;
+            }
+        };
+
+        // Find the tool call by ID in the items
+        for item in trace.items.iter_mut() {
+            if let super::message_types::TraceItem::ToolCall(tc) = item {
+                if tc.id == tool_id {
+                    updater(tc);
+                    return true;
+                }
+            }
+        }
+
+        warn!(
+            "update_tool_call_by_id: Tool call with id={} not found in trace items",
+            tool_id
+        );
+        false
+    }
+
     /// Helper method to update the active tool call in the live trace
     /// Reduces nesting from 6 levels to 2
     fn update_tool_call_trace<F>(&mut self, updater: F) -> bool
@@ -274,21 +317,32 @@ impl ChatView {
     {
         let last_message = match self.messages.last_mut() {
             Some(msg) => msg,
-            None => return false,
+            None => {
+                warn!("update_tool_call_trace: No messages found");
+                return false;
+            }
         };
 
-        if !last_message.is_streaming {
-            return false;
+        // Allow updates even when not streaming - tool results can arrive after message finalization
+        let is_streaming = last_message.is_streaming;
+        if !is_streaming {
+            warn!("update_tool_call_trace: Message is not streaming, will try to update anyway");
         }
 
         let trace = match last_message.live_trace.as_mut() {
             Some(t) => t,
-            None => return false,
+            None => {
+                warn!("update_tool_call_trace: No live_trace in message");
+                return false;
+            }
         };
 
         let active_idx = match trace.active_tool_index {
             Some(idx) => idx,
-            None => return false,
+            None => {
+                warn!("update_tool_call_trace: No active_tool_index, cannot update");
+                return false;
+            }
         };
 
         let item = match trace.items.get_mut(active_idx) {
@@ -348,10 +402,43 @@ impl ChatView {
             tool_call.state = ToolCallState::Success;
         }
 
-        self.update_tool_call_trace(|tc| {
-            tc.output = Some(result);
+        // Use ID-based update instead of active_tool_index (which may have been cleared)
+        let updated = self.update_tool_call_by_id(&id, |tc| {
+            warn!(
+                "UPDATING tool call in trace: old_state={:?}, setting to Success",
+                tc.state
+            );
+            tc.output = Some(result.clone());
             tc.state = ToolCallState::Success;
         });
+
+        warn!(
+            "update_tool_call_by_id returned: {} for tool_id={}",
+            updated, id
+        );
+
+        // Auto-expand the tool call when it completes successfully
+        if updated {
+            // Find the message index and tool index to auto-expand
+            if let Some(msg_idx) = self.messages.len().checked_sub(1) {
+                if let Some(last) = self.messages.last() {
+                    if let Some(ref trace) = last.live_trace {
+                        // Find the tool index by ID
+                        for (tool_idx, item) in trace.items.iter().enumerate() {
+                            if let super::message_types::TraceItem::ToolCall(tc) = item {
+                                if tc.id == id {
+                                    // Auto-expand this tool call
+                                    let key = (msg_idx, tool_idx);
+                                    self.collapsed_tool_calls.insert(key, false);
+                                    warn!("Auto-expanded tool call at {:?}", key);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Clear active tool after successful completion and push to view entity
         if let Some(last) = self.messages.last_mut() {
@@ -367,6 +454,7 @@ impl ChatView {
             }
         }
 
+        debug!("Tool call result handled, notifying ChatView to re-render");
         cx.notify();
     }
 
@@ -805,7 +893,11 @@ impl Render for ChatView {
                                     .flex()
                                     .flex_col()
                                     .gap_4()
-                                    .children(
+                                    .children({
+                                        let collapsed_tool_calls =
+                                            self.collapsed_tool_calls.clone();
+                                        let chat_view_entity = cx.entity();
+
                                         self.messages
                                             .iter()
                                             .enumerate()
@@ -813,8 +905,31 @@ impl Render for ChatView {
                                                 // Skip empty streaming messages (we show skeleton instead)
                                                 !(msg.is_streaming && msg.content.is_empty())
                                             })
-                                            .map(|(index, msg)| render_message(msg, index, cx)),
-                                    )
+                                            .map(|(index, msg)| {
+                                                let entity_clone = chat_view_entity.clone();
+                                                render_message(
+                                                    msg,
+                                                    index,
+                                                    &collapsed_tool_calls,
+                                                    move |msg_idx, tool_idx, cx| {
+                                                        entity_clone.update(cx, |chat_view, cx| {
+                                                            let key = (msg_idx, tool_idx);
+                                                            let current = chat_view
+                                                                .collapsed_tool_calls
+                                                                .get(&key)
+                                                                .copied()
+                                                                .unwrap_or(true);
+                                                            chat_view
+                                                                .collapsed_tool_calls
+                                                                .insert(key, !current);
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                    cx,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
                                     .when(is_awaiting, |this| {
                                         this.child(self.render_loading_skeleton())
                                     }),
