@@ -259,17 +259,49 @@ impl BashExecutor {
 
         #[cfg(target_os = "macos")]
         {
-            // Basic macOS sandbox profile (restrictive default)
+            // macOS sandbox profile - permissive with specific denials
+            // Using (allow default) instead of (deny default) to prevent fork() blocking
             let profile = r#"
                 (version 1)
-                (deny default)
-                (allow process-exec)
-                (allow file-read*)
+                (allow default)
+                (deny file-write*
+                    (subpath "/System")
+                    (subpath "/Library")
+                    (subpath "/private/etc")
+                    (subpath "/private/var")
+                    (regex #"^/Users/[^/]+/\.ssh")
+                    (regex #"^/Users/[^/]+/\.aws")
+                    (regex #"^/Users/[^/]+/\.gnupg")
+                )
                 (allow file-write* (subpath "/tmp"))
             "#;
 
+            // Add workspace directory write permissions if configured
+            let profile_with_workspace = if let Some(workspace) = &self.settings.workspace_dir {
+                format!(
+                    r#"
+                    (version 1)
+                    (allow default)
+                    (deny file-write*
+                        (subpath "/System")
+                        (subpath "/Library")
+                        (subpath "/private/etc")
+                        (subpath "/private/var")
+                        (regex #"^/Users/[^/]+/\.ssh")
+                        (regex #"^/Users/[^/]+/\.aws")
+                        (regex #"^/Users/[^/]+/\.gnupg")
+                    )
+                    (allow file-write* (subpath "/tmp"))
+                    (allow file-write* (subpath "{}"))
+                    "#,
+                    workspace
+                )
+            } else {
+                profile.to_string()
+            };
+
             let mut cmd = Command::new("sandbox-exec");
-            cmd.args(["-p", profile, "/bin/bash", "-c", command]);
+            cmd.args(["-p", &profile_with_workspace, "/bin/bash", "-c", command]);
 
             tokio::process::Command::from(cmd)
                 .output()
