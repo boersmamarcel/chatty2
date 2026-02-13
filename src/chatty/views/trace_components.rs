@@ -6,14 +6,17 @@ use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 
 use super::message_types::{
-    ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem,
+    ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceEvent, TraceItem,
 };
+use gpui::EventEmitter;
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
     trace: SystemTrace,
     is_collapsed: bool,
 }
+
+impl EventEmitter<TraceEvent> for SystemTraceView {}
 
 impl SystemTraceView {
     pub fn new(trace: SystemTrace) -> Self {
@@ -23,9 +26,43 @@ impl SystemTraceView {
         }
     }
 
-    /// Allow updating trace during streaming
-    pub fn update_trace(&mut self, trace: SystemTrace) {
-        self.trace = trace;
+    /// Allow updating trace during streaming and emit events for changes
+    pub fn update_trace(&mut self, new_trace: SystemTrace, cx: &mut Context<Self>) {
+        // Detect what changed and emit appropriate events
+        for (new_item, old_item) in new_trace.items.iter().zip(self.trace.items.iter()) {
+            match (new_item, old_item) {
+                (TraceItem::ToolCall(new_tc), TraceItem::ToolCall(old_tc)) => {
+                    // Tool call state changed
+                    if new_tc.state != old_tc.state {
+                        cx.emit(TraceEvent::ToolCallStateChanged {
+                            tool_id: new_tc.id.clone(),
+                            old_state: old_tc.state.clone(),
+                            new_state: new_tc.state.clone(),
+                        });
+                    }
+
+                    // Tool call received output
+                    if new_tc.output.is_some() && old_tc.output.is_none() {
+                        cx.emit(TraceEvent::ToolCallOutputReceived {
+                            tool_id: new_tc.id.clone(),
+                            has_output: true,
+                        });
+                    }
+                }
+                (TraceItem::Thinking(new_tb), TraceItem::Thinking(old_tb)) => {
+                    if new_tb.state != old_tb.state {
+                        cx.emit(TraceEvent::ThinkingStateChanged {
+                            old_state: old_tb.state.clone(),
+                            new_state: new_tb.state.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Update the trace
+        self.trace = new_trace;
     }
 
     /// Toggle the collapsed state

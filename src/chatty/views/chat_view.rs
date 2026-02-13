@@ -33,7 +33,6 @@ pub struct ChatView {
     messages: Vec<DisplayMessage>,
     conversation_id: Option<String>,
     scroll_handle: ScrollHandle,
-    active_tool_calls: HashMap<String, ToolCallBlock>,
     pending_approval: Option<PendingApprovalInfo>,
     /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
@@ -77,7 +76,6 @@ impl ChatView {
             messages: Vec::new(),
             conversation_id: None,
             scroll_handle,
-            active_tool_calls: HashMap::new(),
             pending_approval: None,
             collapsed_tool_calls: HashMap::new(),
         }
@@ -135,7 +133,6 @@ impl ChatView {
             is_markdown: true,
             attachments: Vec::new(),
         });
-        self.active_tool_calls.clear();
 
         debug!(
             total_messages = self.messages.len(),
@@ -182,7 +179,7 @@ impl ChatView {
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
                     view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
+                        view.update_trace(trace_clone, cx);
                         cx.notify();
                     });
                 }
@@ -230,8 +227,6 @@ impl ChatView {
             text_before,
         };
 
-        self.active_tool_calls.insert(id, tool_call.clone());
-
         // Update live trace and create/update system_trace_view entity
         if let Some(last) = self.messages.last_mut() {
             debug!(
@@ -250,11 +245,32 @@ impl ChatView {
                     // Create or update the trace view entity for rendering
                     let trace_clone = trace.clone();
                     if last.system_trace_view.is_none() {
-                        last.system_trace_view =
-                            Some(cx.new(|_cx| SystemTraceView::new(trace_clone)));
+                        // Create new SystemTraceView entity
+                        let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+
+                        // Subscribe to its events
+                        let chat_view_entity = cx.entity();
+                        cx.subscribe(
+                            &trace_view,
+                            move |_chat_view,
+                                  _trace_view,
+                                  event: &super::message_types::TraceEvent,
+                                  cx| {
+                                let event_clone = event.clone();
+                                let chat_view = chat_view_entity.clone();
+                                cx.defer(move |cx| {
+                                    chat_view.update(cx, |chat_view, cx| {
+                                        chat_view.handle_trace_event(&event_clone, cx);
+                                    });
+                                });
+                            },
+                        )
+                        .detach();
+
+                        last.system_trace_view = Some(trace_view);
                     } else if let Some(ref view_entity) = last.system_trace_view {
                         view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone);
+                            view.update_trace(trace_clone, cx);
                             cx.notify();
                         });
                     }
@@ -309,55 +325,6 @@ impl ChatView {
         false
     }
 
-    /// Helper method to update the active tool call in the live trace
-    /// Reduces nesting from 6 levels to 2
-    fn update_tool_call_trace<F>(&mut self, updater: F) -> bool
-    where
-        F: FnOnce(&mut ToolCallBlock),
-    {
-        let last_message = match self.messages.last_mut() {
-            Some(msg) => msg,
-            None => {
-                warn!("update_tool_call_trace: No messages found");
-                return false;
-            }
-        };
-
-        // Allow updates even when not streaming - tool results can arrive after message finalization
-        let is_streaming = last_message.is_streaming;
-        if !is_streaming {
-            warn!("update_tool_call_trace: Message is not streaming, will try to update anyway");
-        }
-
-        let trace = match last_message.live_trace.as_mut() {
-            Some(t) => t,
-            None => {
-                warn!("update_tool_call_trace: No live_trace in message");
-                return false;
-            }
-        };
-
-        let active_idx = match trace.active_tool_index {
-            Some(idx) => idx,
-            None => {
-                warn!("update_tool_call_trace: No active_tool_index, cannot update");
-                return false;
-            }
-        };
-
-        let item = match trace.items.get_mut(active_idx) {
-            Some(i) => i,
-            None => return false,
-        };
-
-        if let super::message_types::TraceItem::ToolCall(tc) = item {
-            updater(tc);
-            return true;
-        }
-
-        false
-    }
-
     /// Handle tool call input event
     pub fn handle_tool_call_input(
         &mut self,
@@ -365,124 +332,128 @@ impl ChatView {
         arguments: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
-            tool_call.input = arguments.clone();
-        }
-
-        self.update_tool_call_trace(|tc| {
-            tc.input = arguments;
+        // Update tool call input by ID
+        self.update_tool_call_by_id(&id, |tc| {
+            tc.input = arguments.clone();
         });
 
-        // Push updated trace to the view entity
+        // Update trace view - it will emit event if state changes
         if let Some(last) = self.messages.last_mut() {
-            if last.is_streaming {
-                if let Some(ref trace) = last.live_trace {
-                    let trace_clone = trace.clone();
-                    if let Some(ref view_entity) = last.system_trace_view {
-                        view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone);
-                            cx.notify();
-                        });
-                    }
+            if let Some(ref trace) = last.live_trace {
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone, cx);
+                    });
                 }
             }
         }
-
-        cx.notify();
     }
 
     /// Handle tool call result event
     pub fn handle_tool_call_result(&mut self, id: String, result: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
 
-        if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
-            debug!("Found active tool call, updating result");
-            tool_call.output = Some(result.clone());
-            tool_call.output_preview = Some(result.clone());
-            tool_call.state = ToolCallState::Success;
-        }
-
-        // Use ID-based update instead of active_tool_index (which may have been cleared)
-        let updated = self.update_tool_call_by_id(&id, |tc| {
-            warn!(
-                "UPDATING tool call in trace: old_state={:?}, setting to Success",
-                tc.state
-            );
+        // Update trace by ID
+        self.update_tool_call_by_id(&id, |tc| {
             tc.output = Some(result.clone());
             tc.state = ToolCallState::Success;
         });
 
-        warn!(
-            "update_tool_call_by_id returned: {} for tool_id={}",
-            updated, id
-        );
+        // Update trace view - it will emit ToolCallStateChanged event automatically
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                trace.clear_active_tool();
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone, cx); // This emits event!
+                    });
+                }
+            }
+        }
 
-        // Auto-expand the tool call when it completes successfully
-        if updated {
-            // Find the message index and tool index to auto-expand
-            if let Some(msg_idx) = self.messages.len().checked_sub(1) {
-                if let Some(last) = self.messages.last() {
-                    if let Some(ref trace) = last.live_trace {
-                        // Find the tool index by ID
-                        for (tool_idx, item) in trace.items.iter().enumerate() {
-                            if let super::message_types::TraceItem::ToolCall(tc) = item {
-                                if tc.id == id {
-                                    // Auto-expand this tool call
-                                    let key = (msg_idx, tool_idx);
-                                    self.collapsed_tool_calls.insert(key, false);
-                                    warn!("Auto-expanded tool call at {:?}", key);
-                                    break;
-                                }
+        // No need for cx.notify() - event handler calls it
+        // No need for manual auto-expand - event handler does it
+    }
+
+    /// Handle tool call error event
+    pub fn handle_tool_call_error(&mut self, id: String, error: String, cx: &mut Context<Self>) {
+        // Update tool call state by ID
+        self.update_tool_call_by_id(&id, |tc| {
+            tc.state = ToolCallState::Error(error.clone());
+        });
+
+        // Update trace view - it will emit ToolCallStateChanged event automatically
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                trace.clear_active_tool();
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone, cx); // This emits event!
+                    });
+                }
+            }
+        }
+
+        // No need for cx.notify() or manual auto-expand - event handler does it
+    }
+
+    /// Handle events from SystemTraceView
+    fn handle_trace_event(
+        &mut self,
+        event: &super::message_types::TraceEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use super::message_types::TraceEvent;
+
+        match event {
+            TraceEvent::ToolCallStateChanged {
+                tool_id,
+                old_state,
+                new_state,
+            } => {
+                warn!(
+                    "Tool call {} changed: {:?} → {:?}",
+                    tool_id, old_state, new_state
+                );
+
+                // Auto-expand when transitioning to Success or Error
+                if matches!(new_state, ToolCallState::Success | ToolCallState::Error(_)) {
+                    self.auto_expand_tool_call(tool_id);
+                }
+
+                // Notify to trigger re-render
+                cx.notify();
+            }
+            TraceEvent::ToolCallOutputReceived { tool_id, .. } => {
+                warn!("Tool call {} received output", tool_id);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// Auto-expand a tool call by its ID
+    fn auto_expand_tool_call(&mut self, tool_id: &str) {
+        if let Some(msg_idx) = self.messages.len().checked_sub(1) {
+            if let Some(last) = self.messages.last() {
+                if let Some(ref trace) = last.live_trace {
+                    // Find the tool index by ID
+                    for (tool_idx, item) in trace.items.iter().enumerate() {
+                        if let super::message_types::TraceItem::ToolCall(tc) = item {
+                            if tc.id == tool_id {
+                                let key = (msg_idx, tool_idx);
+                                self.collapsed_tool_calls.insert(key, false);
+                                warn!("Auto-expanded tool call {} at {:?}", tool_id, key);
+                                break;
                             }
                         }
                     }
                 }
             }
         }
-
-        // Clear active tool after successful completion and push to view entity
-        if let Some(last) = self.messages.last_mut() {
-            if let Some(ref mut trace) = last.live_trace {
-                trace.clear_active_tool();
-                let trace_clone = trace.clone();
-                if let Some(ref view_entity) = last.system_trace_view {
-                    view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
-                        cx.notify();
-                    });
-                }
-            }
-        }
-
-        debug!("Tool call result handled, notifying ChatView to re-render");
-        cx.notify();
-    }
-
-    /// Handle tool call error event
-    pub fn handle_tool_call_error(&mut self, id: String, error: String, cx: &mut Context<Self>) {
-        if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
-            tool_call.state = ToolCallState::Error(error.clone());
-        }
-
-        self.update_tool_call_trace(|tc| {
-            tc.state = ToolCallState::Error(error);
-        });
-
-        // Clear active tool after error and push to view entity
-        if let Some(last) = self.messages.last_mut() {
-            if let Some(ref mut trace) = last.live_trace {
-                trace.clear_active_tool();
-                let trace_clone = trace.clone();
-                if let Some(ref view_entity) = last.system_trace_view {
-                    view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
-                        cx.notify();
-                    });
-                }
-            }
-        }
-
-        cx.notify();
     }
 
     /// Handle approval requested event
@@ -523,11 +494,32 @@ impl ChatView {
                     // Create or update the trace view entity for rendering
                     let trace_clone = trace.clone();
                     if last.system_trace_view.is_none() {
-                        last.system_trace_view =
-                            Some(cx.new(|_cx| SystemTraceView::new(trace_clone)));
+                        // Create new SystemTraceView entity
+                        let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+
+                        // Subscribe to its events
+                        let chat_view_entity = cx.entity();
+                        cx.subscribe(
+                            &trace_view,
+                            move |_chat_view,
+                                  _trace_view,
+                                  event: &super::message_types::TraceEvent,
+                                  cx| {
+                                let event_clone = event.clone();
+                                let chat_view = chat_view_entity.clone();
+                                cx.defer(move |cx| {
+                                    chat_view.update(cx, |chat_view, cx| {
+                                        chat_view.handle_trace_event(&event_clone, cx);
+                                    });
+                                });
+                            },
+                        )
+                        .detach();
+
+                        last.system_trace_view = Some(trace_view);
                     } else if let Some(ref view_entity) = last.system_trace_view {
                         view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone);
+                            view.update_trace(trace_clone, cx);
                             cx.notify();
                         });
                     }
@@ -567,7 +559,7 @@ impl ChatView {
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
                     view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
+                        view.update_trace(trace_clone, cx);
                         cx.notify();
                     });
                 }

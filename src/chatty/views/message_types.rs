@@ -49,6 +49,26 @@ pub enum TraceItem {
     ApprovalPrompt(ApprovalBlock),
 }
 
+/// Events emitted by SystemTraceView when trace state changes
+#[derive(Clone, Debug)]
+pub enum TraceEvent {
+    /// Tool call state changed (Running → Success/Error)
+    ToolCallStateChanged {
+        tool_id: String,
+        old_state: ToolCallState,
+        new_state: ToolCallState,
+    },
+    /// Tool call received input
+    ToolCallInputReceived { tool_id: String },
+    /// Tool call received output
+    ToolCallOutputReceived { tool_id: String, has_output: bool },
+    /// Thinking block state changed
+    ThinkingStateChanged {
+        old_state: ThinkingState,
+        new_state: ThinkingState,
+    },
+}
+
 /// Represents a "thinking" or "reasoning" session
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThinkingBlock {
