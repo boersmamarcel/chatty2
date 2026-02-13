@@ -33,6 +33,10 @@ impl SystemTraceView {
         self.is_collapsed = !self.is_collapsed;
     }
 
+    pub fn set_collapsed(&mut self, collapsed: bool) {
+        self.is_collapsed = collapsed;
+    }
+
     /// Render the trace container header with active status
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Active status styling

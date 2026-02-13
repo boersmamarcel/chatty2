@@ -36,6 +36,7 @@ pub enum CustomIcon {
     AlertCircle, // alert-circle.svg - Errors
     CheckCircle, // check-circle.svg - Update ready
     Copy,        // copy.svg - Copy button
+    Lock,        // lock.svg - Sandboxed execution
 }
 
 impl IconNamed for CustomIcon {
@@ -48,6 +49,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::AlertCircle => "icons/alert-circle.svg",
             CustomIcon::CheckCircle => "icons/check-circle.svg",
             CustomIcon::Copy => "icons/copy.svg",
+            CustomIcon::Lock => "icons/lock.svg",
         }
         .into()
     }

@@ -21,12 +21,20 @@ use crate::settings::models::models_store::ModelsModel;
 use std::time::SystemTime;
 
 /// Main chat view component
+#[derive(Clone)]
+pub struct PendingApprovalInfo {
+    pub id: String,
+    pub command: String,
+    pub is_sandboxed: bool,
+}
+
 pub struct ChatView {
     chat_input_state: Entity<ChatInputState>,
     messages: Vec<DisplayMessage>,
     conversation_id: Option<String>,
     scroll_handle: ScrollHandle,
     active_tool_calls: HashMap<String, ToolCallBlock>,
+    pending_approval: Option<PendingApprovalInfo>,
 }
 
 impl ChatView {
@@ -68,6 +76,7 @@ impl ChatView {
             conversation_id: None,
             scroll_handle,
             active_tool_calls: HashMap::new(),
+            pending_approval: None,
         }
     }
 
@@ -390,6 +399,13 @@ impl ChatView {
     ) {
         debug!(approval_id = %id, command = %command, sandboxed = is_sandboxed, "UI: handle_approval_requested called");
 
+        // Set pending approval for floating bar
+        self.pending_approval = Some(PendingApprovalInfo {
+            id: id.clone(),
+            command: command.clone(),
+            is_sandboxed,
+        });
+
         // Create approval block with pending state
         let approval = ApprovalBlock {
             id,
@@ -430,6 +446,13 @@ impl ChatView {
     /// Handle approval resolved event
     pub fn handle_approval_resolved(&mut self, id: &str, approved: bool, cx: &mut Context<Self>) {
         debug!(approval_id = %id, approved = approved, "UI: handle_approval_resolved called");
+
+        // Clear pending approval (hide floating bar)
+        if let Some(ref pending) = self.pending_approval {
+            if pending.id == id {
+                self.pending_approval = None;
+            }
+        }
 
         // Update approval state in live trace
         if let Some(last) = self.messages.last_mut() {
@@ -644,6 +667,42 @@ impl ChatView {
         self.scroll_handle.set_offset(point(px(0.0), px(-f32::MAX)));
     }
 
+    /// Handle approval decision from floating bar
+    fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
+        if let Some(ref pending) = self.pending_approval {
+            let id = pending.id.clone();
+
+            // Resolve in approval store
+            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
+                use crate::chatty::models::execution_approval_store::ApprovalDecision;
+                store.resolve(&id, if approved {
+                    ApprovalDecision::Approved
+                } else {
+                    ApprovalDecision::Denied
+                });
+            }
+
+            // Immediately clear pending approval to hide the bar
+            self.pending_approval = None;
+
+            // Also update the trace
+            self.handle_approval_resolved(&id, approved, cx);
+        }
+    }
+
+    /// Expand trace and scroll to approval for "View Details" button
+    fn expand_trace_to_approval(&mut self, cx: &mut Context<Self>) {
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref view_entity) = last.system_trace_view {
+                view_entity.update(cx, |view, cx| {
+                    view.set_collapsed(false); // Expand trace
+                    cx.notify();
+                });
+            }
+        }
+        self.scroll_to_bottom();
+    }
+
     /// Check if we're awaiting a response (streaming message with no content yet)
     fn is_awaiting_response(&self) -> bool {
         self.messages
@@ -755,6 +814,34 @@ impl Render for ChatView {
                     })
                     .vertical_scrollbar(&self.scroll_handle),
             )
+            // Floating approval bar (if pending)
+            .when_some(self.pending_approval.clone(), |this, pending| {
+                let view_entity = cx.entity();
+                this.child(
+                    div().child(
+                        super::approval_prompt_bar::ApprovalPromptBar::new(
+                            pending.command,
+                            pending.is_sandboxed,
+                        )
+                        .on_approve_deny({
+                            let entity = view_entity.clone();
+                            move |approved, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.handle_floating_approval(approved, cx);
+                                });
+                            }
+                        })
+                        .on_expand({
+                            let entity = view_entity.clone();
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.expand_trace_to_approval(cx);
+                                });
+                            }
+                        }),
+                    ),
+                )
+            })
             .child(
                 // Chat input - fixed at bottom
                 div()
