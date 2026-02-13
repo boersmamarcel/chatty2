@@ -552,7 +552,8 @@ pub fn render_message(msg: &DisplayMessage, index: usize, cx: &App) -> AnyElemen
     }
 
     // Parse content for thinking blocks (for assistant messages)
-    if matches!(msg.role, MessageRole::Assistant) {
+    // But skip this if we should render interleaved content instead
+    if matches!(msg.role, MessageRole::Assistant) && !should_interleave {
         let segments = parse_content_segments(&msg.content);
 
         debug!(

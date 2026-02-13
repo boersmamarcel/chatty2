@@ -3,7 +3,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
+use gpui_component::{ActiveTheme, Icon, Sizable, accordion::Accordion, button::Button};
 
 use super::message_types::{
     ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem,
@@ -614,99 +614,100 @@ pub fn render_tool_call_inline(
     };
 
     let muted_text = cx.theme().muted_foreground;
-    let border_color = cx.theme().border;
     let text_color = cx.theme().foreground;
     let panel_bg = cx.theme().muted;
     let badge_text = cx.theme().primary_foreground;
 
-    let mut container = div().flex().flex_col().gap_1().child(
-        // Command invocation line
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .font_family("monospace")
-            .text_sm()
-            .child(
-                div()
-                    .text_color(prefix_color)
-                    .font_weight(FontWeight::BOLD)
-                    .child(prefix),
-            )
-            .child(
-                div()
-                    .text_color(text_color)
-                    .font_weight(FontWeight::BOLD)
-                    .child(format!("$ {}", tool_call.display_name)),
-            )
-            .child(
+    // Compact title for accordion (single line, similar to approval bar)
+    let accordion_title = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .overflow_hidden()
+        .child(
+            div()
+                .text_color(prefix_color)
+                .font_weight(FontWeight::BOLD)
+                .flex_shrink_0()
+                .child(prefix),
+        )
+        .child(
+            div()
+                .text_color(text_color)
+                .font_weight(FontWeight::BOLD)
+                .font_family("monospace")
+                .text_sm()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(format!("$ {}", tool_call.display_name)),
+        )
+        .child(
+            div()
+                .text_xs()
+                .px_2()
+                .py(px(0.5))
+                .rounded_sm()
+                .bg(prefix_color)
+                .text_color(badge_text)
+                .flex_shrink_0()
+                .child(state_label),
+        )
+        .when_some(tool_call.duration, |this, duration| {
+            this.child(
                 div()
                     .text_xs()
-                    .px_2()
-                    .py(px(0.5))
-                    .rounded_sm()
-                    .bg(prefix_color)
-                    .text_color(badge_text)
-                    .child(state_label),
+                    .text_color(muted_text)
+                    .flex_shrink_0()
+                    .child(format!("({:.1}s)", duration.as_secs_f32())),
             )
-            .when_some(tool_call.duration, |this, duration| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_text)
-                        .child(format!("({:.1}s)", duration.as_secs_f32())),
-                )
-            }),
-    );
+        });
 
-    // Output section (if available)
+    // Build accordion content children (what shows when expanded)
+    let mut content_children = Vec::new();
+
+    // Add output section if available
     if let Some(output) = tool_call
         .output
         .as_ref()
         .or(tool_call.output_preview.as_ref())
     {
-        container = container.child(
+        content_children.push(
             div()
-                .ml_4()
-                .pl_3()
-                .border_l_2()
-                .border_color(border_color)
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .font_family("monospace")
-                        .text_xs()
-                        .text_color(muted_text)
-                        .child("output:"),
-                )
-                .child(
-                    div()
-                        .font_family("monospace")
-                        .text_xs()
-                        .px_2()
-                        .py_1()
-                        .bg(panel_bg)
-                        .rounded_sm()
-                        .text_color(text_color)
-                        .child(output.clone()),
-                ),
+                .font_family("monospace")
+                .text_xs()
+                .px_2()
+                .py_1()
+                .bg(panel_bg)
+                .rounded_sm()
+                .text_color(text_color)
+                .max_h(px(300.))
+                .overflow_hidden()
+                .child(output.clone())
+                .into_any_element(),
+        );
+    } else if matches!(tool_call.state, ToolCallState::Running) {
+        // Show "Running..." for running tools
+        content_children.push(
+            div()
+                .font_family("monospace")
+                .text_xs()
+                .text_color(muted_text)
+                .child("Running...")
+                .into_any_element(),
         );
     }
 
-    // Error section (if error state)
+    // Add error section if error state
     if let ToolCallState::Error(error) = &tool_call.state {
         let error_color = cx.theme().ring;
         let error_bg = cx.theme().accent;
-        let error_border = cx.theme().ring;
 
-        container = container.child(
+        content_children.push(
             div()
-                .ml_4()
-                .pl_3()
-                .border_l_2()
-                .border_color(error_border)
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -716,7 +717,7 @@ pub fn render_tool_call_inline(
                         .text_xs()
                         .text_color(error_color)
                         .font_weight(FontWeight::BOLD)
-                        .child("error:"),
+                        .child("Error:"),
                 )
                 .child(
                     div()
@@ -728,9 +729,16 @@ pub fn render_tool_call_inline(
                         .rounded_sm()
                         .text_color(error_color)
                         .child(error.clone()),
-                ),
+                )
+                .into_any_element(),
         );
     }
 
-    container
+    // Wrap everything in a single accordion
+    Accordion::new(("tool-call", _message_index as u64))
+        .xsmall()
+        .item(|item| {
+            item.title(accordion_title)
+                .child(div().flex().flex_col().gap_2().children(content_children))
+        })
 }
