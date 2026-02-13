@@ -26,6 +26,8 @@ regex = "1.10"
 base64 = "0.22"
 async-stream = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+glob = "0.3"
+similar = "2.2"
 
 # Auto-updater dependencies
 semver = "1.0"

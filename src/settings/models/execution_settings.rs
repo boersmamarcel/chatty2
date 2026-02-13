@@ -2,20 +2,15 @@ use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 /// Approval mode for code execution requests
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub enum ApprovalMode {
     /// Require approval for all commands (default, most secure)
+    #[default]
     AlwaysAsk,
     /// Auto-approve sandboxed commands, ask for unsandboxed
     AutoApproveSandboxed,
     /// Auto-approve all commands (dangerous, opt-in only)
     AutoApproveAll,
-}
-
-impl Default for ApprovalMode {
-    fn default() -> Self {
-        Self::AlwaysAsk
-    }
 }
 
 /// Settings for code execution tool

@@ -45,10 +45,7 @@ impl ExecutionSettingsRepository for ExecutionSettingsJsonRepository {
         })
     }
 
-    fn save(
-        &self,
-        settings: ExecutionSettingsModel,
-    ) -> BoxFuture<'static, RepositoryResult<()>> {
+    fn save(&self, settings: ExecutionSettingsModel) -> BoxFuture<'static, RepositoryResult<()>> {
         let path = self.file_path.clone();
 
         Box::pin(async move {

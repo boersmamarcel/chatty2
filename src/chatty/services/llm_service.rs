@@ -10,6 +10,7 @@ use crate::chatty::factories::AgentClient;
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum StreamChunk {
     Text(String),
     ToolCallStarted {

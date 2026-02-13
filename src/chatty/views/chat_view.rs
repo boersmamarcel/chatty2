@@ -196,9 +196,10 @@ impl ChatView {
     pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
+        let display_name = friendly_tool_name(&name);
         let tool_call = ToolCallBlock {
-            tool_name: name.clone(),
-            display_name: name,
+            tool_name: name,
+            display_name,
             input: String::new(),
             output: None,
             output_preview: None,
@@ -681,5 +682,22 @@ impl Render for ChatView {
                     .p_4()
                     .child(ChatInput::new(self.chat_input_state.clone())),
             )
+    }
+}
+
+/// Map raw tool names to user-friendly display names
+fn friendly_tool_name(name: &str) -> String {
+    match name {
+        "read_file" => "Reading file".to_string(),
+        "read_binary" => "Reading binary file".to_string(),
+        "list_directory" => "Listing directory".to_string(),
+        "glob_search" => "Searching files".to_string(),
+        "write_file" => "Writing file".to_string(),
+        "create_directory" => "Creating directory".to_string(),
+        "delete_file" => "Deleting file".to_string(),
+        "move_file" => "Moving file".to_string(),
+        "apply_diff" => "Applying diff".to_string(),
+        "bash" => "Running command".to_string(),
+        other => other.to_string(),
     }
 }

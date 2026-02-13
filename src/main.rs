@@ -339,6 +339,9 @@ fn main() {
         // Initialize execution approval store for tracking pending approvals
         cx.set_global(chatty::models::ExecutionApprovalStore::new());
 
+        // Initialize write approval store for tracking filesystem write approvals
+        cx.set_global(chatty::models::WriteApprovalStore::new());
+
         // Initialize models notifier entity for event subscriptions
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
         cx.set_global(settings::models::GlobalModelsNotifier {

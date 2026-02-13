@@ -5,7 +5,7 @@ pub mod models_notifier;
 pub mod models_store;
 pub mod providers_store;
 
-pub use execution_settings::{ApprovalMode, ExecutionSettingsModel};
+pub use execution_settings::ExecutionSettingsModel;
 pub use general_model::GeneralSettingsModel;
 pub use mcp_store::McpServersModel;
 pub use models_notifier::{GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent};

@@ -29,6 +29,7 @@ pub struct Conversation {
 
 impl Conversation {
     /// Create a new conversation from model and provider config
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         id: String,
         title: String,
@@ -36,7 +37,12 @@ impl Conversation {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
+        pending_write_approvals: Option<
+            crate::chatty::models::write_approval_store::PendingWriteApprovals,
+        >,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -55,6 +61,7 @@ impl Conversation {
             mcp_tools,
             exec_settings,
             pending_approvals,
+            pending_write_approvals,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -82,7 +89,12 @@ impl Conversation {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::chatty::models::execution_approval_store::PendingApprovals>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
+        pending_write_approvals: Option<
+            crate::chatty::models::write_approval_store::PendingWriteApprovals,
+        >,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -102,6 +114,7 @@ impl Conversation {
             mcp_tools,
             exec_settings,
             pending_approvals,
+            pending_write_approvals,
         )
         .await
         .context("Failed to create agent from config")?;
