@@ -280,78 +280,45 @@ impl SystemTraceView {
         let panel_bg = cx.theme().muted;
         let badge_text = cx.theme().primary_foreground;
 
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                // Command invocation line
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_family("monospace")
-                    .text_sm()
-                    .child(
+        let mut container = div().flex().flex_col().gap_1().child(
+            // Command invocation line
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .font_family("monospace")
+                .text_sm()
+                .child(
+                    div()
+                        .text_color(prefix_color)
+                        .font_weight(FontWeight::BOLD)
+                        .child(prefix),
+                )
+                .child(
+                    div()
+                        .text_color(text_color)
+                        .font_weight(FontWeight::BOLD)
+                        .child(format!("$ {}", tool_call.display_name)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .px_2()
+                        .py(px(0.5))
+                        .rounded_sm()
+                        .bg(prefix_color)
+                        .text_color(badge_text)
+                        .child(state_label),
+                )
+                .when_some(tool_call.duration, |this, duration| {
+                    this.child(
                         div()
-                            .text_color(prefix_color)
-                            .font_weight(FontWeight::BOLD)
-                            .child(prefix),
-                    )
-                    .child(
-                        div()
-                            .text_color(text_color)
-                            .font_weight(FontWeight::BOLD)
-                            .child(format!("$ {}", tool_call.display_name)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .px_2()
-                            .py(px(0.5))
-                            .rounded_sm()
-                            .bg(prefix_color)
-                            .text_color(badge_text)
-                            .child(state_label),
-                    )
-                    .when_some(tool_call.duration, |this, duration| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_text)
-                                .child(format!("({:.1}s)", duration.as_secs_f32())),
-                        )
-                    }),
-            )
-            .child(
-                // Input section
-                div()
-                    .ml_4()
-                    .pl_3()
-                    .border_l_2()
-                    .border_color(border_color)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family("monospace")
                             .text_xs()
                             .text_color(muted_text)
-                            .child("input:"),
+                            .child(format!("({:.1}s)", duration.as_secs_f32())),
                     )
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_xs()
-                            .px_2()
-                            .py_1()
-                            .bg(panel_bg)
-                            .rounded_sm()
-                            .text_color(text_color)
-                            .child(tool_call.input.clone()),
-                    ),
-            );
+                }),
+        );
 
         // Output section (if available)
         if let Some(output) = tool_call
