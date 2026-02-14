@@ -2,7 +2,11 @@ use crate::chatty::models::error_store::{ErrorEntry, ErrorLevel, ErrorStore};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Root, Sizable, button::Button, h_flex, scroll::ScrollableElement, v_flex,
+    ActiveTheme as _, Sizable, WindowExt,
+    button::{Button, ButtonVariants},
+    h_flex,
+    scroll::ScrollableElement,
+    v_flex,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,95 +26,51 @@ fn format_timestamp(time: SystemTime) -> String {
 pub struct ErrorLogDialog;
 
 impl ErrorLogDialog {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn open(window: &mut Window, cx: &mut App) {
+        window.open_dialog(cx, |dialog, _window, cx| {
+            let entries = cx.global::<ErrorStore>().get_all_entries();
+            let entries_reversed: Vec<_> = entries.into_iter().rev().collect(); // Most recent first
 
-    pub fn open(cx: &mut App) {
-        let dialog = cx.new(|_cx| Self::new());
-
-        cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Errors & Warnings".into()),
-                    ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    size: size(px(700.0), px(500.0)),
-                    origin: point(px(0.0), px(0.0)),
-                })),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Root::new(dialog, window, cx)),
-        )
-        .map_err(|e| tracing::warn!(error = ?e, "Failed to open error log dialog"))
-        .ok();
-    }
-}
-
-impl Render for ErrorLogDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries = cx.global::<ErrorStore>().get_all_entries();
-        let entries_reversed: Vec<_> = entries.into_iter().rev().collect(); // Most recent first
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(cx.theme().background)
-            .child(
-                // Header with "Clear All" button
-                div()
-                    .h(px(48.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(16.0))
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_lg()
-                            .text_color(cx.theme().foreground)
-                            .child("Errors & Warnings"),
-                    )
-                    .child(
-                        Button::new("clear-all")
-                            .small()
-                            .on_click(|_event, _window, cx| {
-                                cx.update_global::<ErrorStore, _>(|store, _cx| {
-                                    store.clear();
-                                });
-                                cx.refresh_windows();
-                            })
-                            .child("Clear All"),
-                    ),
-            )
-            .child(
-                // Scrollable error list
-                div()
-                    .id("error-list")
-                    .flex_1()
-                    .overflow_y_scrollbar()
-                    .px(px(16.0))
-                    .py(px(12.0))
-                    .when(entries_reversed.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No errors or warnings to display."),
-                        )
-                    })
-                    .when(!entries_reversed.is_empty(), |this| {
-                        this.children(
-                            entries_reversed
-                                .into_iter()
-                                .enumerate()
-                                .map(|(ix, entry)| ErrorEntryView::new(entry).id(ix)),
-                        )
-                    }),
-            )
+            dialog
+                .title("Errors & Warnings")
+                .w(px(700.0))
+                .h(px(500.0))
+                .child(
+                    div()
+                        .id("error-list")
+                        .h_full()
+                        .overflow_y_scrollbar()
+                        .px(px(16.0))
+                        .py(px(12.0))
+                        .when(entries_reversed.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("No errors or warnings to display."),
+                            )
+                        })
+                        .when(!entries_reversed.is_empty(), |this| {
+                            this.children(
+                                entries_reversed
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(ix, entry)| ErrorEntryView::new(entry).id(ix)),
+                            )
+                        }),
+                )
+                .footer(|_, window, _, _cx| {
+                    vec![Button::new("clear-all").label("Clear All").on_click({
+                        move |_, window, cx| {
+                            cx.update_global::<ErrorStore, _>(|store, _cx| {
+                                store.clear();
+                            });
+                            cx.refresh_windows();
+                            window.close_dialog(cx);
+                        }
+                    })]
+                })
+        });
     }
 }
 
@@ -136,7 +96,7 @@ impl RenderOnce for ErrorEntryView {
         let level_color = if self.entry.level == ErrorLevel::Error {
             cx.theme().accent
         } else {
-            cx.theme().muted_foreground
+            cx.theme().ring
         };
 
         let level_text = if self.entry.level == ErrorLevel::Error {

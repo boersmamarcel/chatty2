@@ -26,9 +26,9 @@ impl RenderOnce for StatusFooterView {
             .bg(cx.theme().background)
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(ErrorIndicatorView::new().on_click(move |_window, cx| {
-                // Open error log dialog (will be implemented in Phase 3)
-                crate::chatty::views::ErrorLogDialog::open(cx);
+            .child(ErrorIndicatorView::new().on_click(move |window, cx| {
+                // Open error log dialog as inline overlay
+                crate::chatty::views::ErrorLogDialog::open(window, cx);
             }))
             .child(AutoUpdateView::new().on_click(move |_window, cx| {
                 // Determine which action to take based on current status

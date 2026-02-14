@@ -32,11 +32,12 @@ impl RenderOnce for ErrorIndicatorView {
         let warning_count = store.warning_count();
         let total = error_count + warning_count;
 
-        let icon_color = if error_count > 0 {
-            cx.theme().accent // Accent color for errors
-        } else {
-            cx.theme().muted_foreground // Muted for warnings only
-        };
+        // Use foreground color for visibility in both light/dark themes
+        let text_color = cx.theme().foreground;
+
+        // Background colors for the badge effect
+        let error_bg = cx.theme().accent;
+        let warning_bg = cx.theme().ring;
 
         div().when(total > 0, |this| {
             let mut button = Button::new("error-indicator")
@@ -45,19 +46,34 @@ impl RenderOnce for ErrorIndicatorView {
                 .tooltip("View errors and warnings")
                 .child(
                     h_flex()
-                        .gap_2()
+                        .gap_1()
                         .items_center()
                         .child(
                             Icon::new(CustomIcon::TriangleAlert)
                                 .size(px(16.0))
-                                .text_color(icon_color),
+                                .text_color(text_color),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(icon_color)
-                                .child(total.to_string()),
-                        ),
+                        // Show counts with colored backgrounds
+                        .when(error_count > 0, |this| {
+                            this.child(
+                                div().px_1().rounded_sm().bg(error_bg).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().background)
+                                        .child(error_count.to_string()),
+                                ),
+                            )
+                        })
+                        .when(warning_count > 0, |this| {
+                            this.child(
+                                div().px_1().rounded_sm().bg(warning_bg).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().background)
+                                        .child(warning_count.to_string()),
+                                ),
+                            )
+                        }),
                 );
 
             if let Some(handler) = self.on_click {
