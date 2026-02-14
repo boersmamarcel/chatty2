@@ -532,7 +532,7 @@ where
 
             container = container.child(div().mt_2().mb_2().child(
                 super::trace_components::render_tool_call_inline(
-                    &tool_call,
+                    tool_call,
                     index,
                     tool_idx,
                     is_collapsed,

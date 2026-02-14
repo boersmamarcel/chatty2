@@ -55,16 +55,25 @@ pub enum TraceEvent {
     /// Tool call state changed (Running → Success/Error)
     ToolCallStateChanged {
         tool_id: String,
+        #[allow(dead_code)]
         old_state: ToolCallState,
+        #[allow(dead_code)]
         new_state: ToolCallState,
     },
     /// Tool call received input
+    #[allow(dead_code)]
     ToolCallInputReceived { tool_id: String },
     /// Tool call received output
-    ToolCallOutputReceived { tool_id: String, has_output: bool },
+    ToolCallOutputReceived {
+        tool_id: String,
+        #[allow(dead_code)]
+        has_output: bool,
+    },
     /// Thinking block state changed
     ThinkingStateChanged {
+        #[allow(dead_code)]
         old_state: ThinkingState,
+        #[allow(dead_code)]
         new_state: ThinkingState,
     },
 }

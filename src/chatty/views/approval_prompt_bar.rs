@@ -44,8 +44,7 @@ impl ApprovalPromptBar {
         // Remove actual newlines and escaped \n strings, truncate to max 100 chars
         let cleaned = self
             .command
-            .replace('\n', " ")
-            .replace('\r', " ")
+            .replace(['\n', '\r'], " ")
             .replace("\\n", " ")
             .replace("\\r", " ");
         if cleaned.len() > 100 {

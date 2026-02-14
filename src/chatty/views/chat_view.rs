@@ -450,26 +450,6 @@ impl ChatView {
     }
 
     /// Auto-expand a tool call by its ID
-    fn auto_expand_tool_call(&mut self, tool_id: &str) {
-        if let Some(msg_idx) = self.messages.len().checked_sub(1) {
-            if let Some(last) = self.messages.last() {
-                if let Some(ref trace) = last.live_trace {
-                    // Find the tool index by ID
-                    for (tool_idx, item) in trace.items.iter().enumerate() {
-                        if let super::message_types::TraceItem::ToolCall(tc) = item {
-                            if tc.id == tool_id {
-                                let key = (msg_idx, tool_idx);
-                                self.collapsed_tool_calls.insert(key, false);
-                                warn!("Auto-expanded tool call {} at {:?}", tool_id, key);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Handle approval requested event
     pub fn handle_approval_requested(
         &mut self,
