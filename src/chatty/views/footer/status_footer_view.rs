@@ -1,5 +1,5 @@
 use crate::auto_updater::{AutoUpdateStatus, AutoUpdater};
-use crate::chatty::views::footer::AutoUpdateView;
+use crate::chatty::views::footer::{AutoUpdateView, ErrorIndicatorView};
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 
@@ -26,6 +26,10 @@ impl RenderOnce for StatusFooterView {
             .bg(cx.theme().background)
             .border_t_1()
             .border_color(cx.theme().border)
+            .child(ErrorIndicatorView::new().on_click(move |_window, cx| {
+                // Open error log dialog (will be implemented in Phase 3)
+                crate::chatty::views::ErrorLogDialog::open(cx);
+            }))
             .child(AutoUpdateView::new().on_click(move |_window, cx| {
                 // Determine which action to take based on current status
                 let status = cx.global::<AutoUpdater>().status().clone();
