@@ -33,8 +33,9 @@ impl RenderOnce for ErrorIndicatorView {
         let total = error_count + warning_count;
 
         // Colors: yellow for warnings, red for errors
-        let warning_color = cx.theme().ring;
-        let error_color = cx.theme().accent;
+        // Use GPUI's rgb to create explicit yellow and red colors
+        let warning_color = rgb(0xFFA500); // Orange/amber yellow
+        let error_color = rgb(0xFF0000); // Red
 
         div().when(total > 0, |this| {
             let mut button = Button::new("error-indicator")
