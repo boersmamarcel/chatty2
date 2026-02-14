@@ -435,10 +435,8 @@ impl ChatView {
                     tool_id, old_state, new_state
                 );
 
-                // Auto-expand when transitioning to Success or Error
-                if matches!(new_state, ToolCallState::Success | ToolCallState::Error(_)) {
-                    self.auto_expand_tool_call(tool_id);
-                }
+                // Don't auto-expand - let user expand with Cmd+D (Details button)
+                // This keeps the UI cleaner by not expanding every tool call automatically
 
                 // Notify to trigger re-render
                 cx.notify();
