@@ -214,6 +214,14 @@ impl ChatView {
             .map(|msg| msg.content.clone())
             .unwrap_or_default();
 
+        debug!(
+            tool_id = %id,
+            tool_name = %name,
+            text_before_len = text_before.len(),
+            text_before_preview = %text_before.chars().take(50).collect::<String>(),
+            "Captured text_before for tool call"
+        );
+
         let display_name = friendly_tool_name(&name);
         let tool_call = ToolCallBlock {
             id: id.clone(),
@@ -780,15 +788,26 @@ impl ChatView {
 
     /// Expand trace and scroll to approval for "View Details" button
     fn expand_trace_to_approval(&mut self, cx: &mut Context<Self>) {
+        debug!("expand_trace_to_approval called");
+
         if let Some(last) = self.messages.last_mut() {
             if let Some(ref view_entity) = last.system_trace_view {
                 view_entity.update(cx, |view, cx| {
+                    debug!("Expanding trace view");
                     view.set_collapsed(false); // Expand trace
                     cx.notify();
                 });
+
+                // Scroll to bottom to ensure the expanded trace is visible
+                self.scroll_to_bottom();
+
+                debug!("Trace expanded and scrolled");
+            } else {
+                debug!("No system_trace_view found");
             }
+        } else {
+            debug!("No last message found");
         }
-        self.scroll_to_bottom();
     }
 
     /// Check if we're awaiting a response (streaming message with no content yet)
@@ -856,6 +875,9 @@ impl Render for ChatView {
             }
         }
 
+        let has_pending_approval = self.pending_approval.is_some();
+        let view_entity_for_keys = cx.entity();
+
         div()
             .flex_1()
             .h_full()
@@ -866,6 +888,47 @@ impl Render for ChatView {
             .overflow_hidden()
             // Add top padding on macOS for floating toggle button
             .when(cfg!(target_os = "macos"), |this| this.pt(px(24.)))
+            // Handle keyboard shortcuts for approval bar
+            .when(has_pending_approval, |this| {
+                this.on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    let key = &event.keystroke.key;
+
+                    warn!(
+                        "ChatView key down: key={}, platform={}",
+                        key, modifiers.platform
+                    );
+
+                    // Use platform modifier (Cmd on macOS, Ctrl elsewhere)
+                    if modifiers.platform {
+                        warn!("Platform modifier pressed with key: {}", key);
+                        match key.as_str() {
+                            "y" => {
+                                warn!("Approve shortcut triggered in ChatView");
+                                view_entity_for_keys.update(cx, |view, cx| {
+                                    view.handle_floating_approval(true, cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                            "n" => {
+                                warn!("Deny shortcut triggered in ChatView");
+                                view_entity_for_keys.update(cx, |view, cx| {
+                                    view.handle_floating_approval(false, cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                            "d" => {
+                                warn!("Details shortcut triggered in ChatView");
+                                view_entity_for_keys.update(cx, |view, cx| {
+                                    view.expand_trace_to_approval(cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+            })
             .child(
                 // Message list - scrollable area
                 div()

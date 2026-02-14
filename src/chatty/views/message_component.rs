@@ -490,6 +490,15 @@ where
             // Render text that came before this tool call
             let text_before = &tool_call.text_before;
 
+            debug!(
+                tool_idx = tool_idx,
+                tool_name = %tool_call.tool_name,
+                text_before_len = text_before.len(),
+                last_text_end = last_text_end,
+                condition = text_before.len() > last_text_end,
+                "Processing tool call for interleaving"
+            );
+
             // Only render if there's new text since the last segment
             if text_before.len() > last_text_end {
                 let text_segment = &text_before[last_text_end..];

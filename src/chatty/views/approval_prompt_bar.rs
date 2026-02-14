@@ -67,8 +67,68 @@ impl RenderOnce for ApprovalPromptBar {
             warning_color
         };
 
+        // Platform-specific button labels
+        #[cfg(target_os = "macos")]
+        let (approve_label, deny_label, details_label) =
+            ("Approve (⌘Y)", "Deny (⌘N)", "Details (⌘D)");
+        #[cfg(not(target_os = "macos"))]
+        let (approve_label, deny_label, details_label) =
+            ("Approve (Ctrl+Y)", "Deny (Ctrl+N)", "Details (Ctrl+D)");
+
+        // Clone callbacks for keyboard handler
+        let approve_callback = self.on_approve_deny.clone();
+        let deny_callback = self.on_approve_deny.clone();
+        let details_callback = self.on_expand.clone();
+
         div()
             .w_full()
+            .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                use tracing::warn;
+
+                let modifiers = event.keystroke.modifiers;
+                let key = &event.keystroke.key;
+
+                warn!(
+                    "Approval bar key down: key={}, platform={}, control={}, alt={}, shift={}",
+                    key, modifiers.platform, modifiers.control, modifiers.alt, modifiers.shift
+                );
+
+                // Use platform modifier (Cmd on macOS, Ctrl elsewhere)
+                let cmd_or_ctrl = modifiers.platform;
+
+                if cmd_or_ctrl {
+                    warn!("Platform modifier pressed with key: {}", key);
+                    match key.as_str() {
+                        "y" => {
+                            warn!("Approve shortcut triggered");
+                            // Approve (Ctrl/Cmd + Y)
+                            if let Some(ref cb) = approve_callback {
+                                cb(true, cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                        "n" => {
+                            warn!("Deny shortcut triggered");
+                            // Deny (Ctrl/Cmd + N)
+                            if let Some(ref cb) = deny_callback {
+                                cb(false, cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                        "d" => {
+                            warn!("Details shortcut triggered");
+                            // Show Details (Ctrl/Cmd + D)
+                            if let Some(ref cb) = details_callback {
+                                cb(cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                        _ => {
+                            warn!("Unhandled key with platform modifier: {}", key);
+                        }
+                    }
+                }
+            })
             .px_3()
             .py_2()
             .bg(bg_color)
@@ -141,7 +201,7 @@ impl RenderOnce for ApprovalPromptBar {
                     .flex_shrink_0()
                     .child(
                         Button::new("approve-floating")
-                            .label("Approve")
+                            .label(approve_label)
                             .small()
                             .on_click({
                                 let callback = self.on_approve_deny.clone();
@@ -154,7 +214,7 @@ impl RenderOnce for ApprovalPromptBar {
                     )
                     .child(
                         Button::new("deny-floating")
-                            .label("Deny")
+                            .label(deny_label)
                             .small()
                             .on_click({
                                 let callback = self.on_approve_deny.clone();
@@ -167,13 +227,18 @@ impl RenderOnce for ApprovalPromptBar {
                     )
                     .child(
                         Button::new("expand-trace")
-                            .label("Details")
+                            .label(details_label)
                             .small()
                             .on_click({
                                 let callback = self.on_expand.clone();
                                 move |_event, _window, cx| {
+                                    use tracing::warn;
+                                    warn!("Details button clicked");
                                     if let Some(ref cb) = callback {
+                                        warn!("Calling on_expand callback");
                                         cb(cx);
+                                    } else {
+                                        warn!("No on_expand callback set!");
                                     }
                                 }
                             }),

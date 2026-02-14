@@ -28,11 +28,17 @@ impl SystemTraceView {
 
     /// Allow updating trace during streaming and emit events for changes
     pub fn update_trace(&mut self, new_trace: SystemTrace, cx: &mut Context<Self>) {
-        // Detect what changed and emit appropriate events
-        for (new_item, old_item) in new_trace.items.iter().zip(self.trace.items.iter()) {
+        // Compare items at the SAME INDEX position (not by ID!)
+        // This ensures we're comparing the same tool call at different stages,
+        // not matching against old tool calls from previous turns
+
+        for (index, new_item) in new_trace.items.iter().enumerate() {
+            // Get the corresponding old item at the same index (if it exists)
+            let old_item = self.trace.items.get(index);
+
             match (new_item, old_item) {
-                (TraceItem::ToolCall(new_tc), TraceItem::ToolCall(old_tc)) => {
-                    // Tool call state changed
+                (TraceItem::ToolCall(new_tc), Some(TraceItem::ToolCall(old_tc))) => {
+                    // Same tool call, check for state changes
                     if new_tc.state != old_tc.state {
                         cx.emit(TraceEvent::ToolCallStateChanged {
                             tool_id: new_tc.id.clone(),
@@ -41,7 +47,7 @@ impl SystemTraceView {
                         });
                     }
 
-                    // Tool call received output
+                    // Check for output received
                     if new_tc.output.is_some() && old_tc.output.is_none() {
                         cx.emit(TraceEvent::ToolCallOutputReceived {
                             tool_id: new_tc.id.clone(),
@@ -49,7 +55,7 @@ impl SystemTraceView {
                         });
                     }
                 }
-                (TraceItem::Thinking(new_tb), TraceItem::Thinking(old_tb)) => {
+                (TraceItem::Thinking(new_tb), Some(TraceItem::Thinking(old_tb))) => {
                     if new_tb.state != old_tb.state {
                         cx.emit(TraceEvent::ThinkingStateChanged {
                             old_state: old_tb.state.clone(),
@@ -57,6 +63,7 @@ impl SystemTraceView {
                         });
                     }
                 }
+                // New item with no old item at this index - no state change to report
                 _ => {}
             }
         }
@@ -340,7 +347,7 @@ impl SystemTraceView {
                     div()
                         .text_color(text_color)
                         .font_weight(FontWeight::BOLD)
-                        .child(format!("$ {}", tool_call.display_name)),
+                        .child(extract_command_display(tool_call)),
                 )
                 .child(
                     div()
@@ -368,6 +375,7 @@ impl SystemTraceView {
             .as_ref()
             .or(tool_call.output_preview.as_ref())
         {
+            let formatted_output = format_tool_output(output);
             container = container.child(
                 div()
                     .ml_4()
@@ -393,7 +401,7 @@ impl SystemTraceView {
                             .bg(panel_bg)
                             .rounded_sm()
                             .text_color(text_color)
-                            .child(output.clone()),
+                            .child(formatted_output),
                     ),
             );
         }
@@ -658,7 +666,7 @@ where
 
     let (prefix, prefix_color, state_label) = match &tool_call.state {
         ToolCallState::Running => (">", cx.theme().primary, "running"),
-        ToolCallState::Success => ("✓", cx.theme().accent, "success"),
+        ToolCallState::Success => ("✓", gpui::green(), "success"),
         ToolCallState::Error(_) => ("✗", cx.theme().ring, "error"),
     };
 
@@ -702,7 +710,7 @@ where
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(format!("$ {}", tool_call.display_name)),
+                .child(format!("$ {}", extract_command_display(tool_call))),
         )
         .child(
             div()
@@ -734,6 +742,7 @@ where
         .as_ref()
         .or(tool_call.output_preview.as_ref())
     {
+        let formatted_output = format_tool_output(output);
         content_children.push(
             div()
                 .font_family("monospace")
@@ -745,7 +754,7 @@ where
                 .text_color(text_color)
                 .max_h(px(300.))
                 .overflow_hidden()
-                .child(output.clone())
+                .child(formatted_output)
                 .into_any_element(),
         );
     } else if matches!(tool_call.state, ToolCallState::Running) {
@@ -794,9 +803,18 @@ where
     }
 
     // Return header + conditionally visible content
-    div().flex().flex_col().gap_1().child(header).when(
-        !collapsed && !content_children.is_empty(),
-        |this| {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .border_1()
+        .border_color(cx.theme().border)
+        .rounded_md()
+        .bg(panel_bg.opacity(0.3))
+        .child(header)
+        .when(!collapsed && !content_children.is_empty(), |this| {
             this.child(
                 div()
                     .flex()
@@ -805,6 +823,92 @@ where
                     .pl_4() // Indent content slightly
                     .children(content_children),
             )
-        },
-    )
+        })
+}
+
+/// Extract a user-friendly display string from tool call input
+fn extract_command_display(tool_call: &ToolCallBlock) -> String {
+    // Try to parse input as JSON and extract the command
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool_call.input) {
+        // For bash tool: extract "command" field
+        if tool_call.tool_name == "bash" {
+            if let Some(command) = json.get("command").and_then(|v| v.as_str()) {
+                // Truncate long commands
+                if command.len() > 80 {
+                    return format!("{}...", &command[..77]);
+                }
+                return command.to_string();
+            }
+        }
+
+        // For other tools: try to extract a "query" or "path" or first string field
+        if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
+            if query.len() > 80 {
+                return format!("{}...", &query[..77]);
+            }
+            return query.to_string();
+        }
+
+        if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+            if path.len() > 80 {
+                return format!("{}...", &path[..77]);
+            }
+            return path.to_string();
+        }
+    }
+
+    // Fallback to display_name if we can't extract anything
+    tool_call.display_name.clone()
+}
+
+/// Format tool call output for display (extract useful info from JSON)
+fn format_tool_output(output: &str) -> String {
+    // Try to parse as JSON
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        // If it's an object with common result fields, extract them
+        if let Some(obj) = json.as_object() {
+            // Check for common output patterns (in order of priority)
+            if let Some(stdout) = obj.get("stdout").and_then(|v| v.as_str()) {
+                return stdout.to_string();
+            }
+
+            if let Some(result) = obj.get("result").and_then(|v| v.as_str()) {
+                return result.to_string();
+            }
+
+            if let Some(output) = obj.get("output").and_then(|v| v.as_str()) {
+                return output.to_string();
+            }
+
+            if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
+                return message.to_string();
+            }
+
+            if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+                return content.to_string();
+            }
+
+            // If JSON object has just one string field, return it
+            if obj.len() == 1 {
+                if let Some((_key, value)) = obj.iter().next() {
+                    if let Some(s) = value.as_str() {
+                        return s.to_string();
+                    }
+                }
+            }
+
+            // Pretty print the JSON if it's a structured object
+            if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+                return pretty;
+            }
+        }
+
+        // If it's a plain string value, unwrap it
+        if let Some(s) = json.as_str() {
+            return s.to_string();
+        }
+    }
+
+    // Return as-is if not JSON or can't extract anything useful
+    output.to_string()
 }
