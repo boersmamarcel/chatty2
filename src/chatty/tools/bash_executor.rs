@@ -249,6 +249,8 @@ impl BashExecutor {
             let profile = r#"
                 (version 1)
                 (allow default)
+
+                ;; Deny write access to sensitive system directories
                 (deny file-write*
                     (subpath "/System")
                     (subpath "/Library")
@@ -258,15 +260,43 @@ impl BashExecutor {
                     (regex #"^/Users/[^/]+/\.aws")
                     (regex #"^/Users/[^/]+/\.gnupg")
                 )
+
+                ;; Deny read access to sensitive credential files and directories
+                (deny file-read*
+                    (regex #"^/Users/[^/]+/\.ssh/")
+                    (regex #"^/Users/[^/]+/\.aws/")
+                    (regex #"^/Users/[^/]+/\.gnupg/")
+                    (regex #"^/Users/[^/]+/\.docker/config\.json$")
+                    (regex #"^/Users/[^/]+/\.kube/config$")
+                    (regex #"^/Users/[^/]+/\.netrc$")
+                    (subpath "/private/etc/ssh")
+                    (literal "/etc/master.passwd")
+                    (literal "/etc/shadow")
+                )
+
+                ;; Deny network access if network isolation is enabled
+                ;; (network rules are added conditionally below)
+
                 (allow file-write* (subpath "/tmp"))
             "#;
 
-            // Add workspace directory write permissions if configured
+            // Build profile with optional workspace and network rules
             let profile_with_workspace = if let Some(workspace) = &self.settings.workspace_dir {
+                let network_rules = if self.settings.network_isolation {
+                    r#"
+                ;; Network isolation enabled - deny all network access
+                (deny network*)
+                "#
+                } else {
+                    ""
+                };
+
                 format!(
                     r#"
                     (version 1)
                     (allow default)
+
+                    ;; Deny write access to sensitive system directories
                     (deny file-write*
                         (subpath "/System")
                         (subpath "/Library")
@@ -276,13 +306,32 @@ impl BashExecutor {
                         (regex #"^/Users/[^/]+/\.aws")
                         (regex #"^/Users/[^/]+/\.gnupg")
                     )
+
+                    ;; Deny read access to sensitive credential files and directories
+                    (deny file-read*
+                        (regex #"^/Users/[^/]+/\.ssh/")
+                        (regex #"^/Users/[^/]+/\.aws/")
+                        (regex #"^/Users/[^/]+/\.gnupg/")
+                        (regex #"^/Users/[^/]+/\.docker/config\.json$")
+                        (regex #"^/Users/[^/]+/\.kube/config$")
+                        (regex #"^/Users/[^/]+/\.netrc$")
+                        (subpath "/private/etc/ssh")
+                        (literal "/etc/master.passwd")
+                        (literal "/etc/shadow")
+                    )
+                    {}
                     (allow file-write* (subpath "/tmp"))
                     (allow file-write* (subpath "{}"))
                     "#,
-                    workspace
+                    network_rules, workspace
                 )
             } else {
-                profile.to_string()
+                let network_rules = if self.settings.network_isolation {
+                    format!("{}\n                (deny network*)", profile)
+                } else {
+                    profile.to_string()
+                };
+                network_rules
             };
 
             let mut cmd = Command::new("sandbox-exec");
@@ -835,5 +884,133 @@ mod tests {
         assert!(json.contains("stderr"));
         assert!(json.contains("exit_code"));
         assert!(json.contains("truncated"));
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn test_sandbox_blocks_ssh_read() {
+        let (executor, _) = create_test_executor(true, ApprovalMode::AutoApproveAll);
+
+        // Only run if sandbox is available
+        if !executor.can_sandbox() {
+            return;
+        }
+
+        let input = BashToolInput {
+            command: "cat ~/.ssh/id_rsa 2>&1 || echo 'ACCESS_DENIED'".to_string(),
+        };
+
+        let result = executor.execute(input).await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // Should be denied by sandbox (or file doesn't exist)
+        assert!(
+            output.stdout.contains("ACCESS_DENIED")
+                || output.stdout.contains("Operation not permitted")
+                || output.stderr.contains("Operation not permitted"),
+            "Expected sandbox to block SSH key access, got stdout: {:?}, stderr: {:?}",
+            output.stdout,
+            output.stderr
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn test_sandbox_blocks_aws_credentials() {
+        let (executor, _) = create_test_executor(true, ApprovalMode::AutoApproveAll);
+
+        // Only run if sandbox is available
+        if !executor.can_sandbox() {
+            return;
+        }
+
+        let input = BashToolInput {
+            command: "cat ~/.aws/credentials 2>&1 || echo 'ACCESS_DENIED'".to_string(),
+        };
+
+        let result = executor.execute(input).await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // Should be denied by sandbox (or file doesn't exist)
+        assert!(
+            output.stdout.contains("ACCESS_DENIED")
+                || output.stdout.contains("Operation not permitted")
+                || output.stderr.contains("Operation not permitted"),
+            "Expected sandbox to block AWS credentials access, got stdout: {:?}, stderr: {:?}",
+            output.stdout,
+            output.stderr
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn test_sandbox_blocks_docker_config() {
+        let (executor, _) = create_test_executor(true, ApprovalMode::AutoApproveAll);
+
+        // Only run if sandbox is available
+        if !executor.can_sandbox() {
+            return;
+        }
+
+        let input = BashToolInput {
+            command: "cat ~/.docker/config.json 2>&1 || echo 'ACCESS_DENIED'".to_string(),
+        };
+
+        let result = executor.execute(input).await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // Should be denied by sandbox (or file doesn't exist)
+        assert!(
+            output.stdout.contains("ACCESS_DENIED")
+                || output.stdout.contains("Operation not permitted")
+                || output.stderr.contains("Operation not permitted"),
+            "Expected sandbox to block Docker config access, got stdout: {:?}, stderr: {:?}",
+            output.stdout,
+            output.stderr
+        );
+    }
+
+    #[tokio::test]
+    async fn test_network_isolation() {
+        let settings = ExecutionSettingsModel {
+            enabled: true,
+            approval_mode: ApprovalMode::AutoApproveAll,
+            workspace_dir: None,
+            timeout_seconds: 30,
+            max_output_bytes: 10000,
+            network_isolation: true,
+        };
+        let executor = create_test_executor_with_settings(settings);
+
+        // Only run on platforms with sandboxing
+        if !executor.can_sandbox() {
+            return;
+        }
+
+        // Try to make a network connection (should fail with network isolation)
+        let input = BashToolInput {
+            command: "curl -s --max-time 2 https://example.com 2>&1 || echo 'NETWORK_BLOCKED'"
+                .to_string(),
+        };
+
+        let result = executor.execute(input).await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+
+        // Network should be blocked (or curl not available)
+        // On macOS with network isolation, we expect network operations to fail
+        #[cfg(target_os = "macos")]
+        assert!(
+            output.stdout.contains("NETWORK_BLOCKED")
+                || output.stderr.contains("Operation not permitted")
+                || output.stdout.contains("Operation not permitted"),
+            "Expected network to be blocked, got stdout: {:?}, stderr: {:?}",
+            output.stdout,
+            output.stderr
+        );
     }
 }

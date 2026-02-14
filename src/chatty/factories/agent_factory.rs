@@ -190,7 +190,7 @@ impl AgentClient {
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_ref())
             {
-                Some(workspace_dir) => match FileSystemService::new(workspace_dir) {
+                Some(workspace_dir) => match FileSystemService::new(workspace_dir).await {
                     Ok(service) => {
                         let service = std::sync::Arc::new(service);
                         tracing::info!(workspace = %workspace_dir, "Filesystem tools enabled");

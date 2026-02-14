@@ -48,8 +48,8 @@ pub struct FileSystemService {
 
 impl FileSystemService {
     /// Create a new FileSystemService with the given workspace root.
-    pub fn new(workspace_root: &str) -> Result<Self> {
-        let validator = PathValidator::new(workspace_root)?;
+    pub async fn new(workspace_root: &str) -> Result<Self> {
+        let validator = PathValidator::new(workspace_root).await?;
         Ok(Self { validator })
     }
 
@@ -57,8 +57,8 @@ impl FileSystemService {
     ///
     /// The file must be within the workspace root and under 10MB.
     pub async fn read_file(&self, path: &str) -> Result<String> {
-        let canonical = self.validator.validate(path)?;
-        self.validator.validate_file_size(&canonical)?;
+        let canonical = self.validator.validate(path).await?;
+        self.validator.validate_file_size(&canonical).await?;
 
         debug!(path = %canonical.display(), "Reading text file");
 
@@ -75,8 +75,8 @@ impl FileSystemService {
     ///
     /// Suitable for images and PDFs. The file must be within the workspace root and under 10MB.
     pub async fn read_binary(&self, path: &str) -> Result<String> {
-        let canonical = self.validator.validate(path)?;
-        self.validator.validate_file_size(&canonical)?;
+        let canonical = self.validator.validate(path).await?;
+        self.validator.validate_file_size(&canonical).await?;
 
         debug!(path = %canonical.display(), "Reading binary file");
 
@@ -94,7 +94,7 @@ impl FileSystemService {
     ///
     /// Returns entries with name, type, and size metadata.
     pub async fn list_directory(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
-        let canonical = self.validator.validate(path)?;
+        let canonical = self.validator.validate(path).await?;
 
         if !canonical.is_dir() {
             return Err(anyhow!("'{}' is not a directory", path));
@@ -203,7 +203,7 @@ impl FileSystemService {
     /// Write content to a file, creating it if it doesn't exist.
     /// Returns whether the file already existed (was overwritten).
     pub async fn write_file(&self, path: &str, content: &str) -> Result<bool> {
-        let canonical = self.validator.validate_new_path(path)?;
+        let canonical = self.validator.validate_new_path(path).await?;
         let existed = canonical.exists();
 
         debug!(path = %canonical.display(), overwrite = existed, "Writing file");
@@ -219,7 +219,7 @@ impl FileSystemService {
     /// Create a directory and all parent directories.
     /// Returns whether the directory already existed.
     pub async fn create_directory(&self, path: &str) -> Result<bool> {
-        let resolved = self.validator.validate_mkdir_path(path)?;
+        let resolved = self.validator.validate_mkdir_path(path).await?;
         let existed = resolved.exists();
 
         if existed && !resolved.is_dir() {
@@ -238,7 +238,7 @@ impl FileSystemService {
 
     /// Delete a file.
     pub async fn delete_file(&self, path: &str) -> Result<()> {
-        let canonical = self.validator.validate(path)?;
+        let canonical = self.validator.validate(path).await?;
 
         if !canonical.is_file() {
             return Err(anyhow!("'{}' is not a file or does not exist", path));
@@ -256,8 +256,8 @@ impl FileSystemService {
 
     /// Move/rename a file or directory.
     pub async fn move_file(&self, source: &str, destination: &str) -> Result<()> {
-        let src_canonical = self.validator.validate(source)?;
-        let dst_resolved = self.validator.validate_new_path(destination)?;
+        let src_canonical = self.validator.validate(source).await?;
+        let dst_resolved = self.validator.validate_new_path(destination).await?;
 
         if dst_resolved.exists() {
             return Err(anyhow!(
@@ -293,7 +293,7 @@ impl FileSystemService {
         old_content: &str,
         new_content: &str,
     ) -> Result<DiffResult> {
-        let canonical = self.validator.validate(path)?;
+        let canonical = self.validator.validate(path).await?;
 
         let current = tokio::fs::read_to_string(&canonical)
             .await
@@ -351,7 +351,9 @@ mod tests {
         let test_file = tmp.path().join("test.txt");
         fs::write(&test_file, "Hello, world!").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let content = service.read_file("test.txt").await.unwrap();
         assert_eq!(content, "Hello, world!");
     }
@@ -364,7 +366,9 @@ mod tests {
         let test_file = sub_dir.join("test.txt");
         fs::write(&test_file, "nested content").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let content = service.read_file("subdir/test.txt").await.unwrap();
         assert_eq!(content, "nested content");
     }
@@ -372,7 +376,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_file_traversal_blocked() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.read_file("../../../etc/passwd").await;
         assert!(result.is_err());
     }
@@ -383,7 +389,9 @@ mod tests {
         let test_file = tmp.path().join("test.bin");
         fs::write(&test_file, &[0u8, 1, 2, 3, 255]).unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let content = service.read_binary("test.bin").await.unwrap();
         // Verify it's valid base64
         let decoded =
@@ -398,7 +406,9 @@ mod tests {
         fs::write(tmp.path().join("file2.txt"), "bb").unwrap();
         fs::create_dir(tmp.path().join("subdir")).unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let entries = service.list_directory(".").await.unwrap();
 
         assert_eq!(entries.len(), 3);
@@ -418,7 +428,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("file.txt"), "a").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.list_directory("file.txt").await;
         assert!(result.is_err());
     }
@@ -433,7 +445,9 @@ mod tests {
         fs::create_dir(&sub_dir).unwrap();
         fs::write(sub_dir.join("utils.rs"), "pub fn util(){}").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.glob_search("**/*.rs").await.unwrap();
 
         assert_eq!(result.count, 3);
@@ -445,7 +459,9 @@ mod tests {
     #[tokio::test]
     async fn test_glob_search_no_matches() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.glob_search("**/*.xyz").await.unwrap();
         assert_eq!(result.count, 0);
         assert!(result.matches.is_empty());
@@ -454,7 +470,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_nonexistent_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.read_file("nonexistent.txt").await;
         assert!(result.is_err());
     }
@@ -464,7 +482,9 @@ mod tests {
     #[tokio::test]
     async fn test_write_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         let existed = service
             .write_file("new_file.txt", "hello world")
@@ -481,7 +501,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("existing.txt"), "old content").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let existed = service
             .write_file("existing.txt", "new content")
             .await
@@ -495,7 +517,9 @@ mod tests {
     #[tokio::test]
     async fn test_write_file_traversal_blocked() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.write_file("../../etc/evil.txt", "hack").await;
         assert!(result.is_err());
     }
@@ -503,7 +527,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         let existed = service.create_directory("new_dir/sub_dir").await.unwrap();
         assert!(!existed);
@@ -515,7 +541,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join("existing_dir")).unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let existed = service.create_directory("existing_dir").await.unwrap();
         assert!(existed);
     }
@@ -525,7 +553,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("to_delete.txt"), "bye").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         service.delete_file("to_delete.txt").await.unwrap();
         assert!(!tmp.path().join("to_delete.txt").exists());
     }
@@ -533,7 +563,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete_nonexistent_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.delete_file("nonexistent.txt").await;
         assert!(result.is_err());
     }
@@ -543,7 +575,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("source.txt"), "content").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         service.move_file("source.txt", "dest.txt").await.unwrap();
 
         assert!(!tmp.path().join("source.txt").exists());
@@ -558,7 +592,9 @@ mod tests {
         fs::write(tmp.path().join("source.txt"), "a").unwrap();
         fs::write(tmp.path().join("dest.txt"), "b").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service.move_file("source.txt", "dest.txt").await;
         assert!(result.is_err());
     }
@@ -572,7 +608,9 @@ mod tests {
         )
         .unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service
             .apply_diff(
                 "code.rs",
@@ -593,7 +631,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("file.txt"), "actual content").unwrap();
 
-        let service = FileSystemService::new(tmp.path().to_str().unwrap()).unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         let result = service
             .apply_diff("file.txt", "nonexistent content", "replacement")
             .await;
