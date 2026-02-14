@@ -32,12 +32,9 @@ impl RenderOnce for ErrorIndicatorView {
         let warning_count = store.warning_count();
         let total = error_count + warning_count;
 
-        // Use foreground color for visibility in both light/dark themes
-        let text_color = cx.theme().foreground;
-
-        // Background colors for the badge effect
-        let error_bg = cx.theme().accent;
-        let warning_bg = cx.theme().ring;
+        // Colors: yellow for warnings, red for errors
+        let warning_color = cx.theme().ring;
+        let error_color = cx.theme().accent;
 
         div().when(total > 0, |this| {
             let mut button = Button::new("error-indicator")
@@ -48,30 +45,32 @@ impl RenderOnce for ErrorIndicatorView {
                     h_flex()
                         .gap_1()
                         .items_center()
-                        .child(
-                            Icon::new(CustomIcon::TriangleAlert)
-                                .size(px(16.0))
-                                .text_color(text_color),
-                        )
-                        // Show counts with colored backgrounds
-                        .when(error_count > 0, |this| {
-                            this.child(
-                                div().px_1().rounded_sm().bg(error_bg).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().background)
-                                        .child(error_count.to_string()),
-                                ),
-                            )
-                        })
+                        // Warning section: triangle icon + count (yellow)
                         .when(warning_count > 0, |this| {
                             this.child(
-                                div().px_1().rounded_sm().bg(warning_bg).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().background)
-                                        .child(warning_count.to_string()),
-                                ),
+                                Icon::new(CustomIcon::TriangleAlert)
+                                    .size(px(16.0))
+                                    .text_color(warning_color),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(warning_color)
+                                    .child(warning_count.to_string()),
+                            )
+                        })
+                        // Error section: circle-x icon + count (red)
+                        .when(error_count > 0, |this| {
+                            this.child(
+                                Icon::new(CustomIcon::CircleX)
+                                    .size(px(16.0))
+                                    .text_color(error_color),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(error_color)
+                                    .child(error_count.to_string()),
                             )
                         }),
                 );

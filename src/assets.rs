@@ -36,7 +36,8 @@ pub enum CustomIcon {
     AlertCircle,   // alert-circle.svg - Errors
     CheckCircle,   // check-circle.svg - Update ready
     Copy,          // copy.svg - Copy button
-    TriangleAlert, // triangle-alert.svg - Error indicator
+    TriangleAlert, // triangle-alert.svg - Warning indicator
+    CircleX,       // circle-x.svg - Error indicator
 }
 
 impl IconNamed for CustomIcon {
@@ -50,6 +51,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::CheckCircle => "icons/check-circle.svg",
             CustomIcon::Copy => "icons/copy.svg",
             CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
+            CustomIcon::CircleX => "icons/circle-x.svg",
         }
         .into()
     }
