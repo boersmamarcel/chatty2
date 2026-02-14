@@ -362,10 +362,18 @@ impl ChatView {
     pub fn handle_tool_call_result(&mut self, id: String, result: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
 
+        // Check if result indicates a denial or error
+        let is_denied = result.to_lowercase().contains("denied by user")
+            || result.to_lowercase().contains("execution denied");
+
         // Update trace by ID
         self.update_tool_call_by_id(&id, |tc| {
             tc.output = Some(result.clone());
-            tc.state = ToolCallState::Success;
+            tc.state = if is_denied {
+                ToolCallState::Error("Denied by user".to_string())
+            } else {
+                ToolCallState::Success
+            };
         });
 
         // Update trace view - it will emit ToolCallStateChanged event automatically
@@ -788,25 +796,28 @@ impl ChatView {
 
     /// Expand trace and scroll to approval for "View Details" button
     fn expand_trace_to_approval(&mut self, cx: &mut Context<Self>) {
-        debug!("expand_trace_to_approval called");
+        warn!("expand_trace_to_approval called");
 
         if let Some(last) = self.messages.last_mut() {
+            warn!("Found last message");
             if let Some(ref view_entity) = last.system_trace_view {
+                warn!("Found system_trace_view, expanding...");
                 view_entity.update(cx, |view, cx| {
-                    debug!("Expanding trace view");
+                    warn!("Inside trace view update - setting collapsed to false");
                     view.set_collapsed(false); // Expand trace
                     cx.notify();
                 });
 
                 // Scroll to bottom to ensure the expanded trace is visible
+                warn!("Scrolling to bottom");
                 self.scroll_to_bottom();
 
-                debug!("Trace expanded and scrolled");
+                warn!("Trace expanded and scrolled");
             } else {
-                debug!("No system_trace_view found");
+                warn!("No system_trace_view found - trace not created yet");
             }
         } else {
-            debug!("No last message found");
+            warn!("No last message found");
         }
     }
 
