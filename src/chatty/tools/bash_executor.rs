@@ -40,6 +40,18 @@ impl BashExecutor {
     }
 
     /// Execute a bash command with approval, validation, and sandboxing
+    ///
+    /// Security is provided through multiple layers:
+    /// 1. Feature toggle (enabled/disabled)
+    /// 2. User approval based on approval mode
+    /// 3. Sandboxing (Bubblewrap on Linux, sandbox-exec on macOS)
+    /// 4. Workspace directory isolation
+    /// 5. Timeout enforcement
+    /// 6. Network isolation (optional)
+    ///
+    /// Note: We intentionally do NOT use pattern-based command validation (e.g., blocking
+    /// "~/.ssh") as it provides false security and is trivially bypassable. Real protection
+    /// comes from sandboxing and user approval.
     pub async fn execute(&self, input: BashToolInput) -> Result<BashToolOutput> {
         // 1. Check if execution is enabled
         if !self.settings.enabled {
@@ -48,13 +60,10 @@ impl BashExecutor {
             ));
         }
 
-        // 2. Validate command (block sensitive paths)
-        self.validate_command(&input.command)?;
-
-        // 3. Determine if sandboxing is available
+        // 2. Determine if sandboxing is available
         let is_sandboxed = self.can_sandbox();
 
-        // 4. Check approval mode and request if needed
+        // 3. Check approval mode and request if needed
         let approved = self.request_approval(&input.command, is_sandboxed).await?;
         if !approved {
             return Err(anyhow!("Execution denied by user"));
@@ -62,36 +71,11 @@ impl BashExecutor {
 
         debug!(command = %input.command, sandboxed = is_sandboxed, "Executing bash command");
 
-        // 5. Execute with timeout and capture output
+        // 4. Execute with timeout and capture output
         let output = self.run_command(&input.command, is_sandboxed).await?;
 
-        // 6. Truncate output if needed
+        // 5. Truncate output if needed
         Ok(self.truncate_output(output))
-    }
-
-    /// Validate command to block dangerous patterns
-    fn validate_command(&self, command: &str) -> Result<()> {
-        let blocked_patterns = [
-            "~/.ssh",
-            "~/.aws",
-            "~/.gnupg",
-            "/etc/passwd",
-            "/etc/shadow",
-            "rm -rf /",
-            "rm -rf ~",
-        ];
-
-        for pattern in &blocked_patterns {
-            if command.contains(pattern) {
-                return Err(anyhow!(
-                    "Command blocked: contains dangerous pattern '{}'. \
-                     This pattern is blocked to protect sensitive files.",
-                    pattern
-                ));
-            }
-        }
-
-        Ok(())
     }
 
     /// Check if sandboxing is available on this platform
