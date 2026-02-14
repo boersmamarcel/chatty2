@@ -2,7 +2,7 @@ use crate::assets::CustomIcon;
 use crate::chatty::models::ErrorStore;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{ActiveTheme as _, Icon, Sizable, button::*, h_flex};
+use gpui_component::{Icon, Sizable, button::*, h_flex};
 
 type ClickHandler = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
@@ -50,7 +50,7 @@ impl RenderOnce for ErrorIndicatorView {
                         .when(warning_count > 0, |this| {
                             this.child(
                                 Icon::new(CustomIcon::TriangleAlert)
-                                    .size(px(16.0))
+                                    .size(px(12.0))
                                     .text_color(warning_color),
                             )
                             .child(
@@ -64,7 +64,7 @@ impl RenderOnce for ErrorIndicatorView {
                         .when(error_count > 0, |this| {
                             this.child(
                                 Icon::new(CustomIcon::CircleX)
-                                    .size(px(16.0))
+                                    .size(px(12.0))
                                     .text_color(error_color),
                             )
                             .child(

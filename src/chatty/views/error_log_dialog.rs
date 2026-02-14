@@ -1,8 +1,9 @@
+use crate::assets::CustomIcon;
 use crate::chatty::models::error_store::{ErrorEntry, ErrorLevel, ErrorStore};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Sizable, WindowExt,
+    ActiveTheme as _, Icon, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     h_flex,
     scroll::ScrollableElement,
@@ -59,7 +60,7 @@ impl ErrorLogDialog {
                             )
                         }),
                 )
-                .footer(|_, window, _, _cx| {
+                .footer(|_, _window, _, _cx| {
                     vec![Button::new("clear-all").label("Clear All").on_click({
                         move |_, window, cx| {
                             cx.update_global::<ErrorStore, _>(|store, _cx| {
@@ -105,6 +106,21 @@ impl RenderOnce for ErrorEntryView {
             "WARN"
         };
 
+        // Format complete error text for copying
+        let mut error_text = format!(
+            "[{}] {} - {}\n{}",
+            format_timestamp(self.entry.timestamp),
+            level_text,
+            self.entry.target,
+            self.entry.message
+        );
+        if let Some(file) = &self.entry.file {
+            error_text.push_str(&format!("\n{}:{}", file, self.entry.line.unwrap_or(0)));
+        }
+        for (key, value) in &self.entry.fields {
+            error_text.push_str(&format!("\n  {}: {}", key, value));
+        }
+
         div()
             .id(self.id)
             .mb_3()
@@ -113,32 +129,52 @@ impl RenderOnce for ErrorEntryView {
             .border_1()
             .border_color(cx.theme().border)
             .rounded_md()
+            .cursor_text() // Enable text selection
             .child(
-                // Header row: timestamp, level badge, target
+                // Header row: timestamp, level badge, target, copy button
                 h_flex()
                     .gap_2()
                     .items_center()
+                    .justify_between()
                     .mb_2()
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format_timestamp(self.entry.timestamp)),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format_timestamp(self.entry.timestamp)),
+                            )
+                            .child(
+                                div().px_2().py_1().rounded_sm().bg(level_color).child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(cx.theme().background)
+                                        .child(level_text),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(self.entry.target.clone()),
+                            ),
                     )
                     .child(
-                        div().px_2().py_1().rounded_sm().bg(level_color).child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(cx.theme().background)
-                                .child(level_text),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.entry.target.clone()),
+                        Button::new(ElementId::Name(format!("copy-error-{}", self.id).into()))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(CustomIcon::Copy))
+                            .tooltip("Copy error")
+                            .on_click({
+                                let text = error_text.clone();
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                }
+                            }),
                     ),
             )
             .child(
