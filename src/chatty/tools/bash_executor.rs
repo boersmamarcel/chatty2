@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -480,6 +479,7 @@ impl BashExecutor {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     fn create_test_executor(
         enabled: bool,
@@ -1063,7 +1063,7 @@ mod tests {
         let result = executor.execute(input).await;
 
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let _output = result.unwrap();
 
         // Network should be blocked (or curl not available)
         // On macOS with network isolation, we expect network operations to fail
