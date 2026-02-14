@@ -95,3 +95,153 @@ where
         let _ = self.sender.try_send(entry);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Helper: create a subscriber with ErrorCollectorLayer and return the receiver
+    fn setup_collector() -> (impl tracing::Subscriber, Receiver<ErrorEntry>) {
+        let (layer, rx) = ErrorCollectorLayer::new();
+        let subscriber = tracing_subscriber::registry().with(layer);
+        (subscriber, rx)
+    }
+
+    #[test]
+    fn test_captures_error_events() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("something failed");
+        });
+
+        let entry = rx.try_recv().expect("should receive an error entry");
+        assert_eq!(entry.level, ErrorLevel::Error);
+        assert!(
+            entry.message.contains("something failed"),
+            "message was: {}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn test_captures_warn_events() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("careful now");
+        });
+
+        let entry = rx.try_recv().expect("should receive a warning entry");
+        assert_eq!(entry.level, ErrorLevel::Warning);
+        assert!(
+            entry.message.contains("careful now"),
+            "message was: {}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn test_ignores_info_events() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("just info");
+        });
+
+        assert!(rx.try_recv().is_err(), "should not receive any entry");
+    }
+
+    #[test]
+    fn test_ignores_debug_events() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("debug stuff");
+        });
+
+        assert!(rx.try_recv().is_err(), "should not receive any entry");
+    }
+
+    #[test]
+    fn test_ignores_trace_events() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!("trace stuff");
+        });
+
+        assert!(rx.try_recv().is_err(), "should not receive any entry");
+    }
+
+    #[test]
+    fn test_captures_target() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "my::module", "targeted error");
+        });
+
+        let entry = rx.try_recv().expect("should receive entry");
+        assert_eq!(entry.target, "my::module");
+    }
+
+    #[test]
+    fn test_captures_extra_fields() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(user_id = 42, action = "login", "auth failed");
+        });
+
+        let entry = rx.try_recv().expect("should receive entry");
+        assert!(entry.fields.contains_key("user_id"));
+        assert!(entry.fields.contains_key("action"));
+    }
+
+    #[test]
+    fn test_multiple_events_in_order() {
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("first error");
+            tracing::warn!("first warning");
+            tracing::error!("second error");
+        });
+
+        let e1 = rx.try_recv().expect("first");
+        let e2 = rx.try_recv().expect("second");
+        let e3 = rx.try_recv().expect("third");
+
+        assert_eq!(e1.level, ErrorLevel::Error);
+        assert!(e1.message.contains("first error"));
+        assert_eq!(e2.level, ErrorLevel::Warning);
+        assert!(e2.message.contains("first warning"));
+        assert_eq!(e3.level, ErrorLevel::Error);
+        assert!(e3.message.contains("second error"));
+    }
+
+    #[test]
+    fn test_timestamp_is_recent() {
+        let before = SystemTime::now();
+        let (subscriber, rx) = setup_collector();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("timed event");
+        });
+        let after = SystemTime::now();
+
+        let entry = rx.try_recv().expect("should receive entry");
+        assert!(entry.timestamp >= before);
+        assert!(entry.timestamp <= after);
+    }
+
+    #[test]
+    fn test_channel_bounded_does_not_panic() {
+        // Create a layer with a small channel and overflow it
+        let (tx, _rx) = sync_channel(2);
+        let layer = ErrorCollectorLayer { sender: tx };
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        // Send more events than the channel can hold; should not panic
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..10 {
+                tracing::error!("overflow event {}", i);
+            }
+        });
+
+        // If we get here, no panic occurred - the try_send gracefully drops
+    }
+}

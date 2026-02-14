@@ -15,14 +15,9 @@ pub enum ErrorNotifierEvent {
 
 impl EventEmitter<ErrorNotifierEvent> for ErrorNotifier {}
 
+#[derive(Default)]
 pub struct GlobalErrorNotifier {
     pub entity: Option<WeakEntity<ErrorNotifier>>,
 }
 
 impl Global for GlobalErrorNotifier {}
-
-impl Default for GlobalErrorNotifier {
-    fn default() -> Self {
-        Self { entity: None }
-    }
-}
