@@ -1,5 +1,5 @@
 use crate::assets::CustomIcon;
-use crate::chatty::models::error_store::{ErrorEntry, ErrorLevel, ErrorStore};
+use crate::chatty::models::error_store::{ErrorEntry, ErrorLevel, ErrorStore, format_timestamp};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
@@ -9,20 +9,6 @@ use gpui_component::{
     scroll::ScrollableElement,
     v_flex,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn format_timestamp(time: SystemTime) -> String {
-    match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => {
-            let secs = duration.as_secs();
-            let hours = (secs / 3600) % 24;
-            let minutes = (secs / 60) % 60;
-            let seconds = secs % 60;
-            format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-        }
-        Err(_) => "Unknown time".to_string(),
-    }
-}
 
 pub struct ErrorLogDialog;
 
