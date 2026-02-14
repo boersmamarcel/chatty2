@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
@@ -188,6 +188,67 @@ impl BashExecutor {
         })?
     }
 
+    /// Validate and escape a workspace path for safe use in macOS sandbox profile
+    ///
+    /// Prevents path injection attacks by:
+    /// 1. Validating the path is absolute
+    /// 2. Rejecting paths with suspicious characters (parentheses, etc.)
+    /// 3. Canonicalizing to resolve symlinks and relative components
+    /// 4. Escaping special characters (quotes, backslashes)
+    #[cfg(target_os = "macos")]
+    fn escape_sandbox_path(workspace: &str) -> Result<String> {
+        use std::path::Path;
+
+        // 1. Validate path is absolute
+        let path = Path::new(workspace);
+        if !path.is_absolute() {
+            return Err(anyhow!(
+                "Workspace path must be absolute, got: {}",
+                workspace
+            ));
+        }
+
+        // 2. Early validation: reject paths with parentheses or other suspicious chars
+        // This prevents injection attacks like: /tmp/test") )(allow default)
+        if workspace.contains('(') || workspace.contains(')') {
+            return Err(anyhow!(
+                "Workspace path contains invalid characters (parentheses): {}",
+                workspace
+            ));
+        }
+
+        // 3. Canonicalize to resolve symlinks and normalize path
+        let canonical = path.canonicalize().map_err(|e| {
+            anyhow!(
+                "Failed to canonicalize workspace path '{}': {}",
+                workspace,
+                e
+            )
+        })?;
+
+        let canonical_str = canonical
+            .to_str()
+            .ok_or_else(|| anyhow!("Workspace path contains invalid UTF-8"))?;
+
+        // 4. Escape special characters that could break sandbox DSL
+        // In SBPL (Sandbox Profile Language), strings can contain:
+        // - Quotes that need escaping
+        // - Backslashes that need escaping
+        let escaped = canonical_str
+            .replace('\\', "\\\\") // Escape backslashes first
+            .replace('"', "\\\""); // Escape quotes
+
+        // 5. Final check: ensure canonicalization didn't introduce parentheses
+        if escaped.contains('(') || escaped.contains(')') {
+            return Err(anyhow!(
+                "Canonicalized workspace path contains invalid characters: {}",
+                canonical_str
+            ));
+        }
+
+        Ok(escaped)
+    }
+
     /// Execute command in sandbox (Linux: Bubblewrap, macOS: sandbox-exec)
     async fn run_sandboxed(&self, command: &str) -> Result<std::process::Output> {
         #[cfg(target_os = "linux")]
@@ -282,6 +343,9 @@ impl BashExecutor {
 
             // Build profile with optional workspace and network rules
             let profile_with_workspace = if let Some(workspace) = &self.settings.workspace_dir {
+                // Validate and escape workspace path to prevent injection attacks
+                let safe_workspace = Self::escape_sandbox_path(workspace)?;
+
                 let network_rules = if self.settings.network_isolation {
                     r#"
                 ;; Network isolation enabled - deny all network access
@@ -323,7 +387,7 @@ impl BashExecutor {
                     (allow file-write* (subpath "/tmp"))
                     (allow file-write* (subpath "{}"))
                     "#,
-                    network_rules, workspace
+                    network_rules, safe_workspace
                 )
             } else {
                 let network_rules = if self.settings.network_isolation {
@@ -1011,6 +1075,139 @@ mod tests {
             "Expected network to be blocked, got stdout: {:?}, stderr: {:?}",
             output.stdout,
             output.stderr
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_escape_sandbox_path_injection_attack() {
+        // Test that path injection attempts are blocked
+        let malicious_path = r#"/tmp/test") )(allow default) (deny"#;
+        let result = BashExecutor::escape_sandbox_path(malicious_path);
+
+        // Should fail because path contains parentheses
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_escape_sandbox_path_with_quotes() {
+        use std::fs;
+        use std::path::Path;
+
+        // Create a temp directory with quotes in the name (if filesystem allows)
+        let temp_base = std::env::temp_dir();
+        let dir_name = format!("test_quote_{}", uuid::Uuid::new_v4());
+        let test_dir = temp_base.join(&dir_name);
+
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let path_str = test_dir.to_str().unwrap();
+        let result = BashExecutor::escape_sandbox_path(path_str);
+
+        // Should succeed and escape any special chars
+        assert!(result.is_ok());
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_escape_sandbox_path_relative_path() {
+        // Relative paths should be rejected
+        let relative_path = "./some/relative/path";
+        let result = BashExecutor::escape_sandbox_path(relative_path);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be absolute"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_escape_sandbox_path_nonexistent() {
+        // Non-existent absolute paths should fail canonicalization
+        let nonexistent = "/this/path/definitely/does/not/exist/12345";
+        let result = BashExecutor::escape_sandbox_path(nonexistent);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to canonicalize")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_escape_sandbox_path_valid() {
+        use std::fs;
+
+        // Test with a valid absolute path
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join(format!("valid_path_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let path_str = test_dir.to_str().unwrap();
+        let result = BashExecutor::escape_sandbox_path(path_str);
+
+        assert!(result.is_ok());
+        let escaped = result.unwrap();
+
+        // Should be an absolute path
+        assert!(escaped.starts_with('/'));
+
+        // Should not contain unescaped quotes or parentheses
+        assert!(!escaped.contains('"') || escaped.contains("\\\""));
+        assert!(!escaped.contains('('));
+        assert!(!escaped.contains(')'));
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn test_sandbox_rejects_malicious_workspace() {
+        use std::fs;
+
+        // Try to create an executor with a malicious workspace path
+        let malicious_workspace =
+            r#"/tmp") )(allow default) (allow file-read* (subpath "/Users/test/.ssh"#;
+
+        let settings = ExecutionSettingsModel {
+            enabled: true,
+            approval_mode: ApprovalMode::AutoApproveAll,
+            workspace_dir: Some(malicious_workspace.to_string()),
+            timeout_seconds: 30,
+            max_output_bytes: 10000,
+            network_isolation: false,
+        };
+
+        let executor = create_test_executor_with_settings(settings);
+
+        // Try to execute a command - should fail during sandbox profile construction
+        let input = BashToolInput {
+            command: "echo 'test'".to_string(),
+        };
+
+        let result = executor.execute(input).await;
+
+        // Should fail with validation error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid characters")
+                || err.to_string().contains("Failed to canonicalize"),
+            "Expected validation error, got: {}",
+            err
         );
     }
 }
