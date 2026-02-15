@@ -1,10 +1,9 @@
 name: Dependency Update Check
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
-  schedule:
-    # Run weekly on Mondays at 9:00 AM UTC
-    - cron: '0 9 * * 1'
 
 jobs:
   check-dependencies:
