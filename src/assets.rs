@@ -38,6 +38,7 @@ pub enum CustomIcon {
     Copy,          // copy.svg - Copy button
     TriangleAlert, // triangle-alert.svg - Warning indicator
     CircleX,       // circle-x.svg - Error indicator
+    McpServer,     // mcp-server.svg - MCP indicator
 }
 
 impl IconNamed for CustomIcon {
@@ -52,6 +53,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::Copy => "icons/copy.svg",
             CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
             CustomIcon::CircleX => "icons/circle-x.svg",
+            CustomIcon::McpServer => "icons/mcp-server.svg",
         }
         .into()
     }
