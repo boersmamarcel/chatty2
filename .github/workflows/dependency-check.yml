@@ -60,14 +60,17 @@ jobs:
                - RECOMMEND: Major/minor with significant value
                - SKIP: Patch updates unless critical bugs
                - AVOID: Very recent releases (< 1 week) unless security
-            6. Create GitHub issues for recommendations:
+            6. Check for existing issues FIRST (before creating any new issues):
+               - Run: gh issue list --label "dependency-update" --state open
+               - Parse the output to see if an issue already exists for each dependency
+               - SKIP creating a new issue if one already exists for that specific crate
+            7. Create GitHub issues ONLY for dependencies without existing issues:
                - Title: "Dependency Update: {crate} {current} → {latest}"
                - Include: version change, type (major/minor/patch), reasoning, changelog link
                - Labels: "dependency-update", "priority:{critical|high|medium|low}", "automated"
                - Use: gh issue create --title "..." --body "..." --label "..."
 
-            IMPORTANT: Before creating issues, check for existing open issues about the same dependency
-            to avoid duplicates. Use: gh issue list --label "dependency-update" --state open
+            CRITICAL: Always check gh issue list first to avoid creating duplicate issues!
 
             ## Decision Criteria
             - Security fixes: Always upgrade (critical priority)
@@ -85,4 +88,5 @@ jobs:
             After creating issues, provide a summary of what you found and what actions you took.
 
           # Allow necessary tools for dependency checking
-          claude_args: '--allowed-tools "Read,WebFetch,Bash(jq *),Bash(gh issue *)"'
+          # Note: Using "Bash(gh *)" to allow all gh commands including issue create with multi-line bodies
+          claude_args: '--allowed-tools "Read,WebFetch,Bash(jq *),Bash(gh *)"'
