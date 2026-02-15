@@ -23,6 +23,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--allowed-tools "Read,WebFetch,WebSearch,Bash(cargo *),Bash(jq *),Bash(gh issue *)"'
           prompt: |
             # Dependency Update Check for Chatty Release
 
@@ -87,7 +88,6 @@ jobs:
 
             After creating issues, provide a summary of what you found and what actions you took.
 
-          # Allow all tools for this automated workflow
-          # Note: This is safe because the workflow runs in an isolated environment
-          # with limited permissions (only issues:write, contents:read)
-          # No claude_args restrictions - allows Read, WebFetch, WebSearch, Bash, etc.
+          # Tool restrictions for security - limits Claude to read-only operations,
+          # web fetching, and GitHub CLI issue management. The workflow runs in an
+          # isolated environment with limited permissions (only issues:write, contents:read).
