@@ -5,8 +5,6 @@ on:
     tags:
       - "v*" # Trigger on version tags like v0.1.0, v1.0.0, etc.
       - "[0-9]*" # Also trigger on tags without v prefix like 0.1.0, 1.0.0, etc.
-  release:
-    types: [published] # Trigger when a release is published via GitHub UI
 
 env:
   CARGO_TERM_COLOR: always
