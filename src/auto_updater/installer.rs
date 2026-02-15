@@ -80,9 +80,14 @@ async fn install_release_linux(appimage_path: &Path) -> Result<bool, InstallErro
         ));
     }
 
-    // Determine destination: current executable location
-    let current_exe = std::env::current_exe()?;
-    let dest_path = current_exe;
+    // Determine destination path:
+    // - When running as an AppImage, use the APPIMAGE env var (points to the actual .AppImage file)
+    // - Otherwise, fall back to current_exe for non-AppImage installs
+    let dest_path = if let Ok(appimage_env) = std::env::var("APPIMAGE") {
+        std::path::PathBuf::from(appimage_env)
+    } else {
+        std::env::current_exe()?
+    };
 
     info!(source = ?appimage_path, dest = ?dest_path, "Installing AppImage");
 

@@ -266,9 +266,17 @@ fn set_app_menus(cx: &mut App) {
 }
 
 fn main() {
-    // Initialize structured logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    // Initialize error collector layer
+    let (error_layer, error_receiver) = chatty::services::ErrorCollectorLayer::new();
+
+    // Initialize structured logging with custom error collector layer
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(error_layer)
+        .with(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
         )
@@ -348,6 +356,51 @@ fn main() {
             entity: Some(models_notifier.downgrade()),
         });
 
+        // Initialize error store and notifier
+        cx.set_global(chatty::models::ErrorStore::new(100)); // Max 100 entries
+
+        let error_notifier = cx.new(|_cx| chatty::models::ErrorNotifier::new());
+        cx.set_global(chatty::models::GlobalErrorNotifier {
+            entity: Some(error_notifier.downgrade()),
+        });
+
+        // Spawn background thread to consume errors from tracing layer
+        // Bridge sync channel to tokio channel
+        let (error_tx, mut error_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        std::thread::spawn(move || {
+            while let Ok(entry) = error_receiver.recv() {
+                let _ = error_tx.send(entry);
+            }
+        });
+
+        // Spawn async task to process errors on main thread
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            while let Some(entry) = error_rx.recv().await {
+                let _ = cx.update(|cx| {
+                    // Add to global store
+                    cx.update_global::<chatty::models::ErrorStore, _>(|store, _cx| {
+                        store.add_entry(entry);
+                    });
+
+                    // Notify UI
+                    if let Some(weak_notifier) = cx
+                        .try_global::<chatty::models::GlobalErrorNotifier>()
+                        .and_then(|g| g.entity.clone())
+                        && let Some(notifier) = weak_notifier.upgrade()
+                    {
+                        notifier.update(cx, |_notifier, cx| {
+                            cx.emit(chatty::models::ErrorNotifierEvent::NewError);
+                        });
+                    }
+
+                    // Refresh windows to update badge count
+                    cx.refresh_windows();
+                });
+            }
+        })
+        .detach();
+
         // Initialize global settings window state
         cx.set_global(settings::controllers::GlobalSettingsWindow::default());
 
@@ -357,6 +410,10 @@ fn main() {
         // Initialize auto-updater with current version from Cargo.toml
         let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
         cx.set_global(updater.clone());
+
+        // Check if a previous update installation failed (macOS only)
+        updater.check_previous_update_status(cx);
+
         updater.start_polling(cx);
         info!("Auto-updater initialized and polling started");
 

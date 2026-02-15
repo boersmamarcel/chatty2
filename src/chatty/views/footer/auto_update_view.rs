@@ -77,7 +77,7 @@ impl RenderOnce for AutoUpdateView {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(Icon::new(icon).size(px(16.0)))
+                    .child(Icon::new(icon).size(px(12.0)))
                     .child(
                         div()
                             .text_xs()

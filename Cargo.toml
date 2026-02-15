@@ -1,12 +1,12 @@
 [package]
 name = "chatty"
-version = "0.1.12"
+version = "0.1.18"
 edition = "2024"
 
 [dependencies]
 gpui = "0.2.2"
-gpui-component = "0.5.0"
-gpui-component-assets = "0.5.0"
+gpui-component = "0.5.1"
+gpui-component-assets = "0.5.1"
 rig-core = "0.30.0"
 rmcp = { version = "0.13", features = ["client", "macros", "transport-child-process"] }
 nix = { version = "0.29", features = ["signal"] }
@@ -14,7 +14,7 @@ nix = { version = "0.29", features = ["signal"] }
 # Persistence layer dependencies
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "fs", "macros"] }
+tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "fs", "macros"] }
 dirs = "5.0"
 lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
@@ -25,7 +25,7 @@ anyhow = "1.0"
 regex = "1.10"
 base64 = "0.22"
 async-stream = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"] }
 glob = "0.3"
 similar = "2.2"
 
@@ -49,14 +49,14 @@ azure_core = "0.20"
 rust-embed = "8.0"
 
 # pdf and image upload
-pdfium-render = "0.8"
+pdfium-render = "0.8.37"
 image = "0.25"
 
 # Math rendering with Typst
-typst = "0.14"
-typst-svg = "0.14"
+typst = "0.14.2"
+typst-svg = "0.14.2"
 mitex = "0.2"
-typst-assets = { version = "0.14", features = ["fonts"] }
+typst-assets = { version = "0.14.2", features = ["fonts"] }
 comemo = "0.4"
 
 # Syntax highlighting
@@ -70,7 +70,7 @@ nix = { version = "0.29", features = ["signal"] }
 # Windows icon embedding
 winres = "0.1"
 # Pdfium library download
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13.2", features = ["blocking", "rustls"] }
 flate2 = "1.0"
 tar = "0.4"
 

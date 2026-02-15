@@ -5,6 +5,7 @@ pub mod chat_input;
 pub mod chat_view;
 pub mod code_block_component;
 pub mod conversation_item;
+pub mod error_log_dialog;
 pub mod footer;
 pub mod line_splitter;
 pub mod math_parser;
@@ -17,5 +18,6 @@ pub mod titlebar;
 pub mod trace_components;
 
 pub use chat_view::ChatView;
+pub use error_log_dialog::ErrorLogDialog;
 pub use sidebar_view::SidebarView;
 pub use titlebar::AppTitleBar;
