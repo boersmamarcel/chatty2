@@ -298,6 +298,47 @@ impl AutoUpdater {
         }
     }
 
+    /// Check if a previous update installation succeeded or failed
+    ///
+    /// On macOS, this reads the update log file to detect installation failures
+    /// that occurred after the app quit. If errors are found, sets the status
+    /// to Error so the user can see diagnostic information.
+    ///
+    /// Should be called during app initialization on macOS.
+    pub fn check_previous_update_status(&self, cx: &mut App) {
+        #[cfg(target_os = "macos")]
+        {
+            use std::path::PathBuf;
+
+            let log_path = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join("Library/Logs/chatty_update.log");
+
+            if log_path.exists() {
+                // Read last few lines to check for success/failure
+                if let Ok(content) = std::fs::read_to_string(&log_path) {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let last_10_lines = lines.iter().rev().take(10).rev().collect::<Vec<_>>();
+
+                    for line in last_10_lines {
+                        if line.contains("ERROR:") {
+                            warn!(
+                                log_file = ?log_path,
+                                "Previous update installation failed - check log file"
+                            );
+                            cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                                updater.status = AutoUpdateStatus::Error(format!(
+                                    "Previous update installation failed. Check {} for details.",
+                                    log_path.display()
+                                ));
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Start the polling loop for checking updates
     pub fn start_polling(&self, cx: &mut App) {
         info!(
@@ -476,7 +517,8 @@ impl AutoUpdater {
                         cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                             updater.status = AutoUpdateStatus::Error(
                                 "Auto-updates are only available when running from a packaged .app bundle. \
-                                 Build with ./scripts/package-macos.sh to test updates."
+                                 Build with ./scripts/package-macos.sh to test updates. \
+                                 Check ~/Library/Logs/chatty_update.log for details."
                                     .to_string(),
                             );
                         });
@@ -485,7 +527,8 @@ impl AutoUpdater {
                         cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                             updater.status = AutoUpdateStatus::Error(
                                 "Could not find app bundle path for update installation. \
-                                 This may occur when running outside of a packaged .app bundle."
+                                 This may occur when running outside of a packaged .app bundle. \
+                                 Check ~/Library/Logs/chatty_update.log for details."
                                     .to_string(),
                             );
                         });
@@ -890,12 +933,48 @@ set -e
 
 DMG_PATH="{dmg}"
 APP_BUNDLE="{bundle}"
+LOG_FILE="$HOME/Library/Logs/chatty_update.log"
 
-# Wait for the app to fully exit
-sleep 2
+# Logging function
+log() {{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}}
+
+log "=== Chatty Update Installation Started ==="
+log "DMG: $DMG_PATH"
+log "Target: $APP_BUNDLE"
+
+# Wait for the app to fully exit by checking for running processes
+log "Waiting for app to exit..."
+APP_NAME="Chatty"
+MAX_WAIT=10
+WAIT_COUNT=0
+
+while pgrep -x "$APP_NAME" > /dev/null 2>&1; do
+    if [ $WAIT_COUNT -ge $MAX_WAIT ]; then
+        log "WARNING: App still running after $MAX_WAIT seconds, proceeding anyway"
+        break
+    fi
+    sleep 1
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+    log "Waiting for $APP_NAME to exit... ($WAIT_COUNT/$MAX_WAIT)"
+done
+
+log "App has exited, proceeding with installation"
+sleep 1
 
 # Mount the DMG and capture plist output
-MOUNT_OUTPUT=$(hdiutil attach -nobrowse -plist "$DMG_PATH" 2>/dev/null)
+log "Mounting DMG..."
+MOUNT_OUTPUT=$(hdiutil attach -nobrowse -plist "$DMG_PATH" 2>&1)
+HDIUTIL_EXIT=$?
+
+if [ $HDIUTIL_EXIT -ne 0 ]; then
+    log "ERROR: hdiutil failed with exit code $HDIUTIL_EXIT"
+    log "Output: $MOUNT_OUTPUT"
+    exit 1
+fi
+
+log "DMG mounted successfully"
 
 # Extract mount point from plist output
 MOUNT_POINT=$(echo "$MOUNT_OUTPUT" \
@@ -906,29 +985,142 @@ MOUNT_POINT=$(echo "$MOUNT_OUTPUT" \
 
 # Fallback: scan for /Volumes/ path if plist parse failed
 if [ -z "$MOUNT_POINT" ]; then
+    log "Primary mount point extraction failed, trying fallback..."
     MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep -o '/Volumes/[^<"]*' | head -1 | tr -d '[:space:]')
 fi
 
 if [ -z "$MOUNT_POINT" ]; then
+    log "ERROR: Could not extract mount point from hdiutil output"
+    log "hdiutil output: $MOUNT_OUTPUT"
+    exit 1
+fi
+
+log "Mount point: $MOUNT_POINT"
+
+# Verify mount point exists
+if [ ! -d "$MOUNT_POINT" ]; then
+    log "ERROR: Mount point does not exist: $MOUNT_POINT"
     exit 1
 fi
 
 # Find the .app bundle inside the mounted volume
+log "Searching for .app bundle in $MOUNT_POINT..."
 APP_IN_DMG=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" | head -1)
 
 if [ -z "$APP_IN_DMG" ]; then
-    hdiutil detach -force "$MOUNT_POINT" 2>/dev/null || true
+    log "ERROR: No .app bundle found in DMG"
+    log "DMG contents:"
+    ls -la "$MOUNT_POINT" | tee -a "$LOG_FILE"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+log "Found app bundle: $APP_IN_DMG"
+
+# Verify target bundle exists and is writable
+if [ ! -d "$APP_BUNDLE" ]; then
+    log "ERROR: Target app bundle does not exist: $APP_BUNDLE"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+if [ ! -w "$APP_BUNDLE" ]; then
+    log "ERROR: Target app bundle is not writable: $APP_BUNDLE"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
     exit 1
 fi
 
 # Replace the current installation with the new bundle
-rsync -a --delete "$APP_IN_DMG/" "$APP_BUNDLE/"
+log "Replacing app bundle with rsync..."
+if ! rsync -a --delete "$APP_IN_DMG/" "$APP_BUNDLE/" 2>&1 | tee -a "$LOG_FILE"; then
+    log "ERROR: rsync failed"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+log "App bundle replaced successfully"
+
+# Clear quarantine attributes that might prevent launch (critical for self-signed/adhoc apps)
+log "Clearing quarantine attributes..."
+xattr -cr "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "No quarantine attributes to clear"
+
+# For self-signed/adhoc signed apps, we need to re-sign the bundle to avoid Gatekeeper issues
+log "Checking code signature..."
+SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)
+log "Current signature type: $SIGNATURE"
+
+if [ "$SIGNATURE" = "adhoc" ] || [ -z "$SIGNATURE" ]; then
+    log "App is adhoc/unsigned, re-signing to prevent Gatekeeper issues..."
+    # Remove existing signature and re-sign with adhoc signature
+    # This creates a fresh signature that macOS Gatekeeper will accept for self-updates
+    codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Re-signing failed"
+fi
+
+# Reset Launch Services cache for this app to ensure macOS sees the new version
+log "Resetting Launch Services cache..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Failed to reset Launch Services cache"
 
 # Unmount
-hdiutil detach -force "$MOUNT_POINT" 2>/dev/null || true
+log "Unmounting DMG..."
+if ! hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE"; then
+    log "WARNING: Failed to unmount DMG (continuing anyway)"
+fi
 
 # Relaunch the updated app
-open "$APP_BUNDLE"
+# We try two methods: direct binary execution (bypasses Gatekeeper) and then fall back to 'open'
+log "Relaunching app..."
+
+# Method 1: Direct execution of the binary inside the app bundle
+# This bypasses Gatekeeper for self-signed/adhoc apps
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+if [ -x "$APP_BINARY" ]; then
+    log "Attempting direct binary launch: $APP_BINARY"
+    nohup "$APP_BINARY" > /dev/null 2>&1 &
+    LAUNCH_METHOD="direct"
+else
+    log "Binary not found at $APP_BINARY, falling back to 'open' command"
+    OPEN_OUTPUT=$(open -n "$APP_BUNDLE" 2>&1)
+    OPEN_EXIT=$?
+
+    if [ $OPEN_EXIT -ne 0 ]; then
+        log "ERROR: open command failed with exit code $OPEN_EXIT"
+        log "Output: $OPEN_OUTPUT"
+        exit 1
+    fi
+    LAUNCH_METHOD="open"
+fi
+
+log "Launch command ($LAUNCH_METHOD) succeeded, waiting for app to start..."
+
+# Wait up to 5 seconds for the app to actually start
+MAX_START_WAIT=5
+START_WAIT_COUNT=0
+APP_STARTED=false
+
+while [ $START_WAIT_COUNT -lt $MAX_START_WAIT ]; do
+    sleep 1
+    START_WAIT_COUNT=$((START_WAIT_COUNT + 1))
+
+    if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
+        APP_STARTED=true
+        log "App successfully relaunched via $LAUNCH_METHOD (PID: $(pgrep -x "$APP_NAME"))"
+        break
+    fi
+
+    log "Waiting for app to start... ($START_WAIT_COUNT/$MAX_START_WAIT)"
+done
+
+if [ "$APP_STARTED" = "false" ]; then
+    log "ERROR: App did not start within $MAX_START_WAIT seconds"
+    log "Launch method used: $LAUNCH_METHOD"
+    log "This may indicate a problem with the updated app bundle or Gatekeeper is blocking it"
+    log "Try launching the app manually from /Applications"
+    log "If you see a Gatekeeper dialog, the app needs to be properly code-signed with an Apple Developer certificate"
+    exit 1
+fi
+
+log "=== Update Installation Completed Successfully ==="
 "#,
         dmg = dmg,
         bundle = bundle,
@@ -1212,23 +1404,33 @@ mod tests {
         ];
 
         assert_eq!(
-            find_matching_asset(&assets, "macos", "aarch64").unwrap().name,
+            find_matching_asset(&assets, "macos", "aarch64")
+                .unwrap()
+                .name,
             "chatty-macos-aarch64.dmg"
         );
         assert_eq!(
-            find_matching_asset(&assets, "macos", "x86_64").unwrap().name,
+            find_matching_asset(&assets, "macos", "x86_64")
+                .unwrap()
+                .name,
             "chatty-macos-x86_64.dmg"
         );
         assert_eq!(
-            find_matching_asset(&assets, "linux", "x86_64").unwrap().name,
+            find_matching_asset(&assets, "linux", "x86_64")
+                .unwrap()
+                .name,
             "chatty-linux-x86_64.AppImage"
         );
         assert_eq!(
-            find_matching_asset(&assets, "linux", "aarch64").unwrap().name,
+            find_matching_asset(&assets, "linux", "aarch64")
+                .unwrap()
+                .name,
             "chatty-linux-aarch64.AppImage"
         );
         assert_eq!(
-            find_matching_asset(&assets, "windows", "x86_64").unwrap().name,
+            find_matching_asset(&assets, "windows", "x86_64")
+                .unwrap()
+                .name,
             "chatty-windows-x86_64.exe"
         );
     }
