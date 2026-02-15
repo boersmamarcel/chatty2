@@ -1,3 +1,4 @@
+pub mod execution_settings_controller;
 pub mod general_settings_controller;
 pub mod mcp_controller;
 pub mod models_controller;

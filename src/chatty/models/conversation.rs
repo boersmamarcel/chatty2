@@ -29,12 +29,20 @@ pub struct Conversation {
 
 impl Conversation {
     /// Create a new conversation from model and provider config
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         id: String,
         title: String,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
+        pending_write_approvals: Option<
+            crate::chatty::models::write_approval_store::PendingWriteApprovals,
+        >,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -47,10 +55,16 @@ impl Conversation {
             provider_config.provider_type, url_info, model_config.model_identifier
         );
 
-        let agent =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, mcp_tools)
-                .await
-                .context("Failed to create agent from config")?;
+        let agent = AgentClient::from_model_config_with_tools(
+            model_config,
+            provider_config,
+            mcp_tools,
+            exec_settings,
+            pending_approvals,
+            pending_write_approvals,
+        )
+        .await
+        .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -69,11 +83,19 @@ impl Conversation {
     }
 
     /// Restore a conversation from persisted data
+    #[allow(clippy::too_many_arguments)]
     pub async fn from_data(
         data: ConversationData,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
+        pending_write_approvals: Option<
+            crate::chatty::models::write_approval_store::PendingWriteApprovals,
+        >,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -87,10 +109,16 @@ impl Conversation {
         );
 
         // Reconstruct agent
-        let agent =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, mcp_tools)
-                .await
-                .context("Failed to create agent from config")?;
+        let agent = AgentClient::from_model_config_with_tools(
+            model_config,
+            provider_config,
+            mcp_tools,
+            exec_settings,
+            pending_approvals,
+            pending_write_approvals,
+        )
+        .await
+        .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)

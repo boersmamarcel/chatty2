@@ -4,10 +4,32 @@ use rig::client::CompletionClient;
 use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
+use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::tools::{
+    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool, ListDirectoryTool,
+    ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
+};
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
+
+/// Filesystem read tool set
+type FsReadTools = (
+    ReadFileTool,
+    ReadBinaryTool,
+    ListDirectoryTool,
+    GlobSearchTool,
+);
+
+/// Filesystem write tool set
+type FsWriteTools = (
+    WriteFileTool,
+    CreateDirectoryTool,
+    DeleteFileTool,
+    MoveFileTool,
+    ApplyDiffTool,
+);
 
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
@@ -29,6 +51,96 @@ macro_rules! build_with_mcp_tools {
     }};
 }
 
+/// Build an agent with optional bash, filesystem read, and filesystem write tools,
+/// then optional MCP tools. The list_tools tool is always included.
+///
+/// Due to rig's type-level tool chaining, each combination of tool presence/absence
+/// produces a different builder type. This macro enumerates all 8 combinations
+/// (bash × fs_read × fs_write) explicitly.
+macro_rules! build_agent_with_tools {
+    ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $list_tools:expr, $mcp_tools:expr) => {{
+        match (&$bash_tool, &$fs_read, &$fs_write) {
+            (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(bash.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (Some(bash), Some((rf, rb, ld, gs)), None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(bash.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (Some(bash), None, Some((wf, cd, df, mf, ad))) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(bash.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (Some(bash), None, None) => {
+                let b = $builder.tool($list_tools.clone()).tool(bash.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, Some((rf, rb, ld, gs)), None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, None, Some((wf, cd, df, mf, ad))) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, None, None) => {
+                let b = $builder.tool($list_tools.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+        }
+    }};
+}
+
 /// Enum-based agent wrapper for multi-provider support
 #[derive(Clone)]
 pub enum AgentClient {
@@ -41,14 +153,104 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, bash execution, and filesystem tools
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+        pending_approvals: Option<
+            crate::chatty::models::execution_approval_store::PendingApprovals,
+        >,
+        pending_write_approvals: Option<
+            crate::chatty::models::write_approval_store::PendingWriteApprovals,
+        >,
     ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
+
+        // Create BashTool if execution is enabled
+        let bash_tool = if let (Some(settings), Some(approvals)) =
+            (&exec_settings, &pending_approvals)
+        {
+            if settings.enabled {
+                let executor =
+                    crate::chatty::tools::BashExecutor::new(settings.clone(), approvals.clone());
+                Some(crate::chatty::tools::BashTool::new(std::sync::Arc::new(
+                    executor,
+                )))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Create filesystem tools if a workspace directory is configured
+        let (fs_read_tools, fs_write_tools): (Option<FsReadTools>, Option<FsWriteTools>) =
+            match exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+            {
+                Some(workspace_dir) => match FileSystemService::new(workspace_dir).await {
+                    Ok(service) => {
+                        let service = std::sync::Arc::new(service);
+
+                        // Read tools - check both workspace_dir AND filesystem_read_enabled
+                        let read_tools = if exec_settings
+                            .as_ref()
+                            .map(|s| s.filesystem_read_enabled)
+                            .unwrap_or(false)
+                        {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
+                            Some((
+                                ReadFileTool::new(service.clone()),
+                                ReadBinaryTool::new(service.clone()),
+                                ListDirectoryTool::new(service.clone()),
+                                GlobSearchTool::new(service.clone()),
+                            ))
+                        } else {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem read tools disabled");
+                            None
+                        };
+
+                        // Write tools - check both workspace_dir AND filesystem_write_enabled
+                        let write_tools = if exec_settings
+                            .as_ref()
+                            .map(|s| s.filesystem_write_enabled)
+                            .unwrap_or(false)
+                        {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem write tools enabled");
+                            pending_write_approvals.as_ref().map(|approvals| {
+                                (
+                                    WriteFileTool::new(service.clone(), approvals.clone()),
+                                    CreateDirectoryTool::new(service.clone()),
+                                    DeleteFileTool::new(service.clone(), approvals.clone()),
+                                    MoveFileTool::new(service.clone(), approvals.clone()),
+                                    ApplyDiffTool::new(service.clone(), approvals.clone()),
+                                )
+                            })
+                        } else {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem write tools disabled");
+                            None
+                        };
+
+                        (read_tools, write_tools)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize filesystem tools");
+                        (None, None)
+                    }
+                },
+                None => (None, None),
+            };
+
+        // Create list_tools tool (always available, but shows only actually available tools)
+        let list_tools = ListToolsTool::new_with_config(
+            bash_tool.is_some(),
+            fs_read_tools.is_some(),
+            fs_write_tools.is_some(),
+        );
 
         match &provider_config.provider_type {
             ProviderType::Anthropic => {
@@ -65,7 +267,15 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with all tools
+                let agent = build_agent_with_tools!(
+                    builder,
+                    bash_tool,
+                    fs_read_tools,
+                    fs_write_tools,
+                    list_tools,
+                    mcp_tools
+                );
 
                 Ok(AgentClient::Anthropic(agent))
             }
@@ -83,7 +293,15 @@ impl AgentClient {
                     builder = builder.temperature(model_config.temperature as f64);
                 }
 
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with all tools
+                let agent = build_agent_with_tools!(
+                    builder,
+                    bash_tool,
+                    fs_read_tools,
+                    fs_write_tools,
+                    list_tools,
+                    mcp_tools
+                );
 
                 Ok(AgentClient::OpenAI(agent))
             }
@@ -97,7 +315,15 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with all tools
+                let agent = build_agent_with_tools!(
+                    builder,
+                    bash_tool,
+                    fs_read_tools,
+                    fs_write_tools,
+                    list_tools,
+                    mcp_tools
+                );
 
                 Ok(AgentClient::Gemini(agent))
             }
@@ -115,7 +341,15 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with all tools
+                let agent = build_agent_with_tools!(
+                    builder,
+                    bash_tool,
+                    fs_read_tools,
+                    fs_write_tools,
+                    list_tools,
+                    mcp_tools
+                );
 
                 Ok(AgentClient::Mistral(agent))
             }
@@ -132,7 +366,15 @@ impl AgentClient {
                     .preamble(&model_config.preamble)
                     .temperature(model_config.temperature as f64);
 
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with all tools
+                let agent = build_agent_with_tools!(
+                    builder,
+                    bash_tool,
+                    fs_read_tools,
+                    fs_write_tools,
+                    list_tools,
+                    mcp_tools
+                );
 
                 Ok(AgentClient::Ollama(agent))
             }
@@ -267,7 +509,15 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let agent = build_with_mcp_tools!(builder, mcp_tools);
+                // Build with all tools
+                let agent = build_agent_with_tools!(
+                    builder,
+                    bash_tool,
+                    fs_read_tools,
+                    fs_write_tools,
+                    list_tools,
+                    mcp_tools
+                );
 
                 Ok(AgentClient::AzureOpenAI(agent))
             }

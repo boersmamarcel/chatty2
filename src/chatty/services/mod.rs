@@ -1,7 +1,9 @@
 pub mod error_collector_layer;
+pub mod filesystem_service;
 pub mod llm_service;
 pub mod math_renderer_service;
 pub mod mcp_service;
+pub mod path_validator;
 pub mod pdf_thumbnail;
 pub mod title_generator;
 

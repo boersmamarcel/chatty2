@@ -1,6 +1,6 @@
 [package]
 name = "chatty"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 
 [dependencies]
@@ -26,6 +26,8 @@ regex = "1.10"
 base64 = "0.22"
 async-stream = "0.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"] }
+glob = "0.3"
+similar = "2.2"
 
 # Auto-updater dependencies
 semver = "1.0"

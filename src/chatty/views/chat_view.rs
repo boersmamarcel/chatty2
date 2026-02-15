@@ -13,18 +13,29 @@ use tracing::{debug, info, warn};
 use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
-    SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, TraceItem, UserMessage,
+    ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
+    ToolCallState, TraceItem, UserMessage,
 };
 use super::trace_components::SystemTraceView;
 use crate::settings::models::models_store::ModelsModel;
+use std::time::SystemTime;
 
 /// Main chat view component
+#[derive(Clone)]
+pub struct PendingApprovalInfo {
+    pub id: String,
+    pub command: String,
+    pub is_sandboxed: bool,
+}
+
 pub struct ChatView {
     chat_input_state: Entity<ChatInputState>,
     messages: Vec<DisplayMessage>,
     conversation_id: Option<String>,
     scroll_handle: ScrollHandle,
-    active_tool_calls: HashMap<String, ToolCallBlock>,
+    pending_approval: Option<PendingApprovalInfo>,
+    /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
+    collapsed_tool_calls: HashMap<(usize, usize), bool>,
 }
 
 impl ChatView {
@@ -65,7 +76,8 @@ impl ChatView {
             messages: Vec::new(),
             conversation_id: None,
             scroll_handle,
-            active_tool_calls: HashMap::new(),
+            pending_approval: None,
+            collapsed_tool_calls: HashMap::new(),
         }
     }
 
@@ -121,7 +133,6 @@ impl ChatView {
             is_markdown: true,
             attachments: Vec::new(),
         });
-        self.active_tool_calls.clear();
 
         debug!(
             total_messages = self.messages.len(),
@@ -168,7 +179,7 @@ impl ChatView {
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
                     view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
+                        view.update_trace(trace_clone, cx);
                         cx.notify();
                     });
                 }
@@ -196,17 +207,33 @@ impl ChatView {
     pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
+        // Capture current message content as "text_before" for interleaved rendering
+        let text_before = self
+            .messages
+            .last()
+            .map(|msg| msg.content.clone())
+            .unwrap_or_default();
+
+        debug!(
+            tool_id = %id,
+            tool_name = %name,
+            text_before_len = text_before.len(),
+            text_before_preview = %text_before.chars().take(50).collect::<String>(),
+            "Captured text_before for tool call"
+        );
+
+        let display_name = friendly_tool_name(&name);
         let tool_call = ToolCallBlock {
-            tool_name: name.clone(),
-            display_name: name,
+            id: id.clone(),
+            tool_name: name,
+            display_name,
             input: String::new(),
             output: None,
             output_preview: None,
             state: ToolCallState::Running,
             duration: None,
+            text_before,
         };
-
-        self.active_tool_calls.insert(id, tool_call.clone());
 
         // Update live trace and create/update system_trace_view entity
         if let Some(last) = self.messages.last_mut() {
@@ -226,11 +253,32 @@ impl ChatView {
                     // Create or update the trace view entity for rendering
                     let trace_clone = trace.clone();
                     if last.system_trace_view.is_none() {
-                        last.system_trace_view =
-                            Some(cx.new(|_cx| SystemTraceView::new(trace_clone)));
+                        // Create new SystemTraceView entity
+                        let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+
+                        // Subscribe to its events
+                        let chat_view_entity = cx.entity();
+                        cx.subscribe(
+                            &trace_view,
+                            move |_chat_view,
+                                  _trace_view,
+                                  event: &super::message_types::TraceEvent,
+                                  cx| {
+                                let event_clone = event.clone();
+                                let chat_view = chat_view_entity.clone();
+                                cx.defer(move |cx| {
+                                    chat_view.update(cx, |chat_view, cx| {
+                                        chat_view.handle_trace_event(&event_clone, cx);
+                                    });
+                                });
+                            },
+                        )
+                        .detach();
+
+                        last.system_trace_view = Some(trace_view);
                     } else if let Some(ref view_entity) = last.system_trace_view {
                         view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone);
+                            view.update_trace(trace_clone, cx);
                             cx.notify();
                         });
                     }
@@ -246,41 +294,42 @@ impl ChatView {
         self.scroll_to_bottom();
     }
 
-    /// Helper method to update the active tool call in the live trace
-    /// Reduces nesting from 6 levels to 2
-    fn update_tool_call_trace<F>(&mut self, updater: F) -> bool
+    /// Helper method to update a tool call by ID in the live trace
+    /// This works even after active_tool_index has been cleared
+    fn update_tool_call_by_id<F>(&mut self, tool_id: &str, updater: F) -> bool
     where
         F: FnOnce(&mut ToolCallBlock),
     {
         let last_message = match self.messages.last_mut() {
             Some(msg) => msg,
-            None => return false,
+            None => {
+                warn!("update_tool_call_by_id: No messages found");
+                return false;
+            }
         };
-
-        if !last_message.is_streaming {
-            return false;
-        }
 
         let trace = match last_message.live_trace.as_mut() {
             Some(t) => t,
-            None => return false,
+            None => {
+                warn!("update_tool_call_by_id: No live_trace in message");
+                return false;
+            }
         };
 
-        let active_idx = match trace.active_tool_index {
-            Some(idx) => idx,
-            None => return false,
-        };
-
-        let item = match trace.items.get_mut(active_idx) {
-            Some(i) => i,
-            None => return false,
-        };
-
-        if let super::message_types::TraceItem::ToolCall(tc) = item {
-            updater(tc);
-            return true;
+        // Find the tool call by ID in the items
+        for item in trace.items.iter_mut() {
+            if let super::message_types::TraceItem::ToolCall(tc) = item {
+                if tc.id == tool_id {
+                    updater(tc);
+                    return true;
+                }
+            }
         }
 
+        warn!(
+            "update_tool_call_by_id: Tool call with id={} not found in trace items",
+            tool_id
+        );
         false
     }
 
@@ -291,22 +340,180 @@ impl ChatView {
         arguments: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
-            tool_call.input = arguments.clone();
-        }
-
-        self.update_tool_call_trace(|tc| {
-            tc.input = arguments;
+        // Update tool call input by ID
+        self.update_tool_call_by_id(&id, |tc| {
+            tc.input = arguments.clone();
         });
 
-        // Push updated trace to the view entity
+        // Update trace view - it will emit event if state changes
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref trace) = last.live_trace {
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone, cx);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Handle tool call result event
+    pub fn handle_tool_call_result(&mut self, id: String, result: String, cx: &mut Context<Self>) {
+        debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
+
+        // Check if result indicates a denial or error
+        let is_denied = result.to_lowercase().contains("denied by user")
+            || result.to_lowercase().contains("execution denied");
+
+        // Update trace by ID
+        self.update_tool_call_by_id(&id, |tc| {
+            tc.output = Some(result.clone());
+            tc.state = if is_denied {
+                ToolCallState::Error("Denied by user".to_string())
+            } else {
+                ToolCallState::Success
+            };
+        });
+
+        // Update trace view - it will emit ToolCallStateChanged event automatically
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                trace.clear_active_tool();
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone, cx); // This emits event!
+                    });
+                }
+            }
+        }
+
+        // No need for cx.notify() - event handler calls it
+        // No need for manual auto-expand - event handler does it
+    }
+
+    /// Handle tool call error event
+    pub fn handle_tool_call_error(&mut self, id: String, error: String, cx: &mut Context<Self>) {
+        // Update tool call state by ID
+        self.update_tool_call_by_id(&id, |tc| {
+            tc.state = ToolCallState::Error(error.clone());
+        });
+
+        // Update trace view - it will emit ToolCallStateChanged event automatically
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(ref mut trace) = last.live_trace {
+                trace.clear_active_tool();
+                let trace_clone = trace.clone();
+                if let Some(ref view_entity) = last.system_trace_view {
+                    view_entity.update(cx, |view, cx| {
+                        view.update_trace(trace_clone, cx); // This emits event!
+                    });
+                }
+            }
+        }
+
+        // No need for cx.notify() or manual auto-expand - event handler does it
+    }
+
+    /// Handle events from SystemTraceView
+    fn handle_trace_event(
+        &mut self,
+        event: &super::message_types::TraceEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use super::message_types::TraceEvent;
+
+        match event {
+            TraceEvent::ToolCallStateChanged {
+                tool_id,
+                old_state,
+                new_state,
+            } => {
+                warn!(
+                    "Tool call {} changed: {:?} → {:?}",
+                    tool_id, old_state, new_state
+                );
+
+                // Don't auto-expand - let user expand with Cmd+D (Details button)
+                // This keeps the UI cleaner by not expanding every tool call automatically
+
+                // Notify to trigger re-render
+                cx.notify();
+            }
+            TraceEvent::ToolCallOutputReceived { tool_id, .. } => {
+                warn!("Tool call {} received output", tool_id);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// Auto-expand a tool call by its ID
+    /// Handle approval requested event
+    pub fn handle_approval_requested(
+        &mut self,
+        id: String,
+        command: String,
+        is_sandboxed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        debug!(approval_id = %id, command = %command, sandboxed = is_sandboxed, "UI: handle_approval_requested called");
+
+        // Set pending approval for floating bar
+        self.pending_approval = Some(PendingApprovalInfo {
+            id: id.clone(),
+            command: command.clone(),
+            is_sandboxed,
+        });
+
+        // Create approval block with pending state
+        let approval = ApprovalBlock {
+            id,
+            command,
+            is_sandboxed,
+            state: ApprovalState::Pending,
+            created_at: SystemTime::now(),
+        };
+
+        // Update live trace and create/update system_trace_view entity
         if let Some(last) = self.messages.last_mut() {
             if last.is_streaming {
-                if let Some(ref trace) = last.live_trace {
+                if let Some(ref mut trace) = last.live_trace {
+                    debug!("Adding approval to live_trace");
+                    let index = trace.items.len();
+                    trace.add_approval(approval);
+                    trace.set_active_tool(index);
+
+                    // Create or update the trace view entity for rendering
                     let trace_clone = trace.clone();
-                    if let Some(ref view_entity) = last.system_trace_view {
+                    if last.system_trace_view.is_none() {
+                        // Create new SystemTraceView entity
+                        let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+
+                        // Subscribe to its events
+                        let chat_view_entity = cx.entity();
+                        cx.subscribe(
+                            &trace_view,
+                            move |_chat_view,
+                                  _trace_view,
+                                  event: &super::message_types::TraceEvent,
+                                  cx| {
+                                let event_clone = event.clone();
+                                let chat_view = chat_view_entity.clone();
+                                cx.defer(move |cx| {
+                                    chat_view.update(cx, |chat_view, cx| {
+                                        chat_view.handle_trace_event(&event_clone, cx);
+                                    });
+                                });
+                            },
+                        )
+                        .detach();
+
+                        last.system_trace_view = Some(trace_view);
+                    } else if let Some(ref view_entity) = last.system_trace_view {
                         view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone);
+                            view.update_trace(trace_clone, cx);
                             cx.notify();
                         });
                     }
@@ -315,59 +522,38 @@ impl ChatView {
         }
 
         cx.notify();
+        self.scroll_to_bottom();
     }
 
-    /// Handle tool call result event
-    pub fn handle_tool_call_result(&mut self, id: String, result: String, cx: &mut Context<Self>) {
-        debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
+    /// Handle approval resolved event
+    pub fn handle_approval_resolved(&mut self, id: &str, approved: bool, cx: &mut Context<Self>) {
+        debug!(approval_id = %id, approved = approved, "UI: handle_approval_resolved called");
 
-        if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
-            debug!("Found active tool call, updating result");
-            tool_call.output = Some(result.clone());
-            tool_call.output_preview = Some(result.clone());
-            tool_call.state = ToolCallState::Success;
-        }
-
-        self.update_tool_call_trace(|tc| {
-            tc.output = Some(result);
-            tc.state = ToolCallState::Success;
-        });
-
-        // Clear active tool after successful completion and push to view entity
-        if let Some(last) = self.messages.last_mut() {
-            if let Some(ref mut trace) = last.live_trace {
-                trace.clear_active_tool();
-                let trace_clone = trace.clone();
-                if let Some(ref view_entity) = last.system_trace_view {
-                    view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
-                        cx.notify();
-                    });
-                }
+        // Clear pending approval (hide floating bar)
+        if let Some(ref pending) = self.pending_approval {
+            if pending.id == id {
+                self.pending_approval = None;
             }
         }
 
-        cx.notify();
-    }
-
-    /// Handle tool call error event
-    pub fn handle_tool_call_error(&mut self, id: String, error: String, cx: &mut Context<Self>) {
-        if let Some(tool_call) = self.active_tool_calls.get_mut(&id) {
-            tool_call.state = ToolCallState::Error(error.clone());
-        }
-
-        self.update_tool_call_trace(|tc| {
-            tc.state = ToolCallState::Error(error);
-        });
-
-        // Clear active tool after error and push to view entity
+        // Update approval state in live trace
         if let Some(last) = self.messages.last_mut() {
             if let Some(ref mut trace) = last.live_trace {
+                let new_state = if approved {
+                    ApprovalState::Approved
+                } else {
+                    ApprovalState::Denied
+                };
+                trace.update_approval_state(id, new_state);
+
+                // Clear active tool after resolution
                 trace.clear_active_tool();
+
+                // Push updated trace to view entity
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
                     view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone);
+                        view.update_trace(trace_clone, cx);
                         cx.notify();
                     });
                 }
@@ -563,6 +749,56 @@ impl ChatView {
         self.scroll_handle.set_offset(point(px(0.0), px(-f32::MAX)));
     }
 
+    /// Handle approval decision from floating bar
+    fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
+        if let Some(ref pending) = self.pending_approval {
+            let id = pending.id.clone();
+
+            // Resolve in approval store
+            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
+                use crate::chatty::models::execution_approval_store::ApprovalDecision;
+                store.resolve(&id, if approved {
+                    ApprovalDecision::Approved
+                } else {
+                    ApprovalDecision::Denied
+                });
+            }
+
+            // Immediately clear pending approval to hide the bar
+            self.pending_approval = None;
+
+            // Also update the trace
+            self.handle_approval_resolved(&id, approved, cx);
+        }
+    }
+
+    /// Expand trace and scroll to approval for "View Details" button
+    fn expand_trace_to_approval(&mut self, cx: &mut Context<Self>) {
+        warn!("expand_trace_to_approval called");
+
+        if let Some(last) = self.messages.last_mut() {
+            warn!("Found last message");
+            if let Some(ref view_entity) = last.system_trace_view {
+                warn!("Found system_trace_view, expanding...");
+                view_entity.update(cx, |view, cx| {
+                    warn!("Inside trace view update - setting collapsed to false");
+                    view.set_collapsed(false); // Expand trace
+                    cx.notify();
+                });
+
+                // Scroll to bottom to ensure the expanded trace is visible
+                warn!("Scrolling to bottom");
+                self.scroll_to_bottom();
+
+                warn!("Trace expanded and scrolled");
+            } else {
+                warn!("No system_trace_view found - trace not created yet");
+            }
+        } else {
+            warn!("No last message found");
+        }
+    }
+
     /// Check if we're awaiting a response (streaming message with no content yet)
     fn is_awaiting_response(&self) -> bool {
         self.messages
@@ -628,6 +864,9 @@ impl Render for ChatView {
             }
         }
 
+        let has_pending_approval = self.pending_approval.is_some();
+        let view_entity_for_keys = cx.entity();
+
         div()
             .flex_1()
             .h_full()
@@ -638,6 +877,47 @@ impl Render for ChatView {
             .overflow_hidden()
             // Add top padding on macOS for floating toggle button
             .when(cfg!(target_os = "macos"), |this| this.pt(px(24.)))
+            // Handle keyboard shortcuts for approval bar
+            .when(has_pending_approval, |this| {
+                this.on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    let key = &event.keystroke.key;
+
+                    warn!(
+                        "ChatView key down: key={}, platform={}",
+                        key, modifiers.platform
+                    );
+
+                    // Use platform modifier (Cmd on macOS, Ctrl elsewhere)
+                    if modifiers.platform {
+                        warn!("Platform modifier pressed with key: {}", key);
+                        match key.as_str() {
+                            "y" => {
+                                warn!("Approve shortcut triggered in ChatView");
+                                view_entity_for_keys.update(cx, |view, cx| {
+                                    view.handle_floating_approval(true, cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                            "n" => {
+                                warn!("Deny shortcut triggered in ChatView");
+                                view_entity_for_keys.update(cx, |view, cx| {
+                                    view.handle_floating_approval(false, cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                            "d" => {
+                                warn!("Details shortcut triggered in ChatView");
+                                view_entity_for_keys.update(cx, |view, cx| {
+                                    view.expand_trace_to_approval(cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+            })
             .child(
                 // Message list - scrollable area
                 div()
@@ -657,7 +937,11 @@ impl Render for ChatView {
                                     .flex()
                                     .flex_col()
                                     .gap_4()
-                                    .children(
+                                    .children({
+                                        let collapsed_tool_calls =
+                                            self.collapsed_tool_calls.clone();
+                                        let chat_view_entity = cx.entity();
+
                                         self.messages
                                             .iter()
                                             .enumerate()
@@ -665,8 +949,31 @@ impl Render for ChatView {
                                                 // Skip empty streaming messages (we show skeleton instead)
                                                 !(msg.is_streaming && msg.content.is_empty())
                                             })
-                                            .map(|(index, msg)| render_message(msg, index, cx)),
-                                    )
+                                            .map(|(index, msg)| {
+                                                let entity_clone = chat_view_entity.clone();
+                                                render_message(
+                                                    msg,
+                                                    index,
+                                                    &collapsed_tool_calls,
+                                                    move |msg_idx, tool_idx, cx| {
+                                                        entity_clone.update(cx, |chat_view, cx| {
+                                                            let key = (msg_idx, tool_idx);
+                                                            let current = chat_view
+                                                                .collapsed_tool_calls
+                                                                .get(&key)
+                                                                .copied()
+                                                                .unwrap_or(true);
+                                                            chat_view
+                                                                .collapsed_tool_calls
+                                                                .insert(key, !current);
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                    cx,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
                                     .when(is_awaiting, |this| {
                                         this.child(self.render_loading_skeleton())
                                     }),
@@ -674,6 +981,34 @@ impl Render for ChatView {
                     })
                     .vertical_scrollbar(&self.scroll_handle),
             )
+            // Floating approval bar (if pending)
+            .when_some(self.pending_approval.clone(), |this, pending| {
+                let view_entity = cx.entity();
+                this.child(
+                    div().child(
+                        super::approval_prompt_bar::ApprovalPromptBar::new(
+                            pending.command,
+                            pending.is_sandboxed,
+                        )
+                        .on_approve_deny({
+                            let entity = view_entity.clone();
+                            move |approved, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.handle_floating_approval(approved, cx);
+                                });
+                            }
+                        })
+                        .on_expand({
+                            let entity = view_entity.clone();
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.expand_trace_to_approval(cx);
+                                });
+                            }
+                        }),
+                    ),
+                )
+            })
             .child(
                 // Chat input - fixed at bottom
                 div()
@@ -681,5 +1016,22 @@ impl Render for ChatView {
                     .p_4()
                     .child(ChatInput::new(self.chat_input_state.clone())),
             )
+    }
+}
+
+/// Map raw tool names to user-friendly display names
+fn friendly_tool_name(name: &str) -> String {
+    match name {
+        "read_file" => "Reading file".to_string(),
+        "read_binary" => "Reading binary file".to_string(),
+        "list_directory" => "Listing directory".to_string(),
+        "glob_search" => "Searching files".to_string(),
+        "write_file" => "Writing file".to_string(),
+        "create_directory" => "Creating directory".to_string(),
+        "delete_file" => "Deleting file".to_string(),
+        "move_file" => "Moving file".to_string(),
+        "apply_diff" => "Applying diff".to_string(),
+        "bash" => "Running command".to_string(),
+        other => other.to_string(),
     }
 }

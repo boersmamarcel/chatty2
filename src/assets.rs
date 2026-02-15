@@ -36,9 +36,11 @@ pub enum CustomIcon {
     AlertCircle,   // alert-circle.svg - Errors
     CheckCircle,   // check-circle.svg - Update ready
     Copy,          // copy.svg - Copy button
+    Lock,          // lock.svg - Sandboxed execution
     TriangleAlert, // triangle-alert.svg - Warning indicator
     CircleX,       // circle-x.svg - Error indicator
     McpServer,     // mcp-server.svg - MCP indicator
+    Wrench,        // wrench.svg - Filesystem tools indicator
 }
 
 impl IconNamed for CustomIcon {
@@ -51,9 +53,11 @@ impl IconNamed for CustomIcon {
             CustomIcon::AlertCircle => "icons/alert-circle.svg",
             CustomIcon::CheckCircle => "icons/check-circle.svg",
             CustomIcon::Copy => "icons/copy.svg",
+            CustomIcon::Lock => "icons/lock.svg",
             CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
             CustomIcon::CircleX => "icons/circle-x.svg",
             CustomIcon::McpServer => "icons/mcp-server.svg",
+            CustomIcon::Wrench => "icons/wrench.svg",
         }
         .into()
     }

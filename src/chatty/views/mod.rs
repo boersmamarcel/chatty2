@@ -1,4 +1,5 @@
 pub mod app_view;
+pub mod approval_prompt_bar;
 pub mod attachment_validation;
 pub mod chat_input;
 pub mod chat_view;

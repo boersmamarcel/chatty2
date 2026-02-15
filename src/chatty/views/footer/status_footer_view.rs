@@ -1,5 +1,7 @@
 use crate::auto_updater::{AutoUpdateStatus, AutoUpdater};
-use crate::chatty::views::footer::{AutoUpdateView, ErrorIndicatorView, McpIndicatorView};
+use crate::chatty::views::footer::{
+    AutoUpdateView, ErrorIndicatorView, McpIndicatorView, ToolsIndicatorView,
+};
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 
@@ -60,13 +62,14 @@ impl RenderOnce for StatusFooterView {
                         }
                     })),
             )
-            // Right side: MCP tools
+            // Right side: Tools + MCP
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_1()
+                    .child(ToolsIndicatorView::new())
                     .child(McpIndicatorView::new()),
             )
     }

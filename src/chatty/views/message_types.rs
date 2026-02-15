@@ -45,6 +45,37 @@ pub enum TraceItem {
     Thinking(ThinkingBlock),
     /// A tool call execution
     ToolCall(ToolCallBlock),
+    /// An execution approval prompt
+    ApprovalPrompt(ApprovalBlock),
+}
+
+/// Events emitted by SystemTraceView when trace state changes
+#[derive(Clone, Debug)]
+pub enum TraceEvent {
+    /// Tool call state changed (Running → Success/Error)
+    ToolCallStateChanged {
+        tool_id: String,
+        #[allow(dead_code)]
+        old_state: ToolCallState,
+        #[allow(dead_code)]
+        new_state: ToolCallState,
+    },
+    /// Tool call received input
+    #[allow(dead_code)]
+    ToolCallInputReceived { tool_id: String },
+    /// Tool call received output
+    ToolCallOutputReceived {
+        tool_id: String,
+        #[allow(dead_code)]
+        has_output: bool,
+    },
+    /// Thinking block state changed
+    ThinkingStateChanged {
+        #[allow(dead_code)]
+        old_state: ThinkingState,
+        #[allow(dead_code)]
+        new_state: ThinkingState,
+    },
 }
 
 /// Represents a "thinking" or "reasoning" session
@@ -71,6 +102,9 @@ pub enum ThinkingState {
 /// Represents a single tool call and its execution
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallBlock {
+    /// Unique identifier for this tool call
+    #[serde(default)]
+    pub id: String,
     /// Name of the tool being called (e.g., "google_search", "execute_python")
     pub tool_name: String,
     /// Display-friendly name for the UI
@@ -85,6 +119,9 @@ pub struct ToolCallBlock {
     pub state: ToolCallState,
     /// Execution duration
     pub duration: Option<Duration>,
+    /// Text content that appeared before this tool call (for interleaved rendering)
+    #[serde(default)]
+    pub text_before: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -95,6 +132,31 @@ pub enum ToolCallState {
     Success,
     /// Tool execution failed
     Error(String),
+}
+
+/// Represents an execution approval request
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalBlock {
+    /// Unique ID for tracking this approval
+    pub id: String,
+    /// Command to be executed
+    pub command: String,
+    /// Whether execution will be sandboxed
+    pub is_sandboxed: bool,
+    /// Current approval state
+    pub state: ApprovalState,
+    /// When the approval was requested
+    pub created_at: std::time::SystemTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ApprovalState {
+    /// Awaiting user decision
+    Pending,
+    /// User approved execution
+    Approved,
+    /// User denied execution
+    Denied,
 }
 
 impl ThinkingState {
@@ -133,6 +195,25 @@ impl SystemTrace {
     /// Clear active tool when it completes
     pub fn clear_active_tool(&mut self) {
         self.active_tool_index = None;
+    }
+
+    /// Add an approval prompt to the trace
+    #[allow(dead_code)]
+    pub fn add_approval(&mut self, approval: ApprovalBlock) {
+        self.items.push(TraceItem::ApprovalPrompt(approval));
+    }
+
+    /// Update the state of an approval prompt by ID
+    #[allow(dead_code)]
+    pub fn update_approval_state(&mut self, id: &str, state: ApprovalState) {
+        for item in &mut self.items {
+            if let TraceItem::ApprovalPrompt(approval) = item
+                && approval.id == id
+            {
+                approval.state = state;
+                break;
+            }
+        }
     }
 }
 

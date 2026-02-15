@@ -784,3 +784,11 @@ This pattern:
 - Documents intent without changing behavior
 - Flags technical debt for future refactoring
 - Makes code reviews easier
+
+## Filesystem Tools Configuration
+
+To enable filesystem tools:
+1. Open Settings → Execution
+2. Set workspace directory (absolute path required)
+3. Enable code execution
+4. Configure approval mode
