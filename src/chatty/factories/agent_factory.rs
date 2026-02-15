@@ -174,8 +174,10 @@ impl AgentClient {
             (&exec_settings, &pending_approvals)
         {
             if settings.enabled {
+                let executor =
+                    crate::chatty::tools::BashExecutor::new(settings.clone(), approvals.clone());
                 Some(crate::chatty::tools::BashTool::new(std::sync::Arc::new(
-                    crate::chatty::tools::BashExecutor::new(settings.clone(), approvals.clone()),
+                    executor,
                 )))
             } else {
                 None

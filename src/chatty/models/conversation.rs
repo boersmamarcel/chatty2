@@ -83,6 +83,7 @@ impl Conversation {
     }
 
     /// Restore a conversation from persisted data
+    #[allow(clippy::too_many_arguments)]
     pub async fn from_data(
         data: ConversationData,
         model_config: &ModelConfig,

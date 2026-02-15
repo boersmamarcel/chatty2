@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -140,8 +140,12 @@ impl BashExecutor {
                     pending.insert(request_id.clone(), request);
                 }
 
-                // TODO: Emit event to UI to show approval prompt
-                // This will be handled by the stream processor
+                // Notify via global channel to emit stream event
+                crate::chatty::models::execution_approval_store::notify_approval_via_global(
+                    request_id.clone(),
+                    command.to_string(),
+                    is_sandboxed,
+                );
 
                 // Wait for approval with 5 minute timeout
                 match timeout(Duration::from_secs(300), rx).await {

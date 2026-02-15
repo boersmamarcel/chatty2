@@ -313,6 +313,7 @@ impl ChattyApp {
     /// Restore a single conversation from persisted data
     ///
     /// Looks up the model and provider configs, then calls Conversation::from_data()
+    #[allow(clippy::too_many_arguments)]
     async fn restore_conversation_from_data(
         data: ConversationData,
         models: &ModelsModel,
@@ -1043,7 +1044,25 @@ impl ChattyApp {
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
-                // PHASE 3: Prepare message contents with attachment filtering
+                // PHASE 3: Create approval notification channels
+                let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                // Set up global notifier for BashExecutor to use
+                crate::chatty::models::execution_approval_store::set_global_approval_notifier(approval_tx.clone());
+
+                // Update global store with notifiers for this conversation
+                // IMPORTANT: Use update_global to modify existing store, not set_global which replaces it
+                // Replacing the store would break the pending_requests HashMap connection
+                cx.update_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore, _>(
+                    |store, _cx| {
+                        store.set_notifiers(approval_tx, resolution_tx);
+                    }
+                )
+                .map_err(|e| warn!(error = ?e, "Failed to update approval store with notifiers"))
+                .ok();
+
+                // Prepare message contents with attachment filtering
                 debug!("Calling stream_prompt()");
                 let mut contents = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
@@ -1069,7 +1088,7 @@ impl ChattyApp {
                     }
                 }
                 let (mut stream, user_message) =
-                    stream_prompt(&agent, &history, contents).await?;
+                    stream_prompt(&agent, &history, contents, Some(approval_rx), Some(resolution_rx)).await?;
 
                 // Update history synchronously with user message
                 cx.update_global::<ConversationsStore, _>(|store, _cx| {
@@ -1109,8 +1128,6 @@ impl ChattyApp {
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
                         Ok(StreamChunk::ToolCallStarted { id, name }) => {
-                            let is_bash_tool = name == "bash";
-
                             chat_view
                                 .update(cx, |view, cx| {
                                     if view.conversation_id() == Some(&conv_id) {
@@ -1118,48 +1135,6 @@ impl ChattyApp {
                                     }
                                 })
                                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                            // If this is a bash tool, start polling for approval requests
-                            if is_bash_tool {
-                                let chat_view_for_poll = chat_view.clone();
-                                let conv_id_for_poll = conv_id.clone();
-
-                                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                                    // Poll for approval request with short timeout
-                                    for _ in 0..50 {  // Poll for up to 5 seconds (50 * 100ms)
-                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                                        // Check if approval store has pending requests
-                                        let pending_approval = cx.update(|cx| {
-                                            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
-                                                let pending = store.get_pending_approvals();
-                                                let guard = pending.lock().unwrap();
-
-                                                // Get the most recent request (could improve by tracking which we've seen)
-                                                guard.values().next().map(|req| {
-                                                    (req.id.clone(), req.command.clone(), req.is_sandboxed)
-                                                })
-                                            } else {
-                                                None
-                                            }
-                                        }).ok().flatten();
-
-                                        if let Some((approval_id, command, is_sandboxed)) = pending_approval {
-                                            // Found a pending approval - display it in UI
-                                            let _ = chat_view_for_poll.update(cx, |view, cx| {
-                                                if view.conversation_id() == Some(&conv_id_for_poll) {
-                                                    view.handle_approval_requested(approval_id, command, is_sandboxed, cx);
-                                                }
-                                            });
-
-                                            // Stop polling after finding and displaying approval
-                                            break;
-                                        }
-                                    }
-
-                                    Ok::<_, anyhow::Error>(())
-                                }).detach();
-                            }
                         }
                         Ok(StreamChunk::ToolCallInput { id, arguments }) => {
                             chat_view
