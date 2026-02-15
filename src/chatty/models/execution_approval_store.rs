@@ -18,13 +18,6 @@ pub fn set_global_approval_notifier(tx: mpsc::UnboundedSender<ApprovalNotificati
         .replace(tx);
 }
 
-/// Clear the global approval notifier (call after message completes)
-pub fn clear_global_approval_notifier() {
-    if let Some(guard) = GLOBAL_APPROVAL_NOTIFIER.get() {
-        guard.lock().unwrap().take();
-    }
-}
-
 /// Notify via global channel (called by BashExecutor)
 pub fn notify_approval_via_global(id: String, command: String, is_sandboxed: bool) {
     use tracing::{debug, warn};
@@ -74,15 +67,18 @@ pub struct ApprovalResolution {
 }
 
 /// Request for user approval to execute a command
-#[allow(dead_code)]
 pub struct ExecutionApprovalRequest {
     /// Unique ID for tracking this request
+    #[allow(dead_code)]
     pub id: String,
     /// Command to be executed
+    #[allow(dead_code)]
     pub command: String,
     /// Whether execution will be sandboxed
+    #[allow(dead_code)]
     pub is_sandboxed: bool,
     /// When the request was created (for timeout tracking)
+    #[allow(dead_code)]
     pub created_at: SystemTime,
     /// Channel to send approval decision back to waiting execution
     pub responder: oneshot::Sender<ApprovalDecision>,
@@ -146,25 +142,6 @@ impl ExecutionApprovalStore {
             true
         } else {
             false
-        }
-    }
-
-    /// Get a pending request by ID for display purposes
-    #[allow(dead_code)]
-    pub fn get_pending(&self, id: &str) -> Option<(String, String, bool)> {
-        let pending = self.pending_requests.lock().unwrap();
-        pending
-            .get(id)
-            .map(|req| (req.id.clone(), req.command.clone(), req.is_sandboxed))
-    }
-
-    /// Clear all pending requests (e.g., on shutdown)
-    #[allow(dead_code)]
-    pub fn clear_all(&self) {
-        let mut pending = self.pending_requests.lock().unwrap();
-        for (_id, request) in pending.drain() {
-            // Auto-deny all pending approvals
-            let _ = request.responder.send(ApprovalDecision::Denied);
         }
     }
 }

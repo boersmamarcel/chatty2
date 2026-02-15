@@ -392,13 +392,10 @@ impl BashExecutor {
                     "#,
                     network_rules, safe_workspace
                 )
+            } else if self.settings.network_isolation {
+                format!("{}\n                (deny network*)", profile)
             } else {
-                let network_rules = if self.settings.network_isolation {
-                    format!("{}\n                (deny network*)", profile)
-                } else {
-                    profile.to_string()
-                };
-                network_rules
+                profile.to_string()
             };
 
             let mut cmd = Command::new("sandbox-exec");
@@ -1067,7 +1064,7 @@ mod tests {
         let result = executor.execute(input).await;
 
         assert!(result.is_ok());
-        let _output = result.unwrap();
+        let output = result.unwrap();
 
         // Network should be blocked (or curl not available)
         // On macOS with network isolation, we expect network operations to fail
@@ -1103,7 +1100,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_escape_sandbox_path_with_quotes() {
         use std::fs;
-        use std::path::Path;
 
         // Create a temp directory with quotes in the name (if filesystem allows)
         let temp_base = std::env::temp_dir();
@@ -1180,8 +1176,6 @@ mod tests {
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn test_sandbox_rejects_malicious_workspace() {
-        use std::fs;
-
         // Try to create an executor with a malicious workspace path
         let malicious_workspace =
             r#"/tmp") )(allow default) (allow file-read* (subpath "/Users/test/.ssh"#;
