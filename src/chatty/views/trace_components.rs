@@ -752,8 +752,6 @@ where
                 .bg(panel_bg)
                 .rounded_sm()
                 .text_color(text_color)
-                .max_h(px(300.))
-                .overflow_hidden()
                 .child(formatted_output)
                 .into_any_element(),
         );

@@ -4,7 +4,7 @@ use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
-use gpui_component::{ActiveTheme, Icon, Sizable, button::*, h_flex};
+use gpui_component::{ActiveTheme, Disableable, Icon, Sizable, button::*, h_flex};
 
 // Popover dimensions (same as MCP indicator)
 const TOOLS_POPOVER_MIN_WIDTH: f32 = 200.0;
@@ -61,7 +61,9 @@ impl RenderOnce for ToolsIndicatorView {
                 .content(move |_, _window, cx| {
                     let settings = cx.global::<ExecutionSettingsModel>();
                     let bash_enabled = settings.enabled;
-                    let fs_enabled = settings.workspace_dir.is_some();
+                    let workspace_set = settings.workspace_dir.is_some();
+                    let fs_read_enabled = settings.filesystem_read_enabled;
+                    let fs_write_enabled = settings.filesystem_write_enabled;
 
                     div()
                         .flex()
@@ -83,14 +85,26 @@ impl RenderOnce for ToolsIndicatorView {
                                 .child("Filesystem Tools"),
                         )
                         .child(div().h(px(1.0)).w_full().bg(cx.theme().border).mb_2())
-                        // Bash Execution - toggleable
+                        // Bash Execution - always toggleable
                         .child(render_bash_item(bash_enabled, cx))
-                        // Filesystem Read - status only
-                        .child(render_status_item("Filesystem Read", fs_enabled, cx))
-                        // Filesystem Write - status only
-                        .child(render_status_item("Filesystem Write", fs_enabled, cx))
-                        // Hint when filesystem tools are disabled
-                        .when(!fs_enabled, |this| {
+                        // Filesystem Read - toggleable only if workspace_dir is set
+                        .child(render_filesystem_toggle_item(
+                            "Filesystem Read",
+                            fs_read_enabled,
+                            workspace_set,
+                            "toggle-fs-read",
+                            execution_settings_controller::toggle_filesystem_read,
+                        ))
+                        // Filesystem Write - toggleable only if workspace_dir is set
+                        .child(render_filesystem_toggle_item(
+                            "Filesystem Write",
+                            fs_write_enabled,
+                            workspace_set,
+                            "toggle-fs-write",
+                            execution_settings_controller::toggle_filesystem_write,
+                        ))
+                        // Hint when workspace is not configured
+                        .when(!workspace_set, |this| {
                             this.child(
                                 div()
                                     .h(px(1.0))
@@ -104,9 +118,25 @@ impl RenderOnce for ToolsIndicatorView {
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .px_2()
-                                    .child("ℹ Configure workspace in Settings"),
+                                    .child("ℹ Configure workspace in Settings to enable filesystem tools"),
                             )
                         })
+                        // Always show hint about new conversation requirement
+                        .child(
+                            div()
+                                .h(px(1.0))
+                                .w_full()
+                                .bg(cx.theme().border)
+                                .mt_2()
+                                .mb_2(),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .px_2()
+                                .child("ℹ Start a new conversation after changing tool settings"),
+                        )
                 })
         })
     }
@@ -118,9 +148,11 @@ fn count_enabled_categories(settings: &ExecutionSettingsModel) -> usize {
     if settings.enabled {
         count += 1; // Bash execution
     }
-    if settings.workspace_dir.is_some() {
+    if settings.workspace_dir.is_some() && settings.filesystem_read_enabled {
         count += 1; // Filesystem Read
-        count += 1; // Filesystem Write (both enabled together)
+    }
+    if settings.workspace_dir.is_some() && settings.filesystem_write_enabled {
+        count += 1; // Filesystem Write
     }
     count
 }
@@ -151,9 +183,17 @@ fn render_bash_item(enabled: bool, _cx: &App) -> impl IntoElement {
         )
 }
 
-/// Render a status-only item for filesystem tools
-fn render_status_item(name: &str, enabled: bool, cx: &App) -> impl IntoElement {
+/// Render a toggleable filesystem tool item (disabled if workspace not set)
+fn render_filesystem_toggle_item(
+    name: &str,
+    enabled: bool,
+    workspace_set: bool,
+    button_id: &str,
+    toggle_fn: fn(&mut App),
+) -> impl IntoElement {
     let name = name.to_string();
+    let button_id = SharedString::from(button_id.to_string());
+
     div()
         .flex()
         .flex_row()
@@ -165,17 +205,22 @@ fn render_status_item(name: &str, enabled: bool, cx: &App) -> impl IntoElement {
         .rounded_md()
         .child(div().text_sm().child(name))
         .child(
-            div()
-                .text_xs()
-                .text_color(if enabled {
-                    cx.theme().success
+            Button::new(button_id)
+                .xsmall()
+                .when(workspace_set && enabled, |btn| btn.primary())
+                .when(!workspace_set || !enabled, |btn| btn.ghost())
+                .when(!workspace_set, |btn| btn.disabled(true))
+                .child(if !workspace_set {
+                    "Not Configured"
+                } else if enabled {
+                    "Enabled"
                 } else {
-                    cx.theme().muted_foreground
+                    "Disabled"
                 })
-                .child(if enabled {
-                    "✓ Enabled"
-                } else {
-                    "✗ Disabled"
+                .on_click(move |_event, _window, cx| {
+                    if workspace_set {
+                        toggle_fn(cx);
+                    }
                 }),
         )
 }

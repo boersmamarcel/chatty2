@@ -66,3 +66,53 @@ pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     })
     .detach();
 }
+
+/// Toggle filesystem read tools enabled/disabled and persist to disk
+pub fn toggle_filesystem_read(cx: &mut App) {
+    // 1. Apply update immediately (optimistic update)
+    let new_enabled = !cx
+        .global::<ExecutionSettingsModel>()
+        .filesystem_read_enabled;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .filesystem_read_enabled = new_enabled;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately (optimistic update)
+    cx.refresh_windows();
+
+    // 4. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Toggle filesystem write tools enabled/disabled and persist to disk
+pub fn toggle_filesystem_write(cx: &mut App) {
+    // 1. Apply update immediately (optimistic update)
+    let new_enabled = !cx
+        .global::<ExecutionSettingsModel>()
+        .filesystem_write_enabled;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .filesystem_write_enabled = new_enabled;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately (optimistic update)
+    cx.refresh_windows();
+
+    // 4. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}

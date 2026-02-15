@@ -22,6 +22,12 @@ pub struct ExecutionSettingsModel {
     pub approval_mode: ApprovalMode,
     /// Working directory for commands (None = current directory)
     pub workspace_dir: Option<String>,
+    /// Enable filesystem read tools (requires workspace_dir to be set)
+    #[serde(default = "default_true")]
+    pub filesystem_read_enabled: bool,
+    /// Enable filesystem write tools (requires workspace_dir to be set)
+    #[serde(default = "default_true")]
+    pub filesystem_write_enabled: bool,
     /// Maximum execution time in seconds
     pub timeout_seconds: u32,
     /// Maximum output size in bytes (prevents memory exhaustion)
@@ -30,12 +36,18 @@ pub struct ExecutionSettingsModel {
     pub network_isolation: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for ExecutionSettingsModel {
     fn default() -> Self {
         Self {
             enabled: false, // Opt-in by default for security
             approval_mode: ApprovalMode::AlwaysAsk,
             workspace_dir: None,
+            filesystem_read_enabled: true, // Enabled by default when workspace is set
+            filesystem_write_enabled: true, // Enabled by default when workspace is set
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: true,

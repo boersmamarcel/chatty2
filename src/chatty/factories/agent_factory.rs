@@ -195,27 +195,47 @@ impl AgentClient {
                 Some(workspace_dir) => match FileSystemService::new(workspace_dir).await {
                     Ok(service) => {
                         let service = std::sync::Arc::new(service);
-                        tracing::info!(workspace = %workspace_dir, "Filesystem tools enabled");
 
-                        let read_tools = (
-                            ReadFileTool::new(service.clone()),
-                            ReadBinaryTool::new(service.clone()),
-                            ListDirectoryTool::new(service.clone()),
-                            GlobSearchTool::new(service.clone()),
-                        );
+                        // Read tools - check both workspace_dir AND filesystem_read_enabled
+                        let read_tools = if exec_settings
+                            .as_ref()
+                            .map(|s| s.filesystem_read_enabled)
+                            .unwrap_or(false)
+                        {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
+                            Some((
+                                ReadFileTool::new(service.clone()),
+                                ReadBinaryTool::new(service.clone()),
+                                ListDirectoryTool::new(service.clone()),
+                                GlobSearchTool::new(service.clone()),
+                            ))
+                        } else {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem read tools disabled");
+                            None
+                        };
 
-                        // Write tools also need pending_write_approvals
-                        let write_tools = pending_write_approvals.as_ref().map(|approvals| {
-                            (
-                                WriteFileTool::new(service.clone(), approvals.clone()),
-                                CreateDirectoryTool::new(service.clone()),
-                                DeleteFileTool::new(service.clone(), approvals.clone()),
-                                MoveFileTool::new(service.clone(), approvals.clone()),
-                                ApplyDiffTool::new(service.clone(), approvals.clone()),
-                            )
-                        });
+                        // Write tools - check both workspace_dir AND filesystem_write_enabled
+                        let write_tools = if exec_settings
+                            .as_ref()
+                            .map(|s| s.filesystem_write_enabled)
+                            .unwrap_or(false)
+                        {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem write tools enabled");
+                            pending_write_approvals.as_ref().map(|approvals| {
+                                (
+                                    WriteFileTool::new(service.clone(), approvals.clone()),
+                                    CreateDirectoryTool::new(service.clone()),
+                                    DeleteFileTool::new(service.clone(), approvals.clone()),
+                                    MoveFileTool::new(service.clone(), approvals.clone()),
+                                    ApplyDiffTool::new(service.clone(), approvals.clone()),
+                                )
+                            })
+                        } else {
+                            tracing::info!(workspace = %workspace_dir, "Filesystem write tools disabled");
+                            None
+                        };
 
-                        (Some(read_tools), write_tools)
+                        (read_tools, write_tools)
                     }
                     Err(e) => {
                         tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize filesystem tools");

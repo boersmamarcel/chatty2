@@ -1,10 +1,9 @@
 use crate::settings::controllers::execution_settings_controller;
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
-use gpui::{App, AppContext, IntoElement, ParentElement, Styled, div};
+use gpui::{App, IntoElement, ParentElement, SharedString, Styled, div};
 use gpui_component::{
     ActiveTheme,
     button::Button,
-    input::{Input, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     setting::{SettingField, SettingGroup, SettingItem, SettingPage},
 };
@@ -105,53 +104,29 @@ pub fn execution_settings_page() -> SettingPage {
             SettingGroup::new()
                 .title("Filesystem Access")
                 .description("Configure workspace directory for file read/write operations")
-                .items(vec![SettingItem::new(
-                    "Workspace Directory",
-                    SettingField::render(|_options, window, cx| {
-                        let current_dir = cx
-                            .global::<ExecutionSettingsModel>()
-                            .workspace_dir
-                            .clone()
-                            .unwrap_or_default();
-
-                        let input = cx.new(|cx| {
-                            let mut state = InputState::new(window, cx)
-                                .placeholder("/path/to/workspace (optional)");
-                            state.set_value(current_dir, window, cx);
-                            state
-                        });
-
-                        let input_clone = input.clone();
-                        cx.subscribe(
-                            &input,
-                            move |_entity, event: &gpui_component::input::InputEvent, cx| {
-                                if let gpui_component::input::InputEvent::PressEnter { .. } = event {
-                                    let value = input_clone.read(cx).value();
-                                    let workspace_dir = if value.is_empty() {
-                                        None
-                                    } else {
-                                        Some(value.to_string())
-                                    };
-                                    execution_settings_controller::set_workspace_dir(
-                                        workspace_dir,
-                                        cx,
-                                    );
-                                }
+                .items(vec![
+                    SettingItem::new(
+                        "Workspace Directory",
+                        SettingField::input(
+                            |cx: &App| {
+                                cx.global::<ExecutionSettingsModel>()
+                                    .workspace_dir
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into()
                             },
-                        )
-                        .detach();
-
-                        div()
-                            .w_full()
-                            .child(Input::new(&input).w_full())
-                            .into_any_element()
-                    }),
-                )
-                .description(
-                    "Optional directory path for file operations. \
-                     Leave empty to disable filesystem tools (read_file, write_file, etc.). \
-                     Press Enter to save.",
-                )]),
+                            |val: SharedString, cx: &mut App| {
+                                let workspace_dir = if val.is_empty() {
+                                    None
+                                } else {
+                                    Some(val.to_string())
+                                };
+                                execution_settings_controller::set_workspace_dir(workspace_dir, cx);
+                            },
+                        ),
+                    )
+                    .description("Optional directory path for file operations. Leave empty to disable filesystem tools."),
+                ]),
             SettingGroup::new()
                 .title("Execution Limits")
                 .description("Resource limits for code execution (configured in settings file)")
