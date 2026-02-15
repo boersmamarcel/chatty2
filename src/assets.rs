@@ -40,6 +40,7 @@ pub enum CustomIcon {
     TriangleAlert, // triangle-alert.svg - Warning indicator
     CircleX,       // circle-x.svg - Error indicator
     McpServer,     // mcp-server.svg - MCP indicator
+    Wrench,        // wrench.svg - Filesystem tools indicator
 }
 
 impl IconNamed for CustomIcon {
@@ -56,6 +57,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
             CustomIcon::CircleX => "icons/circle-x.svg",
             CustomIcon::McpServer => "icons/mcp-server.svg",
+            CustomIcon::Wrench => "icons/wrench.svg",
         }
         .into()
     }

@@ -387,7 +387,7 @@ mod tests {
     async fn test_read_binary() {
         let tmp = tempfile::tempdir().unwrap();
         let test_file = tmp.path().join("test.bin");
-        fs::write(&test_file, &[0u8, 1, 2, 3, 255]).unwrap();
+        fs::write(&test_file, [0u8, 1, 2, 3, 255]).unwrap();
 
         let service = FileSystemService::new(tmp.path().to_str().unwrap())
             .await
