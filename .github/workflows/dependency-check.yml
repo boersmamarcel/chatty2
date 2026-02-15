@@ -83,4 +83,5 @@ jobs:
 
             After creating issues, provide a summary of what you found and what actions you took.
 
-          claude_args: '--allowed-tools "Bash(curl:*),Bash(wget:*),Bash(gh issue:*)"'
+          # Allow necessary tools: curl for crates.io API, jq for JSON parsing, gh for issues
+          # Using default permissions (no restrictions) for this automated workflow
