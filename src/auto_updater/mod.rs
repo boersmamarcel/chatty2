@@ -305,7 +305,7 @@ impl AutoUpdater {
     /// to Error so the user can see diagnostic information.
     ///
     /// Should be called during app initialization on macOS.
-    pub fn check_previous_update_status(&self, _cx: &mut App) {
+    pub fn check_previous_update_status(&self, cx: &mut App) {
         #[cfg(target_os = "macos")]
         {
             use std::path::PathBuf;
@@ -944,9 +944,24 @@ log "=== Chatty Update Installation Started ==="
 log "DMG: $DMG_PATH"
 log "Target: $APP_BUNDLE"
 
-# Wait for the app to fully exit
+# Wait for the app to fully exit by checking for running processes
 log "Waiting for app to exit..."
-sleep 2
+APP_NAME="Chatty"
+MAX_WAIT=10
+WAIT_COUNT=0
+
+while pgrep -x "$APP_NAME" > /dev/null 2>&1; do
+    if [ $WAIT_COUNT -ge $MAX_WAIT ]; then
+        log "WARNING: App still running after $MAX_WAIT seconds, proceeding anyway"
+        break
+    fi
+    sleep 1
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+    log "Waiting for $APP_NAME to exit... ($WAIT_COUNT/$MAX_WAIT)"
+done
+
+log "App has exited, proceeding with installation"
+sleep 1
 
 # Mount the DMG and capture plist output
 log "Mounting DMG..."
@@ -1025,6 +1040,26 @@ fi
 
 log "App bundle replaced successfully"
 
+# Clear quarantine attributes that might prevent launch (critical for self-signed/adhoc apps)
+log "Clearing quarantine attributes..."
+xattr -cr "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "No quarantine attributes to clear"
+
+# For self-signed/adhoc signed apps, we need to re-sign the bundle to avoid Gatekeeper issues
+log "Checking code signature..."
+SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)
+log "Current signature type: $SIGNATURE"
+
+if [ "$SIGNATURE" = "adhoc" ] || [ -z "$SIGNATURE" ]; then
+    log "App is adhoc/unsigned, re-signing to prevent Gatekeeper issues..."
+    # Remove existing signature and re-sign with adhoc signature
+    # This creates a fresh signature that macOS Gatekeeper will accept for self-updates
+    codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Re-signing failed"
+fi
+
+# Reset Launch Services cache for this app to ensure macOS sees the new version
+log "Resetting Launch Services cache..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Failed to reset Launch Services cache"
+
 # Unmount
 log "Unmounting DMG..."
 if ! hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE"; then
@@ -1032,9 +1067,56 @@ if ! hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE"; then
 fi
 
 # Relaunch the updated app
+# We try two methods: direct binary execution (bypasses Gatekeeper) and then fall back to 'open'
 log "Relaunching app..."
-if ! open "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
-    log "ERROR: Failed to relaunch app"
+
+# Method 1: Direct execution of the binary inside the app bundle
+# This bypasses Gatekeeper for self-signed/adhoc apps
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+if [ -x "$APP_BINARY" ]; then
+    log "Attempting direct binary launch: $APP_BINARY"
+    nohup "$APP_BINARY" > /dev/null 2>&1 &
+    LAUNCH_METHOD="direct"
+else
+    log "Binary not found at $APP_BINARY, falling back to 'open' command"
+    OPEN_OUTPUT=$(open -n "$APP_BUNDLE" 2>&1)
+    OPEN_EXIT=$?
+
+    if [ $OPEN_EXIT -ne 0 ]; then
+        log "ERROR: open command failed with exit code $OPEN_EXIT"
+        log "Output: $OPEN_OUTPUT"
+        exit 1
+    fi
+    LAUNCH_METHOD="open"
+fi
+
+log "Launch command ($LAUNCH_METHOD) succeeded, waiting for app to start..."
+
+# Wait up to 5 seconds for the app to actually start
+MAX_START_WAIT=5
+START_WAIT_COUNT=0
+APP_STARTED=false
+
+while [ $START_WAIT_COUNT -lt $MAX_START_WAIT ]; do
+    sleep 1
+    START_WAIT_COUNT=$((START_WAIT_COUNT + 1))
+
+    if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
+        APP_STARTED=true
+        log "App successfully relaunched via $LAUNCH_METHOD (PID: $(pgrep -x "$APP_NAME"))"
+        break
+    fi
+
+    log "Waiting for app to start... ($START_WAIT_COUNT/$MAX_START_WAIT)"
+done
+
+if [ "$APP_STARTED" = "false" ]; then
+    log "ERROR: App did not start within $MAX_START_WAIT seconds"
+    log "Launch method used: $LAUNCH_METHOD"
+    log "This may indicate a problem with the updated app bundle or Gatekeeper is blocking it"
+    log "Try launching the app manually from /Applications"
+    log "If you see a Gatekeeper dialog, the app needs to be properly code-signed with an Apple Developer certificate"
     exit 1
 fi
 
