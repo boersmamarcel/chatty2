@@ -30,12 +30,14 @@ impl AssetSource for ChattyAssets {
 #[derive(Debug, Clone, Copy)]
 pub enum CustomIcon {
     // Auto-updater icons
-    Refresh,     // refresh-ccw.svg - Idle state
-    Loader,      // loader.svg - Checking/Installing
-    Download,    // download.svg - Downloading
-    AlertCircle, // alert-circle.svg - Errors
-    CheckCircle, // check-circle.svg - Update ready
-    Copy,        // copy.svg - Copy button
+    Refresh,       // refresh-ccw.svg - Idle state
+    Loader,        // loader.svg - Checking/Installing
+    Download,      // download.svg - Downloading
+    AlertCircle,   // alert-circle.svg - Errors
+    CheckCircle,   // check-circle.svg - Update ready
+    Copy,          // copy.svg - Copy button
+    TriangleAlert, // triangle-alert.svg - Warning indicator
+    CircleX,       // circle-x.svg - Error indicator
 }
 
 impl IconNamed for CustomIcon {
@@ -48,6 +50,8 @@ impl IconNamed for CustomIcon {
             CustomIcon::AlertCircle => "icons/alert-circle.svg",
             CustomIcon::CheckCircle => "icons/check-circle.svg",
             CustomIcon::Copy => "icons/copy.svg",
+            CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
+            CustomIcon::CircleX => "icons/circle-x.svg",
         }
         .into()
     }
