@@ -87,6 +87,7 @@ jobs:
 
             After creating issues, provide a summary of what you found and what actions you took.
 
-          # Allow necessary tools for dependency checking
-          # Note: Using "Bash(gh *)" to allow all gh commands including issue create with multi-line bodies
-          claude_args: '--allowed-tools "Read,WebFetch,Bash(jq *),Bash(gh *)"'
+          # Allow all tools for this automated workflow
+          # Note: This is safe because the workflow runs in an isolated environment
+          # with limited permissions (only issues:write, contents:read)
+          # No claude_args restrictions - allows Read, WebFetch, WebSearch, Bash, etc.
