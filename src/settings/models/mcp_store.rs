@@ -47,6 +47,16 @@ impl McpServersModel {
         &self.servers
     }
 
+    /// Get mutable access to servers (for in-place updates)
+    pub fn servers_mut(&mut self) -> &mut Vec<McpServerConfig> {
+        &mut self.servers
+    }
+
+    /// Count enabled servers
+    pub fn enabled_count(&self) -> usize {
+        self.servers.iter().filter(|s| s.enabled).count()
+    }
+
     /// Replace all servers (used when loading from disk)
     pub fn replace_all(&mut self, servers: Vec<McpServerConfig>) {
         self.servers = servers;
