@@ -394,6 +394,10 @@ fn main() {
         // Initialize auto-updater with current version from Cargo.toml
         let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
         cx.set_global(updater.clone());
+
+        // Check if a previous update installation failed (macOS only)
+        updater.check_previous_update_status(cx);
+
         updater.start_polling(cx);
         info!("Auto-updater initialized and polling started");
 

@@ -298,6 +298,47 @@ impl AutoUpdater {
         }
     }
 
+    /// Check if a previous update installation succeeded or failed
+    ///
+    /// On macOS, this reads the update log file to detect installation failures
+    /// that occurred after the app quit. If errors are found, sets the status
+    /// to Error so the user can see diagnostic information.
+    ///
+    /// Should be called during app initialization on macOS.
+    pub fn check_previous_update_status(&self, cx: &mut App) {
+        #[cfg(target_os = "macos")]
+        {
+            use std::path::PathBuf;
+
+            let log_path = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join("Library/Logs/chatty_update.log");
+
+            if log_path.exists() {
+                // Read last few lines to check for success/failure
+                if let Ok(content) = std::fs::read_to_string(&log_path) {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let last_10_lines = lines.iter().rev().take(10).rev().collect::<Vec<_>>();
+
+                    for line in last_10_lines {
+                        if line.contains("ERROR:") {
+                            warn!(
+                                log_file = ?log_path,
+                                "Previous update installation failed - check log file"
+                            );
+                            cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                                updater.status = AutoUpdateStatus::Error(format!(
+                                    "Previous update installation failed. Check {} for details.",
+                                    log_path.display()
+                                ));
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Start the polling loop for checking updates
     pub fn start_polling(&self, cx: &mut App) {
         info!(
@@ -476,7 +517,8 @@ impl AutoUpdater {
                         cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                             updater.status = AutoUpdateStatus::Error(
                                 "Auto-updates are only available when running from a packaged .app bundle. \
-                                 Build with ./scripts/package-macos.sh to test updates."
+                                 Build with ./scripts/package-macos.sh to test updates. \
+                                 Check ~/Library/Logs/chatty_update.log for details."
                                     .to_string(),
                             );
                         });
@@ -485,7 +527,8 @@ impl AutoUpdater {
                         cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                             updater.status = AutoUpdateStatus::Error(
                                 "Could not find app bundle path for update installation. \
-                                 This may occur when running outside of a packaged .app bundle."
+                                 This may occur when running outside of a packaged .app bundle. \
+                                 Check ~/Library/Logs/chatty_update.log for details."
                                     .to_string(),
                             );
                         });
@@ -890,12 +933,33 @@ set -e
 
 DMG_PATH="{dmg}"
 APP_BUNDLE="{bundle}"
+LOG_FILE="$HOME/Library/Logs/chatty_update.log"
+
+# Logging function
+log() {{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}}
+
+log "=== Chatty Update Installation Started ==="
+log "DMG: $DMG_PATH"
+log "Target: $APP_BUNDLE"
 
 # Wait for the app to fully exit
+log "Waiting for app to exit..."
 sleep 2
 
 # Mount the DMG and capture plist output
-MOUNT_OUTPUT=$(hdiutil attach -nobrowse -plist "$DMG_PATH" 2>/dev/null)
+log "Mounting DMG..."
+MOUNT_OUTPUT=$(hdiutil attach -nobrowse -plist "$DMG_PATH" 2>&1)
+HDIUTIL_EXIT=$?
+
+if [ $HDIUTIL_EXIT -ne 0 ]; then
+    log "ERROR: hdiutil failed with exit code $HDIUTIL_EXIT"
+    log "Output: $MOUNT_OUTPUT"
+    exit 1
+fi
+
+log "DMG mounted successfully"
 
 # Extract mount point from plist output
 MOUNT_POINT=$(echo "$MOUNT_OUTPUT" \
@@ -906,29 +970,75 @@ MOUNT_POINT=$(echo "$MOUNT_OUTPUT" \
 
 # Fallback: scan for /Volumes/ path if plist parse failed
 if [ -z "$MOUNT_POINT" ]; then
+    log "Primary mount point extraction failed, trying fallback..."
     MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep -o '/Volumes/[^<"]*' | head -1 | tr -d '[:space:]')
 fi
 
 if [ -z "$MOUNT_POINT" ]; then
+    log "ERROR: Could not extract mount point from hdiutil output"
+    log "hdiutil output: $MOUNT_OUTPUT"
+    exit 1
+fi
+
+log "Mount point: $MOUNT_POINT"
+
+# Verify mount point exists
+if [ ! -d "$MOUNT_POINT" ]; then
+    log "ERROR: Mount point does not exist: $MOUNT_POINT"
     exit 1
 fi
 
 # Find the .app bundle inside the mounted volume
+log "Searching for .app bundle in $MOUNT_POINT..."
 APP_IN_DMG=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" | head -1)
 
 if [ -z "$APP_IN_DMG" ]; then
-    hdiutil detach -force "$MOUNT_POINT" 2>/dev/null || true
+    log "ERROR: No .app bundle found in DMG"
+    log "DMG contents:"
+    ls -la "$MOUNT_POINT" | tee -a "$LOG_FILE"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+log "Found app bundle: $APP_IN_DMG"
+
+# Verify target bundle exists and is writable
+if [ ! -d "$APP_BUNDLE" ]; then
+    log "ERROR: Target app bundle does not exist: $APP_BUNDLE"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+if [ ! -w "$APP_BUNDLE" ]; then
+    log "ERROR: Target app bundle is not writable: $APP_BUNDLE"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
     exit 1
 fi
 
 # Replace the current installation with the new bundle
-rsync -a --delete "$APP_IN_DMG/" "$APP_BUNDLE/"
+log "Replacing app bundle with rsync..."
+if ! rsync -a --delete "$APP_IN_DMG/" "$APP_BUNDLE/" 2>&1 | tee -a "$LOG_FILE"; then
+    log "ERROR: rsync failed"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+log "App bundle replaced successfully"
 
 # Unmount
-hdiutil detach -force "$MOUNT_POINT" 2>/dev/null || true
+log "Unmounting DMG..."
+if ! hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE"; then
+    log "WARNING: Failed to unmount DMG (continuing anyway)"
+fi
 
 # Relaunch the updated app
-open "$APP_BUNDLE"
+log "Relaunching app..."
+if ! open "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
+    log "ERROR: Failed to relaunch app"
+    exit 1
+fi
+
+log "=== Update Installation Completed Successfully ==="
 "#,
         dmg = dmg,
         bundle = bundle,
@@ -1212,23 +1322,33 @@ mod tests {
         ];
 
         assert_eq!(
-            find_matching_asset(&assets, "macos", "aarch64").unwrap().name,
+            find_matching_asset(&assets, "macos", "aarch64")
+                .unwrap()
+                .name,
             "chatty-macos-aarch64.dmg"
         );
         assert_eq!(
-            find_matching_asset(&assets, "macos", "x86_64").unwrap().name,
+            find_matching_asset(&assets, "macos", "x86_64")
+                .unwrap()
+                .name,
             "chatty-macos-x86_64.dmg"
         );
         assert_eq!(
-            find_matching_asset(&assets, "linux", "x86_64").unwrap().name,
+            find_matching_asset(&assets, "linux", "x86_64")
+                .unwrap()
+                .name,
             "chatty-linux-x86_64.AppImage"
         );
         assert_eq!(
-            find_matching_asset(&assets, "linux", "aarch64").unwrap().name,
+            find_matching_asset(&assets, "linux", "aarch64")
+                .unwrap()
+                .name,
             "chatty-linux-aarch64.AppImage"
         );
         assert_eq!(
-            find_matching_asset(&assets, "windows", "x86_64").unwrap().name,
+            find_matching_asset(&assets, "windows", "x86_64")
+                .unwrap()
+                .name,
             "chatty-windows-x86_64.exe"
         );
     }
