@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_zero_padded() {
         // 1 hour, 2 minutes, 3 seconds
-        let secs = 1 * 3600 + 2 * 60 + 3;
+        let secs = 3600 + 2 * 60 + 3;
         let time = UNIX_EPOCH + std::time::Duration::from_secs(secs);
         assert_eq!(format_timestamp(time), "01:02:03");
     }

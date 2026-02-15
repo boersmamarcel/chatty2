@@ -163,13 +163,35 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
+
           # Copy Linux AppImage
-          cp artifacts/linux-x86_64/*.AppImage release-assets/ || true
+          if ! cp artifacts/linux-x86_64/*.AppImage release-assets/; then
+            echo "::warning::Failed to copy Linux AppImage"
+          fi
+
           # Copy macOS ARM DMG
-          cp artifacts/macos-arm64/*.dmg release-assets/ || true
+          if ! cp artifacts/macos-arm64/*.dmg release-assets/; then
+            echo "::warning::Failed to copy macOS DMG"
+          fi
+
           # Copy Windows Installer
-          cp artifacts/windows-x86_64-setup/*.exe release-assets/ || true
-          ls -la release-assets/
+          if ! cp artifacts/windows-x86_64-setup/*.exe release-assets/; then
+            echo "::warning::Failed to copy Windows installer"
+          fi
+
+          echo "=== Final release assets ==="
+          ls -lah release-assets/
+
+      - name: Debug release assets
+        run: |
+          echo "=== Downloaded artifacts structure ==="
+          find artifacts -type f
+          echo ""
+          echo "=== Release assets directory ==="
+          ls -lah release-assets/
+          echo ""
+          echo "=== File types ==="
+          file release-assets/*
 
       - name: Generate checksums
         run: |
@@ -180,14 +202,44 @@ jobs:
           echo "Generated checksums:"
           cat checksums.txt
 
-      - name: Create or update GitHub Release
+      - name: Validate checksums coverage
+        run: |
+          cd release-assets
+          # Count actual files (excluding checksums.txt itself)
+          ASSET_COUNT=$(ls -1 | grep -v checksums.txt | wc -l)
+          # Count checksums in checksums.txt
+          CHECKSUM_COUNT=$(wc -l < checksums.txt)
+
+          echo "Asset files: $ASSET_COUNT"
+          echo "Checksums: $CHECKSUM_COUNT"
+
+          if [ "$ASSET_COUNT" -ne "$CHECKSUM_COUNT" ]; then
+            echo "::error::Checksum mismatch! $ASSET_COUNT assets but $CHECKSUM_COUNT checksums"
+            echo "Assets:"
+            ls -1 | grep -v checksums.txt
+            echo "Checksums:"
+            cat checksums.txt
+            exit 1
+          fi
+
+          # Verify each asset has a checksum
+          for file in *; do
+            if [ "$file" != "checksums.txt" ]; then
+              if ! grep -q "$file" checksums.txt; then
+                echo "::error::Missing checksum for: $file"
+                exit 1
+              fi
+            fi
+          done
+
+          echo "✅ All $ASSET_COUNT assets have checksums"
+
+      - name: Upload assets to existing release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-version.outputs.tag_name }}
-          name: Release ${{ needs.validate-version.outputs.tag_name }}
-          draft: false
-          prerelease: ${{ contains(needs.validate-version.outputs.version, '-alpha') || contains(needs.validate-version.outputs.version, '-beta') || contains(needs.validate-version.outputs.version, '-rc') }}
-          generate_release_notes: true
+          generate_release_notes: false # Don't generate notes - user already did
           files: release-assets/*
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
