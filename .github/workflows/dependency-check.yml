@@ -42,8 +42,9 @@ jobs:
             ## Instructions
 
             1. Read Cargo.toml to get current versions
-            2. For each core dependency, query crates.io API:
-               - Endpoint: https://crates.io/api/v1/crates/{crate_name}
+            2. For each core dependency, query crates.io API using WebFetch tool:
+               - URL: https://crates.io/api/v1/crates/{crate_name}
+               - Prompt: "Extract the crate.max_stable_version or crate.newest_version field"
                - Extract latest stable version (not pre-release)
             3. Compare versions (use semantic versioning):
                - Major (x.0.0): Breaking changes
@@ -83,5 +84,5 @@ jobs:
 
             After creating issues, provide a summary of what you found and what actions you took.
 
-          # Allow necessary tools: curl for crates.io API, jq for JSON parsing, gh for issues
-          # Using default permissions (no restrictions) for this automated workflow
+          # Allow necessary tools for dependency checking
+          claude_args: '--allowed-tools "Read,WebFetch,Bash(jq *),Bash(gh issue *)"'
