@@ -305,7 +305,7 @@ impl AutoUpdater {
     /// to Error so the user can see diagnostic information.
     ///
     /// Should be called during app initialization on macOS.
-    pub fn check_previous_update_status(&self, _cx: &mut App) {
+    pub fn check_previous_update_status(&self, cx: &mut App) {
         #[cfg(target_os = "macos")]
         {
             use std::path::PathBuf;
