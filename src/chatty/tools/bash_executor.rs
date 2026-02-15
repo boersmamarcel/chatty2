@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -1076,6 +1078,7 @@ mod tests {
         let result = executor.execute(input).await;
 
         assert!(result.is_ok());
+        #[allow(unused_variables)]
         let output = result.unwrap();
 
         // Network should be blocked (or curl not available)
