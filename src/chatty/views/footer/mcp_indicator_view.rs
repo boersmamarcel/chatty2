@@ -6,7 +6,11 @@ use gpui::*;
 use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme, Icon, Sizable, button::*, h_flex};
 
-#[derive(IntoElement)]
+// Popover dimensions
+const MCP_POPOVER_MIN_WIDTH: f32 = 200.0;
+const MCP_POPOVER_MAX_WIDTH: f32 = 300.0;
+
+#[derive(IntoElement, Default)]
 pub struct McpIndicatorView;
 
 impl McpIndicatorView {
@@ -69,8 +73,8 @@ impl RenderOnce for McpIndicatorView {
                             .rounded_md()
                             .shadow_md()
                             .p_2()
-                            .min_w(px(200.0))
-                            .max_w(px(300.0))
+                            .min_w(px(MCP_POPOVER_MIN_WIDTH))
+                            .max_w(px(MCP_POPOVER_MAX_WIDTH))
                             .child(
                                 div()
                                     .text_sm()
@@ -83,7 +87,7 @@ impl RenderOnce for McpIndicatorView {
                             .children(
                                 servers
                                     .into_iter()
-                                    .map(|server| render_server_item(server))
+                                    .map(render_server_item)
                                     .collect::<Vec<_>>(),
                             )
                     }),
@@ -96,8 +100,7 @@ impl RenderOnce for McpIndicatorView {
 fn render_server_item(server: McpServerConfig) -> impl IntoElement {
     let name = server.name.clone();
     let enabled = server.enabled;
-    let name_for_click = name.clone();
-    let button_id = SharedString::from(format!("toggle-{}", name_for_click));
+    let button_id = SharedString::from(format!("toggle-{}", name));
 
     div()
         .flex()
@@ -108,7 +111,7 @@ fn render_server_item(server: McpServerConfig) -> impl IntoElement {
         .px_2()
         .py_1()
         .rounded_md()
-        .child(div().text_sm().child(name))
+        .child(div().text_sm().child(name.clone()))
         .child(
             Button::new(button_id)
                 .xsmall()
@@ -116,7 +119,7 @@ fn render_server_item(server: McpServerConfig) -> impl IntoElement {
                 .when(!enabled, |btn| btn.ghost())
                 .child(if enabled { "Enabled" } else { "Disabled" })
                 .on_click(move |_event, _window, cx| {
-                    mcp_controller::toggle_server(name_for_click.clone(), cx);
+                    mcp_controller::toggle_server(name.clone(), cx);
                 }),
         )
 }
