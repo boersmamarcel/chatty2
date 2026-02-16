@@ -1,14 +1,26 @@
 name: Release
 
+# IMPORTANT: When you create a release via GitHub UI, it fires BOTH the 'release.published'
+# event AND the 'push.tags' event, causing duplicate workflow runs that race each other.
+# Solution: Only trigger on 'release.published' for manual releases.
+# For tag-only pushes (without release), the action will create the release automatically.
 on:
+  release:
+    types: [published] # Trigger when you publish a release via GitHub UI
   push:
     tags:
-      - "v*" # Trigger on version tags like v0.1.0, v1.0.0, etc.
-      - "[0-9]*" # Also trigger on tags without v prefix like 0.1.0, 1.0.0, etc.
+      - "v*" # Trigger on direct tag push (when NO release exists yet)
+      - "[0-9]*"
 
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: chatty
+
+# Prevent race conditions when release.published and push.tags fire simultaneously
+# Only allow one release workflow per tag at a time
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false # Don't cancel, just queue them
 
 jobs:
   # Validate that the tag version matches Cargo.toml
@@ -17,7 +29,23 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
+      should_skip: ${{ steps.check_release.outputs.should_skip }}
     steps:
+      - name: Check if release already exists
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # If triggered by tag push, check if a release already exists
+          if [ "${{ github.event_name }}" == "push" ]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+            if gh release view "$TAG_NAME" --repo ${{ github.repository }} > /dev/null 2>&1; then
+              echo "Release $TAG_NAME already exists, skipping duplicate workflow"
+              echo "should_skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "should_skip=false" >> $GITHUB_OUTPUT
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -53,6 +81,7 @@ jobs:
 
   build-linux:
     needs: validate-version
+    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -97,6 +126,7 @@ jobs:
 
   build-macos-arm:
     needs: validate-version
+    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -108,8 +138,42 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
+      - name: Import code signing certificate
+        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$CERTIFICATE_BASE64" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add keychain to search list
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Clean up certificate file
+          rm certificate.p12
+
       - name: Package macOS app
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
+          NOTARIZE_TEAM_ID: ${{ secrets.NOTARIZE_TEAM_ID }}
         run: ./scripts/package-macos.sh
+
+      - name: Clean up keychain
+        if: ${{ always() && secrets.MACOS_CERTIFICATE != '' }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security delete-keychain "$KEYCHAIN_PATH" || true
 
       - name: Upload macOS ARM artifact
         uses: actions/upload-artifact@v4
@@ -119,6 +183,7 @@ jobs:
 
   build-windows:
     needs: validate-version
+    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -146,6 +211,7 @@ jobs:
 
   create-release:
     needs: [validate-version, build-linux, build-macos-arm, build-windows]
+    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -232,12 +298,16 @@ jobs:
 
           echo "✅ All $ASSET_COUNT assets have checksums"
 
-      - name: Upload assets to existing release
+      - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-version.outputs.tag_name }}
-          generate_release_notes: false # Don't generate notes - user already did
+          draft: false # Always publish the release (not draft)
           files: release-assets/*
           fail_on_unmatched_files: true
+          # If release was created via UI, preserve its body/notes
+          # If triggered by tag push only, generate notes automatically
+          body: ${{ github.event_name == 'release' && github.event.release.body || '' }}
+          generate_release_notes: ${{ github.event_name != 'release' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

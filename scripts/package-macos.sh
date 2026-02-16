@@ -86,9 +86,28 @@ EOF
 
 echo "macOS application bundle created successfully: ${APP_BUNDLE}"
 
-# Apply ad-hoc code signature
-echo "Applying ad-hoc code signature..."
-codesign -s - --force --deep "${APP_BUNDLE}"
+# Code signing configuration
+# Set SIGNING_IDENTITY to your certificate name or use "-" for ad-hoc signing
+# To find your certificate: security find-identity -v -p codesigning
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
+
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    echo "Applying ad-hoc code signature..."
+    codesign -s - --force --deep "${APP_BUNDLE}"
+else
+    echo "Applying code signature with identity: ${SIGNING_IDENTITY}"
+    # Sign with hardened runtime and timestamp for notarization compatibility
+    codesign --sign "${SIGNING_IDENTITY}" \
+        --force \
+        --options runtime \
+        --timestamp \
+        --deep \
+        "${APP_BUNDLE}"
+
+    # Verify signature
+    codesign --verify --verbose "${APP_BUNDLE}"
+    spctl --assess --verbose "${APP_BUNDLE}"
+fi
 
 # Create DMG for distribution
 # Use simplified naming convention for auto-updater: chatty-macos-{arch}.dmg
@@ -104,3 +123,27 @@ hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZ
     echo "You can create a DMG manually with:"
     echo "  hdiutil create -volname ${APP_NAME} -srcfolder ${APP_BUNDLE} -ov -format UDZO ${DMG_NAME}"
 }
+
+# Optional: Notarization (requires NOTARIZE_APPLE_ID and NOTARIZE_TEAM_ID env vars)
+if [ "$SIGNING_IDENTITY" != "-" ] && [ -n "$NOTARIZE_APPLE_ID" ] && [ -n "$NOTARIZE_TEAM_ID" ]; then
+    echo "Submitting for notarization..."
+    # Sign the DMG as well
+    codesign --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_NAME}"
+
+    # Submit for notarization
+    # Note: Requires app-specific password stored in keychain
+    # Create with: xcrun notarytool store-credentials --apple-id "your@email.com" --team-id "TEAM_ID"
+    xcrun notarytool submit "${DMG_NAME}" \
+        --apple-id "${NOTARIZE_APPLE_ID}" \
+        --team-id "${NOTARIZE_TEAM_ID}" \
+        --password "@keychain:AC_PASSWORD" \
+        --wait
+
+    # Staple the notarization ticket
+    xcrun stapler staple "${DMG_NAME}"
+    echo "✅ Notarization complete"
+else
+    if [ "$SIGNING_IDENTITY" != "-" ]; then
+        echo "ℹ️  Notarization skipped (set NOTARIZE_APPLE_ID and NOTARIZE_TEAM_ID to enable)"
+    fi
+fi
