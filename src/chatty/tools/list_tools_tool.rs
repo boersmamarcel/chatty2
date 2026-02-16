@@ -174,6 +174,22 @@ impl Tool for ListToolsTool {
         let has_bash = self.native_tools.iter().any(|t| t.name == "bash");
         let has_mcp = !self.mcp_tools.is_empty();
 
+        tracing::info!(
+            native_tool_count = self.native_tools.len(),
+            mcp_tool_count = self.mcp_tools.len(),
+            total_tool_count = all_tools.len(),
+            "list_tools called - returning tool inventory"
+        );
+
+        // Log each MCP tool for debugging
+        for tool in &self.mcp_tools {
+            tracing::debug!(
+                tool_name = %tool.name,
+                source = %tool.source,
+                "MCP tool in list_tools output"
+            );
+        }
+
         let note = match (has_bash, has_mcp) {
             (true, true) => "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations. MCP tools from connected servers are also listed above — use them by name.".to_string(),
             (true, false) => "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations.".to_string(),

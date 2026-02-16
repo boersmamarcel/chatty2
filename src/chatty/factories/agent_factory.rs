@@ -251,11 +251,25 @@ impl AgentClient {
         let mcp_tool_info: Vec<(String, String, String)> = mcp_tools
             .as_ref()
             .map(|tools_list| {
+                tracing::info!(
+                    server_count = tools_list.len(),
+                    "Extracting MCP tool metadata for list_tools"
+                );
                 tools_list
                     .iter()
                     .flat_map(|(server_name, tools, _sink)| {
+                        tracing::info!(
+                            server = %server_name,
+                            tool_count = tools.len(),
+                            "Processing MCP tools from server"
+                        );
                         let server_name = server_name.clone();
                         tools.iter().map(move |tool| {
+                            tracing::debug!(
+                                server = %server_name,
+                                tool_name = %tool.name,
+                                "Adding MCP tool to metadata list"
+                            );
                             (
                                 server_name.clone(),
                                 tool.name.to_string(),
@@ -269,6 +283,11 @@ impl AgentClient {
                     .collect()
             })
             .unwrap_or_default();
+
+        tracing::info!(
+            mcp_tool_count = mcp_tool_info.len(),
+            "Total MCP tools registered with list_tools"
+        );
 
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
