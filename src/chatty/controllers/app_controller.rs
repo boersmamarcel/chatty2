@@ -352,13 +352,7 @@ impl ChattyApp {
             .get_all_tools_with_sinks()
             .await
             .ok()
-            .and_then(|tools| {
-                if tools.is_empty() {
-                    None
-                } else {
-                    Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
-                }
-            });
+            .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
         // Restore conversation using factory method (bash tool will be created in agent_factory if enabled)
         Conversation::from_data(
@@ -547,18 +541,11 @@ impl ChattyApp {
                             svc.clone()
                         })
                         .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
-                    let mcp_tools =
-                        mcp_service
-                            .get_all_tools_with_sinks()
-                            .await
-                            .ok()
-                            .and_then(|tools| {
-                                if tools.is_empty() {
-                                    None
-                                } else {
-                                    Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
-                                }
-                            });
+                    let mcp_tools = mcp_service
+                        .get_all_tools_with_sinks()
+                        .await
+                        .ok()
+                        .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
                     // Get execution settings and approval stores for tools
                     let (exec_settings, pending_approvals, pending_write_approvals) =
@@ -761,14 +748,8 @@ impl ChattyApp {
                         // Get MCP tools from active servers (outside of cx.update)
                         let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok();
 
-                        // Transform from (String, Vec<Tool>, ServerSink) to (Vec<Tool>, ServerSink)
-                        let mcp_tools = mcp_tools.and_then(|tools| {
-                            if tools.is_empty() {
-                                None
-                            } else {
-                                Some(tools.into_iter().map(|(_, t, s)| (t, s)).collect())
-                            }
-                        });
+                        let mcp_tools = mcp_tools
+                            .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
                         debug!(
                             has_mcp_tools = mcp_tools.is_some(),

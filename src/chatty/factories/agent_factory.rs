@@ -35,10 +35,12 @@ macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
         match $mcp_tools {
             Some(tools_list) => {
-                let mut iter = tools_list.into_iter().filter(|(t, _)| !t.is_empty());
-                if let Some((first_tools, first_sink)) = iter.next() {
+                let mut iter = tools_list
+                    .into_iter()
+                    .filter(|(_name, t, _sink)| !t.is_empty());
+                if let Some((_first_name, first_tools, first_sink)) = iter.next() {
                     let mut b = $builder.rmcp_tools(first_tools, first_sink);
-                    for (tools, sink) in iter {
+                    for (_name, tools, sink) in iter {
                         b = b.rmcp_tools(tools, sink);
                     }
                     b.build()
@@ -157,7 +159,7 @@ impl AgentClient {
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
-        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
         pending_approvals: Option<
             crate::chatty::models::execution_approval_store::PendingApprovals,
@@ -245,11 +247,35 @@ impl AgentClient {
                 None => (None, None),
             };
 
-        // Create list_tools tool (always available, but shows only actually available tools)
+        // Extract MCP tool metadata so list_tools can report them to the model
+        let mcp_tool_info: Vec<(String, String, String)> = mcp_tools
+            .as_ref()
+            .map(|tools_list| {
+                tools_list
+                    .iter()
+                    .flat_map(|(server_name, tools, _sink)| {
+                        let server_name = server_name.clone();
+                        tools.iter().map(move |tool| {
+                            (
+                                server_name.clone(),
+                                tool.name.to_string(),
+                                tool.description
+                                    .as_deref()
+                                    .unwrap_or("No description available")
+                                    .to_string(),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             bash_tool.is_some(),
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
+            mcp_tool_info,
         );
 
         match &provider_config.provider_type {

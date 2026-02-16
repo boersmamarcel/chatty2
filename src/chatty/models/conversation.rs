@@ -35,7 +35,7 @@ impl Conversation {
         title: String,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
-        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
         pending_approvals: Option<
             crate::chatty::models::execution_approval_store::PendingApprovals,
@@ -88,7 +88,7 @@ impl Conversation {
         data: ConversationData,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
-        mcp_tools: Option<Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+        mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
         pending_approvals: Option<
             crate::chatty::models::execution_approval_store::PendingApprovals,

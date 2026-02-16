@@ -33,11 +33,20 @@ pub enum ListToolsError {
 #[derive(Clone)]
 pub struct ListToolsTool {
     native_tools: Vec<ToolInfo>,
+    mcp_tools: Vec<ToolInfo>,
 }
 
 impl ListToolsTool {
-    /// Create a new ListToolsTool with the specified tool availability
-    pub fn new_with_config(has_bash: bool, has_fs_read: bool, has_fs_write: bool) -> Self {
+    /// Create a new ListToolsTool with the specified tool availability and optional MCP tools.
+    ///
+    /// `mcp_tool_info` is a list of (server_name, tool_name, tool_description) tuples
+    /// extracted from the MCP service so the model can discover them via `list_tools`.
+    pub fn new_with_config(
+        has_bash: bool,
+        has_fs_read: bool,
+        has_fs_write: bool,
+        mcp_tool_info: Vec<(String, String, String)>,
+    ) -> Self {
         let mut native_tools = vec![ToolInfo {
             name: "list_tools".to_string(),
             description: "List all available tools (both native and MCP)".to_string(),
@@ -111,12 +120,24 @@ impl ListToolsTool {
             ]);
         }
 
-        Self { native_tools }
+        let mcp_tools = mcp_tool_info
+            .into_iter()
+            .map(|(server_name, tool_name, tool_description)| ToolInfo {
+                name: tool_name,
+                description: tool_description,
+                source: format!("mcp:{}", server_name),
+            })
+            .collect();
+
+        Self {
+            native_tools,
+            mcp_tools,
+        }
     }
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(false, false, false)
+        Self::new_with_config(false, false, false, Vec::new())
     }
 }
 
@@ -146,16 +167,22 @@ impl Tool for ListToolsTool {
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Return the configured native tools
-        let note = if self.native_tools.iter().any(|t| t.name == "bash") {
-            "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations.".to_string()
-        } else {
-            "These are the native tools available. Additional MCP tools may also be available."
-                .to_string()
+        // Return all tools: native + MCP
+        let mut all_tools = self.native_tools.clone();
+        all_tools.extend(self.mcp_tools.clone());
+
+        let has_bash = self.native_tools.iter().any(|t| t.name == "bash");
+        let has_mcp = !self.mcp_tools.is_empty();
+
+        let note = match (has_bash, has_mcp) {
+            (true, true) => "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations. MCP tools from connected servers are also listed above — use them by name.".to_string(),
+            (true, false) => "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations.".to_string(),
+            (false, true) => "These are the available tools. MCP tools from connected servers are also listed — use them by name.".to_string(),
+            (false, false) => "These are the native tools available.".to_string(),
         };
 
         Ok(ListToolsOutput {
-            tools: self.native_tools.clone(),
+            tools: all_tools,
             note,
         })
     }
