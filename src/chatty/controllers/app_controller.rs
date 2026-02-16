@@ -11,6 +11,7 @@ use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
 use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::views::chat_input::ChatInputState;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
@@ -28,6 +29,7 @@ pub struct ChattyApp {
     pub sidebar_view: Entity<SidebarView>,
     conversation_repo: Arc<dyn ConversationRepository>,
     is_ready: bool,
+    active_stream_task: Option<Task<anyhow::Result<()>>>,
 }
 
 impl ChattyApp {
@@ -51,6 +53,7 @@ impl ChattyApp {
             sidebar_view,
             conversation_repo,
             is_ready: false,
+            active_stream_task: None,
         };
 
         // Store entity in global state for later access
@@ -273,6 +276,33 @@ impl ChattyApp {
                         });
 
                         app.change_conversation_model(mid, cx);
+                    });
+                });
+            });
+        });
+
+        // Chat input stop stream callback
+        chat_view.update(cx, |view, cx| {
+            let input_state = view.chat_input_state().clone();
+            let app_for_stop = app_entity.clone();
+            input_state.update(cx, |state, _cx| {
+                debug!("Setting up on_stop callback for chat input");
+                state.set_on_stop(move |cx| {
+                    debug!("on_stop callback triggered");
+                    let app = app_for_stop.clone();
+
+                    app.update(cx, |app, cx| {
+                        app.stop_stream(cx);
+
+                        // Defer input state update to avoid re-entrancy
+                        let chat_view = app.chat_view.clone();
+                        cx.defer(move |cx| {
+                            chat_view.update(cx, |view, cx| {
+                                view.chat_input_state().update(cx, |input, cx| {
+                                    input.set_streaming(false, cx);
+                                });
+                            });
+                        });
                     });
                 });
             });
@@ -941,13 +971,25 @@ impl ChattyApp {
         }
 
         let chat_view = self.chat_view.clone();
+
+        // Set streaming state to true (deferred to avoid re-entrancy)
+        cx.defer({
+            let chat_view = chat_view.clone();
+            move |cx| {
+                chat_view.update(cx, |view, cx| {
+                    view.chat_input_state().update(cx, |input, cx| {
+                        input.set_streaming(true, cx);
+                    });
+                });
+            }
+        });
         let sidebar = self.sidebar_view.clone();
         let app_entity = cx.entity();
         let repo = self.conversation_repo.clone();
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
-        cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
                 debug!("Async task started");
 
                 // PHASE 1: Ensure conversation exists (create if needed)
@@ -970,6 +1012,19 @@ impl ChattyApp {
                             }
                             Err(e) => {
                                 error!(error = ?e, "Failed to create conversation");
+
+                                // Clear streaming state on error
+                                app_entity.update(cx, |app, cx| {
+                                    app.active_stream_task = None;
+
+                                    app.chat_view.update(cx, |view, cx| {
+                                        view.chat_input_state().update(cx, |input, cx| {
+                                            input.set_streaming(false, cx);
+                                        });
+                                    });
+                                }).map_err(|e| warn!(error = ?e, "Failed to clear streaming state on error"))
+                                .ok();
+
                                 return Err(e);
                             }
                         }
@@ -1413,9 +1468,131 @@ impl ChattyApp {
                         .map_err(|e| anyhow::anyhow!(e))?;
                 }
 
+                // Clear streaming state on success
+                app_entity.update(cx, |app, cx| {
+                    app.active_stream_task = None;
+
+                    app.chat_view.update(cx, |view, cx| {
+                        view.chat_input_state().update(cx, |input, cx| {
+                            input.set_streaming(false, cx);
+                        });
+                    });
+                }).map_err(|e| warn!(error = ?e, "Failed to clear streaming state"))
+                .ok();
+
                 Ok(())
-            })
-            .detach();
+            });
+
+        // Store the task instead of detaching
+        self.active_stream_task = Some(task);
+    }
+
+    /// Stop the currently active stream
+    pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
+        if let Some(task) = self.active_stream_task.take() {
+            debug!("Cancelling active stream");
+            // Simply drop the task - GPUI will cancel it automatically
+            drop(task);
+
+            let chat_view = self.chat_view.clone();
+            let repo = self.conversation_repo.clone();
+
+            // Extract current state and save partial response
+            let conv_id_opt = cx
+                .try_global::<ConversationsStore>()
+                .and_then(|store| store.active_id().cloned());
+
+            if let Some(conv_id) = conv_id_opt {
+                // Extract trace before finalizing UI
+                let trace_json = chat_view.update(cx, |view, _cx| {
+                    view.extract_current_trace()
+                        .and_then(|trace| serde_json::to_value(&trace).ok())
+                });
+
+                // Get the partial response text from the UI
+                let response_text = chat_view
+                    .read(cx)
+                    .messages()
+                    .last()
+                    .filter(|msg| msg.is_streaming)
+                    .map(|msg| msg.content.clone())
+                    .unwrap_or_default();
+
+                // Finalize the assistant message in UI
+                chat_view.update(cx, |view, cx| {
+                    view.finalize_assistant_message(cx);
+                });
+
+                // Save the partial response to conversation history
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                        conv.finalize_response(response_text);
+                        conv.add_trace(trace_json);
+                        debug!("Partial response saved to conversation after stop");
+                    }
+                });
+
+                // Serialize conversation data for saving
+                let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    store.get_conversation(&conv_id).and_then(|conv| {
+                        let history = conv.serialize_history().ok()?;
+                        let traces = conv.serialize_traces().ok()?;
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
+
+                        Some(ConversationData {
+                            id: conv.id().to_string(),
+                            title: conv.title().to_string(),
+                            model_id: conv.model_id().to_string(),
+                            message_history: history,
+                            system_traces: traces,
+                            token_usage: conv
+                                .serialize_token_usage()
+                                .unwrap_or_else(|_| "{}".to_string()),
+                            attachment_paths: conv
+                                .serialize_attachment_paths()
+                                .unwrap_or_else(|_| "[]".to_string()),
+                            created_at: conv
+                                .created_at()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as i64,
+                            updated_at: now,
+                        })
+                    })
+                });
+
+                // Save to disk asynchronously
+                if let Some(conv_data) = conv_data_opt {
+                    let conv_id_for_save = conv_id.clone();
+                    cx.spawn(async move |_, _cx| {
+                        if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
+                            warn!(error = ?e, "Failed to save conversation after stop");
+                        } else {
+                            debug!("Conversation saved to disk after stop");
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .detach();
+                }
+            }
+
+            cx.notify();
+        } else {
+            warn!("No active stream to cancel");
+        }
+    }
+
+    /// Check if a stream is currently active
+    pub fn is_streaming(&self) -> bool {
+        self.active_stream_task.is_some()
+    }
+
+    /// Get the chat input state entity
+    pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
+        self.chat_view.read(cx).chat_input_state().clone()
     }
 }
 
