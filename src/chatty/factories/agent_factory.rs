@@ -14,6 +14,105 @@ use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, 
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
+pub const RIG_PREAMBLE: &str = r#"You are a helpful AI assistant in a chat application.
+
+## Response Formatting
+
+Your responses will be rendered using CommonMark markdown. Follow these guidelines:
+
+### Markdown Syntax
+- Use standard CommonMark markdown for formatting
+- Code blocks: Use triple backticks with language identifiers (```rust, ```python, etc.)
+- Inline code: Use single backticks (`code`)
+- Headers: Use # for headers (# H1, ## H2, ### H3, etc.)
+- Lists: Use - or * for unordered, 1. 2. 3. for ordered
+- Emphasis: *italic* or _italic_, **bold** or __bold__
+- Links: [text](url)
+- Tables: Use standard markdown table syntax
+
+### Thinking Blocks
+You can use thinking blocks to show your reasoning process. These will be rendered in a collapsible, visually distinct section.
+
+**Format**: Wrap your thoughts in `<thinking>...</thinking>` tags
+
+**Example**:
+<thinking>
+Let me break down this problem:
+1. First, I need to understand the user's requirements
+2. Then, I'll consider different approaches
+3. Finally, I'll choose the best solution
+
+The key challenge here is...
+</thinking>
+
+**Guidelines**:
+- Use thinking blocks for complex reasoning, problem-solving steps, or analysis
+- Keep the thinking block focused and structured
+- The thinking content can include markdown formatting
+- Thinking blocks are displayed separately from your main response
+- Use them when showing your work would be helpful, but don't overuse them
+- Thinking blocks should come before your main response when used
+
+### Mathematical Expressions
+For mathematical content, use Typst syntax wrapped in specific delimiters:
+
+**Inline math**: Wrap in single dollar signs
+Example: The equation $x^2 + y^2 = r^2$ represents a circle.
+
+**Block math**: Wrap in double dollar signs on separate lines
+Example:
+$$
+integral_0^oo e^(-x^2) dif x = sqrt(pi)/2
+$$
+
+**Typst syntax guidelines**:
+- Functions: Use Typst function names (e.g., `integral`, `sum`, `sqrt`, `frac`)
+- Subscripts: Use underscore `x_1, x_2`
+- Superscripts: Use caret `x^2, e^(x+1)`
+- Fractions: Use `frac(numerator, denominator)`
+- Operators: `dif` for differentials, `dot` for derivatives
+- Greek letters: Write out the name (e.g., `alpha`, `beta`, `gamma`)
+- Special symbols: `oo` for infinity, `<=` `>=` for comparisons
+- Matrices: Use `mat()` with semicolons for rows
+
+DO NOT use LaTeX syntax like \frac{}{}, \int, \sum, etc. Only use Typst syntax.
+
+### Tool Calling
+When you need to use tools, the framework will automatically handle the formatting. Simply use the tools as provided and the system will format them correctly.
+
+Tool calls and responses follow this structure:
+1. You receive available tools in your context
+2. When you decide to call a tool, indicate which tool and provide parameters
+3. The framework formats your tool call properly
+4. Tool results are returned in your context
+5. You can then use those results to continue your response
+
+DO NOT manually format tool calls with XML or JSON - the rig.rs framework handles this automatically.
+
+### Best Practices
+- Be clear and concise
+- Use appropriate formatting to enhance readability
+- For complex math, prefer block format over inline
+- Always use Typst syntax for mathematics, never LaTeX
+- Break long responses into well-structured sections with headers
+- Use code blocks for any code examples, always with language identifiers
+- Use thinking blocks for complex reasoning when showing your work would help the user
+
+"#;
+
+/// Combines the standard RIG preamble with an optional user-provided preamble.
+/// Returns the standard preamble if user_preamble is empty, otherwise concatenates them.
+fn build_full_preamble(user_preamble: &str) -> String {
+    if user_preamble.trim().is_empty() {
+        RIG_PREAMBLE.to_string()
+    } else {
+        format!(
+            "{}\n\n---\n\n# Custom Instructions\n\n{}",
+            RIG_PREAMBLE, user_preamble
+        )
+    }
+}
+
 /// Filesystem read tool set
 type FsReadTools = (
     ReadFileTool,
@@ -305,7 +404,7 @@ impl AgentClient {
                 let client = rig::providers::anthropic::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&build_full_preamble(&model_config.preamble))
                     .temperature(model_config.temperature as f64);
 
                 if let Some(max_tokens) = model_config.max_tokens {
@@ -331,7 +430,7 @@ impl AgentClient {
                 let client = rig::providers::openai::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble);
+                    .preamble(&build_full_preamble(&model_config.preamble));
 
                 // Only set temperature if the model supports it
                 if model_config.supports_temperature {
@@ -357,7 +456,7 @@ impl AgentClient {
                 let client = rig::providers::gemini::Client::new(&key)?;
                 let builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&build_full_preamble(&model_config.preamble))
                     .temperature(model_config.temperature as f64);
 
                 // Build with all tools
@@ -379,7 +478,7 @@ impl AgentClient {
                 let client = rig::providers::mistral::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&build_full_preamble(&model_config.preamble))
                     .temperature(model_config.temperature as f64);
 
                 if let Some(max_tokens) = model_config.max_tokens {
@@ -408,7 +507,7 @@ impl AgentClient {
 
                 let builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&build_full_preamble(&model_config.preamble))
                     .temperature(model_config.temperature as f64);
 
                 // Build with all tools
@@ -544,7 +643,7 @@ impl AgentClient {
 
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble);
+                    .preamble(&build_full_preamble(&model_config.preamble));
 
                 if model_config.supports_temperature {
                     builder = builder.temperature(model_config.temperature as f64);

@@ -1586,11 +1586,13 @@ impl ChattyApp {
     }
 
     /// Check if a stream is currently active
+    #[allow(dead_code)]
     pub fn is_streaming(&self) -> bool {
         self.active_stream_task.is_some()
     }
 
     /// Get the chat input state entity
+    #[allow(dead_code)]
     pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
         self.chat_view.read(cx).chat_input_state().clone()
     }
