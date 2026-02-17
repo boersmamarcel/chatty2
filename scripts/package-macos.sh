@@ -132,11 +132,20 @@ if [ "$SIGNING_IDENTITY" != "-" ] && [ -n "$NOTARIZE_APPLE_ID" ] && [ -n "$NOTAR
     codesign --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_NAME}"
 
     # Submit for notarization
-    # Note: Requires app-specific password stored in keychain
-    # Create with: xcrun notarytool store-credentials "AC_PASSWORD" --apple-id "your@email.com" --team-id "TEAM_ID"
-    xcrun notarytool submit "${DMG_NAME}" \
-        --keychain-profile "AC_PASSWORD" \
-        --wait
+    # Supports two modes:
+    # - Local: uses keychain profile stored with: xcrun notarytool store-credentials "AC_PASSWORD" ...
+    # - CI: uses NOTARIZE_PASSWORD env var directly (for ephemeral runners)
+    if [ -n "$NOTARIZE_PASSWORD" ]; then
+        xcrun notarytool submit "${DMG_NAME}" \
+            --apple-id "${NOTARIZE_APPLE_ID}" \
+            --team-id "${NOTARIZE_TEAM_ID}" \
+            --password "${NOTARIZE_PASSWORD}" \
+            --wait
+    else
+        xcrun notarytool submit "${DMG_NAME}" \
+            --keychain-profile "AC_PASSWORD" \
+            --wait
+    fi
 
     # Staple the notarization ticket
     xcrun stapler staple "${DMG_NAME}"

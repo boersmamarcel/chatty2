@@ -111,27 +111,15 @@ Add these secrets:
 | `NOTARIZE_APPLE_ID` | your@email.com | Your Apple ID email |
 | `NOTARIZE_TEAM_ID` | ABC123XYZ | Your Team ID (10 character code) |
 
-**Note:** Notarization in GitHub Actions requires storing the app-specific password. Since GitHub Actions runners are ephemeral, you would need to pass it as a secret and use `--password` flag instead of `--password "@keychain:AC_PASSWORD"`.
-
-### 4. Update Notarization Script (Optional)
-
-If you want notarization in CI/CD, you'll need to modify the script to accept the password directly:
-
-```bash
-# In package-macos.sh, replace:
---password "@keychain:AC_PASSWORD" \
-
-# With:
---password "${NOTARIZE_PASSWORD}" \
-```
-
-And add this secret:
+**Note:** Notarization in GitHub Actions uses `NOTARIZE_PASSWORD` env var directly since runners are ephemeral and can't use a local keychain profile. Add this additional secret:
 
 | Secret Name | Value | Description |
 |-------------|-------|-------------|
 | `NOTARIZE_PASSWORD` | xxxx-xxxx-xxxx-xxxx | App-specific password from appleid.apple.com |
 
-### 5. Test Your Workflow
+The script automatically detects whether to use the keychain profile (local) or the password directly (CI) based on whether `NOTARIZE_PASSWORD` is set.
+
+### 4. Test Your Workflow
 
 Push a tag to trigger the release workflow:
 
