@@ -139,7 +139,7 @@ jobs:
         run: cargo build --release
 
       - name: Import code signing certificate
-        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        if: ${{ vars.MACOS_SIGNING_ENABLED == 'true' }}
         env:
           CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -165,6 +165,7 @@ jobs:
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
           NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
           NOTARIZE_TEAM_ID: ${{ secrets.NOTARIZE_TEAM_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
         run: ./scripts/package-macos.sh
 
       - name: Clean up keychain
@@ -303,9 +304,9 @@ jobs:
           draft: false # Always publish the release (not draft)
           files: release-assets/*
           fail_on_unmatched_files: true
-          # If release was created via UI, preserve its body/notes
-          # If triggered by tag push only, generate notes automatically
-          body: ${{ github.event_name == 'release' && github.event.release.body || '' }}
+          # If triggered by tag push, generate release notes automatically.
+          # If release was created via UI, omit body entirely so existing
+          # notes are not overwritten (an explicit empty string would clear them).
           generate_release_notes: ${{ github.event_name != 'release' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
