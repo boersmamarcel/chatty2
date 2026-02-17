@@ -1595,27 +1595,27 @@ async fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message:
         "png" => Ok(rig::message::UserContent::image_base64(
             b64,
             Some(rig::completion::message::ImageMediaType::PNG),
-            None,
+            Some(rig::completion::message::ImageDetail::Auto),
         )),
         "jpg" | "jpeg" => Ok(rig::message::UserContent::image_base64(
             b64,
             Some(rig::completion::message::ImageMediaType::JPEG),
-            None,
+            Some(rig::completion::message::ImageDetail::Auto),
         )),
         "gif" => Ok(rig::message::UserContent::image_base64(
             b64,
             Some(rig::completion::message::ImageMediaType::GIF),
-            None,
+            Some(rig::completion::message::ImageDetail::Auto),
         )),
         "webp" => Ok(rig::message::UserContent::image_base64(
             b64,
             Some(rig::completion::message::ImageMediaType::WEBP),
-            None,
+            Some(rig::completion::message::ImageDetail::Auto),
         )),
         "svg" => Ok(rig::message::UserContent::image_base64(
             b64,
             Some(rig::completion::message::ImageMediaType::SVG),
-            None,
+            Some(rig::completion::message::ImageDetail::Auto),
         )),
         "pdf" => Ok(rig::message::UserContent::document(
             b64,
