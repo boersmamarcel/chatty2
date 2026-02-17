@@ -106,7 +106,8 @@ else
 
     # Verify signature
     codesign --verify --verbose "${APP_BUNDLE}"
-    spctl --assess --verbose "${APP_BUNDLE}"
+    # Note: spctl will reject unnotarized apps, so we allow it to fail here
+    spctl --assess --verbose "${APP_BUNDLE}" || echo "⚠️  App not yet notarized (will be notarized below)"
 fi
 
 # Create DMG for distribution
@@ -132,11 +133,9 @@ if [ "$SIGNING_IDENTITY" != "-" ] && [ -n "$NOTARIZE_APPLE_ID" ] && [ -n "$NOTAR
 
     # Submit for notarization
     # Note: Requires app-specific password stored in keychain
-    # Create with: xcrun notarytool store-credentials --apple-id "your@email.com" --team-id "TEAM_ID"
+    # Create with: xcrun notarytool store-credentials "AC_PASSWORD" --apple-id "your@email.com" --team-id "TEAM_ID"
     xcrun notarytool submit "${DMG_NAME}" \
-        --apple-id "${NOTARIZE_APPLE_ID}" \
-        --team-id "${NOTARIZE_TEAM_ID}" \
-        --password "@keychain:AC_PASSWORD" \
+        --keychain-profile "AC_PASSWORD" \
         --wait
 
     # Staple the notarization ticket
