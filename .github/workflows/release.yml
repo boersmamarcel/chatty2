@@ -265,7 +265,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-version.outputs.tag_name }}
-          draft: false
           files: release-assets/*
           fail_on_unmatched_files: true
         env:
