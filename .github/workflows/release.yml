@@ -1,26 +1,15 @@
 name: Release
 
-# IMPORTANT: When you create a release via GitHub UI, it fires BOTH the 'release.published'
-# event AND the 'push.tags' event, causing duplicate workflow runs that race each other.
-# Solution: Only trigger on 'release.published' for manual releases.
-# For tag-only pushes (without release), the action will create the release automatically.
+# Triggered when a release is published via the GitHub UI.
+# GitHub UI creates both the release and the tag atomically,
+# so only one event is needed.
 on:
   release:
-    types: [published] # Trigger when you publish a release via GitHub UI
-  push:
-    tags:
-      - "v*" # Trigger on direct tag push (when NO release exists yet)
-      - "[0-9]*"
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: chatty
-
-# Prevent race conditions when release.published and push.tags fire simultaneously
-# Only allow one release workflow per tag at a time
-concurrency:
-  group: release-${{ github.ref_name }}
-  cancel-in-progress: false # Don't cancel, just queue them
 
 jobs:
   # Validate that the tag version matches Cargo.toml
@@ -29,35 +18,14 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
-      should_skip: ${{ steps.check_release.outputs.should_skip }}
     steps:
-      - name: Check if release already exists
-        id: check_release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # If triggered by tag push, check if a release already exists
-          if [ "${{ github.event_name }}" == "push" ]; then
-            TAG_NAME="${GITHUB_REF_NAME}"
-            if gh release view "$TAG_NAME" --repo ${{ github.repository }} > /dev/null 2>&1; then
-              echo "Release $TAG_NAME already exists, skipping duplicate workflow"
-              echo "should_skip=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-          echo "should_skip=false" >> $GITHUB_OUTPUT
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Extract and validate version
         id: version
         run: |
-          # Get tag name from either push event or release event
-          if [ "${{ github.event_name }}" == "release" ]; then
-            TAG_NAME="${{ github.event.release.tag_name }}"
-          else
-            TAG_NAME="${GITHUB_REF_NAME}"
-          fi
+          TAG_NAME="${{ github.event.release.tag_name }}"
 
           # Extract version from tag (remove 'v' prefix if present)
           TAG_VERSION="${TAG_NAME#v}"
@@ -81,7 +49,6 @@ jobs:
 
   build-linux:
     needs: validate-version
-    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -126,7 +93,6 @@ jobs:
 
   build-macos-arm:
     needs: validate-version
-    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -182,7 +148,6 @@ jobs:
 
   build-windows:
     needs: validate-version
-    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -210,7 +175,6 @@ jobs:
 
   create-release:
     needs: [validate-version, build-linux, build-macos-arm, build-windows]
-    if: needs.validate-version.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -301,12 +265,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-version.outputs.tag_name }}
-          draft: false # Always publish the release (not draft)
+          draft: false
           files: release-assets/*
           fail_on_unmatched_files: true
-          # If triggered by tag push, generate release notes automatically.
-          # If release was created via UI, omit body entirely so existing
-          # notes are not overwritten (an explicit empty string would clear them).
-          generate_release_notes: ${{ github.event_name != 'release' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
