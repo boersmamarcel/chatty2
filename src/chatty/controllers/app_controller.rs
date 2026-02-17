@@ -48,7 +48,7 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
-        let mut app = Self {
+        let app = Self {
             chat_view,
             sidebar_view,
             conversation_repo,
@@ -74,85 +74,10 @@ impl ChattyApp {
         // Initialize chat input with available models
         app.initialize_models(cx);
 
-        // Subscribe to models ready event to create first conversation if needed
-        if let Some(weak_notifier) = cx
-            .try_global::<crate::settings::models::GlobalModelsNotifier>()
-            .and_then(|g| g.entity.clone())
-            && let Some(notifier) = weak_notifier.upgrade()
-        {
-            cx.subscribe(
-                &notifier,
-                |app, _notifier, event: &crate::settings::models::ModelsNotifierEvent, cx| {
-                    if matches!(
-                        event,
-                        crate::settings::models::ModelsNotifierEvent::ModelsReady
-                    ) {
-                        // Check if we need to create initial conversation
-                        let has_convs = cx
-                            .try_global::<ConversationsStore>()
-                            .map(|store| store.count() > 0)
-                            .unwrap_or(false);
-
-                        if !has_convs {
-                            info!("Models ready and no conversations exist, creating initial one");
-                            let app_entity = cx.entity();
-                            cx.spawn(async move |_, cx| {
-                                let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
-                                    app_entity
-                                        .update(cx, |app, cx| app.create_new_conversation(cx));
-                                if let Ok(task) = task_result {
-                                    let _ = task.await;
-                                }
-                                let _: Result<(), _> = app_entity.update(cx, |app, cx| {
-                                    app.is_ready = true;
-                                    info!("App is now ready (initial conversation created)");
-                                    cx.notify();
-                                });
-                                Ok::<_, anyhow::Error>(())
-                            })
-                            .detach();
-                        } else {
-                            app.is_ready = true;
-                        }
-                    }
-                },
-            )
-            .detach();
-        }
-
-        // If models are already loaded, check now
-        let has_models = cx
-            .try_global::<ModelsModel>()
-            .map(|m| !m.models().is_empty())
-            .unwrap_or(false);
-
-        if has_models {
-            let has_convs = cx
-                .try_global::<ConversationsStore>()
-                .map(|store| store.count() > 0)
-                .unwrap_or(false);
-
-            if !has_convs {
-                info!("Models available at startup, creating initial conversation");
-                let app_entity = cx.entity();
-                cx.spawn(async move |_, cx| {
-                    let task_result: Result<gpui::Task<anyhow::Result<String>>, _> =
-                        app_entity.update(cx, |app, cx| app.create_new_conversation(cx));
-                    if let Ok(task) = task_result {
-                        let _ = task.await;
-                    }
-                    let _: Result<(), _> = app_entity.update(cx, |app, cx| {
-                        app.is_ready = true;
-                        info!("App is now ready (initial conversation created)");
-                        cx.notify();
-                    });
-                    Ok::<_, anyhow::Error>(())
-                })
-                .detach();
-            } else {
-                app.is_ready = true;
-            }
-        }
+        // is_ready is set by load_conversations_after_models_ready() once disk load completes.
+        // Do NOT create an initial conversation here — ConversationsStore is always empty at
+        // this point because disk loading hasn't happened yet. Creating one here causes a race
+        // condition where a blank conversation appears instead of the user's history.
 
         app
     }
@@ -494,13 +419,27 @@ impl ChattyApp {
                                 .map_err(|e| warn!(error = ?e, "Failed to clear chat view on startup"))
                                 .ok();
 
-                            // Mark app as ready
-                            if let Some(app) = weak.upgrade() {
-                                let _: Result<(), _> = app.update(cx, |app, cx| {
-                                    app.is_ready = true;
-                                    info!("App is now ready (conversations loaded)");
-                                    cx.notify();
-                                });
+                            // If no conversations existed on disk, create the first one now.
+                            // This is the only place where an initial conversation should be
+                            // created — after we've confirmed disk has nothing, not before.
+                            if restored_count == 0 {
+                                info!("No conversations on disk, creating initial conversation");
+                                if let Some(app) = weak.upgrade() {
+                                    let task_result =
+                                        app.update(cx, |app, cx| app.create_new_conversation(cx));
+                                    if let Ok(task) = task_result {
+                                        let _ = task.await;
+                                    }
+                                }
+                            } else {
+                                // Mark app as ready
+                                if let Some(app) = weak.upgrade() {
+                                    let _: Result<(), _> = app.update(cx, |app, cx| {
+                                        app.is_ready = true;
+                                        info!("App is now ready (conversations loaded)");
+                                        cx.notify();
+                                    });
+                                }
                             }
                         }
                         _ => {
@@ -510,6 +449,14 @@ impl ChattyApp {
                 }
                 Err(e) => {
                     error!(error = ?e, "Failed to load conversation files");
+                    // Still create an initial conversation so the app is usable
+                    if let Some(app) = weak.upgrade() {
+                        let task_result =
+                            app.update(cx, |app, cx| app.create_new_conversation(cx));
+                        if let Ok(task) = task_result {
+                            let _ = task.await;
+                        }
+                    }
                 }
             }
 
