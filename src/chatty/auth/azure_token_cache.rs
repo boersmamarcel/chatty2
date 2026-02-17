@@ -52,7 +52,7 @@ impl AzureTokenCache {
         tracing::info!("Creating Azure token cache with DefaultAzureCredential");
 
         // Ensure az CLI is findable when app is launched as a GUI (no shell PATH)
-        super::azure_auth::augment_path_for_az_cli();
+        super::azure_auth::augment_gui_app_path();
 
         let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())
             .context("Failed to create DefaultAzureCredential")?;

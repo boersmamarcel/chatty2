@@ -430,6 +430,14 @@ impl ChattyApp {
                                     if let Ok(task) = task_result {
                                         let _ = task.await;
                                     }
+                                    // Mark app as ready after initial conversation is created
+                                    app.update(cx, |app, cx| {
+                                        app.is_ready = true;
+                                        info!("App is now ready (initial conversation created)");
+                                        cx.notify();
+                                    })
+                                    .map_err(|e| warn!(error = ?e, "Failed to mark app ready after initial conversation"))
+                                    .ok();
                                 }
                             } else {
                                 // Mark app as ready
@@ -456,6 +464,14 @@ impl ChattyApp {
                         if let Ok(task) = task_result {
                             let _ = task.await;
                         }
+                        // Mark app as ready so messages can be sent despite load error
+                        app.update(cx, |app, cx| {
+                            app.is_ready = true;
+                            info!("App is now ready (started after load error)");
+                            cx.notify();
+                        })
+                        .map_err(|warn_e| warn!(error = ?warn_e, "Failed to mark app ready after load error"))
+                        .ok();
                     }
                 }
             }

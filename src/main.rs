@@ -426,6 +426,10 @@ fn main() {
         if let Err(e) = chatty::services::MathRendererService::cleanup_old_styled_svgs() {
             warn!(error = ?e, "Failed to cleanup old math SVG files");
         }
+        // Augment PATH for GUI app launch — macOS/Linux .app bundles don't inherit the
+        // shell PATH, so executables like npx, uvx, az, etc. won't be found otherwise.
+        chatty::auth::azure_auth::augment_gui_app_path();
+
         // Initialize MCP service for managing MCP server connections
         let mcp_service = chatty::services::McpService::new();
         cx.set_global(mcp_service);
