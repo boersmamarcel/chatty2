@@ -96,6 +96,11 @@ impl ChatView {
         self.conversation_id.as_ref()
     }
 
+    /// Get the messages
+    pub fn messages(&self) -> &[DisplayMessage] {
+        &self.messages
+    }
+
     /// Add a user message to the chat
     pub fn add_user_message(
         &mut self,

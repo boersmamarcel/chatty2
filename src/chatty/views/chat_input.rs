@@ -20,6 +20,9 @@ pub type SendMessageCallback =
 /// Callback type for model selection changes
 pub type ModelChangeCallback = Arc<dyn Fn(String, &mut Context<ChatInputState>) + Send + Sync>;
 
+/// Callback type for stopping stream
+pub type StopStreamCallback = Arc<dyn Fn(&mut Context<ChatInputState>) + Send + Sync>;
+
 /// State for the chat input component
 /// Cache for PDF thumbnails: maps PDF path -> thumbnail path or error
 type ThumbnailCache = Arc<RwLock<HashMap<PathBuf, Result<PathBuf, String>>>>;
@@ -30,11 +33,13 @@ pub struct ChatInputState {
     should_clear: bool,
     on_send: Option<SendMessageCallback>,
     on_model_change: Option<ModelChangeCallback>,
+    on_stop: Option<StopStreamCallback>,
     selected_model_id: Option<String>,
     available_models: Vec<(String, String)>, // (id, display_name)
     supports_images: bool,
     supports_pdf: bool,
     thumbnail_cache: ThumbnailCache,
+    is_streaming: bool,
 }
 
 impl ChatInputState {
@@ -45,11 +50,13 @@ impl ChatInputState {
             should_clear: false,
             on_send: None,
             on_model_change: None,
+            on_stop: None,
             selected_model_id: None,
             thumbnail_cache: Arc::new(RwLock::new(HashMap::new())),
             available_models: Vec::new(),
             supports_images: false,
             supports_pdf: false,
+            is_streaming: false,
         }
     }
 
@@ -67,6 +74,14 @@ impl ChatInputState {
         F: Fn(String, &mut Context<ChatInputState>) + Send + Sync + 'static,
     {
         self.on_model_change = Some(Arc::new(callback));
+    }
+
+    /// Set the callback for stopping stream
+    pub fn set_on_stop<F>(&mut self, callback: F)
+    where
+        F: Fn(&mut Context<ChatInputState>) + Send + Sync + 'static,
+    {
+        self.on_stop = Some(Arc::new(callback));
     }
 
     /// Set available models for selection
@@ -97,6 +112,17 @@ impl ChatInputState {
     pub fn set_capabilities(&mut self, supports_images: bool, supports_pdf: bool) {
         self.supports_images = supports_images;
         self.supports_pdf = supports_pdf;
+    }
+
+    /// Set streaming state
+    pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
+        self.is_streaming = streaming;
+        cx.notify();
+    }
+
+    /// Check if currently streaming
+    pub fn is_streaming(&self) -> bool {
+        self.is_streaming
     }
 
     /// Add file attachments with validation
@@ -203,6 +229,17 @@ impl ChatInputState {
         self.should_clear = true;
         self.clear_attachments();
         debug!("Marked input for clearing");
+    }
+
+    /// Stop the current stream
+    pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
+        debug!("stop_stream called");
+        if let Some(on_stop) = &self.on_stop {
+            debug!("on_stop callback exists, calling it");
+            on_stop(cx);
+        } else {
+            error!("on_stop callback is NOT set");
+        }
     }
 
     /// Clear the input if needed
@@ -348,6 +385,7 @@ impl ChatInput {
 impl RenderOnce for ChatInput {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state_for_send = self.state.clone();
+        let state_for_stop = self.state.clone();
         let state_for_model = self.state.clone();
         let state_for_image = self.state.clone();
         let state_for_pdf = self.state.clone();
@@ -358,6 +396,7 @@ impl RenderOnce for ChatInput {
         let supports_pdf = self.state.read(cx).supports_pdf;
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
+        let is_streaming = self.state.read(cx).is_streaming();
 
         // Read thumbnail cache (for PDF previews)
         let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
@@ -564,24 +603,41 @@ impl RenderOnce for ChatInput {
                             .child(div().flex_grow())
                             .child(model_popover)
                             .child(
-                                // Send button
+                                // Send/Stop button (conditional based on streaming state)
                                 div()
                                     .px_3()
                                     .py_1()
                                     .rounded_sm()
-                                    .bg(rgb(0xffa033))
                                     .text_color(rgb(0xffffff))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0xff8c1a)))
-                                    .child("Send")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        move |_event, _window, cx| {
-                                            state_for_send.update(cx, |state, cx| {
-                                                state.send_message(cx);
-                                            });
-                                        },
-                                    ),
+                                    .when(is_streaming, |div| {
+                                        // Stop button when streaming
+                                        div.bg(rgb(0xff4444))
+                                            .hover(|style| style.bg(rgb(0xff2222)))
+                                            .child("Stop")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                move |_event, _window, cx| {
+                                                    state_for_stop.update(cx, |state, cx| {
+                                                        state.stop_stream(cx);
+                                                    });
+                                                },
+                                            )
+                                    })
+                                    .when(!is_streaming, |div| {
+                                        // Send button when not streaming
+                                        div.bg(rgb(0xffa033))
+                                            .hover(|style| style.bg(rgb(0xff8c1a)))
+                                            .child("Send")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                move |_event, _window, cx| {
+                                                    state_for_send.update(cx, |state, cx| {
+                                                        state.send_message(cx);
+                                                    });
+                                                },
+                                            )
+                                    }),
                             ),
                     )
                     .when(!attachments.is_empty(), |d| {
