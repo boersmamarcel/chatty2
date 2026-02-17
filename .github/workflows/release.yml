@@ -162,7 +162,7 @@ jobs:
 
       - name: Package macOS app
         env:
-          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_ENABLED == 'true' && secrets.MACOS_SIGNING_IDENTITY || '-' }}
           NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
           NOTARIZE_TEAM_ID: ${{ secrets.NOTARIZE_TEAM_ID }}
           NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
