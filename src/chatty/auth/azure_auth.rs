@@ -5,6 +5,39 @@ use tracing::info;
 
 const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 
+/// Augments the process PATH to include common Azure CLI installation directories.
+///
+/// GUI apps on macOS do not inherit the shell PATH, so `az` may not be findable
+/// even after `az login`. This adds standard Homebrew and system bin paths.
+pub fn augment_path_for_az_cli() {
+    let extra_paths = [
+        "/opt/homebrew/bin", // Apple Silicon Homebrew
+        "/usr/local/bin",    // Intel Homebrew / system
+        "/usr/bin",
+        "/bin",
+    ];
+
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<&str> = current.split(':').collect();
+
+    for path in extra_paths.iter().rev() {
+        if !parts.contains(path) {
+            parts.insert(0, path);
+        }
+    }
+
+    let new_path = parts.join(":");
+    if new_path != current {
+        tracing::debug!(path = %new_path, "Augmented PATH for Azure CLI discovery");
+        // SAFETY: no other thread reads PATH concurrently at this point;
+        // this is a one-time augmentation to fix GUI app PATH on macOS
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("PATH", new_path)
+        };
+    }
+}
+
 /// Fetch Azure Entra ID token for Azure OpenAI
 ///
 /// Uses DefaultAzureCredential which tries:
@@ -18,6 +51,8 @@ const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 /// - `Err`: Authentication failed with actionable error message
 pub async fn fetch_entra_id_token() -> Result<String> {
     info!("Fetching Azure Entra ID token for Azure OpenAI");
+
+    augment_path_for_az_cli();
 
     let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())
         .context("Failed to create DefaultAzureCredential")?;
