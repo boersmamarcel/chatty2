@@ -50,7 +50,7 @@ impl Default for ExecutionSettingsModel {
             filesystem_write_enabled: true, // Enabled by default when workspace is set
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
-            network_isolation: true,
+            network_isolation: false,
         }
     }
 }

@@ -41,6 +41,7 @@ pub enum CustomIcon {
     CircleX,       // circle-x.svg - Error indicator
     McpServer,     // mcp-server.svg - MCP indicator
     Wrench,        // wrench.svg - Filesystem tools indicator
+    Earth,         // earth.svg - Network isolation toggle
 }
 
 impl IconNamed for CustomIcon {
@@ -58,6 +59,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::CircleX => "icons/circle-x.svg",
             CustomIcon::McpServer => "icons/mcp-server.svg",
             CustomIcon::Wrench => "icons/wrench.svg",
+            CustomIcon::Earth => "icons/earth.svg",
         }
         .into()
     }
