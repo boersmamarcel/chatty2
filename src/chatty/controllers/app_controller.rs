@@ -294,13 +294,11 @@ impl ChattyApp {
                     app.update(cx, |app, cx| {
                         app.stop_stream(cx);
 
-                        // Defer input state update to avoid re-entrancy
-                        let chat_view = app.chat_view.clone();
+                        // Defer streaming state clear to avoid re-entrancy on ChatInputState
+                        let app_entity = app_for_stop.clone();
                         cx.defer(move |cx| {
-                            chat_view.update(cx, |view, cx| {
-                                view.chat_input_state().update(cx, |input, cx| {
-                                    input.set_streaming(false, cx);
-                                });
+                            app_entity.update(cx, |app, cx| {
+                                app.clear_streaming_state(cx);
                             });
                         });
                     });
@@ -1014,16 +1012,12 @@ impl ChattyApp {
                                 error!(error = ?e, "Failed to create conversation");
 
                                 // Clear streaming state on error
-                                app_entity.update(cx, |app, cx| {
-                                    app.active_stream_task = None;
-
-                                    app.chat_view.update(cx, |view, cx| {
-                                        view.chat_input_state().update(cx, |input, cx| {
-                                            input.set_streaming(false, cx);
-                                        });
-                                    });
-                                }).map_err(|e| warn!(error = ?e, "Failed to clear streaming state on error"))
-                                .ok();
+                                app_entity
+                                    .update(cx, |app, cx| {
+                                        app.clear_streaming_state(cx);
+                                    })
+                                    .map_err(|e| warn!(error = ?e, "Failed to clear streaming state on error"))
+                                    .ok();
 
                                 return Err(e);
                             }
@@ -1469,16 +1463,12 @@ impl ChattyApp {
                 }
 
                 // Clear streaming state on success
-                app_entity.update(cx, |app, cx| {
-                    app.active_stream_task = None;
-
-                    app.chat_view.update(cx, |view, cx| {
-                        view.chat_input_state().update(cx, |input, cx| {
-                            input.set_streaming(false, cx);
-                        });
-                    });
-                }).map_err(|e| warn!(error = ?e, "Failed to clear streaming state"))
-                .ok();
+                app_entity
+                    .update(cx, |app, cx| {
+                        app.clear_streaming_state(cx);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to clear streaming state"))
+                    .ok();
 
                 Ok(())
             });
@@ -1581,16 +1571,48 @@ impl ChattyApp {
 
             cx.notify();
         } else {
-            warn!("No active stream to cancel");
+            // Task may have just completed naturally (race condition: task cleared
+            // active_stream_task before stop_stream ran). Reset UI state to ensure
+            // the Stop button doesn't get stuck.
+            let chat_view = self.chat_view.clone();
+            let input_still_streaming = chat_view
+                .read(cx)
+                .chat_input_state()
+                .read(cx)
+                .is_streaming();
+
+            if input_still_streaming {
+                debug!("No active task but UI still shows streaming — resetting UI state");
+                chat_view.update(cx, |view, cx| {
+                    view.chat_input_state().update(cx, |input, cx| {
+                        input.set_streaming(false, cx);
+                    });
+                });
+                cx.notify();
+            } else {
+                debug!("stop_stream called but no active stream and UI already idle");
+            }
         }
     }
 
+    /// Clear streaming state: drops the active task and sets input to non-streaming
+    fn clear_streaming_state(&mut self, cx: &mut Context<Self>) {
+        self.active_stream_task = None;
+        self.chat_view.update(cx, |view, cx| {
+            view.chat_input_state().update(cx, |input, cx| {
+                input.set_streaming(false, cx);
+            });
+        });
+    }
+
     /// Check if a stream is currently active
+    #[allow(dead_code)]
     pub fn is_streaming(&self) -> bool {
         self.active_stream_task.is_some()
     }
 
     /// Get the chat input state entity
+    #[allow(dead_code)]
     pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
         self.chat_view.read(cx).chat_input_state().clone()
     }
