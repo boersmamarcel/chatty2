@@ -97,11 +97,17 @@ if [ "$SIGNING_IDENTITY" = "-" ]; then
 else
     echo "Applying code signature with identity: ${SIGNING_IDENTITY}"
     # Sign with hardened runtime and timestamp for notarization compatibility
+    # Note: --deep is deprecated; sign nested components individually first,
+    # then sign the app bundle itself.
     codesign --sign "${SIGNING_IDENTITY}" \
         --force \
         --options runtime \
         --timestamp \
-        --deep \
+        "${MACOS_DIR}/${APP_NAME}"
+    codesign --sign "${SIGNING_IDENTITY}" \
+        --force \
+        --options runtime \
+        --timestamp \
         "${APP_BUNDLE}"
 
     # Verify signature
@@ -140,11 +146,13 @@ if [ "$SIGNING_IDENTITY" != "-" ] && [ -n "$NOTARIZE_APPLE_ID" ] && [ -n "$NOTAR
             --apple-id "${NOTARIZE_APPLE_ID}" \
             --team-id "${NOTARIZE_TEAM_ID}" \
             --password "${NOTARIZE_PASSWORD}" \
-            --wait
+            --wait \
+            --timeout 3600
     else
         xcrun notarytool submit "${DMG_NAME}" \
             --keychain-profile "AC_PASSWORD" \
-            --wait
+            --wait \
+            --timeout 3600
     fi
 
     # Staple the notarization ticket

@@ -151,16 +151,14 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Import certificate
+          # Import certificate (trap ensures cleanup even on failure)
+          trap 'rm -f certificate.p12' EXIT
           echo "$CERTIFICATE_BASE64" | base64 --decode > certificate.p12
           security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Add keychain to search list
           security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          # Clean up certificate file
-          rm certificate.p12
 
       - name: Package macOS app
         env:
@@ -170,7 +168,7 @@ jobs:
         run: ./scripts/package-macos.sh
 
       - name: Clean up keychain
-        if: ${{ always() && secrets.MACOS_CERTIFICATE != '' }}
+        if: always()
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           security delete-keychain "$KEYCHAIN_PATH" || true
