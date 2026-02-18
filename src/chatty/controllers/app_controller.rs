@@ -443,6 +443,8 @@ impl ChattyApp {
                             if restored_count == 0 {
                                 info!("No conversations on disk, creating initial conversation");
                                 if let Some(app) = weak.upgrade() {
+                                    // Called directly (bypassing active_create_task guard) because
+                                    // startup is sequential and the sidebar callback cannot fire yet.
                                     let task_result =
                                         app.update(cx, |app, cx| app.create_new_conversation(cx));
                                     if let Ok(task) = task_result {
@@ -477,6 +479,8 @@ impl ChattyApp {
                     error!(error = ?e, "Failed to load conversation files");
                     // Still create an initial conversation so the app is usable
                     if let Some(app) = weak.upgrade() {
+                        // Called directly (bypassing active_create_task guard) because
+                        // startup is sequential and the sidebar callback cannot fire yet.
                         let task_result =
                             app.update(cx, |app, cx| app.create_new_conversation(cx));
                         if let Ok(task) = task_result {
@@ -550,18 +554,17 @@ impl ChattyApp {
                 let conv_id = uuid::Uuid::new_v4().to_string();
                 let title = "New Chat".to_string();
 
+                // Capture model list once (already read via `models` above)
+                let models_list: Vec<(String, String)> = models
+                    .models()
+                    .iter()
+                    .map(|m| (m.id.clone(), m.name.clone()))
+                    .collect();
+
                 // Clear chat view immediately so the user sees a fresh state
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone());
                     view.clear_messages(cx);
-
-                    // Set available models in chat input
-                    let models_list: Vec<(String, String)> = cx
-                        .global::<ModelsModel>()
-                        .models()
-                        .iter()
-                        .map(|m| (m.id.clone(), m.name.clone()))
-                        .collect();
 
                     view.chat_input_state().update(cx, |state, _cx| {
                         state.set_available_models(models_list, Some(model_config.id.clone()));
@@ -595,100 +598,130 @@ impl ChattyApp {
 
                 // PHASE 2: Async work — MCP tools, agent creation, store + persist
                 cx.spawn(async move |_weak, cx| {
-                    // Get MCP tools.
-                    // NOTE: MCP tools are fetched once at conversation creation time and baked
-                    // into the AgentClient. If an MCP server is added, removed, or restarted
-                    // after this point, the existing conversation will retain its original tool
-                    // set. Open a new conversation to pick up updated tool registrations.
-                    let mcp_service = cx
-                        .update_global::<crate::chatty::services::McpService, _>(|svc, _| {
-                            svc.clone()
-                        })
-                        .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
-                    let mcp_tools = mcp_service
-                        .get_all_tools_with_sinks()
-                        .await
-                        .ok()
-                        .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+                    let result: anyhow::Result<String> = async {
+                        // Get MCP tools.
+                        // NOTE: MCP tools are fetched once at conversation creation time and baked
+                        // into the AgentClient. If an MCP server is added, removed, or restarted
+                        // after this point, the existing conversation will retain its original tool
+                        // set. Open a new conversation to pick up updated tool registrations.
+                        let mcp_service = cx
+                            .update_global::<crate::chatty::services::McpService, _>(|svc, _| {
+                                svc.clone()
+                            })
+                            .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
+                        let mcp_tools = mcp_service
+                            .get_all_tools_with_sinks()
+                            .await
+                            .ok()
+                            .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
-                    // Get execution settings and approval stores for tools
-                    let (exec_settings, pending_approvals, pending_write_approvals) =
-                        cx.update(|cx| {
-                            let settings = cx
-                                .global::<crate::settings::models::ExecutionSettingsModel>()
-                                .clone();
-                            let approvals = cx
-                                .global::<crate::chatty::models::ExecutionApprovalStore>()
-                                .get_pending_approvals();
-                            let write_approvals = cx
-                                .global::<crate::chatty::models::WriteApprovalStore>()
-                                .get_pending_approvals();
-                            (Some(settings), Some(approvals), Some(write_approvals))
+                        // Get execution settings and approval stores for tools
+                        let (exec_settings, pending_approvals, pending_write_approvals) =
+                            cx.update(|cx| {
+                                let settings = cx
+                                    .global::<crate::settings::models::ExecutionSettingsModel>()
+                                    .clone();
+                                let approvals = cx
+                                    .global::<crate::chatty::models::ExecutionApprovalStore>()
+                                    .get_pending_approvals();
+                                let write_approvals = cx
+                                    .global::<crate::chatty::models::WriteApprovalStore>()
+                                    .get_pending_approvals();
+                                (Some(settings), Some(approvals), Some(write_approvals))
+                            })?;
+
+                        let conversation = Conversation::new(
+                            conv_id.clone(),
+                            title.clone(),
+                            &model_config,
+                            &provider_config,
+                            mcp_tools,
+                            exec_settings,
+                            pending_approvals,
+                            pending_write_approvals,
+                        )
+                        .await?;
+
+                        // PHASE 3: Add to global store and refresh sidebar with real data
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            store.add_conversation(conversation);
+                            store.set_active(conv_id.clone());
                         })?;
 
-                    let conversation = Conversation::new(
-                        conv_id.clone(),
-                        title.clone(),
-                        &model_config,
-                        &provider_config,
-                        mcp_tools,
-                        exec_settings,
-                        pending_approvals,
-                        pending_write_approvals,
-                    )
-                    .await?;
+                        // Refresh sidebar with actual store data (replaces the placeholder)
+                        sidebar.update(cx, |sidebar, cx| {
+                            let convs = cx
+                                .global::<ConversationsStore>()
+                                .list_all()
+                                .iter()
+                                .map(|c| {
+                                    (
+                                        c.id().to_string(),
+                                        c.title().to_string(),
+                                        Some(c.token_usage().total_estimated_cost_usd),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            debug!(
+                                conv_count = convs.len(),
+                                "Updating sidebar after conversation creation"
+                            );
+                            sidebar.set_conversations(convs, cx);
+                            sidebar.set_active_conversation(Some(conv_id.clone()), cx);
+                        })?;
 
-                    // PHASE 3: Add to global store and refresh sidebar with real data
-                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        store.add_conversation(conversation);
-                        store.set_active(conv_id.clone());
-                    })?;
+                        // Save to disk
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
 
-                    // Refresh sidebar with actual store data (replaces the placeholder)
-                    sidebar.update(cx, |sidebar, cx| {
-                        let convs = cx
-                            .global::<ConversationsStore>()
-                            .list_all()
-                            .iter()
-                            .map(|c| {
-                                (
-                                    c.id().to_string(),
-                                    c.title().to_string(),
-                                    Some(c.token_usage().total_estimated_cost_usd),
-                                )
+                        let data = ConversationData {
+                            id: conv_id.clone(),
+                            title,
+                            model_id: model_config.id.clone(),
+                            message_history: "[]".to_string(),
+                            system_traces: "[]".to_string(),
+                            token_usage: "{}".to_string(),
+                            attachment_paths: "[]".to_string(),
+                            created_at: now,
+                            updated_at: now,
+                        };
+
+                        repo.save(&conv_id, data)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))?;
+
+                        Ok(conv_id)
+                    }
+                    .await;
+
+                    // On failure, roll back the optimistic sidebar placeholder
+                    if result.is_err() {
+                        warn!("Conversation creation failed, removing sidebar placeholder");
+                        sidebar
+                            .update(cx, |sidebar, cx| {
+                                let convs = cx
+                                    .global::<ConversationsStore>()
+                                    .list_all()
+                                    .iter()
+                                    .map(|c| {
+                                        (
+                                            c.id().to_string(),
+                                            c.title().to_string(),
+                                            Some(c.token_usage().total_estimated_cost_usd),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                sidebar.set_conversations(convs, cx);
                             })
-                            .collect::<Vec<_>>();
-                        debug!(
-                            conv_count = convs.len(),
-                            "Updating sidebar after conversation creation"
-                        );
-                        sidebar.set_conversations(convs, cx);
-                        sidebar.set_active_conversation(Some(conv_id.clone()), cx);
-                    })?;
+                            .map_err(|e| {
+                                warn!(error = ?e, "Failed to roll back sidebar placeholder")
+                            })
+                            .ok();
+                    }
 
-                    // Save to disk
-                    let now = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64;
-
-                    let data = ConversationData {
-                        id: conv_id.clone(),
-                        title,
-                        model_id: model_config.id.clone(),
-                        message_history: "[]".to_string(),
-                        system_traces: "[]".to_string(),
-                        token_usage: "{}".to_string(),
-                        attachment_paths: "[]".to_string(),
-                        created_at: now,
-                        updated_at: now,
-                    };
-
-                    repo.save(&conv_id, data)
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))?;
-
-                    Ok(conv_id)
+                    result
                 })
             } else {
                 let err_msg = "No provider found for model";
