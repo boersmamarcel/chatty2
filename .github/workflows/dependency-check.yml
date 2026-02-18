@@ -1,13 +1,15 @@
 name: Dependency Update Check
 
 on:
-  push:
-    tags:
-      - "v*" # Trigger on version tags like v0.1.0, v1.0.0, etc.
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
   workflow_dispatch:
 
 jobs:
   check-dependencies:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
