@@ -30,6 +30,9 @@ pub struct ChattyApp {
     conversation_repo: Arc<dyn ConversationRepository>,
     is_ready: bool,
     active_stream_task: Option<Task<anyhow::Result<()>>>,
+    /// Held while a conversation is being created; prevents concurrent creations.
+    /// Automatically dropped (and thus "cleared") when the task completes.
+    active_create_task: Option<Task<anyhow::Result<String>>>,
 }
 
 impl ChattyApp {
@@ -54,6 +57,7 @@ impl ChattyApp {
             conversation_repo,
             is_ready: false,
             active_stream_task: None,
+            active_create_task: None,
         };
 
         // Store entity in global state for later access
@@ -98,13 +102,27 @@ impl ChattyApp {
         // Get entity to use in callbacks (avoids window lookup issues)
         let app_entity = cx.entity();
 
-        // New chat callback
+        // New chat callback (guarded against rapid clicks via active_create_task)
         sidebar.update(cx, |sidebar, _cx| {
             let app = app_entity.clone();
             sidebar.set_on_new_chat(move |cx| {
                 let app = app.clone();
                 app.update(cx, |app, cx| {
-                    app.create_new_conversation(cx).detach();
+                    if app.active_create_task.is_some() {
+                        debug!("Already creating a conversation, ignoring duplicate click");
+                        return;
+                    }
+                    let create_task = app.create_new_conversation(cx);
+                    // Wrap so the guard auto-clears when the task finishes
+                    app.active_create_task = Some(cx.spawn(async move |weak, cx| {
+                        let result = create_task.await;
+                        if let Some(app) = weak.upgrade() {
+                            app.update(cx, |app, _cx| app.active_create_task = None)
+                                .map_err(|e| warn!(error = ?e, "Failed to clear active_create_task"))
+                                .ok();
+                        }
+                        result
+                    }));
                 });
             });
         });
@@ -482,11 +500,21 @@ impl ChattyApp {
     }
 
     /// Create a new conversation
+    ///
+    /// Provides immediate UI feedback (clears chat, updates sidebar) before
+    /// performing the potentially slow async work (MCP tool fetching, agent
+    /// creation). This prevents the button from appearing unresponsive.
+    ///
+    /// Phases:
+    /// 1. Synchronous: generate ID, update sidebar + chat view immediately
+    /// 2. Async: fetch MCP tools, create agent, build Conversation object
+    /// 3. Async: add to ConversationsStore, persist to disk
     pub fn create_new_conversation(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<String>> {
         info!("Creating new conversation");
+
         // Use the selected model from chat input, falling back to first available
         let selected_model_id = self
             .chat_view
@@ -517,11 +545,56 @@ impl ChattyApp {
                 let sidebar = self.sidebar_view.clone();
                 let repo = self.conversation_repo.clone();
 
-                cx.spawn(async move |_weak, cx| {
-                    // Create conversation
-                    let conv_id = uuid::Uuid::new_v4().to_string();
-                    let title = "New Chat".to_string();
+                // PHASE 1: Immediate UI feedback (synchronous, before any async work)
+                // Generate the conversation ID and title now so we can update UI instantly
+                let conv_id = uuid::Uuid::new_v4().to_string();
+                let title = "New Chat".to_string();
 
+                // Clear chat view immediately so the user sees a fresh state
+                chat_view.update(cx, |view, cx| {
+                    view.set_conversation_id(conv_id.clone());
+                    view.clear_messages(cx);
+
+                    // Set available models in chat input
+                    let models_list: Vec<(String, String)> = cx
+                        .global::<ModelsModel>()
+                        .models()
+                        .iter()
+                        .map(|m| (m.id.clone(), m.name.clone()))
+                        .collect();
+
+                    view.chat_input_state().update(cx, |state, _cx| {
+                        state.set_available_models(models_list, Some(model_config.id.clone()));
+                        state.set_capabilities(
+                            model_config.supports_images,
+                            model_config.supports_pdf,
+                        );
+                    });
+                });
+
+                // Update sidebar immediately with the new conversation entry
+                sidebar.update(cx, |sidebar, cx| {
+                    let mut convs: Vec<(String, String, Option<f64>)> = cx
+                        .global::<ConversationsStore>()
+                        .list_all()
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.id().to_string(),
+                                c.title().to_string(),
+                                Some(c.token_usage().total_estimated_cost_usd),
+                            )
+                        })
+                        .collect();
+                    // Prepend the new conversation so it appears at the top
+                    convs.insert(0, (conv_id.clone(), title.clone(), Some(0.0)));
+                    sidebar.set_conversations(convs, cx);
+                    sidebar.set_active_conversation(Some(conv_id.clone()), cx);
+                    debug!("Sidebar updated immediately with new conversation placeholder");
+                });
+
+                // PHASE 2: Async work — MCP tools, agent creation, store + persist
+                cx.spawn(async move |_weak, cx| {
                     // Get MCP tools.
                     // NOTE: MCP tools are fetched once at conversation creation time and baked
                     // into the AgentClient. If an MCP server is added, removed, or restarted
@@ -565,13 +638,13 @@ impl ChattyApp {
                     )
                     .await?;
 
-                    // Add to global store
+                    // PHASE 3: Add to global store and refresh sidebar with real data
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
                         store.add_conversation(conversation);
                         store.set_active(conv_id.clone());
                     })?;
 
-                    // Update sidebar
+                    // Refresh sidebar with actual store data (replaces the placeholder)
                     sidebar.update(cx, |sidebar, cx| {
                         let convs = cx
                             .global::<ConversationsStore>()
@@ -587,33 +660,10 @@ impl ChattyApp {
                             .collect::<Vec<_>>();
                         debug!(
                             conv_count = convs.len(),
-                            "Updating sidebar with conversations"
+                            "Updating sidebar after conversation creation"
                         );
                         sidebar.set_conversations(convs, cx);
                         sidebar.set_active_conversation(Some(conv_id.clone()), cx);
-                        debug!("Sidebar updated with new conversation");
-                    })?;
-
-                    // Update chat view
-                    chat_view.update(cx, |view, cx| {
-                        view.set_conversation_id(conv_id.clone());
-                        view.clear_messages(cx);
-
-                        // Set available models in chat input
-                        let models_list: Vec<(String, String)> = cx
-                            .global::<ModelsModel>()
-                            .models()
-                            .iter()
-                            .map(|m| (m.id.clone(), m.name.clone()))
-                            .collect();
-
-                        view.chat_input_state().update(cx, |state, _cx| {
-                            state.set_available_models(models_list, Some(model_config.id.clone()));
-                            state.set_capabilities(
-                                model_config.supports_images,
-                                model_config.supports_pdf,
-                            );
-                        });
                     })?;
 
                     // Save to disk
