@@ -28,73 +28,107 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--allowed-tools "Read,WebFetch,WebSearch,Bash(cargo *),Bash(jq *),Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh issue close:*),Bash(gh issue comment:*)"'
+          claude_args: '--allowed-tools "Read,WebFetch,WebSearch,Bash(cargo *),Bash(jq *),Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh issue close:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh issue view:*)"'
           prompt: |
             # Dependency Update Check for Chatty Release
 
-            TASK: Check for important dependency updates and create GitHub issues ONLY for high-value upgrades.
+            TASK: Check dependencies for updates and propose grouped tech debt cleanup releases.
+            Do NOT create individual issues per crate. Instead, group updates into coherent
+            tech debt release proposals.
 
-            ## High-Priority Dependencies (check these)
-            Only check dependencies that are core to the application's functionality:
-            - rig-core (LLM operations — CRITICAL, stay current)
-            - rmcp (Model Context Protocol — CRITICAL, stay current)
-            - gpui, gpui-component (UI framework — check for important fixes)
-            - azure_identity, azure_core (Entra ID auth — check for security fixes)
-            - typst, typst-svg (math rendering — check for important fixes)
-            - pdfium-render (PDF processing — check for important fixes)
+            ## Dependencies to Check
+            Only check dependencies core to the application:
+            - rig-core (LLM operations)
+            - rmcp (Model Context Protocol)
+            - gpui, gpui-component (UI framework)
+            - azure_identity, azure_core (Entra ID auth)
+            - typst, typst-svg (math rendering)
+            - pdfium-render (PDF processing)
+            - tokio, serde, serde_json, reqwest (infrastructure)
+            - Any other direct dependency in Cargo.toml
 
-            ## Do NOT create issues for
-            - Utility crates: uuid, thiserror, anyhow, serde, serde_json, tokio, reqwest, nix, log, tracing, etc.
-            - Patch-only updates (0.0.x) unless they fix a security vulnerability
-            - Minor updates to stable/mature crates that don't add features we need
-            - Any crate not in the high-priority list above
+            ## Step 1: Gather Data
+            1. Read Cargo.toml to get ALL direct dependencies and their current versions
+            2. For each dependency, query: https://crates.io/api/v1/crates/{crate_name}
+               Extract the latest stable version (skip pre-release/alpha/beta/rc)
+            3. Build a table of: crate | current | latest | bump type (major/minor/patch)
+            4. For crates with meaningful updates (minor+), briefly check changelogs for
+               security fixes, breaking changes, or notable new features
 
-            ## Instructions
+            ## Step 2: Categorize Updates
+            Sort each outdated dependency into one of these buckets:
 
-            ### Step 1: Read current versions
-            Read Cargo.toml and note versions of the high-priority dependencies only.
+            **CRITICAL (standalone issue)**:
+            - Security vulnerabilities — always file immediately as its own issue
+            - Title: "Security: Update {crate} {current} → {latest}"
 
-            ### Step 2: Check latest versions
-            For each high-priority dependency, query the crates.io API:
-            - URL: https://crates.io/api/v1/crates/{crate_name}
-            - Extract the latest stable version (not pre-release/alpha/beta/rc)
+            **AI/LLM updates (group together)**:
+            - rig-core, rmcp — we want to stay current with AI capabilities
+            - These are high-priority and should be grouped together
 
-            ### Step 3: Filter — be VERY selective
-            Only proceed to issue creation if ALL of these are true:
-            - The update is for a high-priority dependency
-            - There is a meaningful version difference (not just a patch bump)
-            - The update provides concrete value: security fix, bug fix we hit, or feature we need
-            - For rig-core and rmcp: any minor+ bump qualifies (we want latest AI capabilities)
-            - For everything else: only security fixes or major feature additions qualify
+            **UI/Rendering updates (group together)**:
+            - gpui, gpui-component, typst, typst-svg, pdfium-render
 
-            ### Step 4: Deduplicate against existing issues
-            CRITICAL — search by title, not by label (labels may not exist):
-            - Run: gh issue list --state open --search "Dependency Update" --limit 100
-            - For each crate you want to file, check if ANY open issue already mentions that crate name
-            - If an open issue exists for that crate (even at an older version):
-              - If the existing issue targets the SAME version: skip entirely
-              - If the existing issue targets an OLDER version: close it with a comment
-                "Superseded by #NEW" and create the new issue
-            - Group related crates into ONE issue (e.g., azure_identity + azure_core together)
+            **Infrastructure updates (group together)**:
+            - tokio, serde, reqwest, azure_*, and other supporting crates
 
-            ### Step 5: Create issues (sparingly)
-            - Title: "Dependency Update: {crate} {current} → {latest}"
-            - For grouped crates: "Dependency Update: {crate1} + {crate2} {current} → {latest}"
-            - Body must include: why this update matters, what changed, link to changelog
-            - Use: gh issue create --title "..." --body "..."
-            - Do NOT add labels (they may not exist in the repo)
+            **SKIP**:
+            - Patch-only bumps (0.0.x) unless they fix bugs we've hit
+            - Crates already at latest version
+            - Updates with no meaningful changelog entries
+
+            ## Step 3: Check for Existing Tech Debt Issues
+            CRITICAL — do this BEFORE creating anything:
+            - Run: gh issue list --state open --search "Tech Debt" --limit 50
+            - Look for open issues with "Tech Debt" in the title
+            - Note what they already cover (read the issue body if needed with gh issue view)
+
+            ## Step 4: Create or Amend Tech Debt Issues
+            For each non-empty bucket from Step 2:
+
+            **If an open tech debt issue already covers this bucket:**
+            - Read the existing issue body with: gh issue view {number}
+            - Check if the updates you found are already listed
+            - If there are NEW updates not yet in the issue, append them with:
+              gh issue comment {number} --body "..."
+              Include: what's new since last check, updated version targets
+            - Do NOT create a duplicate issue
+
+            **If no matching open tech debt issue exists:**
+            - Create ONE issue per bucket (not per crate!)
+            - Title format: "Tech Debt: {bucket name} updates"
+              Examples:
+              - "Tech Debt: AI/LLM dependency updates (rig-core, rmcp)"
+              - "Tech Debt: UI/Rendering updates (gpui, typst)"
+              - "Tech Debt: Infrastructure updates (tokio, serde, azure)"
+            - Body must include:
+              - A checklist of each crate to update: `- [ ] crate: current → latest`
+              - For each crate: one-line summary of why (new feature, bug fix, etc.)
+              - Estimated effort: Low / Medium / High
+              - Any breaking changes or migration notes
+              - Link to relevant changelogs
+
+            ## Sizing Guidelines
+            - Each tech debt issue should be completable in roughly 1-3 hours of work
+            - If a bucket has too many updates (>6 crates) or includes a complex migration,
+              split it into smaller issues with clear scope
+            - If a bucket has only 1 trivial update, skip it — not worth the issue overhead
+            - Aim for 0-3 issues total per run. Creating 0 issues is perfectly fine.
 
             ## Quality Bar
-            Ask yourself before creating each issue: "Would a maintainer thank me for this,
-            or would they close it as noise?" If the answer is noise, do NOT create the issue.
-            Creating 0 issues is a perfectly valid outcome if nothing important changed.
+            Before creating each issue, ask: "Is this actionable and worth a developer's time?"
+            - A good tech debt issue: clear scope, grouped logically, achievable in one session
+            - A bad tech debt issue: single patch bump, no real value, just noise
 
             ## Project Context
             Chatty is a desktop chat app using GPUI for UI, rig-core for LLM integration,
-            rmcp for MCP support, and typst for math rendering. Prioritize staying current
-            with LLM/MCP libraries (rig-core, rmcp) for latest AI capabilities. For everything
-            else, only flag security issues or major improvements.
+            rmcp for MCP support, and typst for math rendering. Stay current with AI/LLM
+            libraries for latest capabilities. For UI and infrastructure, only flag meaningful
+            improvements or security fixes.
 
-            After completing, provide a summary table:
-            | Crate | Current | Latest | Action | Reason |
-            Include ALL checked crates, even ones you skipped.
+            ## Output
+            End with a summary:
+            1. Table of ALL checked dependencies (including skipped ones)
+               | Crate | Current | Latest | Bump | Action | Reason |
+            2. List of issues created or amended (with issue numbers)
+            3. Total: X issues created, Y issues amended, Z crates skipped
