@@ -369,6 +369,19 @@ impl SystemTraceView {
                 }),
         );
 
+        // Show full command when the header was truncated
+        let full_command = extract_full_command(tool_call);
+        if full_command.chars().count() > 80 {
+            container = container.child(
+                div()
+                    .ml_4()
+                    .pl_3()
+                    .border_l_2()
+                    .border_color(border_color)
+                    .child(render_full_command_box(full_command, panel_bg, text_color)),
+            );
+        }
+
         // Output section (if available)
         if let Some(output) = tool_call
             .output
@@ -736,6 +749,12 @@ where
     // Build accordion content children (what shows when expanded)
     let mut content_children = Vec::new();
 
+    // Show full command when the header was truncated
+    let full_command = extract_full_command(tool_call);
+    if full_command.chars().count() > 80 {
+        content_children.push(render_full_command_box(full_command, panel_bg, text_color));
+    }
+
     // Add output section if available
     if let Some(output) = tool_call
         .output
@@ -824,33 +843,51 @@ where
         })
 }
 
-/// Extract a user-friendly display string from tool call input
+/// Render the full command text box (used when the header was truncated)
+fn render_full_command_box(
+    full_command: String,
+    panel_bg: Hsla,
+    text_color: Hsla,
+) -> gpui::AnyElement {
+    div()
+        .font_family("monospace")
+        .text_xs()
+        .px_2()
+        .py_1()
+        .bg(panel_bg)
+        .rounded_sm()
+        .text_color(text_color)
+        .child(full_command)
+        .into_any_element()
+}
+
+/// Extract a user-friendly display string from tool call input (truncated for headers)
 fn extract_command_display(tool_call: &ToolCallBlock) -> String {
-    // Try to parse input as JSON and extract the command
+    let full = extract_full_command(tool_call);
+    if full.chars().count() > 80 {
+        let truncated: String = full.chars().take(77).collect();
+        format!("{}...", truncated)
+    } else {
+        full
+    }
+}
+
+/// Extract the full, untruncated command string from tool call input
+fn extract_full_command(tool_call: &ToolCallBlock) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool_call.input) {
         // For bash tool: extract "command" field
         if tool_call.tool_name == "bash" {
             if let Some(command) = json.get("command").and_then(|v| v.as_str()) {
-                // Truncate long commands
-                if command.len() > 80 {
-                    return format!("{}...", &command[..77]);
-                }
                 return command.to_string();
             }
         }
 
         // For other tools: try to extract a "query" or "path" or first string field
         if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
-            if query.len() > 80 {
-                return format!("{}...", &query[..77]);
-            }
             return query.to_string();
         }
 
         if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
-            if path.len() > 80 {
-                return format!("{}...", &path[..77]);
-            }
             return path.to_string();
         }
     }

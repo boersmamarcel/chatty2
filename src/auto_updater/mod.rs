@@ -305,7 +305,7 @@ impl AutoUpdater {
     /// to Error so the user can see diagnostic information.
     ///
     /// Should be called during app initialization on macOS.
-    pub fn check_previous_update_status(&self, cx: &mut App) {
+    pub fn check_previous_update_status(&self, _cx: &mut App) {
         #[cfg(target_os = "macos")]
         {
             use std::path::PathBuf;
@@ -325,7 +325,7 @@ impl AutoUpdater {
                                 log_file = ?log_path,
                                 "Previous update installation failed - check log file"
                             );
-                            cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+                            _cx.update_global::<AutoUpdater, _>(|updater, _cx| {
                                 updater.status = AutoUpdateStatus::Error(format!(
                                     "Previous update installation failed. Check {} for details.",
                                     log_path.display()
