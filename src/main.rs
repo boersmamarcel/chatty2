@@ -32,7 +32,7 @@ static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 /// Sender half of the MCP update channel. Initialized once at startup.
 /// AddMcpTool sends the updated server list here after a successful save.
 pub static MCP_UPDATE_SENDER: OnceLock<
-    tokio::sync::mpsc::UnboundedSender<Vec<settings::models::mcp_store::McpServerConfig>>,
+    tokio::sync::mpsc::Sender<Vec<settings::models::mcp_store::McpServerConfig>>,
 > = OnceLock::new();
 
 /// McpService instance accessible from tool context (no GPUI available there).
@@ -374,10 +374,12 @@ fn main() {
         });
 
         // Create MCP update channel and spawn listener that updates global + emits event
-        let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::unbounded_channel::<
+        let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::channel::<
             Vec<settings::models::mcp_store::McpServerConfig>,
-        >();
-        MCP_UPDATE_SENDER.set(mcp_tx).ok();
+        >(64);
+        MCP_UPDATE_SENDER.set(mcp_tx)
+            .map_err(|_| warn!("MCP_UPDATE_SENDER already initialized"))
+            .ok();
 
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(servers) = mcp_rx.recv().await {
@@ -392,7 +394,7 @@ fn main() {
                         && let Some(notifier) = weak_notifier.upgrade()
                     {
                         notifier.update(cx, |_notifier, cx| {
-                            cx.emit(settings::models::McpNotifierEvent::ServerAdded);
+                            cx.emit(settings::models::McpNotifierEvent::ServersUpdated);
                         });
                     }
                 })
@@ -478,7 +480,9 @@ fn main() {
 
         // Initialize MCP service for managing MCP server connections
         let mcp_service = chatty::services::McpService::new();
-        MCP_SERVICE.set(mcp_service.clone()).ok();
+        MCP_SERVICE.set(mcp_service.clone())
+            .map_err(|_| warn!("MCP_SERVICE already initialized"))
+            .ok();
         cx.set_global(mcp_service);
         info!("MCP service initialized");
 

@@ -53,19 +53,20 @@ macro_rules! build_with_mcp_tools {
     }};
 }
 
-/// Build an agent with optional bash, filesystem read, and filesystem write tools,
-/// then optional MCP tools. The list_tools and add_mcp_service tools are always included.
+/// Build an agent with optional bash, filesystem read, filesystem write, and add_mcp_service
+/// tools, then optional MCP tools. The list_tools tool is always included.
 ///
 /// Due to rig's type-level tool chaining, each combination of tool presence/absence
-/// produces a different builder type. This macro enumerates all 8 combinations
-/// (bash × fs_read × fs_write) explicitly.
+/// produces a different builder type. This macro enumerates all 16 combinations
+/// (bash × fs_read × fs_write × add_mcp_tool) explicitly.
 macro_rules! build_agent_with_tools {
     ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $list_tools:expr, $add_mcp_tool:expr, $mcp_tools:expr) => {{
-        match (&$bash_tool, &$fs_read, &$fs_write) {
-            (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
+        match (&$bash_tool, &$fs_read, &$fs_write, &$add_mcp_tool) {
+            // === WITH add_mcp_tool (8 branches) ===
+            (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad)), Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(bash.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
@@ -78,10 +79,10 @@ macro_rules! build_agent_with_tools {
                     .tool(ad.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (Some(bash), Some((rf, rb, ld, gs)), None) => {
+            (Some(bash), Some((rf, rb, ld, gs)), None, Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(bash.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
@@ -89,10 +90,10 @@ macro_rules! build_agent_with_tools {
                     .tool(gs.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (Some(bash), None, Some((wf, cd, df, mf, ad))) => {
+            (Some(bash), None, Some((wf, cd, df, mf, ad)), Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(bash.clone())
                     .tool(wf.clone())
                     .tool(cd.clone())
@@ -101,17 +102,17 @@ macro_rules! build_agent_with_tools {
                     .tool(ad.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (Some(bash), None, None) => {
+            (Some(bash), None, None, Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(bash.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
+            (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad)), Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
                     .tool(ld.clone())
@@ -123,20 +124,20 @@ macro_rules! build_agent_with_tools {
                     .tool(ad.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (None, Some((rf, rb, ld, gs)), None) => {
+            (None, Some((rf, rb, ld, gs)), None, Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
                     .tool(ld.clone())
                     .tool(gs.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (None, None, Some((wf, cd, df, mf, ad))) => {
+            (None, None, Some((wf, cd, df, mf, ad)), Some(amt)) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone())
+                    .tool(amt.clone())
                     .tool(wf.clone())
                     .tool(cd.clone())
                     .tool(df.clone())
@@ -144,10 +145,86 @@ macro_rules! build_agent_with_tools {
                     .tool(ad.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
-            (None, None, None) => {
+            (None, None, None, Some(amt)) => {
+                let b = $builder.tool($list_tools.clone()).tool(amt.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            // === WITHOUT add_mcp_tool (8 branches) ===
+            (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad)), None) => {
                 let b = $builder
                     .tool($list_tools.clone())
-                    .tool($add_mcp_tool.clone());
+                    .tool(bash.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (Some(bash), Some((rf, rb, ld, gs)), None, None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(bash.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (Some(bash), None, Some((wf, cd, df, mf, ad)), None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(bash.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (Some(bash), None, None, None) => {
+                let b = $builder.tool($list_tools.clone()).tool(bash.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad)), None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, Some((rf, rb, ld, gs)), None, None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(rf.clone())
+                    .tool(rb.clone())
+                    .tool(ld.clone())
+                    .tool(gs.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, None, Some((wf, cd, df, mf, ad)), None) => {
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool(wf.clone())
+                    .tool(cd.clone())
+                    .tool(df.clone())
+                    .tool(mf.clone())
+                    .tool(ad.clone());
+                build_with_mcp_tools!(b, $mcp_tools)
+            }
+            (None, None, None, None) => {
+                let b = $builder.tool($list_tools.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
         }
@@ -308,8 +385,35 @@ impl AgentClient {
             mcp_tool_info,
         );
 
-        // Create add_mcp_service tool (always available)
-        let add_mcp_tool = AddMcpTool::new(crate::MCP_REPOSITORY.clone());
+        // Create add_mcp_service tool (conditional on settings)
+        let add_mcp_tool: Option<AddMcpTool> = {
+            let enabled = exec_settings
+                .as_ref()
+                .map(|s| s.mcp_service_tool_enabled)
+                .unwrap_or(true); // default true when no settings present (preserves existing behaviour)
+            if enabled {
+                match (
+                    crate::MCP_UPDATE_SENDER.get().cloned(),
+                    crate::MCP_SERVICE.get().cloned(),
+                ) {
+                    (Some(sender), Some(service)) => Some(AddMcpTool::new_with_services(
+                        crate::MCP_REPOSITORY.clone(),
+                        sender,
+                        service,
+                    )),
+                    _ => {
+                        tracing::warn!(
+                            "MCP_UPDATE_SENDER or MCP_SERVICE not initialized; \
+                             add_mcp_tool created without live services"
+                        );
+                        Some(AddMcpTool::new(crate::MCP_REPOSITORY.clone()))
+                    }
+                }
+            } else {
+                tracing::info!("add_mcp_service tool disabled by execution settings");
+                None
+            }
+        };
 
         match &provider_config.provider_type {
             ProviderType::Anthropic => {

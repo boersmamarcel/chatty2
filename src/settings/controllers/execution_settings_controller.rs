@@ -114,6 +114,32 @@ pub fn toggle_network_isolation(cx: &mut App) {
     .detach();
 }
 
+/// Toggle the add_mcp_service tool enabled/disabled and persist to disk.
+/// When disabled, the LLM cannot register new MCP servers.
+pub fn toggle_mcp_service_tool(cx: &mut App) {
+    // 1. Apply update immediately (optimistic update)
+    let new_enabled = !cx
+        .global::<ExecutionSettingsModel>()
+        .mcp_service_tool_enabled;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .mcp_service_tool_enabled = new_enabled;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately (optimistic update)
+    cx.refresh_windows();
+
+    // 4. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle filesystem write tools enabled/disabled and persist to disk
 pub fn toggle_filesystem_write(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)

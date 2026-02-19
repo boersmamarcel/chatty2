@@ -33,6 +33,21 @@ pub fn execution_settings_page() -> SettingPage {
                     )
                     .description("Master toggle for bash shell command execution"),
                     SettingItem::new(
+                        "Allow LLM to Register MCP Servers",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().mcp_service_tool_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_mcp_service_tool(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "When enabled, the AI can register new MCP servers via the add_mcp_service tool. \
+                         Disable to prevent the AI from adding new command-line integrations. \
+                         After changing this setting, start a new conversation for tools to be updated.",
+                    ),
+                    SettingItem::new(
                         "Approval Mode",
                         SettingField::render(|_options, _window, cx| {
                             let current_mode = cx.global::<ExecutionSettingsModel>().approval_mode.clone();

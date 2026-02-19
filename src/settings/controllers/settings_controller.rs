@@ -35,7 +35,7 @@ impl SettingsView {
             cx.subscribe(
                 &notifier,
                 |_this, _notifier, event: &McpNotifierEvent, cx| {
-                    if matches!(event, McpNotifierEvent::ServerAdded) {
+                    if matches!(event, McpNotifierEvent::ServersUpdated) {
                         cx.notify();
                     }
                 },

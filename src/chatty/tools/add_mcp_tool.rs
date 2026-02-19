@@ -8,6 +8,12 @@ use std::sync::Arc;
 use crate::settings::models::mcp_store::McpServerConfig;
 use crate::settings::repositories::McpRepository;
 
+lazy_static::lazy_static! {
+    /// Serialises concurrent add_mcp_service calls so the
+    /// load → check → append → save sequence is atomic.
+    static ref WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+}
+
 /// Error type for add_mcp tool
 #[derive(Debug, thiserror::Error)]
 pub enum AddMcpToolError {
@@ -44,24 +50,49 @@ pub struct AddMcpToolOutput {
 #[derive(Clone)]
 pub struct AddMcpTool {
     repository: Arc<dyn McpRepository>,
+    /// Notifies the UI after a successful save. None in tests.
+    update_sender: Option<tokio::sync::mpsc::Sender<Vec<McpServerConfig>>>,
+    /// Starts the new server immediately after saving. None in tests.
+    mcp_service: Option<crate::chatty::services::McpService>,
 }
 
 impl AddMcpTool {
+    /// Test constructor: no live services injected.
     pub fn new(repository: Arc<dyn McpRepository>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            update_sender: None,
+            mcp_service: None,
+        }
+    }
+
+    /// Production constructor: inject real sender and service.
+    pub fn new_with_services(
+        repository: Arc<dyn McpRepository>,
+        update_sender: tokio::sync::mpsc::Sender<Vec<McpServerConfig>>,
+        mcp_service: crate::chatty::services::McpService,
+    ) -> Self {
+        Self {
+            repository,
+            update_sender: Some(update_sender),
+            mcp_service: Some(mcp_service),
+        }
     }
 }
 
 /// Validate an MCP server configuration, returning an error message if invalid.
 fn validate_config(args: &AddMcpToolArgs) -> Result<(), String> {
+    // Trim once and use for all name checks to avoid confusing errors
+    // (e.g. a name with only leading/trailing spaces must fail empty, not char validation)
+    let name = args.name.trim();
+
     // Name must not be empty
-    if args.name.trim().is_empty() {
+    if name.is_empty() {
         return Err("Server name cannot be empty".to_string());
     }
 
     // Name must be reasonable (alphanumeric, hyphens, underscores)
-    if !args
-        .name
+    if !name
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
@@ -136,10 +167,14 @@ impl Tool for AddMcpTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Validate the configuration
+        // Validate before acquiring the lock — read-only and cheap.
         validate_config(&args).map_err(AddMcpToolError::ValidationError)?;
 
         let server_name = args.name.clone();
+
+        // Acquire write lock: makes load → check → append → save atomic,
+        // preventing TOCTOU races when two concurrent calls share the same name.
+        let _guard = WRITE_LOCK.lock().await;
 
         // Load existing servers
         let mut servers = self.repository.load_all().await.map_err(|e| {
@@ -178,7 +213,7 @@ impl Tool for AddMcpTool {
         let new_server_for_start = new_server.clone();
         servers.push(new_server);
 
-        // Save to disk
+        // Save to disk inside the lock — critical section ends when save completes.
         self.repository
             .save_all(servers.clone())
             .await
@@ -186,17 +221,20 @@ impl Tool for AddMcpTool {
                 AddMcpToolError::RepositoryError(format!("Failed to save servers: {}", e))
             })?;
 
-        // Notify the UI to refresh by sending the updated list on the channel
-        if let Some(tx) = crate::MCP_UPDATE_SENDER.get()
-            && let Err(e) = tx.send(servers)
+        // Release lock before best-effort notification and server start.
+        drop(_guard);
+
+        // Notify the UI to refresh via injected sender (None in tests → skipped).
+        if let Some(ref tx) = self.update_sender
+            && let Err(e) = tx.send(servers).await
         {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // Start the server process so it's ready for the next conversation
-        let start_result = match crate::MCP_SERVICE.get() {
+        // Start the server process via injected service (None in tests → fallback message).
+        let start_result = match &self.mcp_service {
             Some(svc) => svc.start_server(new_server_for_start).await,
-            None => Err(anyhow!("MCP service not initialized")),
+            None => Err(anyhow!("MCP service not available")),
         };
         let message = match start_result {
             Ok(()) => format!(
