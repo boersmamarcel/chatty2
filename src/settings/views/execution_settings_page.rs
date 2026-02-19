@@ -40,7 +40,7 @@ pub fn execution_settings_page() -> SettingPage {
                                 execution_settings_controller::toggle_mcp_service_tool(cx);
                             },
                         )
-                        .default_value(true),
+                        .default_value(false),
                     )
                     .description(
                         "When enabled, the AI can register new MCP servers via the add_mcp_service tool. \
