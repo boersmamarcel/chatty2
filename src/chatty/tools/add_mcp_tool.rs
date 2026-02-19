@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -174,20 +175,48 @@ impl Tool for AddMcpTool {
             "Adding new MCP server configuration"
         );
 
+        let new_server_for_start = new_server.clone();
         servers.push(new_server);
 
         // Save to disk
-        self.repository.save_all(servers).await.map_err(|e| {
-            AddMcpToolError::RepositoryError(format!("Failed to save servers: {}", e))
-        })?;
+        self.repository
+            .save_all(servers.clone())
+            .await
+            .map_err(|e| {
+                AddMcpToolError::RepositoryError(format!("Failed to save servers: {}", e))
+            })?;
+
+        // Notify the UI to refresh by sending the updated list on the channel
+        if let Some(tx) = crate::MCP_UPDATE_SENDER.get()
+            && let Err(e) = tx.send(servers)
+        {
+            tracing::warn!(error = ?e, "Failed to send MCP update notification");
+        }
+
+        // Start the server process so it's ready for the next conversation
+        let start_result = match crate::MCP_SERVICE.get() {
+            Some(svc) => svc.start_server(new_server_for_start).await,
+            None => Err(anyhow!("MCP service not initialized")),
+        };
+        let message = match start_result {
+            Ok(()) => format!(
+                "MCP server '{}' has been added and started. \
+                 Start a new conversation to use its tools.",
+                server_name
+            ),
+            Err(e) => {
+                tracing::warn!(server = %server_name, error = ?e, "MCP server added but failed to start");
+                format!(
+                    "MCP server '{}' has been saved but could not be started ({}). \
+                     It will be available after restarting the application.",
+                    server_name, e
+                )
+            }
+        };
 
         Ok(AddMcpToolOutput {
             success: true,
-            message: format!(
-                "MCP server '{}' has been added successfully. \
-                 It will be available after creating a new conversation or restarting the application.",
-                server_name
-            ),
+            message,
             server_name,
         })
     }
@@ -500,7 +529,7 @@ mod tests {
         let output = result.unwrap();
         assert!(output.success);
         assert_eq!(output.server_name, "new-server");
-        assert!(output.message.contains("added successfully"));
+        assert!(output.message.contains("MCP server 'new-server' has been"));
 
         // Verify the server was saved
         let saved = repo.get_last_saved().unwrap();

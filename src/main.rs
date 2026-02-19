@@ -21,12 +21,22 @@ use settings::repositories::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Flag to prevent theme observer from saving during initialization.
 /// This avoids a race condition where the default theme could overwrite
 /// the user's saved theme preference before settings are loaded.
 static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
+
+/// Sender half of the MCP update channel. Initialized once at startup.
+/// AddMcpTool sends the updated server list here after a successful save.
+pub static MCP_UPDATE_SENDER: OnceLock<
+    tokio::sync::mpsc::UnboundedSender<Vec<settings::models::mcp_store::McpServerConfig>>,
+> = OnceLock::new();
+
+/// McpService instance accessible from tool context (no GPUI available there).
+pub static MCP_SERVICE: OnceLock<chatty::services::McpService> = OnceLock::new();
 
 actions!(chatty, [OpenSettings, Quit, ToggleSidebar]);
 
@@ -61,6 +71,7 @@ lazy_static::lazy_static! {
             .expect("Failed to initialize execution settings repository");
         Arc::new(repo)
     };
+
 }
 
 fn get_themes_dir() -> PathBuf {
@@ -356,6 +367,41 @@ fn main() {
             entity: Some(models_notifier.downgrade()),
         });
 
+        // Initialize MCP notifier entity for event subscriptions
+        let mcp_notifier = cx.new(|_cx| settings::models::McpNotifier::new());
+        cx.set_global(settings::models::GlobalMcpNotifier {
+            entity: Some(mcp_notifier.downgrade()),
+        });
+
+        // Create MCP update channel and spawn listener that updates global + emits event
+        let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<settings::models::mcp_store::McpServerConfig>,
+        >();
+        MCP_UPDATE_SENDER.set(mcp_tx).ok();
+
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            while let Some(servers) = mcp_rx.recv().await {
+                cx.update(|cx| {
+                    cx.update_global::<settings::models::McpServersModel, _>(|model, _cx| {
+                        model.replace_all(servers);
+                    });
+
+                    if let Some(weak_notifier) = cx
+                        .try_global::<settings::models::GlobalMcpNotifier>()
+                        .and_then(|g| g.entity.clone())
+                        && let Some(notifier) = weak_notifier.upgrade()
+                    {
+                        notifier.update(cx, |_notifier, cx| {
+                            cx.emit(settings::models::McpNotifierEvent::ServerAdded);
+                        });
+                    }
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to update MCP servers model"))
+                .ok();
+            }
+        })
+        .detach();
+
         // Initialize error store and notifier
         cx.set_global(chatty::models::ErrorStore::new(100)); // Max 100 entries
 
@@ -432,6 +478,7 @@ fn main() {
 
         // Initialize MCP service for managing MCP server connections
         let mcp_service = chatty::services::McpService::new();
+        MCP_SERVICE.set(mcp_service.clone()).ok();
         cx.set_global(mcp_service);
         info!("MCP service initialized");
 
