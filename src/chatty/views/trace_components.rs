@@ -371,21 +371,14 @@ impl SystemTraceView {
 
         // Show full command when the header was truncated
         let full_command = extract_full_command(tool_call);
-        if full_command.len() > 80 {
+        if full_command.chars().count() > 80 {
             container = container.child(
                 div()
                     .ml_4()
                     .pl_3()
                     .border_l_2()
                     .border_color(border_color)
-                    .font_family("monospace")
-                    .text_xs()
-                    .px_2()
-                    .py_1()
-                    .bg(panel_bg)
-                    .rounded_sm()
-                    .text_color(text_color)
-                    .child(full_command),
+                    .child(render_full_command_box(full_command, panel_bg, text_color)),
             );
         }
 
@@ -758,19 +751,8 @@ where
 
     // Show full command when the header was truncated
     let full_command = extract_full_command(tool_call);
-    if full_command.len() > 80 {
-        content_children.push(
-            div()
-                .font_family("monospace")
-                .text_xs()
-                .px_2()
-                .py_1()
-                .bg(panel_bg)
-                .rounded_sm()
-                .text_color(text_color)
-                .child(full_command)
-                .into_any_element(),
-        );
+    if full_command.chars().count() > 80 {
+        content_children.push(render_full_command_box(full_command, panel_bg, text_color));
     }
 
     // Add output section if available
@@ -861,11 +843,30 @@ where
         })
 }
 
+/// Render the full command text box (used when the header was truncated)
+fn render_full_command_box(
+    full_command: String,
+    panel_bg: Hsla,
+    text_color: Hsla,
+) -> gpui::AnyElement {
+    div()
+        .font_family("monospace")
+        .text_xs()
+        .px_2()
+        .py_1()
+        .bg(panel_bg)
+        .rounded_sm()
+        .text_color(text_color)
+        .child(full_command)
+        .into_any_element()
+}
+
 /// Extract a user-friendly display string from tool call input (truncated for headers)
 fn extract_command_display(tool_call: &ToolCallBlock) -> String {
     let full = extract_full_command(tool_call);
-    if full.len() > 80 {
-        format!("{}...", &full[..77])
+    if full.chars().count() > 80 {
+        let truncated: String = full.chars().take(77).collect();
+        format!("{}...", truncated)
     } else {
         full
     }
