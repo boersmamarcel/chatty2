@@ -23,17 +23,17 @@
 
 There are plenty of chat UIs for LLMs. Here's why Chatty stands apart:
 
-**Use your own API keys.** No middleman, no subscriptions, no data harvesting. You talk directly to OpenAI, Anthropic, Google, Mistral, or your local Ollama instance. Your keys, your data, your control.
+🔑 **Your API keys, your data.** No middleman, no subscriptions. Talk directly to OpenAI, Anthropic, Google, Mistral, or your local Ollama instance.
 
-**True native performance.** Chatty is not another Electron wrapper. It's written in Rust using [GPUI](https://crates.io/crates/gpui) — the same GPU-accelerated framework behind the Zed editor. The result: instant startup, buttery smooth scrolling, and a fraction of the memory usage of browser-based alternatives.
+⚡ **Native Rust performance.** Not another Electron wrapper — built on [GPUI](https://crates.io/crates/gpui), the GPU-accelerated framework behind the Zed editor. Instant startup, smooth scrolling, minimal memory.
 
-**One app, every model.** Switch between Claude, GPT-4, Gemini, Mistral, and local Ollama models within the same conversation sidebar. No need to juggle browser tabs or separate apps per provider.
+🔀 **One app, every model.** Switch between Claude, GPT-4, Gemini, Mistral, and Ollama in a single sidebar. No more juggling tabs.
 
-**Built-in tool use and MCP.** Chatty doesn't just chat — it acts. Built-in filesystem tools, bash execution with sandboxing, and full [Model Context Protocol](https://modelcontextprotocol.io/) support let your LLM read files, search codebases, query databases, and more. All with a transparent approval workflow so you stay in control.
+🛠️ **Built-in tools & MCP.** Filesystem access, sandboxed bash, and full [Model Context Protocol](https://modelcontextprotocol.io/) support — your LLM can read files, query databases, and more. All with an approval workflow you control.
 
-**Transparent reasoning.** See *how* your LLM thinks. Collapsible thinking blocks show Claude's extended reasoning chains. Tool call traces show exactly what was executed, what was returned, and how long it took.
+🧠 **Transparent reasoning.** Collapsible thinking blocks and tool call traces show *exactly* what your LLM did, returned, and how long it took.
 
-**Privacy when you need it.** Run fully local with Ollama — no data leaves your machine. Network isolation toggles and workspace sandboxing give you fine-grained control over what the LLM can access.
+🔒 **Privacy first.** Run fully local with Ollama — no data leaves your machine. Network isolation and workspace sandboxing keep you in control.
 
 ---
 
