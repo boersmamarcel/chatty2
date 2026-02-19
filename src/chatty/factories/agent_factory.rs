@@ -377,20 +377,12 @@ impl AgentClient {
             "Total MCP tools registered with list_tools"
         );
 
-        // Create list_tools tool (always available, shows native + MCP tools)
-        let list_tools = ListToolsTool::new_with_config(
-            bash_tool.is_some(),
-            fs_read_tools.is_some(),
-            fs_write_tools.is_some(),
-            mcp_tool_info,
-        );
-
         // Create add_mcp_service tool (conditional on settings)
         let add_mcp_tool: Option<AddMcpTool> = {
             let enabled = exec_settings
                 .as_ref()
                 .map(|s| s.mcp_service_tool_enabled)
-                .unwrap_or(true); // default true when no settings present (preserves existing behaviour)
+                .unwrap_or(false);
             if enabled {
                 match (
                     crate::MCP_UPDATE_SENDER.get().cloned(),
@@ -414,6 +406,15 @@ impl AgentClient {
                 None
             }
         };
+
+        // Create list_tools tool (always available, shows native + MCP tools)
+        let list_tools = ListToolsTool::new_with_config(
+            bash_tool.is_some(),
+            fs_read_tools.is_some(),
+            fs_write_tools.is_some(),
+            add_mcp_tool.is_some(),
+            mcp_tool_info,
+        );
 
         match &provider_config.provider_type {
             ProviderType::Anthropic => {

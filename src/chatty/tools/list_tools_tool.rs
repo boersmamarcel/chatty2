@@ -45,20 +45,22 @@ impl ListToolsTool {
         has_bash: bool,
         has_fs_read: bool,
         has_fs_write: bool,
+        has_add_mcp: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
-        let mut native_tools = vec![
-            ToolInfo {
-                name: "list_tools".to_string(),
-                description: "List all available tools (both native and MCP)".to_string(),
-                source: "native".to_string(),
-            },
-            ToolInfo {
+        let mut native_tools = vec![ToolInfo {
+            name: "list_tools".to_string(),
+            description: "List all available tools (both native and MCP)".to_string(),
+            source: "native".to_string(),
+        }];
+
+        if has_add_mcp {
+            native_tools.push(ToolInfo {
                 name: "add_mcp_service".to_string(),
                 description: "Add a new MCP server configuration so it becomes available in future conversations".to_string(),
                 source: "native".to_string(),
-            },
-        ];
+            });
+        }
 
         if has_bash {
             native_tools.push(ToolInfo {
@@ -144,7 +146,7 @@ impl ListToolsTool {
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(false, false, false, Vec::new())
+        Self::new_with_config(false, false, false, false, Vec::new())
     }
 }
 

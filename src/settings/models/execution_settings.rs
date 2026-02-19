@@ -29,8 +29,9 @@ pub struct ExecutionSettingsModel {
     #[serde(default = "default_true")]
     pub filesystem_write_enabled: bool,
     /// Enable the add_mcp_service tool, which allows the LLM to register new MCP servers.
-    /// Disable to prevent the AI from adding new command-line integrations.
-    #[serde(default = "default_true")]
+    /// Opt-in: disabled by default to prevent the AI from adding new command-line integrations
+    /// without explicit user action.
+    #[serde(default)]
     pub mcp_service_tool_enabled: bool,
     /// Maximum execution time in seconds
     pub timeout_seconds: u32,
@@ -52,7 +53,7 @@ impl Default for ExecutionSettingsModel {
             workspace_dir: None,
             filesystem_read_enabled: true, // Enabled by default when workspace is set
             filesystem_write_enabled: true, // Enabled by default when workspace is set
-            mcp_service_tool_enabled: true,
+            mcp_service_tool_enabled: false,
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
