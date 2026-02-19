@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/app_icon/ai-7.png" alt="Chatty" width="128" height="128">
+  <img src="assets/app_icon/ai-2.png" alt="Chatty" width="128" height="128">
 </p>
 
 <h1 align="center">Chatty</h1>
