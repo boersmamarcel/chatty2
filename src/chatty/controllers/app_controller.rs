@@ -118,7 +118,9 @@ impl ChattyApp {
                         let result = create_task.await;
                         if let Some(app) = weak.upgrade() {
                             app.update(cx, |app, _cx| app.active_create_task = None)
-                                .map_err(|e| warn!(error = ?e, "Failed to clear active_create_task"))
+                                .map_err(
+                                    |e| warn!(error = ?e, "Failed to clear active_create_task"),
+                                )
                                 .ok();
                         }
                         result
