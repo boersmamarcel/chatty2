@@ -196,6 +196,116 @@ impl Tool for AddMcpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::repositories::mcp_repository::BoxFuture;
+    use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
+    use std::sync::Mutex;
+
+    // --- Mock repository for testing ---
+
+    /// In-memory mock of McpRepository for unit tests
+    struct MockMcpRepository {
+        servers: Mutex<Vec<McpServerConfig>>,
+        /// If set, load_all will return this error
+        load_error: Mutex<Option<String>>,
+        /// If set, save_all will return this error
+        save_error: Mutex<Option<String>>,
+        /// Track what was last saved
+        last_saved: Mutex<Option<Vec<McpServerConfig>>>,
+    }
+
+    impl MockMcpRepository {
+        fn new() -> Self {
+            Self {
+                servers: Mutex::new(Vec::new()),
+                load_error: Mutex::new(None),
+                save_error: Mutex::new(None),
+                last_saved: Mutex::new(None),
+            }
+        }
+
+        fn with_servers(servers: Vec<McpServerConfig>) -> Self {
+            Self {
+                servers: Mutex::new(servers),
+                load_error: Mutex::new(None),
+                save_error: Mutex::new(None),
+                last_saved: Mutex::new(None),
+            }
+        }
+
+        fn with_load_error(error: &str) -> Self {
+            Self {
+                servers: Mutex::new(Vec::new()),
+                load_error: Mutex::new(Some(error.to_string())),
+                save_error: Mutex::new(None),
+                last_saved: Mutex::new(None),
+            }
+        }
+
+        fn with_save_error(servers: Vec<McpServerConfig>, error: &str) -> Self {
+            Self {
+                servers: Mutex::new(servers),
+                load_error: Mutex::new(None),
+                save_error: Mutex::new(Some(error.to_string())),
+                last_saved: Mutex::new(None),
+            }
+        }
+
+        fn get_last_saved(&self) -> Option<Vec<McpServerConfig>> {
+            self.last_saved.lock().unwrap().clone()
+        }
+    }
+
+    impl McpRepository for MockMcpRepository {
+        fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<McpServerConfig>>> {
+            let servers = self.servers.lock().unwrap().clone();
+            let error = self.load_error.lock().unwrap().clone();
+            Box::pin(async move {
+                if let Some(err) = error {
+                    Err(RepositoryError::IoError(err))
+                } else {
+                    Ok(servers)
+                }
+            })
+        }
+
+        fn save_all(
+            &self,
+            servers: Vec<McpServerConfig>,
+        ) -> BoxFuture<'static, RepositoryResult<()>> {
+            let error = self.save_error.lock().unwrap().clone();
+            *self.last_saved.lock().unwrap() = Some(servers);
+            Box::pin(async move {
+                if let Some(err) = error {
+                    Err(RepositoryError::IoError(err))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    /// Helper to create a test McpServerConfig
+    fn test_server(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            command: "echo".to_string(),
+            args: vec!["test".to_string()],
+            env: HashMap::new(),
+            enabled: true,
+        }
+    }
+
+    /// Helper to create valid AddMcpToolArgs
+    fn valid_args(name: &str) -> AddMcpToolArgs {
+        AddMcpToolArgs {
+            name: name.to_string(),
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@test/mcp-server".to_string()],
+            env: HashMap::new(),
+        }
+    }
+
+    // --- Validation tests ---
 
     #[test]
     fn test_validate_empty_name() {
@@ -237,9 +347,42 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_name_with_dots() {
+        let args = AddMcpToolArgs {
+            name: "my.server".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(validate_config(&args).is_err());
+    }
+
+    #[test]
+    fn test_validate_name_with_slashes() {
+        let args = AddMcpToolArgs {
+            name: "my/server".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(validate_config(&args).is_err());
+    }
+
+    #[test]
     fn test_validate_valid_name_with_hyphens_and_underscores() {
         let args = AddMcpToolArgs {
             name: "my-server_v2".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(validate_config(&args).is_ok());
+    }
+
+    #[test]
+    fn test_validate_valid_name_alphanumeric_only() {
+        let args = AddMcpToolArgs {
+            name: "myserver123".to_string(),
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
@@ -264,6 +407,17 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_whitespace_command() {
+        let args = AddMcpToolArgs {
+            name: "test-server".to_string(),
+            command: "   ".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(validate_config(&args).is_err());
+    }
+
+    #[test]
     fn test_validate_empty_env_key() {
         let mut env = HashMap::new();
         env.insert("".to_string(), "value".to_string());
@@ -282,6 +436,19 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_whitespace_env_key() {
+        let mut env = HashMap::new();
+        env.insert("  ".to_string(), "value".to_string());
+        let args = AddMcpToolArgs {
+            name: "test-server".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env,
+        };
+        assert!(validate_config(&args).is_err());
+    }
+
+    #[test]
     fn test_validate_valid_full_config() {
         let mut env = HashMap::new();
         env.insert("API_KEY".to_string(), "test-key".to_string());
@@ -292,5 +459,291 @@ mod tests {
             env,
         };
         assert!(validate_config(&args).is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_args_and_env_is_valid() {
+        let args = AddMcpToolArgs {
+            name: "simple".to_string(),
+            command: "my-server".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(validate_config(&args).is_ok());
+    }
+
+    #[test]
+    fn test_validate_multiple_env_vars() {
+        let mut env = HashMap::new();
+        env.insert("KEY1".to_string(), "val1".to_string());
+        env.insert("KEY2".to_string(), "val2".to_string());
+        env.insert("KEY3".to_string(), "val3".to_string());
+        let args = AddMcpToolArgs {
+            name: "multi-env".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env,
+        };
+        assert!(validate_config(&args).is_ok());
+    }
+
+    // --- Tool::call integration tests ---
+
+    #[tokio::test]
+    async fn test_call_add_to_empty_repo() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo.clone());
+
+        let result = tool.call(valid_args("new-server")).await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        assert!(output.success);
+        assert_eq!(output.server_name, "new-server");
+        assert!(output.message.contains("added successfully"));
+
+        // Verify the server was saved
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, "new-server");
+        assert_eq!(saved[0].command, "npx");
+        assert_eq!(saved[0].args, vec!["-y", "@test/mcp-server"]);
+        assert!(saved[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn test_call_add_to_existing_servers() {
+        let existing = vec![test_server("existing-1"), test_server("existing-2")];
+        let repo = Arc::new(MockMcpRepository::with_servers(existing));
+        let tool = AddMcpTool::new(repo.clone());
+
+        let result = tool.call(valid_args("new-server")).await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        assert!(output.success);
+
+        // Verify all servers are preserved in the save
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved.len(), 3);
+        assert_eq!(saved[0].name, "existing-1");
+        assert_eq!(saved[1].name, "existing-2");
+        assert_eq!(saved[2].name, "new-server");
+    }
+
+    #[tokio::test]
+    async fn test_call_duplicate_name_returns_failure() {
+        let existing = vec![test_server("my-server")];
+        let repo = Arc::new(MockMcpRepository::with_servers(existing));
+        let tool = AddMcpTool::new(repo.clone());
+
+        let result = tool.call(valid_args("my-server")).await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        assert!(!output.success);
+        assert_eq!(output.server_name, "my-server");
+        assert!(output.message.contains("already exists"));
+
+        // Verify nothing was saved (duplicate rejected before save)
+        assert!(repo.get_last_saved().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_call_validation_error_returns_err() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo.clone());
+
+        let args = AddMcpToolArgs {
+            name: "".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+
+        let result = tool.call(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, AddMcpToolError::ValidationError(_)));
+        assert!(err.to_string().contains("Validation error"));
+    }
+
+    #[tokio::test]
+    async fn test_call_load_error() {
+        let repo = Arc::new(MockMcpRepository::with_load_error("disk read failure"));
+        let tool = AddMcpTool::new(repo);
+
+        let result = tool.call(valid_args("new-server")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, AddMcpToolError::RepositoryError(_)));
+        assert!(err.to_string().contains("Failed to load servers"));
+    }
+
+    #[tokio::test]
+    async fn test_call_save_error() {
+        let repo = Arc::new(MockMcpRepository::with_save_error(
+            vec![],
+            "disk write failure",
+        ));
+        let tool = AddMcpTool::new(repo);
+
+        let result = tool.call(valid_args("new-server")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, AddMcpToolError::RepositoryError(_)));
+        assert!(err.to_string().contains("Failed to save servers"));
+    }
+
+    #[tokio::test]
+    async fn test_call_preserves_env_vars() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo.clone());
+
+        let mut env = HashMap::new();
+        env.insert("API_KEY".to_string(), "secret-123".to_string());
+        env.insert("REGION".to_string(), "us-east-1".to_string());
+
+        let args = AddMcpToolArgs {
+            name: "env-server".to_string(),
+            command: "uvx".to_string(),
+            args: vec!["my-package".to_string()],
+            env,
+        };
+
+        let result = tool.call(args).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].env.get("API_KEY").unwrap(), "secret-123");
+        assert_eq!(saved[0].env.get("REGION").unwrap(), "us-east-1");
+        assert_eq!(saved[0].command, "uvx");
+        assert_eq!(saved[0].args, vec!["my-package"]);
+    }
+
+    #[tokio::test]
+    async fn test_call_new_server_is_enabled_by_default() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo.clone());
+
+        let result = tool.call(valid_args("test-server")).await;
+        assert!(result.is_ok());
+
+        let saved = repo.get_last_saved().unwrap();
+        assert!(saved[0].enabled);
+    }
+
+    // --- Tool definition tests ---
+
+    #[tokio::test]
+    async fn test_definition_has_correct_name() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo);
+
+        let def = tool.definition("test".to_string()).await;
+        assert_eq!(def.name, "add_mcp_service");
+    }
+
+    #[tokio::test]
+    async fn test_definition_has_required_fields() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo);
+
+        let def = tool.definition("test".to_string()).await;
+        let required = def.parameters["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"name"));
+        assert!(required_names.contains(&"command"));
+        // args and env should be optional (not in required)
+        assert!(!required_names.contains(&"args"));
+        assert!(!required_names.contains(&"env"));
+    }
+
+    #[tokio::test]
+    async fn test_definition_has_all_properties() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo);
+
+        let def = tool.definition("test".to_string()).await;
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("name"));
+        assert!(props.contains_key("command"));
+        assert!(props.contains_key("args"));
+        assert!(props.contains_key("env"));
+    }
+
+    // --- Serde deserialization tests ---
+
+    #[test]
+    fn test_args_deserialize_minimal() {
+        let json = r#"{"name": "test", "command": "npx"}"#;
+        let args: AddMcpToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.name, "test");
+        assert_eq!(args.command, "npx");
+        assert!(args.args.is_empty());
+        assert!(args.env.is_empty());
+    }
+
+    #[test]
+    fn test_args_deserialize_full() {
+        let json = r#"{
+            "name": "tavily",
+            "command": "npx",
+            "args": ["-y", "@tavily/mcp-server"],
+            "env": {"TAVILY_API_KEY": "tvly-xxx"}
+        }"#;
+        let args: AddMcpToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.name, "tavily");
+        assert_eq!(args.command, "npx");
+        assert_eq!(args.args, vec!["-y", "@tavily/mcp-server"]);
+        assert_eq!(args.env.get("TAVILY_API_KEY").unwrap(), "tvly-xxx");
+    }
+
+    #[test]
+    fn test_args_deserialize_missing_name_fails() {
+        let json = r#"{"command": "npx"}"#;
+        let result: Result<AddMcpToolArgs, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_args_deserialize_missing_command_fails() {
+        let json = r#"{"name": "test"}"#;
+        let result: Result<AddMcpToolArgs, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_output_serialization() {
+        let output = AddMcpToolOutput {
+            success: true,
+            message: "Added successfully".to_string(),
+            server_name: "test".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"server_name\":\"test\""));
+    }
+
+    // --- Error display tests ---
+
+    #[test]
+    fn test_validation_error_display() {
+        let err = AddMcpToolError::ValidationError("bad name".to_string());
+        assert_eq!(err.to_string(), "Validation error: bad name");
+    }
+
+    #[test]
+    fn test_repository_error_display() {
+        let err = AddMcpToolError::RepositoryError("disk full".to_string());
+        assert_eq!(err.to_string(), "Repository error: disk full");
+    }
+
+    // --- Tool constant tests ---
+
+    #[test]
+    fn test_tool_name_constant() {
+        assert_eq!(AddMcpTool::NAME, "add_mcp_service");
     }
 }
