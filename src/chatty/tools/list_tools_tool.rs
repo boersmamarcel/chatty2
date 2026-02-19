@@ -47,11 +47,18 @@ impl ListToolsTool {
         has_fs_write: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
-        let mut native_tools = vec![ToolInfo {
-            name: "list_tools".to_string(),
-            description: "List all available tools (both native and MCP)".to_string(),
-            source: "native".to_string(),
-        }];
+        let mut native_tools = vec![
+            ToolInfo {
+                name: "list_tools".to_string(),
+                description: "List all available tools (both native and MCP)".to_string(),
+                source: "native".to_string(),
+            },
+            ToolInfo {
+                name: "add_mcp_service".to_string(),
+                description: "Add a new MCP server configuration so it becomes available in future conversations".to_string(),
+                source: "native".to_string(),
+            },
+        ];
 
         if has_bash {
             native_tools.push(ToolInfo {

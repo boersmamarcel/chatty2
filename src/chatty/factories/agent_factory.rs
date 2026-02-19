@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
-    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool, ListDirectoryTool,
-    ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool,
+    ListDirectoryTool, ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -54,17 +54,18 @@ macro_rules! build_with_mcp_tools {
 }
 
 /// Build an agent with optional bash, filesystem read, and filesystem write tools,
-/// then optional MCP tools. The list_tools tool is always included.
+/// then optional MCP tools. The list_tools and add_mcp_service tools are always included.
 ///
 /// Due to rig's type-level tool chaining, each combination of tool presence/absence
 /// produces a different builder type. This macro enumerates all 8 combinations
 /// (bash × fs_read × fs_write) explicitly.
 macro_rules! build_agent_with_tools {
-    ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $list_tools:expr, $mcp_tools:expr) => {{
+    ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $list_tools:expr, $add_mcp_tool:expr, $mcp_tools:expr) => {{
         match (&$bash_tool, &$fs_read, &$fs_write) {
             (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
                     .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
                     .tool(bash.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
@@ -80,6 +81,7 @@ macro_rules! build_agent_with_tools {
             (Some(bash), Some((rf, rb, ld, gs)), None) => {
                 let b = $builder
                     .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
                     .tool(bash.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
@@ -90,6 +92,7 @@ macro_rules! build_agent_with_tools {
             (Some(bash), None, Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
                     .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
                     .tool(bash.clone())
                     .tool(wf.clone())
                     .tool(cd.clone())
@@ -99,12 +102,16 @@ macro_rules! build_agent_with_tools {
                 build_with_mcp_tools!(b, $mcp_tools)
             }
             (Some(bash), None, None) => {
-                let b = $builder.tool($list_tools.clone()).tool(bash.clone());
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
+                    .tool(bash.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
             (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
                     .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
                     .tool(ld.clone())
@@ -119,6 +126,7 @@ macro_rules! build_agent_with_tools {
             (None, Some((rf, rb, ld, gs)), None) => {
                 let b = $builder
                     .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
                     .tool(rf.clone())
                     .tool(rb.clone())
                     .tool(ld.clone())
@@ -128,6 +136,7 @@ macro_rules! build_agent_with_tools {
             (None, None, Some((wf, cd, df, mf, ad))) => {
                 let b = $builder
                     .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone())
                     .tool(wf.clone())
                     .tool(cd.clone())
                     .tool(df.clone())
@@ -136,7 +145,9 @@ macro_rules! build_agent_with_tools {
                 build_with_mcp_tools!(b, $mcp_tools)
             }
             (None, None, None) => {
-                let b = $builder.tool($list_tools.clone());
+                let b = $builder
+                    .tool($list_tools.clone())
+                    .tool($add_mcp_tool.clone());
                 build_with_mcp_tools!(b, $mcp_tools)
             }
         }
@@ -297,6 +308,9 @@ impl AgentClient {
             mcp_tool_info,
         );
 
+        // Create add_mcp_service tool (always available)
+        let add_mcp_tool = AddMcpTool::new(crate::MCP_REPOSITORY.clone());
+
         match &provider_config.provider_type {
             ProviderType::Anthropic => {
                 let key = api_key
@@ -319,6 +333,7 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     list_tools,
+                    add_mcp_tool,
                     mcp_tools
                 );
 
@@ -345,6 +360,7 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     list_tools,
+                    add_mcp_tool,
                     mcp_tools
                 );
 
@@ -367,6 +383,7 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     list_tools,
+                    add_mcp_tool,
                     mcp_tools
                 );
 
@@ -393,6 +410,7 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     list_tools,
+                    add_mcp_tool,
                     mcp_tools
                 );
 
@@ -418,6 +436,7 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     list_tools,
+                    add_mcp_tool,
                     mcp_tools
                 );
 
@@ -561,6 +580,7 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     list_tools,
+                    add_mcp_tool,
                     mcp_tools
                 );
 
