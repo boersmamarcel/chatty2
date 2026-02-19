@@ -1,4 +1,7 @@
+use crate::settings::controllers::mcp_controller;
 use crate::settings::models::mcp_store::McpServersModel;
+use gpui::prelude::FluentBuilder;
+use gpui_component::button::*;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 
 fn get_config_path_display() -> String {
@@ -51,17 +54,10 @@ fn mcp_servers_list_group() -> SettingGroup {
                             .flex_col()
                             .gap_2()
                             .children(servers.iter().map(|server| {
-                                let status_color = if server.enabled {
-                                    cx.theme().accent
-                                } else {
-                                    cx.theme().muted_foreground
-                                };
-
-                                let status_text = if server.enabled {
-                                    "Enabled"
-                                } else {
-                                    "Disabled"
-                                };
+                                let enabled = server.enabled;
+                                let name = server.name.clone();
+                                let button_id =
+                                    SharedString::from(format!("settings-toggle-{}", name));
 
                                 div()
                                     .flex()
@@ -96,15 +92,14 @@ fn mcp_servers_list_group() -> SettingGroup {
                                             ),
                                     )
                                     .child(
-                                        div()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_sm()
-                                            .text_xs()
-                                            .text_color(status_color)
-                                            .border_1()
-                                            .border_color(status_color)
-                                            .child(status_text),
+                                        Button::new(button_id)
+                                            .xsmall()
+                                            .when(enabled, |btn| btn.primary())
+                                            .when(!enabled, |btn| btn.ghost())
+                                            .child(if enabled { "Enabled" } else { "Disabled" })
+                                            .on_click(move |_event, _window, cx| {
+                                                mcp_controller::toggle_server(name.clone(), cx);
+                                            }),
                                     )
                             }))
                             .into_any_element()

@@ -1,3 +1,4 @@
+use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
 use crate::settings::utils::get_all_base_theme_names;
 use gpui::*;
 use gpui_component::Root;
@@ -24,6 +25,23 @@ impl SettingsView {
             cx.global_mut::<GlobalSettingsWindow>().handle = None;
         })
         .detach();
+
+        // Subscribe to MCP notifier so the settings page re-renders when a server is added
+        if let Some(weak_notifier) = cx
+            .try_global::<GlobalMcpNotifier>()
+            .and_then(|g| g.entity.clone())
+            && let Some(notifier) = weak_notifier.upgrade()
+        {
+            cx.subscribe(
+                &notifier,
+                |_this, _notifier, event: &McpNotifierEvent, cx| {
+                    if matches!(event, McpNotifierEvent::ServersUpdated) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+        }
 
         // Compute theme options once at initialization
         let cached_theme_options = get_all_base_theme_names(cx);

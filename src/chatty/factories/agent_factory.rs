@@ -1,13 +1,14 @@
 use anyhow::{Context, Result, anyhow};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
+use rig::tool::ToolDyn;
 use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
-    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool, ListDirectoryTool,
-    ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool,
+    ListDirectoryTool, ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -53,94 +54,40 @@ macro_rules! build_with_mcp_tools {
     }};
 }
 
-/// Build an agent with optional bash, filesystem read, and filesystem write tools,
-/// then optional MCP tools. The list_tools tool is always included.
+/// Collect all optional native tools into a `Vec<Box<dyn ToolDyn>>`.
 ///
-/// Due to rig's type-level tool chaining, each combination of tool presence/absence
-/// produces a different builder type. This macro enumerates all 8 combinations
-/// (bash × fs_read × fs_write) explicitly.
-macro_rules! build_agent_with_tools {
-    ($builder:expr, $bash_tool:expr, $fs_read:expr, $fs_write:expr, $list_tools:expr, $mcp_tools:expr) => {{
-        match (&$bash_tool, &$fs_read, &$fs_write) {
-            (Some(bash), Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
-                let b = $builder
-                    .tool($list_tools.clone())
-                    .tool(bash.clone())
-                    .tool(rf.clone())
-                    .tool(rb.clone())
-                    .tool(ld.clone())
-                    .tool(gs.clone())
-                    .tool(wf.clone())
-                    .tool(cd.clone())
-                    .tool(df.clone())
-                    .tool(mf.clone())
-                    .tool(ad.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (Some(bash), Some((rf, rb, ld, gs)), None) => {
-                let b = $builder
-                    .tool($list_tools.clone())
-                    .tool(bash.clone())
-                    .tool(rf.clone())
-                    .tool(rb.clone())
-                    .tool(ld.clone())
-                    .tool(gs.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (Some(bash), None, Some((wf, cd, df, mf, ad))) => {
-                let b = $builder
-                    .tool($list_tools.clone())
-                    .tool(bash.clone())
-                    .tool(wf.clone())
-                    .tool(cd.clone())
-                    .tool(df.clone())
-                    .tool(mf.clone())
-                    .tool(ad.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (Some(bash), None, None) => {
-                let b = $builder.tool($list_tools.clone()).tool(bash.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (None, Some((rf, rb, ld, gs)), Some((wf, cd, df, mf, ad))) => {
-                let b = $builder
-                    .tool($list_tools.clone())
-                    .tool(rf.clone())
-                    .tool(rb.clone())
-                    .tool(ld.clone())
-                    .tool(gs.clone())
-                    .tool(wf.clone())
-                    .tool(cd.clone())
-                    .tool(df.clone())
-                    .tool(mf.clone())
-                    .tool(ad.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (None, Some((rf, rb, ld, gs)), None) => {
-                let b = $builder
-                    .tool($list_tools.clone())
-                    .tool(rf.clone())
-                    .tool(rb.clone())
-                    .tool(ld.clone())
-                    .tool(gs.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (None, None, Some((wf, cd, df, mf, ad))) => {
-                let b = $builder
-                    .tool($list_tools.clone())
-                    .tool(wf.clone())
-                    .tool(cd.clone())
-                    .tool(df.clone())
-                    .tool(mf.clone())
-                    .tool(ad.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-            (None, None, None) => {
-                let b = $builder.tool($list_tools.clone());
-                build_with_mcp_tools!(b, $mcp_tools)
-            }
-        }
-    }};
+/// Replaces the former 16-branch `build_agent_with_tools!` macro. Adding a new
+/// optional tool only requires one new `if let Some` block here — no combinatorial
+/// branching.
+fn collect_tools(
+    list_tools: ListToolsTool,
+    bash_tool: Option<BashTool>,
+    fs_read: Option<FsReadTools>,
+    fs_write: Option<FsWriteTools>,
+    add_mcp_tool: Option<AddMcpTool>,
+) -> Vec<Box<dyn ToolDyn>> {
+    let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+    tools.push(Box::new(list_tools)); // always present
+    if let Some(t) = add_mcp_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = bash_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some((rf, rb, ld, gs)) = fs_read {
+        tools.push(Box::new(rf));
+        tools.push(Box::new(rb));
+        tools.push(Box::new(ld));
+        tools.push(Box::new(gs));
+    }
+    if let Some((wf, cd, df, mf, ad)) = fs_write {
+        tools.push(Box::new(wf));
+        tools.push(Box::new(cd));
+        tools.push(Box::new(df));
+        tools.push(Box::new(mf));
+        tools.push(Box::new(ad));
+    }
+    tools
 }
 
 /// Enum-based agent wrapper for multi-provider support
@@ -289,11 +236,42 @@ impl AgentClient {
             "Total MCP tools registered with list_tools"
         );
 
+        // Create add_mcp_service tool (conditional on settings)
+        let add_mcp_tool: Option<AddMcpTool> = {
+            let enabled = exec_settings
+                .as_ref()
+                .map(|s| s.mcp_service_tool_enabled)
+                .unwrap_or(false);
+            if enabled {
+                match (
+                    crate::MCP_UPDATE_SENDER.get().cloned(),
+                    crate::MCP_SERVICE.get().cloned(),
+                ) {
+                    (Some(sender), Some(service)) => Some(AddMcpTool::new_with_services(
+                        crate::MCP_REPOSITORY.clone(),
+                        sender,
+                        service,
+                    )),
+                    _ => {
+                        tracing::warn!(
+                            "MCP_UPDATE_SENDER or MCP_SERVICE not initialized; \
+                             add_mcp_tool created without live services"
+                        );
+                        Some(AddMcpTool::new(crate::MCP_REPOSITORY.clone()))
+                    }
+                }
+            } else {
+                tracing::info!("add_mcp_service tool disabled by execution settings");
+                None
+            }
+        };
+
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             bash_tool.is_some(),
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
+            add_mcp_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -313,14 +291,14 @@ impl AgentClient {
                 }
 
                 // Build with all tools
-                let agent = build_agent_with_tools!(
-                    builder,
+                let tool_vec = collect_tools(
+                    list_tools,
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    list_tools,
-                    mcp_tools
+                    add_mcp_tool,
                 );
+                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::Anthropic(agent))
             }
@@ -339,14 +317,14 @@ impl AgentClient {
                 }
 
                 // Build with all tools
-                let agent = build_agent_with_tools!(
-                    builder,
+                let tool_vec = collect_tools(
+                    list_tools,
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    list_tools,
-                    mcp_tools
+                    add_mcp_tool,
                 );
+                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::OpenAI(agent))
             }
@@ -361,14 +339,14 @@ impl AgentClient {
                     .temperature(model_config.temperature as f64);
 
                 // Build with all tools
-                let agent = build_agent_with_tools!(
-                    builder,
+                let tool_vec = collect_tools(
+                    list_tools,
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    list_tools,
-                    mcp_tools
+                    add_mcp_tool,
                 );
+                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::Gemini(agent))
             }
@@ -387,14 +365,14 @@ impl AgentClient {
                 }
 
                 // Build with all tools
-                let agent = build_agent_with_tools!(
-                    builder,
+                let tool_vec = collect_tools(
+                    list_tools,
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    list_tools,
-                    mcp_tools
+                    add_mcp_tool,
                 );
+                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::Mistral(agent))
             }
@@ -412,14 +390,14 @@ impl AgentClient {
                     .temperature(model_config.temperature as f64);
 
                 // Build with all tools
-                let agent = build_agent_with_tools!(
-                    builder,
+                let tool_vec = collect_tools(
+                    list_tools,
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    list_tools,
-                    mcp_tools
+                    add_mcp_tool,
                 );
+                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::Ollama(agent))
             }
@@ -555,14 +533,14 @@ impl AgentClient {
                 }
 
                 // Build with all tools
-                let agent = build_agent_with_tools!(
-                    builder,
+                let tool_vec = collect_tools(
+                    list_tools,
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    list_tools,
-                    mcp_tools
+                    add_mcp_tool,
                 );
+                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::AzureOpenAI(agent))
             }
