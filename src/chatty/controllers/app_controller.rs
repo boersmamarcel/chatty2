@@ -1,6 +1,7 @@
 use gpui::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
@@ -29,7 +30,14 @@ pub struct ChattyApp {
     pub sidebar_view: Entity<SidebarView>,
     conversation_repo: Arc<dyn ConversationRepository>,
     is_ready: bool,
-    active_stream_task: Option<Task<anyhow::Result<()>>>,
+    /// Maps conversation_id → active stream task
+    /// Allows multiple conversations to have concurrent streams
+    active_stream_tasks: HashMap<String, Task<anyhow::Result<()>>>,
+    /// Maps "__pending__" → Arc<Mutex<Option<String>>> to track resolved conversation ID
+    /// When a task is created with no conversation ID, we store a shared reference here.
+    /// The async block updates this once the real conversation ID is known.
+    /// This allows load_conversation to detect active streams even if the task hasn't been re-keyed yet.
+    pending_task_resolved_ids: HashMap<String, Arc<Mutex<Option<String>>>>,
     /// Held while a conversation is being created; prevents concurrent creations.
     /// Automatically dropped (and thus "cleared") when the task completes.
     active_create_task: Option<Task<anyhow::Result<String>>>,
@@ -56,7 +64,8 @@ impl ChattyApp {
             sidebar_view,
             conversation_repo,
             is_ready: false,
-            active_stream_task: None,
+            active_stream_tasks: HashMap::new(),
+            pending_task_resolved_ids: HashMap::new(),
             active_create_task: None,
         };
 
@@ -237,15 +246,9 @@ impl ChattyApp {
                     let app = app_for_stop.clone();
 
                     app.update(cx, |app, cx| {
+                        // stop_stream now handles clearing the stream from HashMap
+                        // and updating UI state, so no need for separate clear_streaming_state call
                         app.stop_stream(cx);
-
-                        // Defer streaming state clear to avoid re-entrancy on ChatInputState
-                        let app_entity = app_for_stop.clone();
-                        cx.defer(move |cx| {
-                            app_entity.update(cx, |app, cx| {
-                                app.clear_streaming_state(cx);
-                            });
-                        });
                     });
                 });
             });
@@ -432,7 +435,7 @@ impl ChattyApp {
                             // This ensures when the user sends the first message, a new conversation is created
                             chat_view
                                 .update(cx, |view, cx| {
-                                    view.set_conversation_id(String::new());
+                                    view.set_conversation_id(String::new(), cx);
                                     view.clear_messages(cx);
                                     cx.notify();
                                 })
@@ -552,9 +555,15 @@ impl ChattyApp {
                 let conv_id = uuid::Uuid::new_v4().to_string();
                 let title = "New Chat".to_string();
 
+                // Cancel any pending stream for conversations without IDs
+                if let Some(task) = self.active_stream_tasks.remove("__pending__") {
+                    debug!("Cancelling pending stream when creating new conversation");
+                    drop(task);
+                }
+
                 // Clear chat view immediately so the user sees a fresh state
                 chat_view.update(cx, |view, cx| {
-                    view.set_conversation_id(conv_id.clone());
+                    view.set_conversation_id(conv_id.clone(), cx);
                     view.clear_messages(cx);
 
                     // Set available models in chat input
@@ -565,12 +574,16 @@ impl ChattyApp {
                         .map(|m| (m.id.clone(), m.name.clone()))
                         .collect();
 
-                    view.chat_input_state().update(cx, |state, _cx| {
+                    view.chat_input_state().update(cx, |state, cx| {
                         state.set_available_models(models_list, Some(model_config.id.clone()));
                         state.set_capabilities(
                             model_config.supports_images,
                             model_config.supports_pdf,
                         );
+                        // Reset streaming state for new conversation (Bug Fix #1)
+                        state.set_streaming(false, cx);
+                        // Clear input text field for new conversation (Bug Fix #3)
+                        state.mark_for_clear();
                     });
                 });
 
@@ -707,11 +720,9 @@ impl ChattyApp {
 
     /// Load a conversation by ID
     fn load_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
-        // Set active in store
-        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store.set_active(id.to_string());
-        });
+        // No need to manually save streaming content - it's already in the Conversation model
 
+        // Set active in store
         let conv_id = id.to_string();
         let chat_view = self.chat_view.clone();
         let sidebar = self.sidebar_view.clone();
@@ -721,23 +732,53 @@ impl ChattyApp {
             sidebar.set_active_conversation(Some(conv_id.clone()), cx);
         });
 
-        // Update chat view
-        let conversation_data =
-            cx.global::<ConversationsStore>()
-                .get_conversation(id)
-                .map(|conv| {
-                    (
-                        conv.history().to_vec(),
-                        conv.system_traces().to_vec(),
-                        conv.attachment_paths().to_vec(),
-                        conv.model_id().to_string(),
-                    )
+        // Batch: set active + get conversation data + streaming content in single global lookup
+        let conversation_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            store.set_active(id.to_string());
+            store.get_conversation(id).map(|conv| {
+                (
+                    conv.history().to_vec(),
+                    conv.system_traces().to_vec(),
+                    conv.attachment_paths().to_vec(),
+                    conv.model_id().to_string(),
+                    conv.streaming_message().cloned(),
+                )
+            })
+        });
+
+        if let Some((history, traces, attachment_paths, model_id, streaming_content)) =
+            conversation_data
+        {
+            chat_view.update(cx, |view, cx| {
+                view.set_conversation_id(conv_id.clone(), cx);
+
+                // Clear attachments from previous conversation
+                view.chat_input_state().update(cx, |state, _cx| {
+                    state.clear_attachments();
                 });
 
-        if let Some((history, traces, attachment_paths, model_id)) = conversation_data {
-            chat_view.update(cx, |view, cx| {
-                view.set_conversation_id(conv_id.clone());
                 view.load_history(&history, &traces, &attachment_paths, cx);
+
+                // Check if this conversation has an active stream
+                // First check direct key, then check if there's a pending task that resolved to this ID
+                let mut has_active_stream = self.active_stream_tasks.contains_key(&conv_id);
+                if !has_active_stream {
+                    // Check if "__pending__" task has resolved to this conversation ID
+                    has_active_stream = self
+                        .pending_task_resolved_ids
+                        .get("__pending__")
+                        .and_then(|resolved_id_mutex| resolved_id_mutex.lock().ok())
+                        .as_ref()
+                        .and_then(|resolved_id| {
+                            if resolved_id.as_ref() == Some(&conv_id) {
+                                debug!(conv_id = %conv_id, "Found active stream via pending task resolution");
+                                Some(true)
+                            } else {
+                                None
+                            }
+                        })
+                        .is_some();
+                }
 
                 // Update the selected model and capabilities in the chat input
                 let model_capabilities = cx
@@ -746,10 +787,30 @@ impl ChattyApp {
                     .map(|m| (m.supports_images, m.supports_pdf))
                     .unwrap_or((false, false));
 
-                view.chat_input_state().update(cx, |state, _cx| {
+                view.chat_input_state().update(cx, |state, cx| {
                     state.set_selected_model_id(model_id);
                     state.set_capabilities(model_capabilities.0, model_capabilities.1);
+
+                    // Restore streaming state if conversation has active stream
+                    // Set this BEFORE restoring the message so the UI is in correct state
+                    state.set_streaming(has_active_stream, cx);
                 });
+
+                // Restore in-progress streaming message from Conversation model if it exists
+                // This must happen AFTER setting the streaming state
+                if has_active_stream {
+                    if let Some(content) = streaming_content {
+                        debug!(conv_id = %conv_id, content_len = content.len(),
+                               "Restoring streaming message content from Conversation model");
+                        // Start a new streaming message and populate it with content from model
+                        view.start_assistant_message(cx);
+                        view.append_assistant_text(&content, cx);
+                    } else {
+                        // Stream active but no content yet - show placeholder
+                        debug!(conv_id = %conv_id, "Stream active but no content yet, starting placeholder");
+                        view.start_assistant_message(cx);
+                    }
+                }
             });
         }
     }
@@ -942,7 +1003,7 @@ impl ChattyApp {
         } else {
             chat_view.update(cx, |view, cx| {
                 view.clear_messages(cx);
-                view.set_conversation_id(String::new());
+                view.set_conversation_id(String::new(), cx);
             });
         }
 
@@ -1000,6 +1061,21 @@ impl ChattyApp {
         let app_entity = cx.entity();
         let repo = self.conversation_repo.clone();
 
+        // Get the conversation ID for task tracking
+        // If no conversation exists, we'll create one inside the async block
+        let conv_id_for_task = cx.global::<ConversationsStore>().active_id().cloned();
+        let needs_conversation_creation = conv_id_for_task.is_none();
+
+        // Create shared resolved ID tracker if we need to create a conversation
+        let resolved_id = if needs_conversation_creation {
+            Arc::new(Mutex::new(None))
+        } else {
+            Arc::new(Mutex::new(conv_id_for_task.clone()))
+        };
+
+        // Clone for the async closure to use
+        let resolved_id_for_closure = resolved_id.clone();
+
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
         let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
@@ -1016,20 +1092,25 @@ impl ChattyApp {
                     }
                     None => {
                         debug!("No active conversation found, creating one");
-                        let task = app_entity.update(cx, |app, cx| app.create_new_conversation(cx))
+                        let create_task = app_entity.update(cx, |app, cx| app.create_new_conversation(cx))
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        match task.await {
+                        match create_task.await {
                             Ok(id) => {
                                 debug!(conv_id = %id, "Created new conversation");
+                                // Update the shared resolved ID so load_conversation can find the active stream
+                                if let Ok(mut resolved) = resolved_id_for_closure.lock() {
+                                    *resolved = Some(id.clone());
+                                    debug!(conv_id = %id, "Updated resolved conversation ID for pending task");
+                                }
                                 id
                             }
                             Err(e) => {
                                 error!(error = ?e, "Failed to create conversation");
 
-                                // Clear streaming state on error
+                                // Clear streaming state on error (clear all since we don't have a conv_id)
                                 app_entity
                                     .update(cx, |app, cx| {
-                                        app.clear_streaming_state(cx);
+                                        app.clear_streaming_state(None, cx);
                                     })
                                     .map_err(|e| warn!(error = ?e, "Failed to clear streaming state on error"))
                                     .ok();
@@ -1043,7 +1124,7 @@ impl ChattyApp {
                 // PHASE 2: Initialize UI with user and assistant messages
                 // and add the user/assistant messages AFTER conversation exists
                 chat_view.update(cx, |view, cx| {
-                    view.set_conversation_id(conv_id.clone());
+                    view.set_conversation_id(conv_id.clone(), cx);
                     // Add user message to UI
                     view.add_user_message(message.clone(), attachments.clone(), cx);
                     debug!("User message added to UI");
@@ -1159,6 +1240,16 @@ impl ChattyApp {
                             debug!(text = %text, "Text chunk received");
                             response_text.push_str(&text);
 
+                            // Update the Conversation model (source of truth)
+                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                    conv.append_streaming_content(&text);
+                                }
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
+                            .ok();
+
+                            // Update UI if this conversation is currently displayed
                             chat_view
                                 .update(cx, |view, cx| {
                                     let view_conv_id = view.conversation_id().cloned();
@@ -1477,10 +1568,13 @@ impl ChattyApp {
                         .map_err(|e| anyhow::anyhow!(e))?;
                 }
 
-                // Clear streaming state on success
+                // Clear streaming state on success for this conversation
+                let conv_id_for_clear = conv_id.clone();
                 app_entity
                     .update(cx, |app, cx| {
-                        app.clear_streaming_state(cx);
+                        app.clear_streaming_state(Some(&conv_id_for_clear), cx);
+                        // Also remove placeholder if it still exists
+                        app.active_stream_tasks.remove("__pending__");
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to clear streaming state"))
                     .ok();
@@ -1488,142 +1582,210 @@ impl ChattyApp {
                 Ok(())
             });
 
-        // Store the task instead of detaching
-        self.active_stream_task = Some(task);
-    }
-
-    /// Stop the currently active stream
-    pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
-        if let Some(task) = self.active_stream_task.take() {
-            debug!("Cancelling active stream");
-            // Simply drop the task - GPUI will cancel it automatically
-            drop(task);
-
-            let chat_view = self.chat_view.clone();
-            let repo = self.conversation_repo.clone();
-
-            // Extract current state and save partial response
-            let conv_id_opt = cx
-                .try_global::<ConversationsStore>()
-                .and_then(|store| store.active_id().cloned());
-
-            if let Some(conv_id) = conv_id_opt {
-                // Extract trace before finalizing UI
-                let trace_json = chat_view.update(cx, |view, _cx| {
-                    view.extract_current_trace()
-                        .and_then(|trace| serde_json::to_value(&trace).ok())
-                });
-
-                // Get the partial response text from the UI
-                let response_text = chat_view
-                    .read(cx)
-                    .messages()
-                    .last()
-                    .filter(|msg| msg.is_streaming)
-                    .map(|msg| msg.content.clone())
-                    .unwrap_or_default();
-
-                // Finalize the assistant message in UI
-                chat_view.update(cx, |view, cx| {
-                    view.finalize_assistant_message(cx);
-                });
-
-                // Save the partial response to conversation history
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.finalize_response(response_text);
-                        conv.add_trace(trace_json);
-                        debug!("Partial response saved to conversation after stop");
-                    }
-                });
-
-                // Serialize conversation data for saving
-                let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    store.get_conversation(&conv_id).and_then(|conv| {
-                        let history = conv.serialize_history().ok()?;
-                        let traces = conv.serialize_traces().ok()?;
-                        let now = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64;
-
-                        Some(ConversationData {
-                            id: conv.id().to_string(),
-                            title: conv.title().to_string(),
-                            model_id: conv.model_id().to_string(),
-                            message_history: history,
-                            system_traces: traces,
-                            token_usage: conv
-                                .serialize_token_usage()
-                                .unwrap_or_else(|_| "{}".to_string()),
-                            attachment_paths: conv
-                                .serialize_attachment_paths()
-                                .unwrap_or_else(|_| "[]".to_string()),
-                            created_at: conv
-                                .created_at()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs() as i64,
-                            updated_at: now,
-                        })
-                    })
-                });
-
-                // Save to disk asynchronously
-                if let Some(conv_data) = conv_data_opt {
-                    let conv_id_for_save = conv_id.clone();
-                    cx.spawn(async move |_, _cx| {
-                        if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
-                            warn!(error = ?e, "Failed to save conversation after stop");
-                        } else {
-                            debug!("Conversation saved to disk after stop");
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    })
-                    .detach();
-                }
-            }
-
-            cx.notify();
-        } else {
-            // Task may have just completed naturally (race condition: task cleared
-            // active_stream_task before stop_stream ran). Reset UI state to ensure
-            // the Stop button doesn't get stuck.
-            let chat_view = self.chat_view.clone();
-            let input_still_streaming = chat_view
-                .read(cx)
-                .chat_input_state()
-                .read(cx)
-                .is_streaming();
-
-            if input_still_streaming {
-                debug!("No active task but UI still shows streaming — resetting UI state");
-                chat_view.update(cx, |view, cx| {
-                    view.chat_input_state().update(cx, |input, cx| {
-                        input.set_streaming(false, cx);
-                    });
-                });
-                cx.notify();
-            } else {
-                debug!("stop_stream called but no active stream and UI already idle");
-            }
+        // Store the task in HashMap with conversation ID as key
+        // This allows multiple conversations to have concurrent streams
+        if let Some(conv_id) = conv_id_for_task {
+            self.active_stream_tasks.insert(conv_id, task);
+        } else if needs_conversation_creation {
+            // No conversation exists yet - use placeholder key
+            // Store resolved ID tracker so load_conversation can detect active stream
+            // even before the task is re-keyed to the real conversation ID
+            self.active_stream_tasks
+                .insert("__pending__".to_string(), task);
+            self.pending_task_resolved_ids
+                .insert("__pending__".to_string(), resolved_id);
+            debug!("Using placeholder key for task until conversation is created");
         }
     }
 
-    /// Clear streaming state: drops the active task and sets input to non-streaming
-    fn clear_streaming_state(&mut self, cx: &mut Context<Self>) {
-        self.active_stream_task = None;
-        self.chat_view.update(cx, |view, cx| {
-            view.chat_input_state().update(cx, |input, cx| {
-                input.set_streaming(false, cx);
+    /// Stop the currently active stream for the current conversation
+    pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
+        // Get current conversation ID
+        let conv_id_opt = cx
+            .try_global::<ConversationsStore>()
+            .and_then(|store| store.active_id().cloned());
+
+        if let Some(conv_id) = &conv_id_opt {
+            // Remove and drop the stream task for this specific conversation
+            if let Some(task) = self.active_stream_tasks.remove(conv_id) {
+                debug!(conversation_id = %conv_id, "Cancelling stream for conversation");
+                // Simply drop the task - GPUI will cancel it automatically
+                drop(task);
+            } else {
+                // Try the pending key (in case stream started before conversation was created)
+                if let Some(task) = self.active_stream_tasks.remove("__pending__") {
+                    debug!(conversation_id = %conv_id, "Cancelling pending stream that became this conversation");
+                    drop(task);
+                } else {
+                    debug!(conversation_id = %conv_id, "No active stream found for conversation");
+                    // No active stream, might be a race condition - still reset UI
+                }
+            }
+        } else {
+            // No conversation ID yet - check for pending stream
+            if let Some(task) = self.active_stream_tasks.remove("__pending__") {
+                debug!("Cancelling pending stream (no conversation yet)");
+                drop(task);
+            }
+        }
+
+        let chat_view = self.chat_view.clone();
+        let repo = self.conversation_repo.clone();
+
+        if let Some(conv_id) = conv_id_opt {
+            // Extract trace before finalizing UI
+            let trace_json = chat_view.update(cx, |view, _cx| {
+                view.extract_current_trace()
+                    .and_then(|trace| serde_json::to_value(&trace).ok())
             });
-        });
+
+            // Mark the assistant message as cancelled in UI
+            chat_view.update(cx, |view, cx| {
+                view.mark_message_cancelled(cx);
+            });
+
+            // Get the partial response text from the UI (after marking as cancelled)
+            let response_text = chat_view
+                .read(cx)
+                .messages()
+                .last()
+                .map(|msg| msg.content.clone())
+                .unwrap_or_default();
+
+            // Save the partial response to conversation history (includes cancellation notice)
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.finalize_response(response_text);
+                    conv.add_trace(trace_json);
+                    debug!("Partial response saved to conversation after stop");
+                }
+            });
+
+            // Serialize conversation data for saving
+            let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                store.get_conversation(&conv_id).and_then(|conv| {
+                    let history = conv.serialize_history().ok()?;
+                    let traces = conv.serialize_traces().ok()?;
+                    let now = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+
+                    Some(ConversationData {
+                        id: conv.id().to_string(),
+                        title: conv.title().to_string(),
+                        model_id: conv.model_id().to_string(),
+                        message_history: history,
+                        system_traces: traces,
+                        token_usage: conv
+                            .serialize_token_usage()
+                            .unwrap_or_else(|_| "{}".to_string()),
+                        attachment_paths: conv
+                            .serialize_attachment_paths()
+                            .unwrap_or_else(|_| "[]".to_string()),
+                        created_at: conv
+                            .created_at()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64,
+                        updated_at: now,
+                    })
+                })
+            });
+
+            // Save to disk asynchronously
+            if let Some(conv_data) = conv_data_opt {
+                let conv_id_for_save = conv_id.clone();
+                cx.spawn(async move |_, _cx| {
+                    if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
+                        warn!(error = ?e, "Failed to save conversation after stop");
+                    } else {
+                        debug!("Conversation saved to disk after stop");
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .detach();
+            }
+
+            // Reset streaming state in UI (Bug Fix)
+            self.clear_streaming_state(Some(&conv_id), cx);
+        }
+
+        cx.notify();
     }
 
-    /// Check if a stream is currently active
+    /// Clear streaming state for a specific conversation or all conversations
+    ///
+    /// If conversation_id is provided, clears only that conversation's stream.
+    /// If None, clears all streams (useful for shutdown scenarios).
+    ///
+    /// Only updates UI if the cleared conversation is currently active.
+    fn clear_streaming_state(&mut self, conversation_id: Option<&str>, cx: &mut Context<Self>) {
+        let should_update_ui = if let Some(conv_id) = conversation_id {
+            // Clear specific conversation's stream
+            self.active_stream_tasks.remove(conv_id);
+
+            // Also clear the resolved ID tracker if it resolves to this conversation
+            let should_remove_resolved = if let Some(resolved_id_mutex) =
+                self.pending_task_resolved_ids.get("__pending__")
+            {
+                if let Ok(resolved_id) = resolved_id_mutex.lock() {
+                    resolved_id.as_ref() == Some(&conv_id.to_string())
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if should_remove_resolved {
+                self.pending_task_resolved_ids.remove("__pending__");
+                debug!(conv_id = %conv_id, "Cleaned up resolved ID tracker");
+            }
+
+            // Clear streaming message from Conversation model
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(conv_id) {
+                    conv.set_streaming_message(None);
+                }
+            });
+
+            // Check if this is the currently active conversation
+            let current_conv = self
+                .chat_view
+                .read(cx)
+                .conversation_id()
+                .map(|s| s.as_str());
+            current_conv == Some(conv_id)
+        } else {
+            // Clear all streams
+            self.active_stream_tasks.clear();
+            self.pending_task_resolved_ids.clear();
+            // Note: Not clearing streaming messages from all conversations here
+            // as they will be cleared individually when streams complete
+            // Always update UI when clearing all
+            true
+        };
+
+        // Only update UI if the cleared conversation is currently displayed
+        if should_update_ui {
+            self.chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, cx| {
+                    input.set_streaming(false, cx);
+                });
+            });
+        }
+    }
+
+    /// Check if any stream is currently active
     #[allow(dead_code)]
     pub fn is_streaming(&self) -> bool {
-        self.active_stream_task.is_some()
+        !self.active_stream_tasks.is_empty()
+    }
+
+    /// Check if a specific conversation has an active stream
+    #[allow(dead_code)]
+    pub fn is_conversation_streaming(&self, conversation_id: &str) -> bool {
+        self.active_stream_tasks.contains_key(conversation_id)
     }
 
     /// Get the chat input state entity

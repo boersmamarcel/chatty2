@@ -242,6 +242,11 @@ impl ChatInputState {
         }
     }
 
+    /// Mark the input for clearing on next render (without sending)
+    pub fn mark_for_clear(&mut self) {
+        self.should_clear = true;
+    }
+
     /// Clear the input if needed
     pub fn clear_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.should_clear {
