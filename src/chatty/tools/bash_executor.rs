@@ -179,18 +179,67 @@ impl BashExecutor {
     async fn run_command(&self, command: &str, is_sandboxed: bool) -> Result<std::process::Output> {
         let timeout_duration = Duration::from_secs(self.settings.timeout_seconds as u64);
 
-        let result = if is_sandboxed {
-            timeout(timeout_duration, self.run_sandboxed(command)).await
+        if is_sandboxed {
+            match timeout(timeout_duration, self.run_sandboxed(command)).await {
+                Ok(output_result) => {
+                    match output_result {
+                        Ok(output) => {
+                            // Check if the command itself failed with exit code 1 due to sandbox error
+                            if output.status.code() == Some(1)
+                                && !output.stderr.is_empty()
+                                && (String::from_utf8_lossy(&output.stderr).contains("bwrap")
+                                    || String::from_utf8_lossy(&output.stderr)
+                                        .contains("Operation not permitted"))
+                            {
+                                // Sandboxing failed, retry without sandbox
+                                warn!(
+                                    stderr = ?String::from_utf8_lossy(&output.stderr),
+                                    "Sandboxed execution failed, falling back to unsandboxed"
+                                );
+                                timeout(timeout_duration, self.run_unsandboxed(command))
+                                    .await
+                                    .map_err(|_| {
+                                        anyhow!(
+                                            "Command execution timed out after {} seconds",
+                                            self.settings.timeout_seconds
+                                        )
+                                    })?
+                            } else {
+                                Ok(output)
+                            }
+                        }
+                        Err(e) => {
+                            // Sandboxing setup failed, try unsandboxed
+                            warn!(
+                                error = ?e,
+                                "Sandboxed execution setup failed, falling back to unsandboxed"
+                            );
+                            timeout(timeout_duration, self.run_unsandboxed(command))
+                                .await
+                                .map_err(|_| {
+                                    anyhow!(
+                                        "Command execution timed out after {} seconds",
+                                        self.settings.timeout_seconds
+                                    )
+                                })?
+                        }
+                    }
+                }
+                Err(_) => Err(anyhow!(
+                    "Command execution timed out after {} seconds",
+                    self.settings.timeout_seconds
+                )),
+            }
         } else {
-            timeout(timeout_duration, self.run_unsandboxed(command)).await
-        };
-
-        result.map_err(|_| {
-            anyhow!(
-                "Command execution timed out after {} seconds",
-                self.settings.timeout_seconds
-            )
-        })?
+            timeout(timeout_duration, self.run_unsandboxed(command))
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "Command execution timed out after {} seconds",
+                        self.settings.timeout_seconds
+                    )
+                })?
+        }
     }
 
     /// Validate and escape a workspace path for safe use in macOS sandbox profile

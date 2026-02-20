@@ -741,7 +741,7 @@ impl ChattyApp {
                     conv.system_traces().to_vec(),
                     conv.attachment_paths().to_vec(),
                     conv.model_id().to_string(),
-                    conv.streaming_message().map(|s| s.clone()),
+                    conv.streaming_message().cloned(),
                 )
             })
         });
