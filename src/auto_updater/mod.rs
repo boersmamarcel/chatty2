@@ -444,12 +444,13 @@ impl AutoUpdater {
 
     /// Install the downloaded update and restart the application.
     ///
-    /// On macOS this uses a Zed-style deferred approach for smooth UX:
+    /// On macOS this uses a deferred approach for fast restart:
     /// 1. Set status to Installing for visual feedback
     /// 2. Write a helper shell script to /tmp that will mount the DMG,
-    ///    rsync the .app bundle, and relaunch the app
-    /// 3. Spawn the helper as a detached process (it sleeps 2s first)
-    /// 4. Call cx.quit() for a graceful GPUI shutdown with window animations
+    ///    rsync the .app bundle, relaunch immediately, then run
+    ///    housekeeping (codesign, xattr, lsregister) post-launch
+    /// 3. Spawn the helper as a detached process (polls for app exit)
+    /// 4. Call cx.quit() for a graceful GPUI shutdown
     ///
     /// On Linux/Windows the existing in-process approach is used, now with
     /// async I/O to keep the Tokio runtime unblocked.
@@ -913,12 +914,13 @@ fn relaunch_linux_process() -> std::io::Result<()> {
 /// Write and spawn a detached shell script that installs the macOS update
 /// after the app has fully exited.
 ///
-/// The script:
-/// 1. Sleeps 2 s to let the app finish its GPUI shutdown
-/// 2. Mounts the downloaded .dmg with `hdiutil`
+/// The script prioritises fast restart by launching the app immediately
+/// after copying, then running housekeeping tasks afterward:
+/// 1. Polls for app exit with 0.2 s intervals (up to 10 s total)
+/// 2. Mounts the downloaded .dmg with `hdiutil` (`-noverify` — checksum already validated)
 /// 3. Rsyncs the new .app bundle over the current installation
-/// 4. Unmounts the .dmg
-/// 5. Relaunches the updated app with `open`
+/// 4. Relaunches via direct binary execution (bypasses Gatekeeper)
+/// 5. Post-launch: clears quarantine attrs, re-signs adhoc bundles, resets LS cache, unmounts DMG
 #[cfg(target_os = "macos")]
 pub fn launch_macos_install_helper(dmg_path: &std::path::Path, app_bundle: &std::path::Path) {
     use std::io::Write;
@@ -944,28 +946,26 @@ log "=== Chatty Update Installation Started ==="
 log "DMG: $DMG_PATH"
 log "Target: $APP_BUNDLE"
 
-# Wait for the app to fully exit by checking for running processes
+# Wait for the app to fully exit — poll quickly (0.2s) to minimize delay
 log "Waiting for app to exit..."
 APP_NAME="Chatty"
-MAX_WAIT=10
+MAX_WAIT=50
 WAIT_COUNT=0
 
 while pgrep -x "$APP_NAME" > /dev/null 2>&1; do
     if [ $WAIT_COUNT -ge $MAX_WAIT ]; then
-        log "WARNING: App still running after $MAX_WAIT seconds, proceeding anyway"
+        log "WARNING: App still running after 10 seconds, proceeding anyway"
         break
     fi
-    sleep 1
+    sleep 0.2
     WAIT_COUNT=$((WAIT_COUNT + 1))
-    log "Waiting for $APP_NAME to exit... ($WAIT_COUNT/$MAX_WAIT)"
 done
 
 log "App has exited, proceeding with installation"
-sleep 1
 
-# Mount the DMG and capture plist output
+# Mount the DMG — skip verification since we already validated the SHA-256 checksum
 log "Mounting DMG..."
-MOUNT_OUTPUT=$(hdiutil attach -nobrowse -plist "$DMG_PATH" 2>&1)
+MOUNT_OUTPUT=$(hdiutil attach -nobrowse -noverify -plist "$DMG_PATH" 2>&1)
 HDIUTIL_EXIT=$?
 
 if [ $HDIUTIL_EXIT -ne 0 ]; then
@@ -1040,42 +1040,14 @@ fi
 
 log "App bundle replaced successfully"
 
-# Clear quarantine attributes that might prevent launch (critical for self-signed/adhoc apps)
-log "Clearing quarantine attributes..."
-xattr -cr "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "No quarantine attributes to clear"
-
-# For self-signed/adhoc signed apps, we need to re-sign the bundle to avoid Gatekeeper issues
-log "Checking code signature..."
-SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)
-log "Current signature type: $SIGNATURE"
-
-if [ "$SIGNATURE" = "adhoc" ] || [ -z "$SIGNATURE" ]; then
-    log "App is adhoc/unsigned, re-signing to prevent Gatekeeper issues..."
-    # Remove existing signature and re-sign with adhoc signature
-    # This creates a fresh signature that macOS Gatekeeper will accept for self-updates
-    codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Re-signing failed"
-fi
-
-# Reset Launch Services cache for this app to ensure macOS sees the new version
-log "Resetting Launch Services cache..."
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Failed to reset Launch Services cache"
-
-# Unmount
-log "Unmounting DMG..."
-if ! hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE"; then
-    log "WARNING: Failed to unmount DMG (continuing anyway)"
-fi
-
-# Relaunch the updated app
-# We try two methods: direct binary execution (bypasses Gatekeeper) and then fall back to 'open'
+# Relaunch the app IMMEDIATELY — don't wait for codesign/xattr/lsregister.
+# Direct binary execution bypasses Gatekeeper, so those steps are only
+# needed for future Finder/Spotlight launches and can run after relaunch.
 log "Relaunching app..."
-
-# Method 1: Direct execution of the binary inside the app bundle
-# This bypasses Gatekeeper for self-signed/adhoc apps
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 if [ -x "$APP_BINARY" ]; then
-    log "Attempting direct binary launch: $APP_BINARY"
+    log "Launching via direct binary: $APP_BINARY"
     nohup "$APP_BINARY" > /dev/null 2>&1 &
     LAUNCH_METHOD="direct"
 else
@@ -1091,34 +1063,28 @@ else
     LAUNCH_METHOD="open"
 fi
 
-log "Launch command ($LAUNCH_METHOD) succeeded, waiting for app to start..."
+log "App launched via $LAUNCH_METHOD, running post-install tasks in background..."
 
-# Wait up to 5 seconds for the app to actually start
-MAX_START_WAIT=5
-START_WAIT_COUNT=0
-APP_STARTED=false
+# --- Post-launch housekeeping (non-blocking) ---
+# These tasks prepare the bundle for future Finder/Spotlight launches
+# but are NOT needed for the direct binary launch above.
 
-while [ $START_WAIT_COUNT -lt $MAX_START_WAIT ]; do
-    sleep 1
-    START_WAIT_COUNT=$((START_WAIT_COUNT + 1))
+# Clear quarantine attributes
+xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
 
-    if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
-        APP_STARTED=true
-        log "App successfully relaunched via $LAUNCH_METHOD (PID: $(pgrep -x "$APP_NAME"))"
-        break
-    fi
-
-    log "Waiting for app to start... ($START_WAIT_COUNT/$MAX_START_WAIT)"
-done
-
-if [ "$APP_STARTED" = "false" ]; then
-    log "ERROR: App did not start within $MAX_START_WAIT seconds"
-    log "Launch method used: $LAUNCH_METHOD"
-    log "This may indicate a problem with the updated app bundle or Gatekeeper is blocking it"
-    log "Try launching the app manually from /Applications"
-    log "If you see a Gatekeeper dialog, the app needs to be properly code-signed with an Apple Developer certificate"
-    exit 1
+# Re-sign adhoc/unsigned bundles for future Gatekeeper compatibility
+SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)
+if [ "$SIGNATURE" = "adhoc" ] || [ -z "$SIGNATURE" ]; then
+    log "Re-signing adhoc bundle for future Gatekeeper compatibility..."
+    codesign --force --deep --sign - "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "WARNING: Re-signing failed"
 fi
+
+# Reset Launch Services cache so Finder shows the new version
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || true
+
+# Unmount DMG
+log "Unmounting DMG..."
+hdiutil detach -force "$MOUNT_POINT" >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to unmount DMG"
 
 log "=== Update Installation Completed Successfully ==="
 "#,
