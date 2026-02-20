@@ -25,6 +25,8 @@ pub struct Conversation {
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
+    /// Partial streaming message being composed (None if no active stream)
+    streaming_message: Option<String>,
 }
 
 impl Conversation {
@@ -79,6 +81,7 @@ impl Conversation {
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
+            streaming_message: None,
         })
     }
 
@@ -151,6 +154,7 @@ impl Conversation {
             token_usage,
             created_at,
             updated_at,
+            streaming_message: None, // Always start fresh, streaming state is transient
         })
     }
 
@@ -299,5 +303,24 @@ impl Conversation {
     /// Deserialize token usage from JSON string
     pub fn deserialize_token_usage(json: &str) -> Result<ConversationTokenUsage> {
         serde_json::from_str(json).context("Failed to deserialize token usage")
+    }
+
+    /// Get the current streaming message content (if any)
+    pub fn streaming_message(&self) -> Option<&String> {
+        self.streaming_message.as_ref()
+    }
+
+    /// Set the streaming message content
+    pub fn set_streaming_message(&mut self, content: Option<String>) {
+        self.streaming_message = content;
+    }
+
+    /// Append text to the streaming message
+    pub fn append_streaming_content(&mut self, text: &str) {
+        if let Some(ref mut content) = self.streaming_message {
+            content.push_str(text);
+        } else {
+            self.streaming_message = Some(text.to_string());
+        }
     }
 }

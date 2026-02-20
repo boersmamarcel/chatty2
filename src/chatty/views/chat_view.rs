@@ -26,6 +26,7 @@ pub struct PendingApprovalInfo {
     pub id: String,
     pub command: String,
     pub is_sandboxed: bool,
+    pub conversation_id: String,
 }
 
 pub struct ChatView {
@@ -87,8 +88,9 @@ impl ChatView {
     }
 
     /// Set the conversation ID for this view
-    pub fn set_conversation_id(&mut self, conversation_id: String) {
+    pub fn set_conversation_id(&mut self, conversation_id: String, cx: &mut Context<Self>) {
         self.conversation_id = Some(conversation_id);
+        cx.notify();
     }
 
     /// Get the current conversation ID
@@ -465,12 +467,15 @@ impl ChatView {
     ) {
         debug!(approval_id = %id, command = %command, sandboxed = is_sandboxed, "UI: handle_approval_requested called");
 
-        // Set pending approval for floating bar
-        self.pending_approval = Some(PendingApprovalInfo {
-            id: id.clone(),
-            command: command.clone(),
-            is_sandboxed,
-        });
+        // Set pending approval for floating bar (only if we have a conversation ID)
+        if let Some(conv_id) = &self.conversation_id {
+            self.pending_approval = Some(PendingApprovalInfo {
+                id: id.clone(),
+                command: command.clone(),
+                is_sandboxed,
+                conversation_id: conv_id.clone(),
+            });
+        }
 
         // Create approval block with pending state
         let approval = ApprovalBlock {
@@ -703,6 +708,12 @@ impl ChatView {
     ) {
         use rig::completion::Message;
 
+        // Clear any pending approval from previous conversation
+        self.pending_approval = None;
+
+        // Clear collapsed tool calls state from previous conversation
+        self.collapsed_tool_calls.clear();
+
         self.messages.clear();
 
         for (idx, msg) in history.iter().enumerate() {
@@ -871,6 +882,11 @@ impl Render for ChatView {
 
         let has_pending_approval = self.pending_approval.is_some();
         let view_entity_for_keys = cx.entity();
+        let pending_conv_id = self
+            .pending_approval
+            .as_ref()
+            .map(|p| p.conversation_id.clone());
+        let current_conv_id = self.conversation_id.clone();
 
         div()
             .flex_1()
@@ -892,6 +908,15 @@ impl Render for ChatView {
                         "ChatView key down: key={}, platform={}",
                         key, modifiers.platform
                     );
+
+                    // Validate that the pending approval belongs to the current conversation
+                    if pending_conv_id.as_ref() != current_conv_id.as_ref() {
+                        warn!(
+                            "Ignoring keyboard shortcut: approval belongs to different conversation (pending: {:?}, current: {:?})",
+                            pending_conv_id, current_conv_id
+                        );
+                        return;
+                    }
 
                     // Use platform modifier (Cmd on macOS, Ctrl elsewhere)
                     if modifiers.platform {
@@ -986,10 +1011,15 @@ impl Render for ChatView {
                     })
                     .vertical_scrollbar(&self.scroll_handle),
             )
-            // Floating approval bar (if pending)
-            .when_some(self.pending_approval.clone(), |this, pending| {
-                let view_entity = cx.entity();
-                this.child(
+            // Floating approval bar (if pending and belongs to current conversation)
+            .when_some(
+                self.pending_approval.as_ref().filter(|approval| {
+                    // Only show approval if it belongs to current conversation
+                    self.conversation_id.as_ref() == Some(&approval.conversation_id)
+                }).cloned(),
+                |this, pending| {
+                    let view_entity = cx.entity();
+                    this.child(
                     div().child(
                         super::approval_prompt_bar::ApprovalPromptBar::new(
                             pending.command,

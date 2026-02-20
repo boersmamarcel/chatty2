@@ -74,60 +74,11 @@ impl RenderOnce for ApprovalPromptBar {
         let (approve_label, deny_label, details_label) =
             ("Approve (Ctrl+Y)", "Deny (Ctrl+N)", "Details (Ctrl+D)");
 
-        // Clone callbacks for keyboard handler
-        let approve_callback = self.on_approve_deny.clone();
-        let deny_callback = self.on_approve_deny.clone();
-        let details_callback = self.on_expand.clone();
+        // Note: Keyboard shortcuts are handled at the ChatView level, not here.
+        // This component just displays the approval bar UI.
 
         div()
             .w_full()
-            .on_key_down(move |event: &KeyDownEvent, _window, cx| {
-                use tracing::warn;
-
-                let modifiers = event.keystroke.modifiers;
-                let key = &event.keystroke.key;
-
-                warn!(
-                    "Approval bar key down: key={}, platform={}, control={}, alt={}, shift={}",
-                    key, modifiers.platform, modifiers.control, modifiers.alt, modifiers.shift
-                );
-
-                // Use platform modifier (Cmd on macOS, Ctrl elsewhere)
-                let cmd_or_ctrl = modifiers.platform;
-
-                if cmd_or_ctrl {
-                    warn!("Platform modifier pressed with key: {}", key);
-                    match key.as_str() {
-                        "y" => {
-                            warn!("Approve shortcut triggered");
-                            // Approve (Ctrl/Cmd + Y)
-                            if let Some(ref cb) = approve_callback {
-                                cb(true, cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        "n" => {
-                            warn!("Deny shortcut triggered");
-                            // Deny (Ctrl/Cmd + N)
-                            if let Some(ref cb) = deny_callback {
-                                cb(false, cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        "d" => {
-                            warn!("Details shortcut triggered");
-                            // Show Details (Ctrl/Cmd + D)
-                            if let Some(ref cb) = details_callback {
-                                cb(cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            warn!("Unhandled key with platform modifier: {}", key);
-                        }
-                    }
-                }
-            })
             .px_3()
             .py_2()
             .bg(bg_color)

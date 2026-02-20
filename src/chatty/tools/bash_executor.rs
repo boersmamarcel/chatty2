@@ -788,8 +788,8 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             // Result depends on whether bwrap is installed
-            // Just verify it doesn't panic
-            assert!(can_sandbox == true || can_sandbox == false);
+            // Just verify it doesn't panic - can_sandbox can be either true or false
+            let _ = can_sandbox;
         }
 
         #[cfg(target_os = "macos")]
