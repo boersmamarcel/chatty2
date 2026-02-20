@@ -1603,21 +1603,20 @@ impl ChattyApp {
                     .and_then(|trace| serde_json::to_value(&trace).ok())
             });
 
-            // Get the partial response text from the UI
+            // Mark the assistant message as cancelled in UI
+            chat_view.update(cx, |view, cx| {
+                view.mark_message_cancelled(cx);
+            });
+
+            // Get the partial response text from the UI (after marking as cancelled)
             let response_text = chat_view
                 .read(cx)
                 .messages()
                 .last()
-                .filter(|msg| msg.is_streaming)
                 .map(|msg| msg.content.clone())
                 .unwrap_or_default();
 
-            // Finalize the assistant message in UI
-            chat_view.update(cx, |view, cx| {
-                view.finalize_assistant_message(cx);
-            });
-
-            // Save the partial response to conversation history
+            // Save the partial response to conversation history (includes cancellation notice)
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.finalize_response(response_text);

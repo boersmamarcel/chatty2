@@ -199,6 +199,28 @@ impl ChatView {
         }
     }
 
+    /// Mark the current streaming message as cancelled by the user
+    pub fn mark_message_cancelled(&mut self, cx: &mut Context<Self>) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.is_streaming {
+                // Append cancellation notice to the message
+                if !last.content.is_empty() {
+                    last.content.push_str("\n\n");
+                }
+                last.content.push_str("*[Response cancelled by user]*");
+                last.is_streaming = false;
+
+                // Finalize trace if present
+                if let Some(ref mut trace) = last.live_trace {
+                    trace.clear_active_tool();
+                }
+                last.live_trace = None;
+
+                cx.notify();
+            }
+        }
+    }
+
     /// Extract the current trace before finalizing (for persistence)
     pub fn extract_current_trace(&mut self) -> Option<SystemTrace> {
         if let Some(last) = self.messages.last_mut() {
