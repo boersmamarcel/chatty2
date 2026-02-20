@@ -447,8 +447,8 @@ impl AutoUpdater {
     /// On macOS this uses a deferred approach for fast restart:
     /// 1. Set status to Installing for visual feedback
     /// 2. Write a helper shell script to /tmp that will mount the DMG,
-    ///    rsync the .app bundle, relaunch immediately, then run
-    ///    housekeeping (codesign, xattr, lsregister) post-launch
+    ///    rsync the .app bundle, clear quarantine, relaunch immediately,
+    ///    then run housekeeping (codesign, lsregister) post-launch
     /// 3. Spawn the helper as a detached process (polls for app exit)
     /// 4. Call cx.quit() for a graceful GPUI shutdown
     ///
@@ -1040,7 +1040,11 @@ fi
 
 log "App bundle replaced successfully"
 
-# Relaunch the app IMMEDIATELY — don't wait for codesign/xattr/lsregister.
+# Clear quarantine attributes before launch so the 'open' fallback
+# (which goes through Gatekeeper) won't be blocked by quarantine.
+xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
+
+# Relaunch the app IMMEDIATELY — don't wait for codesign/lsregister.
 # Direct binary execution bypasses Gatekeeper, so those steps are only
 # needed for future Finder/Spotlight launches and can run after relaunch.
 log "Relaunching app..."
@@ -1068,9 +1072,6 @@ log "App launched via $LAUNCH_METHOD, running post-install tasks in background..
 # --- Post-launch housekeeping (non-blocking) ---
 # These tasks prepare the bundle for future Finder/Spotlight launches
 # but are NOT needed for the direct binary launch above.
-
-# Clear quarantine attributes
-xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
 
 # Re-sign adhoc/unsigned bundles for future Gatekeeper compatibility
 SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)
