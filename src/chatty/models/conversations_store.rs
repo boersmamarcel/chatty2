@@ -79,6 +79,15 @@ impl ConversationsStore {
         convs
     }
 
+    /// List the N most recent conversations (sorted by updated_at descending)
+    /// OPTIMIZATION: Only loads top N for sidebar display
+    pub fn list_recent(&self, limit: usize) -> Vec<&Conversation> {
+        let mut convs: Vec<&Conversation> = self.conversations.values().collect();
+        convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at()));
+        convs.truncate(limit); // Only take top N
+        convs
+    }
+
     /// Get count of conversations
     pub fn count(&self) -> usize {
         self.conversations.len()

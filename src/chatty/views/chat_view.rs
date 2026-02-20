@@ -120,6 +120,7 @@ impl ChatView {
             live_trace: None,
             is_markdown: true,
             attachments,
+            raw_trace_json: None,
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -139,6 +140,7 @@ impl ChatView {
             live_trace: Some(SystemTrace::new()),
             is_markdown: true,
             attachments: Vec::new(),
+            raw_trace_json: None,
         });
 
         debug!(
@@ -752,28 +754,29 @@ impl ChatView {
                             live_trace: None,
                             is_markdown: true,
                             attachments,
+                            raw_trace_json: None,
                         });
                     }
                 }
                 Message::Assistant { content, .. } => {
-                    let mut assistant_msg =
+                    let assistant_msg =
                         super::message_types::AssistantMessage::from_rig_content(content);
 
-                    // Restore system trace if available
-                    if let Some(Some(trace_json)) = traces.get(idx) {
-                        if let Some(msg_with_trace) =
-                            super::message_types::AssistantMessage::with_trace_json(
-                                assistant_msg.text.clone(),
-                                trace_json,
-                            )
-                        {
-                            assistant_msg = msg_with_trace;
-                        }
-                    }
+                    // OPTIMIZATION: Store raw trace JSON for lazy deserialization
+                    // Only deserialize when user expands the trace view
+                    let raw_trace_json = traces.get(idx).and_then(|t| t.clone());
 
                     if !assistant_msg.text.is_empty() {
-                        self.messages
-                            .push(DisplayMessage::from_assistant_message(&assistant_msg, cx));
+                        self.messages.push(DisplayMessage {
+                            role: MessageRole::Assistant,
+                            content: assistant_msg.text.clone(),
+                            is_streaming: false,
+                            system_trace_view: None, // Will be created on-demand when expanded
+                            live_trace: None,
+                            is_markdown: true,
+                            attachments: Vec::new(),
+                            raw_trace_json, // Store raw JSON instead of deserializing
+                        });
                     }
                 }
             }
@@ -1015,6 +1018,33 @@ impl Render for ChatView {
                                                                 .get(&key)
                                                                 .copied()
                                                                 .unwrap_or(true);
+
+                                                            // OPTIMIZATION: Lazy trace deserialization
+                                                            // If expanding (current=true, will become false) and trace view doesn't exist yet,
+                                                            // deserialize from raw JSON now
+                                                            if current {  // Expanding (current=true means collapsed, will toggle to false=expanded)
+                                                                if let Some(msg) = chat_view.messages.get_mut(msg_idx) {
+                                                                    if msg.system_trace_view.is_none() && msg.raw_trace_json.is_some() {
+                                                                        // Deserialize trace from raw JSON
+                                                                        if let Some(trace_json) = &msg.raw_trace_json {
+                                                                            if let Some(assistant_msg) = super::message_types::AssistantMessage::with_trace_json(
+                                                                                msg.content.clone(),
+                                                                                trace_json,
+                                                                            ) {
+                                                                                // Create trace view from deserialized trace
+                                                                                if let Some(trace) = &assistant_msg.system_trace {
+                                                                                    if trace.has_items() {
+                                                                                        msg.system_trace_view = Some(cx.new(|_cx| {
+                                                                                            super::trace_components::SystemTraceView::new(trace.clone())
+                                                                                        }));
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
                                                             chat_view
                                                                 .collapsed_tool_calls
                                                                 .insert(key, !current);

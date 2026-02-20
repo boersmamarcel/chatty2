@@ -180,6 +180,36 @@ impl ChattyApp {
             });
         });
 
+        // Load more conversations callback
+        let sidebar_for_load_more = sidebar.clone();
+        sidebar.update(cx, |sidebar, _cx| {
+            sidebar.set_on_load_more(move |cx| {
+                sidebar_for_load_more.update(cx, |sidebar, cx| {
+                    let store = cx.global::<ConversationsStore>();
+                    let total = store.count();
+                    let convs = store
+                        .list_recent(sidebar.visible_limit())
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.id().to_string(),
+                                c.title().to_string(),
+                                Some(c.token_usage().total_estimated_cost_usd),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    debug!(
+                        conv_count = convs.len(),
+                        total = total,
+                        limit = sidebar.visible_limit(),
+                        "Load More: Reloading conversations with new limit"
+                    );
+                    sidebar.set_conversations(convs, cx);
+                    sidebar.set_total_count(total);
+                });
+            });
+        });
+
         // Chat input send message callback
         chat_view.update(cx, |view, cx| {
             let input_state = view.chat_input_state().clone();
@@ -412,17 +442,19 @@ impl ChattyApp {
                             }).map_err(|e| warn!(error = ?e, "Failed to clear active conversation"))
                             .ok();
 
-                            // Update sidebar with all conversations
+                            // Update sidebar with recent conversations (OPTIMIZATION: only top N)
                             sidebar
                                 .update(cx, |sidebar, cx| {
-                                    let convs = cx
-                                        .global::<ConversationsStore>()
-                                        .list_all()
+                                    let store = cx.global::<ConversationsStore>();
+                                    let total = store.count();
+                                    let convs = store
+                                        .list_recent(sidebar.visible_limit())
                                         .iter()
                                         .map(|c| (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd)))
                                         .collect::<Vec<_>>();
-                                    debug!(conv_count = convs.len(), "Loaded conversations, updating sidebar");
+                                    debug!(conv_count = convs.len(), total = total, "Loaded conversations, updating sidebar");
                                     sidebar.set_conversations(convs, cx);
+                                    sidebar.set_total_count(total);
 
                                     // Don't set any conversation as active on startup
                                     // This ensures the first message creates a NEW conversation
@@ -589,9 +621,10 @@ impl ChattyApp {
 
                 // Update sidebar immediately with the new conversation entry
                 sidebar.update(cx, |sidebar, cx| {
-                    let mut convs: Vec<(String, String, Option<f64>)> = cx
-                        .global::<ConversationsStore>()
-                        .list_all()
+                    let store = cx.global::<ConversationsStore>();
+                    let total = store.count();
+                    let mut convs: Vec<(String, String, Option<f64>)> = store
+                        .list_recent(sidebar.visible_limit())
                         .iter()
                         .map(|c| {
                             (
@@ -601,6 +634,7 @@ impl ChattyApp {
                             )
                         })
                         .collect();
+                    sidebar.set_total_count(total);
                     // Prepend the new conversation so it appears at the top
                     convs.insert(0, (conv_id.clone(), title.clone(), Some(0.0)));
                     sidebar.set_conversations(convs, cx);
@@ -661,9 +695,10 @@ impl ChattyApp {
 
                     // Refresh sidebar with actual store data (replaces the placeholder)
                     sidebar.update(cx, |sidebar, cx| {
-                        let convs = cx
-                            .global::<ConversationsStore>()
-                            .list_all()
+                        let store = cx.global::<ConversationsStore>();
+                        let total = store.count();
+                        let convs = store
+                            .list_recent(sidebar.visible_limit())
                             .iter()
                             .map(|c| {
                                 (
@@ -673,6 +708,7 @@ impl ChattyApp {
                                 )
                             })
                             .collect::<Vec<_>>();
+                        sidebar.set_total_count(total);
                         debug!(
                             conv_count = convs.len(),
                             "Updating sidebar after conversation creation"
@@ -732,23 +768,47 @@ impl ChattyApp {
             sidebar.set_active_conversation(Some(conv_id.clone()), cx);
         });
 
-        // Batch: set active + get conversation data + streaming content in single global lookup
-        let conversation_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+        // OPTIMIZATION: Set active and extract only minimal data (model_id, streaming_content)
+        // We'll access history/traces/attachments by reference later to avoid cloning
+        let minimal_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             store.set_active(id.to_string());
             store.get_conversation(id).map(|conv| {
                 (
-                    conv.history().to_vec(),
-                    conv.system_traces().to_vec(),
-                    conv.attachment_paths().to_vec(),
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                 )
             })
         });
 
-        if let Some((history, traces, attachment_paths, model_id, streaming_content)) =
-            conversation_data
-        {
+        if let Some((model_id, streaming_content)) = minimal_data {
+            // Check if this conversation has an active stream
+            // First check direct key, then check if there's a pending task that resolved to this ID
+            let mut has_active_stream = self.active_stream_tasks.contains_key(&conv_id);
+            if !has_active_stream {
+                // Check if "__pending__" task has resolved to this conversation ID
+                has_active_stream = self
+                    .pending_task_resolved_ids
+                    .get("__pending__")
+                    .and_then(|resolved_id_mutex| resolved_id_mutex.lock().ok())
+                    .as_ref()
+                    .and_then(|resolved_id| {
+                        if resolved_id.as_ref() == Some(&conv_id) {
+                            debug!(conv_id = %conv_id, "Found active stream via pending task resolution");
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    })
+                    .is_some();
+            }
+
+            // Get model capabilities
+            let model_capabilities = cx
+                .global::<ModelsModel>()
+                .get_model(&model_id)
+                .map(|m| (m.supports_images, m.supports_pdf))
+                .unwrap_or((false, false));
+
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone(), cx);
 
@@ -757,36 +817,24 @@ impl ChattyApp {
                     state.clear_attachments();
                 });
 
-                view.load_history(&history, &traces, &attachment_paths, cx);
+                // Load conversation history
+                // Note: We clone traces here, but they're just Vec<Option<serde_json::Value>>
+                // The actual trace deserialization happens lazily when user expands them
+                let conversation_data = cx.global::<ConversationsStore>()
+                    .get_conversation(&conv_id)
+                    .map(|conv| {
+                        (
+                            conv.history().to_vec(),
+                            conv.system_traces().to_vec(),  // Clones JSON values, not deserialized traces
+                            conv.attachment_paths().to_vec(),
+                        )
+                    });
 
-                // Check if this conversation has an active stream
-                // First check direct key, then check if there's a pending task that resolved to this ID
-                let mut has_active_stream = self.active_stream_tasks.contains_key(&conv_id);
-                if !has_active_stream {
-                    // Check if "__pending__" task has resolved to this conversation ID
-                    has_active_stream = self
-                        .pending_task_resolved_ids
-                        .get("__pending__")
-                        .and_then(|resolved_id_mutex| resolved_id_mutex.lock().ok())
-                        .as_ref()
-                        .and_then(|resolved_id| {
-                            if resolved_id.as_ref() == Some(&conv_id) {
-                                debug!(conv_id = %conv_id, "Found active stream via pending task resolution");
-                                Some(true)
-                            } else {
-                                None
-                            }
-                        })
-                        .is_some();
+                if let Some((history, traces, attachment_paths)) = conversation_data {
+                    view.load_history(&history, &traces, &attachment_paths, cx);
                 }
 
                 // Update the selected model and capabilities in the chat input
-                let model_capabilities = cx
-                    .global::<ModelsModel>()
-                    .get_model(&model_id)
-                    .map(|m| (m.supports_images, m.supports_pdf))
-                    .unwrap_or((false, false));
-
                 view.chat_input_state().update(cx, |state, cx| {
                     state.set_selected_model_id(model_id);
                     state.set_capabilities(model_capabilities.0, model_capabilities.1);
@@ -971,9 +1019,10 @@ impl ChattyApp {
 
         // Update sidebar
         sidebar.update(cx, |sidebar, cx| {
-            let convs = cx
-                .global::<ConversationsStore>()
-                .list_all()
+            let store = cx.global::<ConversationsStore>();
+            let total = store.count();
+            let convs = store
+                .list_recent(sidebar.visible_limit())
                 .iter()
                 .map(|c| {
                     (
@@ -983,6 +1032,7 @@ impl ChattyApp {
                     )
                 })
                 .collect::<Vec<_>>();
+            sidebar.set_total_count(total);
 
             let active_id = cx
                 .global::<ConversationsStore>()
@@ -1444,15 +1494,17 @@ impl ChattyApp {
                                 // Update sidebar to show new title
                                 sidebar
                                     .update(cx, |sidebar, cx| {
-                                        let convs = cx
-                                            .global::<ConversationsStore>()
-                                            .list_all()
+                                        let store = cx.global::<ConversationsStore>();
+                                        let total = store.count();
+                                        let convs = store
+                                            .list_recent(sidebar.visible_limit())
                                             .iter()
                                             .map(|c| {
                                                 (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd))
                                             })
                                             .collect::<Vec<_>>();
                                         sidebar.set_conversations(convs, cx);
+                                        sidebar.set_total_count(total);
                                     })
                                     .map_err(|e| warn!(error = ?e, "Failed to update sidebar with new title"))
                                     .ok();
@@ -1500,9 +1552,10 @@ impl ChattyApp {
                             // Update sidebar with refreshed costs
                             debug!("Updating sidebar with new costs");
                             let update_result = sidebar.update(cx, |sidebar, cx| {
-                                let convs = cx
-                                    .global::<ConversationsStore>()
-                                    .list_all()
+                                let store = cx.global::<ConversationsStore>();
+                                let total = store.count();
+                                let convs = store
+                                    .list_recent(sidebar.visible_limit())
                                     .iter()
                                     .map(|c| {
                                         let cost = c.token_usage().total_estimated_cost_usd;
@@ -1516,6 +1569,7 @@ impl ChattyApp {
                                     .collect::<Vec<_>>();
                                 debug!(count = convs.len(), "Setting {} conversations on sidebar", convs.len());
                                 sidebar.set_conversations(convs, cx);
+                                sidebar.set_total_count(total);
                             });
                             if let Err(e) = update_result {
                                 warn!(error = ?e, "Failed to update sidebar with costs");

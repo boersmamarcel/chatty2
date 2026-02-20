@@ -117,6 +117,9 @@ pub struct DisplayMessage {
     pub is_markdown: bool,
     // File attachments (images/PDFs) for this message
     pub attachments: Vec<PathBuf>,
+    // OPTIMIZATION: Store raw trace JSON for lazy deserialization
+    // Only deserialize when user expands the trace view
+    pub raw_trace_json: Option<serde_json::Value>,
 }
 
 impl DisplayMessage {
@@ -137,6 +140,7 @@ impl DisplayMessage {
             live_trace: None,
             is_markdown: true,
             attachments: Vec::new(),
+            raw_trace_json: None, // Not used when created from AssistantMessage (already deserialized)
         }
     }
 }
