@@ -717,10 +717,6 @@ impl ChattyApp {
         // No need to manually save streaming content - it's already in the Conversation model
 
         // Set active in store
-        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store.set_active(id.to_string());
-        });
-
         let conv_id = id.to_string();
         let chat_view = self.chat_view.clone();
         let sidebar = self.sidebar_view.clone();
@@ -730,20 +726,23 @@ impl ChattyApp {
             sidebar.set_active_conversation(Some(conv_id.clone()), cx);
         });
 
-        // Update chat view
-        let conversation_data =
-            cx.global::<ConversationsStore>()
-                .get_conversation(id)
-                .map(|conv| {
-                    (
-                        conv.history().to_vec(),
-                        conv.system_traces().to_vec(),
-                        conv.attachment_paths().to_vec(),
-                        conv.model_id().to_string(),
-                    )
-                });
+        // Batch: set active + get conversation data + streaming content in single global lookup
+        let conversation_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            store.set_active(id.to_string());
+            store.get_conversation(id).map(|conv| {
+                (
+                    conv.history().to_vec(),
+                    conv.system_traces().to_vec(),
+                    conv.attachment_paths().to_vec(),
+                    conv.model_id().to_string(),
+                    conv.streaming_message().map(|s| s.clone()),
+                )
+            })
+        });
 
-        if let Some((history, traces, attachment_paths, model_id)) = conversation_data {
+        if let Some((history, traces, attachment_paths, model_id, streaming_content)) =
+            conversation_data
+        {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone(), cx);
 
@@ -776,11 +775,6 @@ impl ChattyApp {
                 // Restore in-progress streaming message from Conversation model if it exists
                 // This must happen AFTER setting the streaming state
                 if has_active_stream {
-                    let streaming_content = cx.global::<ConversationsStore>()
-                        .get_conversation(&conv_id)
-                        .and_then(|c| c.streaming_message())
-                        .map(|s| s.clone());
-
                     if let Some(content) = streaming_content {
                         debug!(conv_id = %conv_id, content_len = content.len(),
                                "Restoring streaming message content from Conversation model");
