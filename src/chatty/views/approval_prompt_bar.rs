@@ -70,7 +70,10 @@ impl RenderOnce for ApprovalPromptBar {
         #[cfg(target_os = "macos")]
         let (approve_label, deny_label, details_label) =
             ("Approve (⌘Y)", "Deny (⌘N)", "Details (⌘D)");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let (approve_label, deny_label, details_label) =
+            ("Approve (Opt+Y)", "Deny (Opt+N)", "Details (Opt+D)");
+        #[cfg(target_os = "windows")]
         let (approve_label, deny_label, details_label) =
             ("Approve (Ctrl+Y)", "Deny (Ctrl+N)", "Details (Ctrl+D)");
 

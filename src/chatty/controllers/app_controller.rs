@@ -1,7 +1,7 @@
 use gpui::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
@@ -33,6 +33,11 @@ pub struct ChattyApp {
     /// Maps conversation_id → active stream task
     /// Allows multiple conversations to have concurrent streams
     active_stream_tasks: HashMap<String, Task<anyhow::Result<()>>>,
+    /// Maps "__pending__" → Arc<Mutex<Option<String>>> to track resolved conversation ID
+    /// When a task is created with no conversation ID, we store a shared reference here.
+    /// The async block updates this once the real conversation ID is known.
+    /// This allows load_conversation to detect active streams even if the task hasn't been re-keyed yet.
+    pending_task_resolved_ids: HashMap<String, Arc<Mutex<Option<String>>>>,
     /// Held while a conversation is being created; prevents concurrent creations.
     /// Automatically dropped (and thus "cleared") when the task completes.
     active_create_task: Option<Task<anyhow::Result<String>>>,
@@ -60,6 +65,7 @@ impl ChattyApp {
             conversation_repo,
             is_ready: false,
             active_stream_tasks: HashMap::new(),
+            pending_task_resolved_ids: HashMap::new(),
             active_create_task: None,
         };
 
@@ -754,7 +760,25 @@ impl ChattyApp {
                 view.load_history(&history, &traces, &attachment_paths, cx);
 
                 // Check if this conversation has an active stream
-                let has_active_stream = self.active_stream_tasks.contains_key(&conv_id);
+                // First check direct key, then check if there's a pending task that resolved to this ID
+                let mut has_active_stream = self.active_stream_tasks.contains_key(&conv_id);
+                if !has_active_stream {
+                    // Check if "__pending__" task has resolved to this conversation ID
+                    has_active_stream = self
+                        .pending_task_resolved_ids
+                        .get("__pending__")
+                        .and_then(|resolved_id_mutex| resolved_id_mutex.lock().ok())
+                        .as_ref()
+                        .and_then(|resolved_id| {
+                            if resolved_id.as_ref() == Some(&conv_id) {
+                                debug!(conv_id = %conv_id, "Found active stream via pending task resolution");
+                                Some(true)
+                            } else {
+                                None
+                            }
+                        })
+                        .is_some();
+                }
 
                 // Update the selected model and capabilities in the chat input
                 let model_capabilities = cx
@@ -1042,6 +1066,16 @@ impl ChattyApp {
         let conv_id_for_task = cx.global::<ConversationsStore>().active_id().cloned();
         let needs_conversation_creation = conv_id_for_task.is_none();
 
+        // Create shared resolved ID tracker if we need to create a conversation
+        let resolved_id = if needs_conversation_creation {
+            Arc::new(Mutex::new(None))
+        } else {
+            Arc::new(Mutex::new(conv_id_for_task.clone()))
+        };
+
+        // Clone for the async closure to use
+        let resolved_id_for_closure = resolved_id.clone();
+
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
         let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
@@ -1063,6 +1097,11 @@ impl ChattyApp {
                         match create_task.await {
                             Ok(id) => {
                                 debug!(conv_id = %id, "Created new conversation");
+                                // Update the shared resolved ID so load_conversation can find the active stream
+                                if let Ok(mut resolved) = resolved_id_for_closure.lock() {
+                                    *resolved = Some(id.clone());
+                                    debug!(conv_id = %id, "Updated resolved conversation ID for pending task");
+                                }
                                 id
                             }
                             Err(e) => {
@@ -1549,9 +1588,12 @@ impl ChattyApp {
             self.active_stream_tasks.insert(conv_id, task);
         } else if needs_conversation_creation {
             // No conversation exists yet - use placeholder key
-            // The async block will move this to the real conversation ID once created
+            // Store resolved ID tracker so load_conversation can detect active stream
+            // even before the task is re-keyed to the real conversation ID
             self.active_stream_tasks
                 .insert("__pending__".to_string(), task);
+            self.pending_task_resolved_ids
+                .insert("__pending__".to_string(), resolved_id);
             debug!("Using placeholder key for task until conversation is created");
         }
     }
@@ -1664,6 +1706,9 @@ impl ChattyApp {
                 })
                 .detach();
             }
+
+            // Reset streaming state in UI (Bug Fix)
+            self.clear_streaming_state(Some(&conv_id), cx);
         }
 
         cx.notify();
@@ -1679,6 +1724,23 @@ impl ChattyApp {
         let should_update_ui = if let Some(conv_id) = conversation_id {
             // Clear specific conversation's stream
             self.active_stream_tasks.remove(conv_id);
+
+            // Also clear the resolved ID tracker if it resolves to this conversation
+            let should_remove_resolved = if let Some(resolved_id_mutex) =
+                self.pending_task_resolved_ids.get("__pending__")
+            {
+                if let Ok(resolved_id) = resolved_id_mutex.lock() {
+                    resolved_id.as_ref() == Some(&conv_id.to_string())
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if should_remove_resolved {
+                self.pending_task_resolved_ids.remove("__pending__");
+                debug!(conv_id = %conv_id, "Cleaned up resolved ID tracker");
+            }
 
             // Clear streaming message from Conversation model
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
@@ -1697,6 +1759,7 @@ impl ChattyApp {
         } else {
             // Clear all streams
             self.active_stream_tasks.clear();
+            self.pending_task_resolved_ids.clear();
             // Note: Not clearing streaming messages from all conversations here
             // as they will be cleared individually when streams complete
             // Always update UI when clearing all
