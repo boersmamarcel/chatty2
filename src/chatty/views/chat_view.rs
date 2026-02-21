@@ -57,6 +57,7 @@ impl ChatView {
             if let InputEvent::PressEnter { secondary } = event {
                 // Only send on plain Enter (not Shift+Enter)
                 if !secondary {
+                    tracing::debug!("Enter key pressed, calling send_message");
                     state_for_enter.update(cx, |state, cx| {
                         state.send_message(cx);
                     });

@@ -86,6 +86,7 @@ sudo apt-get install -y \
 - **Tokio Runtime**: The app uses Tokio for all async operations. The runtime is entered at startup and maintained throughout the application lifecycle.
 - **Global State**: Uses GPUI's global state system (`cx.set_global`, `cx.global`) for app-wide state like providers, models, and settings.
 - **Async Loading**: Providers, models, and settings are loaded asynchronously to avoid blocking the UI during startup.
+- **Stream Lifecycle**: LLM response streams are managed by `StreamManager` (`src/chatty/models/stream_manager.rs`), a centralized GPUI entity that owns all stream state, emits events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. See Idiomatic Patterns > StreamManager Pattern for details.
 - **Theme System**: Themes are loaded from `./themes` directory. User preferences (theme name + dark mode) are persisted to JSON.
 - **Math Cache**: LaTeX math expressions are compiled to SVG using Typst and cached in platform-specific directories:
   - **macOS**: `~/Library/Application Support/chatty/math_cache/`
@@ -607,6 +608,103 @@ pub async fn stream_prompt(
 }
 ```
 
+### 11. StreamManager Pattern (Centralized Stream Lifecycle)
+
+**When to use**: For managing the lifecycle of long-running async operations (like LLM response streams) that need coordinated state, cancellation, and event-driven UI updates.
+
+**Pattern**: A GPUI entity (`StreamManager`) owns all stream state in a `HashMap<String, StreamState>`, emits typed events via `EventEmitter`, and uses `Arc<AtomicBool>` cancellation tokens for graceful shutdown.
+
+**Architecture**:
+
+```
+send_message() ──► StreamManager ──► StreamManagerEvent ──► handle_stream_manager_event()
+     │                  │                                            │
+     │              owns task,                                  routes to
+     │           cancel_flag,                               ChatView methods
+     │           response_text                             (append_text, etc.)
+     │                  │
+     └── stream loop ───┘
+         only updates:
+         1. Conversation model
+         2. StreamManager.handle_chunk()
+```
+
+**Key types** (`src/chatty/models/stream_manager.rs`):
+
+```rust
+pub enum StreamStatus { Active, Completed, Cancelled, Error(String) }
+
+pub struct StreamState {
+    response_text: String,
+    status: StreamStatus,
+    token_usage: Option<(u32, u32)>,
+    trace_json: Option<serde_json::Value>,
+    task: Option<Task<anyhow::Result<()>>>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+pub enum StreamManagerEvent {
+    StreamStarted { conversation_id },
+    TextChunk { conversation_id, text },
+    ToolCallStarted { conversation_id, id, name },
+    // ... 8 more variants
+    StreamEnded { conversation_id, status, response_text, token_usage, trace_json },
+}
+```
+
+**Cancellation token pattern** (replaces task drop):
+
+```rust
+// Create cancel flag before spawning
+let cancel_flag = Arc::new(AtomicBool::new(false));
+let cancel_flag_for_loop = cancel_flag.clone();
+
+// In stream loop: check at top of each iteration
+while let Some(chunk) = stream.next().await {
+    if cancel_flag_for_loop.load(Ordering::Relaxed) {
+        break;  // Clean exit
+    }
+    // process chunk...
+}
+
+// To stop: set flag (stream exits cleanly on next iteration)
+cancel_flag.store(true, Ordering::Relaxed);
+```
+
+**Event-driven finalization** (replaces inline finalization in async block):
+
+```rust
+// Stream loop only does two things:
+// 1. Updates Conversation model (source of truth for background streams)
+// 2. Forwards chunks to StreamManager via handle_chunk()
+
+// All finalization happens in the event handler:
+fn handle_stream_manager_event(&mut self, event: &StreamManagerEvent, cx: ...) {
+    match event {
+        StreamEnded { status: Completed, .. } => self.finalize_completed_stream(...),
+        StreamEnded { status: Cancelled, .. } => self.finalize_stopped_stream(...),
+        TextChunk { .. } => chat_view.append_assistant_text(...),
+        // ...
+    }
+}
+```
+
+**Pending stream promotion** (for streams started before conversation creation):
+
+```rust
+// Register under "__pending__" key
+mgr.register_pending_stream(task, resolved_id, cancel_flag, cx);
+
+// Once conversation ID is known, promote to real key
+mgr.promote_pending(&conv_id);
+```
+
+**Design principles**:
+- **Single source of truth**: StreamManager owns all stream state; ChattyApp has no stream-related fields
+- **Decoupled UI**: Stream loop never calls `chat_view.update()` directly; events decouple the stream from the UI
+- **Graceful cancellation**: Cancel flag checked at loop top; no task drops mid-execution
+- **Conversation-scoped**: Events tagged with `conversation_id` so handlers can filter for the active conversation
+
 ### Key Takeaways
 
 1. **Globals** are initialized at startup and accessed throughout the app via `cx.global()`
@@ -619,6 +717,7 @@ pub async fn stream_prompt(
 8. **Deferred updates** prevent re-entrancy problems with `cx.defer()`
 9. **Render** uses fluent API for composing UI elements
 10. **Context types** determine available operations and access levels
+11. **StreamManager** centralizes stream lifecycle with events and cancellation tokens
 
 
 
