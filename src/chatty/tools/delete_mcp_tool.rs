@@ -3,14 +3,8 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::McpServerConfig;
+use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
-
-lazy_static::lazy_static! {
-    /// Serialises concurrent delete_mcp_service calls so the
-    /// load → check → remove → save sequence is atomic.
-    static ref WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
-}
 
 /// Error type for delete_mcp tool
 #[derive(Debug, thiserror::Error)]
@@ -110,8 +104,9 @@ impl Tool for DeleteMcpTool {
 
         let server_name = name.clone();
 
-        // Acquire write lock: makes load → check → remove → save atomic.
-        let _guard = WRITE_LOCK.lock().await;
+        // Acquire shared write lock: makes load → check → remove → save atomic
+        // across all MCP tools (add, delete, edit).
+        let _guard = MCP_WRITE_LOCK.lock().await;
 
         // Load existing servers
         let mut servers = self.repository.load_all().await.map_err(|e| {

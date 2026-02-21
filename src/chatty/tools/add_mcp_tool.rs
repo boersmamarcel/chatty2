@@ -5,14 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::McpServerConfig;
+use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
-
-lazy_static::lazy_static! {
-    /// Serialises concurrent add_mcp_service calls so the
-    /// load → check → append → save sequence is atomic.
-    static ref WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
-}
 
 /// Error type for add_mcp tool
 #[derive(Debug, thiserror::Error)]
@@ -174,7 +168,7 @@ impl Tool for AddMcpTool {
 
         // Acquire write lock: makes load → check → append → save atomic,
         // preventing TOCTOU races when two concurrent calls share the same name.
-        let _guard = WRITE_LOCK.lock().await;
+        let _guard = MCP_WRITE_LOCK.lock().await;
 
         // Load existing servers
         let mut servers = self.repository.load_all().await.map_err(|e| {

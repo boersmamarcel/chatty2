@@ -4,14 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::McpServerConfig;
+use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
-
-lazy_static::lazy_static! {
-    /// Serialises concurrent edit_mcp_service calls so the
-    /// load → find → update → save sequence is atomic.
-    static ref WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
-}
 
 /// Error type for edit_mcp tool
 #[derive(Debug, thiserror::Error)]
@@ -157,7 +151,7 @@ impl Tool for EditMcpTool {
                     "env": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
-                        "description": "New environment variables. When provided, fully replaces existing env vars. Omit to keep current value."
+                        "description": "New environment variables. CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Omit this field entirely to keep current values unchanged."
                     },
                     "enabled": {
                         "type": "boolean",
@@ -173,24 +167,27 @@ impl Tool for EditMcpTool {
         // Validate before acquiring the lock
         validate_edit_args(&args).map_err(EditMcpToolError::ValidationError)?;
 
-        let server_name = args.name.clone();
+        // Trim name consistently (matches delete_mcp_tool behaviour)
+        let name = args.name.trim().to_string();
+        let server_name = name.clone();
 
-        // Acquire write lock: makes load → find → update → save atomic.
-        let _guard = WRITE_LOCK.lock().await;
+        // Acquire shared write lock: makes load → find → update → save atomic
+        // across all MCP tools (add, delete, edit).
+        let _guard = MCP_WRITE_LOCK.lock().await;
 
         // Load existing servers
         let mut servers = self.repository.load_all().await.map_err(|e| {
             EditMcpToolError::RepositoryError(format!("Failed to load servers: {}", e))
         })?;
 
-        // Find the server to edit
-        let server = servers.iter_mut().find(|s| s.name == args.name);
+        // Find the server to edit (using trimmed name)
+        let server = servers.iter_mut().find(|s| s.name == name);
         let Some(server) = server else {
             return Ok(EditMcpToolOutput {
                 success: false,
                 message: format!(
                     "No MCP server named '{}' was found. Use list_tools to see available servers.",
-                    args.name
+                    name
                 ),
                 server_name,
             });
@@ -221,7 +218,7 @@ impl Tool for EditMcpTool {
         let server_enabled = updated_server.enabled;
 
         tracing::info!(
-            server_name = %args.name,
+            server_name = %name,
             changes = ?changes,
             "Editing MCP server configuration"
         );
@@ -245,15 +242,15 @@ impl Tool for EditMcpTool {
         }
 
         // Restart the server if it was enabled (stop then start)
-        if let Some(ref svc) = self.mcp_service {
+        let was_restarted = if let Some(ref svc) = self.mcp_service {
             // Always stop the old instance
-            if let Err(e) = svc.stop_server(&args.name).await {
-                tracing::warn!(server = %args.name, error = ?e, "Failed to stop MCP server for restart");
+            if let Err(e) = svc.stop_server(&name).await {
+                tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server for restart");
             }
             // Start new instance if enabled
             if server_enabled {
                 if let Err(e) = svc.start_server(updated_server).await {
-                    tracing::warn!(server = %args.name, error = ?e, "MCP server edited but failed to restart");
+                    tracing::warn!(server = %name, error = ?e, "MCP server edited but failed to restart");
                     return Ok(EditMcpToolOutput {
                         success: true,
                         message: format!(
@@ -266,13 +263,20 @@ impl Tool for EditMcpTool {
                         server_name,
                     });
                 }
+                true
+            } else {
+                false
             }
-        }
-
-        let restart_msg = if server_enabled {
-            " and restarted. Start a new conversation to use the updated tools."
         } else {
+            false
+        };
+
+        let restart_msg = if was_restarted {
+            " and restarted. Start a new conversation to use the updated tools."
+        } else if !server_enabled {
             " (server is disabled)."
+        } else {
+            ". It will be available after restarting the application."
         };
 
         Ok(EditMcpToolOutput {

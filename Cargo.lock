@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "chatty"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "anyhow",
  "async-stream",

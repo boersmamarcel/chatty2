@@ -2,6 +2,14 @@ use gpui::Global;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+lazy_static::lazy_static! {
+    /// Shared write lock for all MCP tool operations (add, delete, edit).
+    ///
+    /// Serialises concurrent MCP tool calls so the load → modify → save
+    /// sequence is atomic, preventing TOCTOU races across different tools.
+    pub static ref MCP_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+}
+
 /// Configuration for a single MCP server
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpServerConfig {
