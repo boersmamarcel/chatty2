@@ -113,7 +113,8 @@ impl Tool for DeleteMcpTool {
             DeleteMcpToolError::RepositoryError(format!("Failed to load servers: {}", e))
         })?;
 
-        // Find the server to delete
+        // Find the server to delete and capture whether it was enabled (i.e. running).
+        let was_enabled = servers.iter().find(|s| s.name == name).map(|s| s.enabled);
         let original_len = servers.len();
         servers.retain(|s| s.name != name);
 
@@ -131,6 +132,7 @@ impl Tool for DeleteMcpTool {
 
         tracing::info!(
             server_name = %name,
+            was_enabled = ?was_enabled,
             "Deleting MCP server configuration"
         );
 
@@ -152,16 +154,23 @@ impl Tool for DeleteMcpTool {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // Stop the server process
-        if let Some(ref svc) = self.mcp_service
+        // Only stop the server process if it was enabled (i.e. actually running).
+        if was_enabled == Some(true)
+            && let Some(ref svc) = self.mcp_service
             && let Err(e) = svc.stop_server(&name).await
         {
             tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server during deletion");
         }
 
+        let message = if was_enabled == Some(true) {
+            format!("MCP server '{}' has been deleted and stopped.", server_name)
+        } else {
+            format!("MCP server '{}' has been deleted.", server_name)
+        };
+
         Ok(DeleteMcpToolOutput {
             success: true,
-            message: format!("MCP server '{}' has been deleted and stopped.", server_name),
+            message,
             server_name,
         })
     }

@@ -18,7 +18,7 @@ pub enum AddMcpToolError {
 }
 
 /// Arguments for adding an MCP server
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Default)]
 pub struct AddMcpToolArgs {
     /// Unique name for the MCP server (e.g., "tavily-search", "github")
     pub name: String,
@@ -30,6 +30,9 @@ pub struct AddMcpToolArgs {
     /// Environment variables for the server process
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Whether to enable the server immediately (defaults to false — user enables via Settings)
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Output from the add_mcp tool
@@ -121,8 +124,9 @@ impl Tool for AddMcpTool {
         ToolDefinition {
             name: "add_mcp_service".to_string(),
             description: "Add a new MCP (Model Context Protocol) server configuration. \
-                         This registers a new MCP server that will be available after restarting \
-                         the application or creating a new conversation. \
+                         The server is saved as DISABLED by default — the user must enable it \
+                         via Settings before it will start. This keeps the user in control of \
+                         what runs on their machine. \
                          \n\n\
                          Use this when the user wants to connect to a new MCP service. \
                          Common examples include:\n\
@@ -130,8 +134,7 @@ impl Tool for AddMcpTool {
                          - uvx-based servers: command=\"uvx\", args=[\"package-name\"]\n\
                          - Docker-based servers: command=\"docker\", args=[\"run\", ...]\n\
                          \n\
-                         Environment variables can be used for API keys and configuration. \
-                         The server will be enabled by default."
+                         Environment variables can be used for API keys and configuration."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -196,13 +199,14 @@ impl Tool for AddMcpTool {
             ));
         }
 
-        // Create the new server config
+        // Create the new server config. Disabled by default — the user enables it
+        // via Settings once they have reviewed the configuration.
         let new_server = McpServerConfig {
             name: args.name,
             command: args.command,
             args: args.args,
             env: args.env,
-            enabled: true,
+            enabled: args.enabled,
         };
 
         tracing::info!(
@@ -210,10 +214,12 @@ impl Tool for AddMcpTool {
             command = %new_server.command,
             args = ?new_server.args,
             env_keys = ?new_server.env.keys().collect::<Vec<_>>(),
+            enabled = %new_server.enabled,
             "Adding new MCP server configuration"
         );
 
         let new_server_for_start = new_server.clone();
+        let server_enabled = new_server.enabled;
         servers.push(new_server);
 
         // Save to disk inside the lock — critical section ends when save completes.
@@ -234,25 +240,33 @@ impl Tool for AddMcpTool {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // Start the server process via injected service (None in tests → fallback message).
-        let start_result = match &self.mcp_service {
-            Some(svc) => svc.start_server(new_server_for_start).await,
-            None => Err(anyhow!("MCP service not available")),
-        };
-        let message = match start_result {
-            Ok(()) => format!(
-                "MCP server '{}' has been added and started. \
-                 Start a new conversation to use its tools.",
-                server_name
-            ),
-            Err(e) => {
-                tracing::warn!(server = %server_name, error = ?e, "MCP server added but failed to start");
-                format!(
-                    "MCP server '{}' has been saved but could not be started ({}). \
-                     It will be available after restarting the application.",
-                    server_name, e
-                )
+        // Only attempt to start if the server is enabled.
+        let message = if server_enabled {
+            let start_result = match &self.mcp_service {
+                Some(svc) => svc.start_server(new_server_for_start).await,
+                None => Err(anyhow!("MCP service not available")),
+            };
+            match start_result {
+                Ok(()) => format!(
+                    "MCP server '{}' has been added and started. \
+                     Start a new conversation to use its tools.",
+                    server_name
+                ),
+                Err(e) => {
+                    tracing::warn!(server = %server_name, error = ?e, "MCP server added but failed to start");
+                    format!(
+                        "MCP server '{}' has been saved but could not be started ({}). \
+                         It will be available after restarting the application.",
+                        server_name, e
+                    )
+                }
             }
+        } else {
+            format!(
+                "MCP server '{}' has been saved as disabled. \
+                 Enable it in Settings → Execution → MCP Servers to start using it.",
+                server_name
+            )
         };
 
         Ok(AddMcpToolOutput {
@@ -365,13 +379,14 @@ mod tests {
         }
     }
 
-    /// Helper to create valid AddMcpToolArgs
+    /// Helper to create valid AddMcpToolArgs (disabled by default, matching production default)
     fn valid_args(name: &str) -> AddMcpToolArgs {
         AddMcpToolArgs {
             name: name.to_string(),
             command: "npx".to_string(),
             args: vec!["-y".to_string(), "@test/mcp-server".to_string()],
             env: HashMap::new(),
+            enabled: false,
         }
     }
 
@@ -384,6 +399,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
         assert!(
@@ -400,6 +416,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -411,6 +428,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
         assert!(validate_config(&args).unwrap_err().contains("alphanumeric"));
@@ -423,6 +441,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -434,6 +453,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -445,6 +465,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -456,6 +477,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -467,6 +489,7 @@ mod tests {
             command: "".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
         assert!(
@@ -483,6 +506,7 @@ mod tests {
             command: "   ".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -496,6 +520,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env,
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
         assert!(
@@ -514,6 +539,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env,
+            enabled: false,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -527,6 +553,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec!["-y".to_string(), "@tavily/mcp-server".to_string()],
             env,
+            enabled: false,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -538,6 +565,7 @@ mod tests {
             command: "my-server".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -553,6 +581,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env,
+            enabled: false,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -578,7 +607,7 @@ mod tests {
         assert_eq!(saved[0].name, "new-server");
         assert_eq!(saved[0].command, "npx");
         assert_eq!(saved[0].args, vec!["-y", "@test/mcp-server"]);
-        assert!(saved[0].enabled);
+        assert!(!saved[0].enabled); // disabled by default — user enables via Settings
     }
 
     #[tokio::test]
@@ -629,6 +658,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec![],
             env: HashMap::new(),
+            enabled: false,
         };
 
         let result = tool.call(args).await;
@@ -679,6 +709,7 @@ mod tests {
             command: "uvx".to_string(),
             args: vec!["my-package".to_string()],
             env,
+            enabled: false,
         };
 
         let result = tool.call(args).await;
@@ -693,7 +724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_call_new_server_is_enabled_by_default() {
+    async fn test_call_new_server_is_disabled_by_default() {
         let repo = Arc::new(MockMcpRepository::new());
         let tool = AddMcpTool::new(repo.clone());
 
@@ -701,7 +732,7 @@ mod tests {
         assert!(result.is_ok());
 
         let saved = repo.get_last_saved().unwrap();
-        assert!(saved[0].enabled);
+        assert!(!saved[0].enabled); // disabled by default — user enables via Settings
     }
 
     // --- Tool definition tests ---
