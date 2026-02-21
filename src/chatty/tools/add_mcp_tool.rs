@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
+use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
 
 /// Error type for add_mcp tool
@@ -185,6 +185,15 @@ impl Tool for AddMcpTool {
                 ),
                 server_name,
             });
+        }
+
+        // Reject sentinel values — there is no existing server to preserve values from.
+        if args.env.values().any(|v| v == MASKED_VALUE_SENTINEL) {
+            return Err(AddMcpToolError::ValidationError(
+                "Cannot use '****' as an env var value when adding a new server. \
+                 Provide the actual value."
+                    .to_string(),
+            ));
         }
 
         // Create the new server config

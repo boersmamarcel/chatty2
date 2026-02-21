@@ -10,6 +10,42 @@ lazy_static::lazy_static! {
     pub static ref MCP_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 }
 
+/// Sentinel value used to represent a masked (hidden) env var value.
+///
+/// When the LLM sends this value back in `edit_mcp_service`, the original
+/// stored value is preserved rather than overwriting with the literal string.
+pub const MASKED_VALUE_SENTINEL: &str = "****";
+
+/// Returns true if the key name suggests a sensitive value.
+///
+/// Matches keys containing KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL, AUTH,
+/// or API (case-insensitive).
+pub fn is_sensitive_env_key(key: &str) -> bool {
+    let key_upper = key.to_uppercase();
+    [
+        "KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "CREDENTIAL",
+        "AUTH",
+        "API",
+    ]
+    .iter()
+    .any(|p| key_upper.contains(p))
+}
+
+/// Masks a sensitive env var value. Non-sensitive values are returned as-is.
+///
+/// Sensitive values are fully replaced with `MASKED_VALUE_SENTINEL` (`"****"`).
+pub fn mask_env_value(key: &str, value: &str) -> String {
+    if is_sensitive_env_key(key) {
+        MASKED_VALUE_SENTINEL.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 /// Configuration for a single MCP server
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -34,6 +70,19 @@ pub struct McpServerConfig {
 
 fn default_enabled() -> bool {
     true
+}
+
+impl McpServerConfig {
+    /// Returns env vars with sensitive values masked, safe for display to LLMs.
+    ///
+    /// Sensitive keys (containing KEY, SECRET, TOKEN, etc.) have their values
+    /// replaced with `"****"`. Non-sensitive keys are returned as-is.
+    pub fn masked_env(&self) -> HashMap<String, String> {
+        self.env
+            .iter()
+            .map(|(k, v)| (k.clone(), mask_env_value(k, v)))
+            .collect()
+    }
 }
 
 /// Global store for MCP server configurations
@@ -74,5 +123,52 @@ impl McpServersModel {
 impl Default for McpServersModel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_sensitive_env_key() {
+        assert!(is_sensitive_env_key("TAVILY_API_KEY"));
+        assert!(is_sensitive_env_key("GITHUB_TOKEN"));
+        assert!(is_sensitive_env_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(is_sensitive_env_key("PASSWORD"));
+        assert!(is_sensitive_env_key("AUTH_HEADER"));
+        assert!(is_sensitive_env_key("api_key"));
+        assert!(!is_sensitive_env_key("HOST"));
+        assert!(!is_sensitive_env_key("PORT"));
+        assert!(!is_sensitive_env_key("DEBUG"));
+        assert!(!is_sensitive_env_key("WORKSPACE"));
+    }
+
+    #[test]
+    fn test_mask_env_value() {
+        assert_eq!(mask_env_value("TAVILY_API_KEY", "tvly-abc123"), "****");
+        assert_eq!(mask_env_value("GITHUB_TOKEN", "ghp_abcdefgh"), "****");
+        assert_eq!(mask_env_value("PASSWORD", "hunter2"), "****");
+        assert_eq!(mask_env_value("HOST", "localhost"), "localhost");
+        assert_eq!(mask_env_value("PORT", "8080"), "8080");
+    }
+
+    #[test]
+    fn test_masked_env() {
+        let config = McpServerConfig {
+            name: "test".to_string(),
+            command: "npx".to_string(),
+            args: vec![],
+            env: HashMap::from([
+                ("TAVILY_API_KEY".to_string(), "tvly-real-key".to_string()),
+                ("HOST".to_string(), "localhost".to_string()),
+                ("GITHUB_TOKEN".to_string(), "ghp_secret".to_string()),
+            ]),
+            enabled: true,
+        };
+        let masked = config.masked_env();
+        assert_eq!(masked["TAVILY_API_KEY"], "****");
+        assert_eq!(masked["HOST"], "localhost");
+        assert_eq!(masked["GITHUB_TOKEN"], "****");
     }
 }
