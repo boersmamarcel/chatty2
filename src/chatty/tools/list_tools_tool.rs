@@ -62,12 +62,15 @@ impl ListToolsTool {
             });
             native_tools.push(ToolInfo {
                 name: "delete_mcp_service".to_string(),
-                description: "Delete an existing MCP server configuration and stop it if running".to_string(),
+                description: "Delete an existing MCP server configuration and stop it if running"
+                    .to_string(),
                 source: "native".to_string(),
             });
             native_tools.push(ToolInfo {
                 name: "edit_mcp_service".to_string(),
-                description: "Edit an existing MCP server's command, args, env vars, or enabled state".to_string(),
+                description:
+                    "Edit an existing MCP server's command, args, env vars, or enabled state"
+                        .to_string(),
                 source: "native".to_string(),
             });
         }

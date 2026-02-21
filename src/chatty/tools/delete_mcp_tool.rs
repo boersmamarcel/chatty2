@@ -166,10 +166,7 @@ impl Tool for DeleteMcpTool {
 
         Ok(DeleteMcpToolOutput {
             success: true,
-            message: format!(
-                "MCP server '{}' has been deleted and stopped.",
-                server_name
-            ),
+            message: format!("MCP server '{}' has been deleted and stopped.", server_name),
             server_name,
         })
     }

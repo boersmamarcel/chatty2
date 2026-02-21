@@ -109,10 +109,7 @@ fn validate_edit_args(args: &EditMcpToolArgs) -> Result<(), String> {
     }
 
     // Must provide at least one field to update
-    if args.command.is_none()
-        && args.args.is_none()
-        && args.env.is_none()
-        && args.enabled.is_none()
+    if args.command.is_none() && args.args.is_none() && args.env.is_none() && args.enabled.is_none()
     {
         return Err(
             "At least one field (command, args, env, enabled) must be provided to edit".to_string(),
@@ -414,9 +411,11 @@ mod tests {
             enabled: None,
         };
         assert!(validate_edit_args(&args).is_err());
-        assert!(validate_edit_args(&args)
-            .unwrap_err()
-            .contains("At least one field"));
+        assert!(
+            validate_edit_args(&args)
+                .unwrap_err()
+                .contains("At least one field")
+        );
     }
 
     #[test]
@@ -429,9 +428,11 @@ mod tests {
             enabled: None,
         };
         assert!(validate_edit_args(&args).is_err());
-        assert!(validate_edit_args(&args)
-            .unwrap_err()
-            .contains("Command cannot be empty"));
+        assert!(
+            validate_edit_args(&args)
+                .unwrap_err()
+                .contains("Command cannot be empty")
+        );
     }
 
     #[test]
