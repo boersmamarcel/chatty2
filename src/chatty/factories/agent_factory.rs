@@ -7,8 +7,9 @@ use std::sync::OnceLock;
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
-    AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool,
-    ListDirectoryTool, ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, DeleteMcpTool,
+    EditMcpTool, GlobSearchTool, ListDirectoryTool, ListToolsTool, MoveFileTool, ReadBinaryTool,
+    ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -65,10 +66,18 @@ fn collect_tools(
     fs_read: Option<FsReadTools>,
     fs_write: Option<FsWriteTools>,
     add_mcp_tool: Option<AddMcpTool>,
+    delete_mcp_tool: Option<DeleteMcpTool>,
+    edit_mcp_tool: Option<EditMcpTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
     if let Some(t) = add_mcp_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = delete_mcp_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = edit_mcp_tool {
         tools.push(Box::new(t));
     }
     if let Some(t) = bash_tool {
@@ -266,6 +275,39 @@ impl AgentClient {
             }
         };
 
+        // Create delete_mcp_service and edit_mcp_service tools (same gate as add)
+        let delete_mcp_tool: Option<DeleteMcpTool> = if add_mcp_tool.is_some() {
+            match (
+                crate::MCP_UPDATE_SENDER.get().cloned(),
+                crate::MCP_SERVICE.get().cloned(),
+            ) {
+                (Some(sender), Some(service)) => Some(DeleteMcpTool::new_with_services(
+                    crate::MCP_REPOSITORY.clone(),
+                    sender,
+                    service,
+                )),
+                _ => Some(DeleteMcpTool::new(crate::MCP_REPOSITORY.clone())),
+            }
+        } else {
+            None
+        };
+
+        let edit_mcp_tool: Option<EditMcpTool> = if add_mcp_tool.is_some() {
+            match (
+                crate::MCP_UPDATE_SENDER.get().cloned(),
+                crate::MCP_SERVICE.get().cloned(),
+            ) {
+                (Some(sender), Some(service)) => Some(EditMcpTool::new_with_services(
+                    crate::MCP_REPOSITORY.clone(),
+                    sender,
+                    service,
+                )),
+                _ => Some(EditMcpTool::new(crate::MCP_REPOSITORY.clone())),
+            }
+        } else {
+            None
+        };
+
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             bash_tool.is_some(),
@@ -297,6 +339,8 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_mcp_tool,
+                    delete_mcp_tool,
+                    edit_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -323,6 +367,8 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_mcp_tool,
+                    delete_mcp_tool,
+                    edit_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -345,6 +391,8 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_mcp_tool,
+                    delete_mcp_tool,
+                    edit_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -371,6 +419,8 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_mcp_tool,
+                    delete_mcp_tool,
+                    edit_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -396,6 +446,8 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_mcp_tool,
+                    delete_mcp_tool,
+                    edit_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -539,6 +591,8 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_mcp_tool,
+                    delete_mcp_tool,
+                    edit_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 

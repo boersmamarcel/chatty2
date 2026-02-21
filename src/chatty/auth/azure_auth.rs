@@ -8,8 +8,8 @@ const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 /// Augments the process PATH to include common tool installation directories.
 ///
 /// GUI apps on macOS/Linux do not inherit the shell PATH, so executables installed
-/// via Homebrew, npm, pip, etc. may not be findable. This probes well-known locations
-/// and adds any that exist on disk.
+/// via Homebrew, npm, pip, uv/uvx, cargo, etc. may not be findable. This probes
+/// well-known locations and adds any that exist on disk.
 pub fn augment_gui_app_path() {
     use std::sync::OnceLock;
 
@@ -85,6 +85,55 @@ pub fn augment_gui_app_path() {
                     .collect();
                 nvm_dirs.sort_by(|a, b| b.cmp(a));
                 candidates.extend(nvm_dirs);
+            }
+        }
+
+        // Python / uv / uvx paths: uvx is commonly installed via `uv` (Astral),
+        // pipx, or cargo. GUI apps won't find these without explicit PATH entries.
+        if let Ok(home) = std::env::var("HOME") {
+            // ~/.local/bin — default install location for `uv`, pipx, pip --user
+            let local_bin = format!("{}/.local/bin", home);
+            if std::path::Path::new(&local_bin).exists() {
+                candidates.push(local_bin);
+            }
+
+            // ~/.cargo/bin — uv can also be installed via `cargo install uv`
+            let cargo_bin = format!("{}/.cargo/bin", home);
+            if std::path::Path::new(&cargo_bin).exists() {
+                candidates.push(cargo_bin);
+            }
+
+            // pyenv shims: ~/.pyenv/shims — if user manages Python via pyenv
+            let pyenv_shims = format!("{}/.pyenv/shims", home);
+            if std::path::Path::new(&pyenv_shims).exists() {
+                candidates.push(pyenv_shims);
+            }
+        }
+
+        // Homebrew keg-only Python installs: probe /opt/homebrew/opt/python*/bin
+        // and /usr/local/opt/python*/bin (Intel). Similar to Node keg-only handling.
+        for root in &homebrew_opt_roots {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                let mut python_dirs: Vec<String> = entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("python") {
+                            let bin = format!("{}/{}/bin", root, name);
+                            if std::path::Path::new(&bin).exists() {
+                                Some(bin)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                // Sort descending so newer versions appear first
+                python_dirs.sort_by(|a, b| b.cmp(a));
+                candidates.extend(python_dirs);
             }
         }
 
