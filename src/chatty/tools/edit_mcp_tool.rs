@@ -31,9 +31,6 @@ pub struct EditMcpToolArgs {
     /// When provided, fully replaces the existing env vars.
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
-    /// Enable or disable the server (optional, keeps existing if not provided)
-    #[serde(default)]
-    pub enabled: Option<bool>,
 }
 
 /// Output from the edit_mcp tool
@@ -103,10 +100,9 @@ fn validate_edit_args(args: &EditMcpToolArgs) -> Result<(), String> {
     }
 
     // Must provide at least one field to update
-    if args.command.is_none() && args.args.is_none() && args.env.is_none() && args.enabled.is_none()
-    {
+    if args.command.is_none() && args.args.is_none() && args.env.is_none() {
         return Err(
-            "At least one field (command, args, env, enabled) must be provided to edit".to_string(),
+            "At least one field (command, args, env) must be provided to edit".to_string(),
         );
     }
 
@@ -123,14 +119,17 @@ impl Tool for EditMcpTool {
         ToolDefinition {
             name: "edit_mcp_service".to_string(),
             description: "Edit an existing MCP (Model Context Protocol) server configuration. \
-                         This updates the server's command, arguments, environment variables, \
-                         or enabled state. Only the fields you provide will be changed; \
-                         omitted fields keep their current values. \
+                         This updates the server's command, arguments, or environment variables. \
+                         Only the fields you provide will be changed; omitted fields keep their \
+                         current values. \
                          \n\n\
                          Use this when the user wants to update an MCP server's configuration, \
-                         such as changing environment variables (e.g., API keys), updating the \
-                         command or arguments, or enabling/disabling a server. \
-                         The server will be restarted automatically if it was running."
+                         such as changing environment variables (e.g., API keys) or updating the \
+                         command or arguments. The server will be restarted automatically if it \
+                         was running. \
+                         \n\n\
+                         Note: enabling or disabling a server can only be done by the user via \
+                         Settings → Execution → MCP Servers."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -152,10 +151,6 @@ impl Tool for EditMcpTool {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
                         "description": "New environment variables. CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Omit this field entirely to keep current values unchanged. Sensitive values (API keys, tokens, passwords) are shown as '****' — pass '****' back unchanged to preserve the existing secret value."
-                    },
-                    "enabled": {
-                        "type": "boolean",
-                        "description": "Enable (true) or disable (false) the server. Omit to keep current value."
                     }
                 },
                 "required": ["name"]
@@ -212,25 +207,28 @@ impl Tool for EditMcpTool {
             // For each key whose value is the masked sentinel "****", preserve the
             // existing stored value so the LLM cannot accidentally overwrite real
             // API keys with the literal placeholder it received.
-            let resolved_env: HashMap<String, String> = new_env
-                .into_iter()
-                .map(|(k, v)| {
-                    if v == MASKED_VALUE_SENTINEL {
-                        let existing = server.env.get(&k).cloned().unwrap_or_default();
-                        (k, existing)
-                    } else {
-                        (k, v)
+            let mut resolved_env = HashMap::new();
+            for (k, v) in new_env {
+                if v == MASKED_VALUE_SENTINEL {
+                    match server.env.get(&k).cloned() {
+                        Some(existing) => {
+                            resolved_env.insert(k, existing);
+                        }
+                        None => {
+                            return Err(EditMcpToolError::ValidationError(format!(
+                                "Cannot use sentinel '****' for key '{}': no existing value to preserve. \
+                                 Provide the actual value instead.",
+                                k
+                            )));
+                        }
                     }
-                })
-                .collect();
+                } else {
+                    resolved_env.insert(k, v);
+                }
+            }
             server.env = resolved_env;
             changes.push("env");
         }
-        if let Some(enabled) = args.enabled {
-            server.enabled = enabled;
-            changes.push("enabled");
-        }
-
         let updated_server = server.clone();
         let server_enabled = updated_server.enabled;
 
@@ -312,80 +310,7 @@ impl Tool for EditMcpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::repositories::mcp_repository::BoxFuture;
-    use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
-    use std::sync::Mutex;
-
-    // --- Mock repository for testing ---
-
-    struct MockMcpRepository {
-        servers: Mutex<Vec<McpServerConfig>>,
-        load_error: Mutex<Option<String>>,
-        save_error: Mutex<Option<String>>,
-        last_saved: Mutex<Option<Vec<McpServerConfig>>>,
-    }
-
-    impl MockMcpRepository {
-        fn with_servers(servers: Vec<McpServerConfig>) -> Self {
-            Self {
-                servers: Mutex::new(servers),
-                load_error: Mutex::new(None),
-                save_error: Mutex::new(None),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn with_load_error(error: &str) -> Self {
-            Self {
-                servers: Mutex::new(Vec::new()),
-                load_error: Mutex::new(Some(error.to_string())),
-                save_error: Mutex::new(None),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn with_save_error(servers: Vec<McpServerConfig>, error: &str) -> Self {
-            Self {
-                servers: Mutex::new(servers),
-                load_error: Mutex::new(None),
-                save_error: Mutex::new(Some(error.to_string())),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn get_last_saved(&self) -> Option<Vec<McpServerConfig>> {
-            self.last_saved.lock().unwrap().clone()
-        }
-    }
-
-    impl McpRepository for MockMcpRepository {
-        fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<McpServerConfig>>> {
-            let servers = self.servers.lock().unwrap().clone();
-            let error = self.load_error.lock().unwrap().clone();
-            Box::pin(async move {
-                if let Some(err) = error {
-                    Err(RepositoryError::IoError(err))
-                } else {
-                    Ok(servers)
-                }
-            })
-        }
-
-        fn save_all(
-            &self,
-            servers: Vec<McpServerConfig>,
-        ) -> BoxFuture<'static, RepositoryResult<()>> {
-            let error = self.save_error.lock().unwrap().clone();
-            *self.last_saved.lock().unwrap() = Some(servers);
-            Box::pin(async move {
-                if let Some(err) = error {
-                    Err(RepositoryError::IoError(err))
-                } else {
-                    Ok(())
-                }
-            })
-        }
-    }
+    use crate::chatty::tools::test_helpers::MockMcpRepository;
 
     fn test_server(name: &str) -> McpServerConfig {
         McpServerConfig {
@@ -416,7 +341,6 @@ mod tests {
             command: Some("npx".to_string()),
             args: None,
             env: None,
-            enabled: None,
         };
         assert!(validate_edit_args(&args).is_err());
         assert!(validate_edit_args(&args).unwrap_err().contains("name"));
@@ -429,7 +353,6 @@ mod tests {
             command: None,
             args: None,
             env: None,
-            enabled: None,
         };
         assert!(validate_edit_args(&args).is_err());
         assert!(
@@ -446,7 +369,6 @@ mod tests {
             command: Some("".to_string()),
             args: None,
             env: None,
-            enabled: None,
         };
         assert!(validate_edit_args(&args).is_err());
         assert!(
@@ -465,7 +387,6 @@ mod tests {
             command: None,
             args: None,
             env: Some(env),
-            enabled: None,
         };
         assert!(validate_edit_args(&args).is_err());
     }
@@ -477,19 +398,6 @@ mod tests {
             command: Some("uvx".to_string()),
             args: None,
             env: None,
-            enabled: None,
-        };
-        assert!(validate_edit_args(&args).is_ok());
-    }
-
-    #[test]
-    fn test_validate_valid_enabled_only() {
-        let args = EditMcpToolArgs {
-            name: "server".to_string(),
-            command: None,
-            args: None,
-            env: None,
-            enabled: Some(false),
         };
         assert!(validate_edit_args(&args).is_ok());
     }
@@ -508,7 +416,6 @@ mod tests {
                 command: Some("uvx".to_string()),
                 args: None,
                 env: None,
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -536,7 +443,6 @@ mod tests {
                 command: None,
                 args: Some(vec!["new-arg".to_string()]),
                 env: None,
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -564,7 +470,6 @@ mod tests {
                 command: None,
                 args: None,
                 env: Some(new_env),
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -598,7 +503,6 @@ mod tests {
                 command: None,
                 args: None,
                 env: Some(env_from_llm),
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -612,9 +516,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_env_sentinel_for_unknown_key_uses_empty_string() {
+    async fn test_edit_env_sentinel_for_unknown_key_returns_validation_error() {
         // If the LLM sends sentinel for a key that doesn't exist in the store,
-        // we fall back to an empty string (safe default — no phantom secrets).
+        // we must return a ValidationError — storing an empty string would create
+        // a blank credential that silently breaks the server.
         let servers = vec![test_server("my-server")]; // no env vars
         let repo = Arc::new(MockMcpRepository::with_servers(servers));
         let tool = EditMcpTool::new(repo.clone());
@@ -628,36 +533,16 @@ mod tests {
                 command: None,
                 args: None,
                 env: Some(env_from_llm),
-                enabled: None,
             })
             .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().success);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            EditMcpToolError::ValidationError(_)
+        ));
 
-        let saved = repo.get_last_saved().unwrap();
-        assert_eq!(saved[0].env["NONEXISTENT_KEY"], "");
-    }
-
-    #[tokio::test]
-    async fn test_edit_enabled() {
-        let servers = vec![test_server("my-server")];
-        let repo = Arc::new(MockMcpRepository::with_servers(servers));
-        let tool = EditMcpTool::new(repo.clone());
-
-        let result = tool
-            .call(EditMcpToolArgs {
-                name: "my-server".to_string(),
-                command: None,
-                args: None,
-                env: None,
-                enabled: Some(false),
-            })
-            .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().success);
-
-        let saved = repo.get_last_saved().unwrap();
-        assert!(!saved[0].enabled);
+        // Nothing must have been saved
+        assert!(repo.get_last_saved().is_none());
     }
 
     #[tokio::test]
@@ -675,7 +560,6 @@ mod tests {
                 command: Some("docker".to_string()),
                 args: Some(vec!["run".to_string(), "img".to_string()]),
                 env: Some(env),
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -704,7 +588,6 @@ mod tests {
                 command: Some("npx".to_string()),
                 args: None,
                 env: None,
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -732,7 +615,6 @@ mod tests {
                 command: Some("new-cmd".to_string()),
                 args: None,
                 env: None,
-                enabled: None,
             })
             .await;
         assert!(result.is_ok());
@@ -756,7 +638,6 @@ mod tests {
                 command: Some("npx".to_string()),
                 args: None,
                 env: None,
-                enabled: None,
             })
             .await;
         assert!(result.is_err());
@@ -781,7 +662,6 @@ mod tests {
                 command: Some("new".to_string()),
                 args: None,
                 env: None,
-                enabled: None,
             })
             .await;
         assert!(result.is_err());
@@ -815,7 +695,6 @@ mod tests {
         assert!(!required_names.contains(&"command"));
         assert!(!required_names.contains(&"args"));
         assert!(!required_names.contains(&"env"));
-        assert!(!required_names.contains(&"enabled"));
     }
 
     #[tokio::test]
@@ -829,7 +708,7 @@ mod tests {
         assert!(props.contains_key("command"));
         assert!(props.contains_key("args"));
         assert!(props.contains_key("env"));
-        assert!(props.contains_key("enabled"));
+        assert!(!props.contains_key("enabled")); // user-only control, not in schema
     }
 
     // --- Serde tests ---
@@ -842,7 +721,6 @@ mod tests {
         assert_eq!(args.command.unwrap(), "npx");
         assert!(args.args.is_none());
         assert!(args.env.is_none());
-        assert!(args.enabled.is_none());
     }
 
     #[test]
@@ -860,15 +738,13 @@ mod tests {
             "name": "server",
             "command": "uvx",
             "args": ["pkg"],
-            "env": {"KEY": "val"},
-            "enabled": false
+            "env": {"KEY": "val"}
         }"#;
         let args: EditMcpToolArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.name, "server");
         assert_eq!(args.command.unwrap(), "uvx");
         assert_eq!(args.args.unwrap(), vec!["pkg"]);
         assert_eq!(args.env.unwrap().get("KEY").unwrap(), "val");
-        assert_eq!(args.enabled.unwrap(), false);
     }
 
     #[test]

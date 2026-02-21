@@ -123,7 +123,11 @@ pub struct DisplayMessage {
 }
 
 impl DisplayMessage {
-    /// Create an assistant display message
+    /// Create an assistant display message.
+    ///
+    /// Kept as a convenience constructor for future callers (e.g., tests or
+    /// replay/export paths). Current production code builds `DisplayMessage`
+    /// inline during stream processing.
     #[allow(dead_code)]
     pub fn from_assistant_message(assistant_msg: &AssistantMessage, cx: &mut App) -> Self {
         // Only create a trace view if the trace exists AND has items

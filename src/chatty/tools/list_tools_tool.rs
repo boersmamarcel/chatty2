@@ -74,7 +74,7 @@ impl ListToolsTool {
             native_tools.push(ToolInfo {
                 name: "edit_mcp_service".to_string(),
                 description:
-                    "Edit an existing MCP server's command, args, env vars, or enabled state"
+                    "Edit an existing MCP server's command, args, or env vars (enabling/disabling is user-only via Settings)"
                         .to_string(),
                 source: "native".to_string(),
             });

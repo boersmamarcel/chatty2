@@ -1,4 +1,6 @@
 pub mod add_mcp_tool;
+#[cfg(test)]
+pub mod test_helpers;
 pub mod bash_executor;
 pub mod bash_tool;
 pub mod delete_mcp_tool;

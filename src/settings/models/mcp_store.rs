@@ -18,11 +18,11 @@ pub const MASKED_VALUE_SENTINEL: &str = "****";
 
 /// Returns true if the key name suggests a sensitive value.
 ///
-/// Matches keys containing KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL, AUTH,
-/// or API (case-insensitive).
+/// Matches keys where any `_`-delimited segment exactly equals KEY, SECRET,
+/// TOKEN, PASSWORD, CREDENTIAL, AUTH, or API (case-insensitive). Whole-word
+/// matching avoids false positives like MONKEY (contains KEY) or WORKPATH.
 pub fn is_sensitive_env_key(key: &str) -> bool {
-    let key_upper = key.to_uppercase();
-    [
+    const SENSITIVE_WORDS: &[&str] = &[
         "KEY",
         "SECRET",
         "TOKEN",
@@ -30,9 +30,9 @@ pub fn is_sensitive_env_key(key: &str) -> bool {
         "CREDENTIAL",
         "AUTH",
         "API",
-    ]
-    .iter()
-    .any(|p| key_upper.contains(p))
+    ];
+    key.split('_')
+        .any(|segment| SENSITIVE_WORDS.contains(&segment.to_uppercase().as_str()))
 }
 
 /// Masks a sensitive env var value. Non-sensitive values are returned as-is.
@@ -132,16 +132,30 @@ mod tests {
 
     #[test]
     fn test_is_sensitive_env_key() {
+        // True positives — whole-word sensitive segments
         assert!(is_sensitive_env_key("TAVILY_API_KEY"));
         assert!(is_sensitive_env_key("GITHUB_TOKEN"));
         assert!(is_sensitive_env_key("AWS_SECRET_ACCESS_KEY"));
         assert!(is_sensitive_env_key("PASSWORD"));
         assert!(is_sensitive_env_key("AUTH_HEADER"));
-        assert!(is_sensitive_env_key("api_key"));
+        assert!(is_sensitive_env_key("api_key")); // lowercase
+        assert!(is_sensitive_env_key("API"));
+        assert!(is_sensitive_env_key("KEY"));
+        assert!(is_sensitive_env_key("SECRET"));
+        assert!(is_sensitive_env_key("TOKEN"));
+        assert!(is_sensitive_env_key("CREDENTIAL"));
+        assert!(is_sensitive_env_key("MY_API"));
+
+        // True negatives — non-sensitive keys
         assert!(!is_sensitive_env_key("HOST"));
         assert!(!is_sensitive_env_key("PORT"));
         assert!(!is_sensitive_env_key("DEBUG"));
         assert!(!is_sensitive_env_key("WORKSPACE"));
+
+        // No more false positives from substring matching
+        assert!(!is_sensitive_env_key("MONKEY_HOST")); // contains KEY as substring
+        assert!(!is_sensitive_env_key("TURKEY"));       // contains KEY as substring
+        assert!(!is_sensitive_env_key("WORKPATH"));     // does not match PATH
     }
 
     #[test]

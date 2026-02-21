@@ -72,7 +72,10 @@ impl ConversationsStore {
         self.active_conversation_id = None;
     }
 
-    /// List all conversations (sorted by updated_at descending)
+    /// List all conversations (sorted by updated_at descending).
+    ///
+    /// The sidebar uses [`list_recent`] for performance; this is kept for
+    /// future use (e.g., export, search, or bulk operations).
     #[allow(dead_code)]
     pub fn list_all(&self) -> Vec<&Conversation> {
         let mut convs: Vec<&Conversation> = self.conversations.values().collect();
