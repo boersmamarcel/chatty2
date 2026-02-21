@@ -115,53 +115,9 @@ impl Tool for ListMcpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chatty::tools::test_helpers::MockMcpRepository;
     use crate::settings::models::mcp_store::McpServerConfig;
-    use crate::settings::repositories::mcp_repository::BoxFuture;
-    use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
     use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    struct MockMcpRepository {
-        servers: Mutex<Vec<McpServerConfig>>,
-        load_error: Mutex<Option<String>>,
-    }
-
-    impl MockMcpRepository {
-        fn new(servers: Vec<McpServerConfig>) -> Self {
-            Self {
-                servers: Mutex::new(servers),
-                load_error: Mutex::new(None),
-            }
-        }
-
-        fn with_load_error(error: &str) -> Self {
-            Self {
-                servers: Mutex::new(Vec::new()),
-                load_error: Mutex::new(Some(error.to_string())),
-            }
-        }
-    }
-
-    impl McpRepository for MockMcpRepository {
-        fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<McpServerConfig>>> {
-            let servers = self.servers.lock().unwrap().clone();
-            let error = self.load_error.lock().unwrap().clone();
-            Box::pin(async move {
-                if let Some(err) = error {
-                    Err(RepositoryError::IoError(err))
-                } else {
-                    Ok(servers)
-                }
-            })
-        }
-
-        fn save_all(
-            &self,
-            _servers: Vec<McpServerConfig>,
-        ) -> BoxFuture<'static, RepositoryResult<()>> {
-            Box::pin(async move { Ok(()) })
-        }
-    }
 
     fn make_server(name: &str, api_key: &str) -> McpServerConfig {
         let mut env = HashMap::new();
@@ -178,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_empty_repo() {
-        let repo = Arc::new(MockMcpRepository::new(vec![]));
+        let repo = Arc::new(MockMcpRepository::new());
         let tool = ListMcpTool::new(repo);
 
         let result = tool.call(ListMcpToolArgs {}).await;
@@ -193,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_masks_sensitive_env_vars() {
         let server = make_server("tavily", "tvly-real-secret");
-        let repo = Arc::new(MockMcpRepository::new(vec![server]));
+        let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
 
         let result = tool.call(ListMcpToolArgs {}).await;
@@ -216,7 +172,7 @@ mod tests {
             make_server("server-a", "key-a"),
             make_server("server-b", "key-b"),
         ];
-        let repo = Arc::new(MockMcpRepository::new(servers));
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
         let tool = ListMcpTool::new(repo);
 
         let result = tool.call(ListMcpToolArgs {}).await;
@@ -234,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_returns_correct_fields() {
         let server = make_server("my-server", "real-key");
-        let repo = Arc::new(MockMcpRepository::new(vec![server]));
+        let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
 
         let output = tool.call(ListMcpToolArgs {}).await.unwrap();
@@ -261,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_definition_has_correct_name() {
-        let repo = Arc::new(MockMcpRepository::new(vec![]));
+        let repo = Arc::new(MockMcpRepository::new());
         let tool = ListMcpTool::new(repo);
         let def = tool.definition("".to_string()).await;
         assert_eq!(def.name, "list_mcp_services");

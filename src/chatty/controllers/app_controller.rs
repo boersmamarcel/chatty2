@@ -16,6 +16,7 @@ use crate::chatty::views::chat_input::ChatInputState;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
+use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
 
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
@@ -283,6 +284,23 @@ impl ChattyApp {
                 });
             });
         });
+
+        // Rebuild active conversation's agent when MCP servers are toggled on/off
+        if let Some(weak_notifier) = cx
+            .try_global::<GlobalMcpNotifier>()
+            .and_then(|g| g.entity.clone())
+            && let Some(notifier) = weak_notifier.upgrade()
+        {
+            cx.subscribe(
+                &notifier,
+                |this, _notifier, event: &McpNotifierEvent, cx| {
+                    if matches!(event, McpNotifierEvent::ServersUpdated) {
+                        this.rebuild_active_agent(cx);
+                    }
+                },
+            )
+            .detach();
+        }
     }
 
     /// Initialize chat input with available models
@@ -864,6 +882,96 @@ impl ChattyApp {
     }
 
     /// Change the model for the active conversation
+    /// Rebuild the active conversation's agent with fresh MCP tools, keeping the same model.
+    /// Called after an MCP server is enabled or disabled so the agent's tool set stays current.
+    fn rebuild_active_agent(&mut self, cx: &mut Context<Self>) {
+        let conv_id = cx
+            .global::<ConversationsStore>()
+            .active_id()
+            .map(|s| s.to_string());
+
+        let Some(conv_id) = conv_id else { return };
+
+        let model_id = cx
+            .global::<ConversationsStore>()
+            .get_conversation(&conv_id)
+            .map(|c| c.model_id().to_string());
+
+        let Some(model_id) = model_id else { return };
+
+        let models = cx.global::<ModelsModel>();
+        let providers = cx.global::<ProviderModel>();
+
+        let model_config = models.get_model(&model_id).cloned();
+        let provider_config = model_config.as_ref().and_then(|mc| {
+            providers
+                .providers()
+                .iter()
+                .find(|p| p.provider_type == mc.provider_type)
+                .cloned()
+        });
+
+        let (Some(model_config), Some(provider_config)) = (model_config, provider_config) else {
+            error!(
+                model_id = %model_id,
+                "Could not find model or provider config for agent rebuild"
+            );
+            return;
+        };
+
+        debug!(
+            conv_id = %conv_id,
+            model_id = %model_id,
+            "Rebuilding conversation agent after MCP change"
+        );
+
+        cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+            let mcp_service = cx
+                .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+            let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok();
+            let mcp_tools =
+                mcp_tools.and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+
+            let (exec_settings, pending_approvals, pending_write_approvals) = cx
+                .update(|cx| {
+                    let settings = cx
+                        .global::<crate::settings::models::ExecutionSettingsModel>()
+                        .clone();
+                    let approvals = cx
+                        .global::<crate::chatty::models::ExecutionApprovalStore>()
+                        .get_pending_approvals();
+                    let write_approvals = cx
+                        .global::<crate::chatty::models::WriteApprovalStore>()
+                        .get_pending_approvals();
+                    (Some(settings), Some(approvals), Some(write_approvals))
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+            let new_agent = AgentClient::from_model_config_with_tools(
+                &model_config,
+                &provider_config,
+                mcp_tools,
+                exec_settings,
+                pending_approvals,
+                pending_write_approvals,
+            )
+            .await?;
+
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.set_agent(new_agent, model_config.id.clone());
+                    debug!(conv_id = %conv_id, "Agent rebuilt with updated MCP tools");
+                }
+            })
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+            Ok(())
+        })
+        .detach();
+    }
+
     fn change_conversation_model(&mut self, model_id: String, cx: &mut Context<Self>) {
         debug!(model_id = %model_id, "Changing to model");
 

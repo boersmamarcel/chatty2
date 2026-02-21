@@ -1,5 +1,6 @@
 use crate::chatty::services::mcp_service::McpService;
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
+use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
 use gpui::{App, AsyncApp};
 use tracing::{error, info};
 
@@ -31,7 +32,8 @@ pub fn toggle_server(server_name: String, cx: &mut App) {
     // 2. Refresh UI immediately
     cx.refresh_windows();
 
-    // 3. Update MCP service (start/stop server)
+    // 3. Update MCP service (start/stop server), then notify subscribers so the
+    //    active conversation's agent is rebuilt with the updated tool set.
     if let Some(config) = updated_servers
         .iter()
         .find(|s| s.name == server_name)
@@ -41,14 +43,32 @@ pub fn toggle_server(server_name: String, cx: &mut App) {
         let name = config.name.clone();
         let is_enabled = config.enabled;
 
-        cx.spawn(move |_cx: &mut AsyncApp| async move {
+        cx.spawn(async move |cx| {
             if is_enabled {
                 if let Err(e) = service.start_server(config).await {
                     error!(server = %name, error = ?e, "Failed to start MCP server");
+                    return;
                 }
             } else if let Err(e) = service.stop_server(&name).await {
                 error!(server = %name, error = ?e, "Failed to stop MCP server");
             }
+
+            // Emit ServersUpdated after start/stop completes so subscribers
+            // (e.g. ChattyApp) rebuild the active conversation's agent with
+            // the now-accurate tool set.
+            cx.update(|cx| {
+                if let Some(weak_notifier) = cx
+                    .try_global::<GlobalMcpNotifier>()
+                    .and_then(|g| g.entity.clone())
+                    && let Some(notifier) = weak_notifier.upgrade()
+                {
+                    notifier.update(cx, |_notifier, cx| {
+                        cx.emit(McpNotifierEvent::ServersUpdated);
+                    });
+                }
+            })
+            .map_err(|e| error!(error = ?e, "Failed to emit ServersUpdated after MCP toggle"))
+            .ok();
         })
         .detach();
     }
