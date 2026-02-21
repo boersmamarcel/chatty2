@@ -5,6 +5,7 @@ pub mod delete_mcp_tool;
 pub mod edit_mcp_tool;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
+pub mod list_mcp_tool;
 pub mod list_tools_tool;
 
 pub use add_mcp_tool::AddMcpTool;
@@ -16,4 +17,5 @@ pub use filesystem_tool::{GlobSearchTool, ListDirectoryTool, ReadBinaryTool, Rea
 pub use filesystem_write_tool::{
     ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, MoveFileTool, WriteFileTool,
 };
+pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;

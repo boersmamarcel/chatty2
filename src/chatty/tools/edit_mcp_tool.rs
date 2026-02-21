@@ -261,9 +261,7 @@ impl Tool for EditMcpTool {
         // Restart the server if it was running before the edit, or start it if it was just enabled.
         // Only stop if it was previously enabled (i.e. actually running).
         let was_restarted = if let Some(ref svc) = self.mcp_service {
-            if was_enabled
-                && let Err(e) = svc.stop_server(&name).await
-            {
+            if was_enabled && let Err(e) = svc.stop_server(&name).await {
                 tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server for restart");
             }
             // Start new instance if now enabled

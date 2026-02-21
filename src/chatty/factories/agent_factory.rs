@@ -8,8 +8,8 @@ use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
     AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, DeleteMcpTool,
-    EditMcpTool, GlobSearchTool, ListDirectoryTool, ListToolsTool, MoveFileTool, ReadBinaryTool,
-    ReadFileTool, WriteFileTool,
+    EditMcpTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool, MoveFileTool,
+    ReadBinaryTool, ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -60,6 +60,7 @@ macro_rules! build_with_mcp_tools {
 /// Replaces the former 16-branch `build_agent_with_tools!` macro. Adding a new
 /// optional tool only requires one new `if let Some` block here — no combinatorial
 /// branching.
+#[allow(clippy::too_many_arguments)]
 fn collect_tools(
     list_tools: ListToolsTool,
     bash_tool: Option<BashTool>,
@@ -68,9 +69,13 @@ fn collect_tools(
     add_mcp_tool: Option<AddMcpTool>,
     delete_mcp_tool: Option<DeleteMcpTool>,
     edit_mcp_tool: Option<EditMcpTool>,
+    list_mcp_tool: Option<ListMcpTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
+    if let Some(t) = list_mcp_tool {
+        tools.push(Box::new(t));
+    }
     if let Some(t) = add_mcp_tool {
         tools.push(Box::new(t));
     }
@@ -308,6 +313,13 @@ impl AgentClient {
             None
         };
 
+        // list_mcp_services: always enabled alongside add/edit/delete MCP tools
+        let list_mcp_tool: Option<ListMcpTool> = if add_mcp_tool.is_some() {
+            Some(ListMcpTool::new(crate::MCP_REPOSITORY.clone()))
+        } else {
+            None
+        };
+
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             bash_tool.is_some(),
@@ -341,6 +353,7 @@ impl AgentClient {
                     add_mcp_tool,
                     delete_mcp_tool,
                     edit_mcp_tool,
+                    list_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -369,6 +382,7 @@ impl AgentClient {
                     add_mcp_tool,
                     delete_mcp_tool,
                     edit_mcp_tool,
+                    list_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -393,6 +407,7 @@ impl AgentClient {
                     add_mcp_tool,
                     delete_mcp_tool,
                     edit_mcp_tool,
+                    list_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -421,6 +436,7 @@ impl AgentClient {
                     add_mcp_tool,
                     delete_mcp_tool,
                     edit_mcp_tool,
+                    list_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -448,6 +464,7 @@ impl AgentClient {
                     add_mcp_tool,
                     delete_mcp_tool,
                     edit_mcp_tool,
+                    list_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -593,6 +610,7 @@ impl AgentClient {
                     add_mcp_tool,
                     delete_mcp_tool,
                     edit_mcp_tool,
+                    list_mcp_tool,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
