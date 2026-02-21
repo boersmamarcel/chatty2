@@ -1,7 +1,25 @@
 use crate::EXECUTION_SETTINGS_REPOSITORY;
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
+use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
 use gpui::{App, AsyncApp};
-use tracing::error;
+use tracing::{error, info, warn};
+
+/// Emit `ServersUpdated` so the active conversation's agent is rebuilt
+/// with the current execution tool settings (bash, filesystem, MCP management).
+fn notify_tool_set_changed(cx: &mut App) {
+    if let Some(weak_notifier) = cx
+        .try_global::<GlobalMcpNotifier>()
+        .and_then(|g| g.entity.clone())
+        && let Some(notifier) = weak_notifier.upgrade()
+    {
+        info!("Notifying tool set changed — triggering agent rebuild");
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(McpNotifierEvent::ServersUpdated);
+        });
+    } else {
+        warn!("notify_tool_set_changed: GlobalMcpNotifier not found — agent will not be rebuilt");
+    }
+}
 
 /// Toggle code execution enabled/disabled and persist to disk
 pub fn toggle_execution(cx: &mut App) {
@@ -15,7 +33,10 @@ pub fn toggle_execution(cx: &mut App) {
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt with the new tool set
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
@@ -36,7 +57,10 @@ pub fn set_workspace_dir(dir: Option<String>, cx: &mut App) {
     // 3. Refresh UI immediately
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt (workspace dir affects fs tools)
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
@@ -82,7 +106,10 @@ pub fn toggle_filesystem_read(cx: &mut App) {
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt with the new tool set
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
@@ -130,7 +157,10 @@ pub fn toggle_mcp_service_tool(cx: &mut App) {
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt with the new tool set
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
@@ -155,7 +185,10 @@ pub fn toggle_filesystem_write(cx: &mut App) {
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt with the new tool set
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {

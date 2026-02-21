@@ -1,18 +1,11 @@
-use anyhow::anyhow;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::McpServerConfig;
+use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
-
-lazy_static::lazy_static! {
-    /// Serialises concurrent add_mcp_service calls so the
-    /// load → check → append → save sequence is atomic.
-    static ref WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
-}
 
 /// Error type for add_mcp tool
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +17,7 @@ pub enum AddMcpToolError {
 }
 
 /// Arguments for adding an MCP server
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Default)]
 pub struct AddMcpToolArgs {
     /// Unique name for the MCP server (e.g., "tavily-search", "github")
     pub name: String,
@@ -52,8 +45,6 @@ pub struct AddMcpTool {
     repository: Arc<dyn McpRepository>,
     /// Notifies the UI after a successful save. None in tests.
     update_sender: Option<tokio::sync::mpsc::Sender<Vec<McpServerConfig>>>,
-    /// Starts the new server immediately after saving. None in tests.
-    mcp_service: Option<crate::chatty::services::McpService>,
 }
 
 impl AddMcpTool {
@@ -62,20 +53,20 @@ impl AddMcpTool {
         Self {
             repository,
             update_sender: None,
-            mcp_service: None,
         }
     }
 
-    /// Production constructor: inject real sender and service.
+    /// Production constructor: inject real sender.
+    /// Note: mcp_service is intentionally not stored — new servers are always saved as disabled
+    /// so there is nothing to start.
     pub fn new_with_services(
         repository: Arc<dyn McpRepository>,
         update_sender: tokio::sync::mpsc::Sender<Vec<McpServerConfig>>,
-        mcp_service: crate::chatty::services::McpService,
+        _mcp_service: crate::chatty::services::McpService,
     ) -> Self {
         Self {
             repository,
             update_sender: Some(update_sender),
-            mcp_service: Some(mcp_service),
         }
     }
 }
@@ -127,8 +118,10 @@ impl Tool for AddMcpTool {
         ToolDefinition {
             name: "add_mcp_service".to_string(),
             description: "Add a new MCP (Model Context Protocol) server configuration. \
-                         This registers a new MCP server that will be available after restarting \
-                         the application or creating a new conversation. \
+                         The server is ALWAYS saved as disabled — only the user can enable it \
+                         via Settings → Execution → MCP Servers. There is no way to create a \
+                         server in the enabled state. This keeps the user in full control of \
+                         what runs on their machine. \
                          \n\n\
                          Use this when the user wants to connect to a new MCP service. \
                          Common examples include:\n\
@@ -136,8 +129,7 @@ impl Tool for AddMcpTool {
                          - uvx-based servers: command=\"uvx\", args=[\"package-name\"]\n\
                          - Docker-based servers: command=\"docker\", args=[\"run\", ...]\n\
                          \n\
-                         Environment variables can be used for API keys and configuration. \
-                         The server will be enabled by default."
+                         Environment variables can be used for API keys and configuration."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -174,7 +166,7 @@ impl Tool for AddMcpTool {
 
         // Acquire write lock: makes load → check → append → save atomic,
         // preventing TOCTOU races when two concurrent calls share the same name.
-        let _guard = WRITE_LOCK.lock().await;
+        let _guard = MCP_WRITE_LOCK.lock().await;
 
         // Load existing servers
         let mut servers = self.repository.load_all().await.map_err(|e| {
@@ -193,13 +185,23 @@ impl Tool for AddMcpTool {
             });
         }
 
-        // Create the new server config
+        // Reject sentinel values — there is no existing server to preserve values from.
+        if args.env.values().any(|v| v == MASKED_VALUE_SENTINEL) {
+            return Err(AddMcpToolError::ValidationError(
+                "Cannot use '****' as an env var value when adding a new server. \
+                 Provide the actual value."
+                    .to_string(),
+            ));
+        }
+
+        // Create the new server config. Always disabled — only the user can enable
+        // it via Settings after reviewing the configuration.
         let new_server = McpServerConfig {
             name: args.name,
             command: args.command,
             args: args.args,
             env: args.env,
-            enabled: true,
+            enabled: false,
         };
 
         tracing::info!(
@@ -207,10 +209,10 @@ impl Tool for AddMcpTool {
             command = %new_server.command,
             args = ?new_server.args,
             env_keys = ?new_server.env.keys().collect::<Vec<_>>(),
+            enabled = %new_server.enabled,
             "Adding new MCP server configuration"
         );
 
-        let new_server_for_start = new_server.clone();
         servers.push(new_server);
 
         // Save to disk inside the lock — critical section ends when save completes.
@@ -231,26 +233,12 @@ impl Tool for AddMcpTool {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // Start the server process via injected service (None in tests → fallback message).
-        let start_result = match &self.mcp_service {
-            Some(svc) => svc.start_server(new_server_for_start).await,
-            None => Err(anyhow!("MCP service not available")),
-        };
-        let message = match start_result {
-            Ok(()) => format!(
-                "MCP server '{}' has been added and started. \
-                 Start a new conversation to use its tools.",
-                server_name
-            ),
-            Err(e) => {
-                tracing::warn!(server = %server_name, error = ?e, "MCP server added but failed to start");
-                format!(
-                    "MCP server '{}' has been saved but could not be started ({}). \
-                     It will be available after restarting the application.",
-                    server_name, e
-                )
-            }
-        };
+        // New servers are always saved as disabled — the user enables them via Settings.
+        let message = format!(
+            "MCP server '{}' has been saved as disabled. \
+             Enable it in Settings → Execution → MCP Servers to start using it.",
+            server_name
+        );
 
         Ok(AddMcpToolOutput {
             success: true,
@@ -263,93 +251,7 @@ impl Tool for AddMcpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::repositories::mcp_repository::BoxFuture;
-    use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
-    use std::sync::Mutex;
-
-    // --- Mock repository for testing ---
-
-    /// In-memory mock of McpRepository for unit tests
-    struct MockMcpRepository {
-        servers: Mutex<Vec<McpServerConfig>>,
-        /// If set, load_all will return this error
-        load_error: Mutex<Option<String>>,
-        /// If set, save_all will return this error
-        save_error: Mutex<Option<String>>,
-        /// Track what was last saved
-        last_saved: Mutex<Option<Vec<McpServerConfig>>>,
-    }
-
-    impl MockMcpRepository {
-        fn new() -> Self {
-            Self {
-                servers: Mutex::new(Vec::new()),
-                load_error: Mutex::new(None),
-                save_error: Mutex::new(None),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn with_servers(servers: Vec<McpServerConfig>) -> Self {
-            Self {
-                servers: Mutex::new(servers),
-                load_error: Mutex::new(None),
-                save_error: Mutex::new(None),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn with_load_error(error: &str) -> Self {
-            Self {
-                servers: Mutex::new(Vec::new()),
-                load_error: Mutex::new(Some(error.to_string())),
-                save_error: Mutex::new(None),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn with_save_error(servers: Vec<McpServerConfig>, error: &str) -> Self {
-            Self {
-                servers: Mutex::new(servers),
-                load_error: Mutex::new(None),
-                save_error: Mutex::new(Some(error.to_string())),
-                last_saved: Mutex::new(None),
-            }
-        }
-
-        fn get_last_saved(&self) -> Option<Vec<McpServerConfig>> {
-            self.last_saved.lock().unwrap().clone()
-        }
-    }
-
-    impl McpRepository for MockMcpRepository {
-        fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<McpServerConfig>>> {
-            let servers = self.servers.lock().unwrap().clone();
-            let error = self.load_error.lock().unwrap().clone();
-            Box::pin(async move {
-                if let Some(err) = error {
-                    Err(RepositoryError::IoError(err))
-                } else {
-                    Ok(servers)
-                }
-            })
-        }
-
-        fn save_all(
-            &self,
-            servers: Vec<McpServerConfig>,
-        ) -> BoxFuture<'static, RepositoryResult<()>> {
-            let error = self.save_error.lock().unwrap().clone();
-            *self.last_saved.lock().unwrap() = Some(servers);
-            Box::pin(async move {
-                if let Some(err) = error {
-                    Err(RepositoryError::IoError(err))
-                } else {
-                    Ok(())
-                }
-            })
-        }
-    }
+    use crate::chatty::tools::test_helpers::MockMcpRepository;
 
     /// Helper to create a test McpServerConfig
     fn test_server(name: &str) -> McpServerConfig {
@@ -575,7 +477,7 @@ mod tests {
         assert_eq!(saved[0].name, "new-server");
         assert_eq!(saved[0].command, "npx");
         assert_eq!(saved[0].args, vec!["-y", "@test/mcp-server"]);
-        assert!(saved[0].enabled);
+        assert!(!saved[0].enabled); // disabled by default — user enables via Settings
     }
 
     #[tokio::test]
@@ -690,7 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_call_new_server_is_enabled_by_default() {
+    async fn test_call_new_server_is_disabled_by_default() {
         let repo = Arc::new(MockMcpRepository::new());
         let tool = AddMcpTool::new(repo.clone());
 
@@ -698,7 +600,7 @@ mod tests {
         assert!(result.is_ok());
 
         let saved = repo.get_last_saved().unwrap();
-        assert!(saved[0].enabled);
+        assert!(!saved[0].enabled); // disabled by default — user enables via Settings
     }
 
     // --- Tool definition tests ---

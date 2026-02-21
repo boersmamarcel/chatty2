@@ -1,0 +1,778 @@
+use rig::completion::ToolDefinition;
+use rig::tool::Tool;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
+use crate::settings::repositories::McpRepository;
+
+/// Error type for edit_mcp tool
+#[derive(Debug, thiserror::Error)]
+pub enum EditMcpToolError {
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+    #[error("Repository error: {0}")]
+    RepositoryError(String),
+}
+
+/// Arguments for editing an MCP server
+#[derive(Deserialize, Serialize)]
+pub struct EditMcpToolArgs {
+    /// Name of the MCP server to edit
+    pub name: String,
+    /// New command to execute (optional, keeps existing if not provided)
+    #[serde(default)]
+    pub command: Option<String>,
+    /// New command-line arguments (optional, keeps existing if not provided)
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// New environment variables (optional, keeps existing if not provided).
+    /// When provided, fully replaces the existing env vars.
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+}
+
+/// Output from the edit_mcp tool
+#[derive(Debug, Serialize)]
+pub struct EditMcpToolOutput {
+    pub success: bool,
+    pub message: String,
+    pub server_name: String,
+}
+
+/// Tool that allows the LLM to edit existing MCP server configurations
+#[derive(Clone)]
+pub struct EditMcpTool {
+    repository: Arc<dyn McpRepository>,
+    /// Notifies the UI after a successful save. None in tests.
+    update_sender: Option<tokio::sync::mpsc::Sender<Vec<McpServerConfig>>>,
+    /// Restarts the server after editing. None in tests.
+    mcp_service: Option<crate::chatty::services::McpService>,
+}
+
+impl EditMcpTool {
+    /// Test constructor: no live services injected.
+    pub fn new(repository: Arc<dyn McpRepository>) -> Self {
+        Self {
+            repository,
+            update_sender: None,
+            mcp_service: None,
+        }
+    }
+
+    /// Production constructor: inject real sender and service.
+    pub fn new_with_services(
+        repository: Arc<dyn McpRepository>,
+        update_sender: tokio::sync::mpsc::Sender<Vec<McpServerConfig>>,
+        mcp_service: crate::chatty::services::McpService,
+    ) -> Self {
+        Self {
+            repository,
+            update_sender: Some(update_sender),
+            mcp_service: Some(mcp_service),
+        }
+    }
+}
+
+/// Validate the edit arguments, returning an error message if invalid.
+fn validate_edit_args(args: &EditMcpToolArgs) -> Result<(), String> {
+    let name = args.name.trim();
+
+    if name.is_empty() {
+        return Err("Server name cannot be empty".to_string());
+    }
+
+    // Validate command if provided
+    if let Some(ref cmd) = args.command
+        && cmd.trim().is_empty()
+    {
+        return Err("Command cannot be empty".to_string());
+    }
+
+    // Validate env var keys if provided
+    if let Some(ref env) = args.env {
+        for key in env.keys() {
+            if key.trim().is_empty() {
+                return Err("Environment variable keys cannot be empty".to_string());
+            }
+        }
+    }
+
+    // Must provide at least one field to update
+    if args.command.is_none() && args.args.is_none() && args.env.is_none() {
+        return Err("At least one field (command, args, env) must be provided to edit".to_string());
+    }
+
+    Ok(())
+}
+
+impl Tool for EditMcpTool {
+    const NAME: &'static str = "edit_mcp_service";
+    type Error = EditMcpToolError;
+    type Args = EditMcpToolArgs;
+    type Output = EditMcpToolOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "edit_mcp_service".to_string(),
+            description: "Edit an existing MCP (Model Context Protocol) server configuration. \
+                         This updates the server's command, arguments, or environment variables. \
+                         Only the fields you provide will be changed; omitted fields keep their \
+                         current values. \
+                         \n\n\
+                         Use this when the user wants to update an MCP server's configuration, \
+                         such as changing environment variables (e.g., API keys) or updating the \
+                         command or arguments. The server will be restarted automatically if it \
+                         was running. \
+                         \n\n\
+                         Note: enabling or disabling a server can only be done by the user via \
+                         Settings → Execution → MCP Servers."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the MCP server to edit (e.g., 'tavily-search', 'github')"
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "New command to execute (e.g., 'npx', 'uvx'). Omit to keep current value."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "New command-line arguments. Omit to keep current value."
+                    },
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "New environment variables. CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Omit this field entirely to keep current values unchanged. Sensitive values (API keys, tokens, passwords) are shown as '****' — pass '****' back unchanged to preserve the existing secret value."
+                    }
+                },
+                "required": ["name"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // Validate before acquiring the lock
+        validate_edit_args(&args).map_err(EditMcpToolError::ValidationError)?;
+
+        // Trim name consistently (matches delete_mcp_tool behaviour)
+        let name = args.name.trim().to_string();
+        let server_name = name.clone();
+
+        // Acquire shared write lock: makes load → find → update → save atomic
+        // across all MCP tools (add, delete, edit).
+        let _guard = MCP_WRITE_LOCK.lock().await;
+
+        // Load existing servers
+        let mut servers = self.repository.load_all().await.map_err(|e| {
+            EditMcpToolError::RepositoryError(format!("Failed to load servers: {}", e))
+        })?;
+
+        // Find the server to edit (using trimmed name)
+        let server = servers.iter_mut().find(|s| s.name == name);
+        let Some(server) = server else {
+            return Ok(EditMcpToolOutput {
+                success: false,
+                message: format!(
+                    "No MCP server named '{}' was found. Use list_tools to see available servers.",
+                    name
+                ),
+                server_name,
+            });
+        };
+
+        // Capture enabled state before applying changes, so we know whether to stop the old instance.
+        let was_enabled = server.enabled;
+
+        // Track what changed for the log message
+        let mut changes = Vec::new();
+
+        // Apply updates (only fields that are Some)
+        if let Some(command) = args.command {
+            server.command = command;
+            changes.push("command");
+        }
+        if let Some(new_args) = args.args {
+            server.args = new_args;
+            changes.push("args");
+        }
+        if let Some(new_env) = args.env {
+            // For each key whose value is the masked sentinel "****", preserve the
+            // existing stored value so the LLM cannot accidentally overwrite real
+            // API keys with the literal placeholder it received.
+            let mut resolved_env = HashMap::new();
+            for (k, v) in new_env {
+                if v == MASKED_VALUE_SENTINEL {
+                    match server.env.get(&k).cloned() {
+                        Some(existing) => {
+                            resolved_env.insert(k, existing);
+                        }
+                        None => {
+                            return Err(EditMcpToolError::ValidationError(format!(
+                                "Cannot use sentinel '****' for key '{}': no existing value to preserve. \
+                                 Provide the actual value instead.",
+                                k
+                            )));
+                        }
+                    }
+                } else {
+                    resolved_env.insert(k, v);
+                }
+            }
+            server.env = resolved_env;
+            changes.push("env");
+        }
+        let updated_server = server.clone();
+        let server_enabled = updated_server.enabled;
+
+        tracing::info!(
+            server_name = %name,
+            changes = ?changes,
+            "Editing MCP server configuration"
+        );
+
+        // Save to disk inside the lock
+        self.repository
+            .save_all(servers.clone())
+            .await
+            .map_err(|e| {
+                EditMcpToolError::RepositoryError(format!("Failed to save servers: {}", e))
+            })?;
+
+        // Release lock before best-effort notification and server restart.
+        drop(_guard);
+
+        // Notify the UI to refresh
+        if let Some(ref tx) = self.update_sender
+            && let Err(e) = tx.send(servers).await
+        {
+            tracing::warn!(error = ?e, "Failed to send MCP update notification");
+        }
+
+        // Restart the server if it was running before the edit, or start it if it was just enabled.
+        // Only stop if it was previously enabled (i.e. actually running).
+        let was_restarted = if let Some(ref svc) = self.mcp_service {
+            if was_enabled && let Err(e) = svc.stop_server(&name).await {
+                tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server for restart");
+            }
+            // Start new instance if now enabled
+            if server_enabled {
+                if let Err(e) = svc.start_server(updated_server).await {
+                    tracing::warn!(server = %name, error = ?e, "MCP server edited but failed to restart");
+                    return Ok(EditMcpToolOutput {
+                        success: true,
+                        message: format!(
+                            "MCP server '{}' configuration updated ({}) but failed to restart ({}). \
+                             It will be available after restarting the application.",
+                            server_name,
+                            changes.join(", "),
+                            e
+                        ),
+                        server_name,
+                    });
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let restart_msg = if was_restarted {
+            " and restarted. Start a new conversation to use the updated tools."
+        } else if !server_enabled {
+            " (server is disabled)."
+        } else {
+            ". It will be available after restarting the application."
+        };
+
+        Ok(EditMcpToolOutput {
+            success: true,
+            message: format!(
+                "MCP server '{}' has been updated ({}){}",
+                server_name,
+                changes.join(", "),
+                restart_msg
+            ),
+            server_name,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chatty::tools::test_helpers::MockMcpRepository;
+
+    fn test_server(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            command: "echo".to_string(),
+            args: vec!["test".to_string()],
+            env: HashMap::new(),
+            enabled: true,
+        }
+    }
+
+    fn test_server_with_env(name: &str, env: HashMap<String, String>) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@test/server".to_string()],
+            env,
+            enabled: true,
+        }
+    }
+
+    // --- Validation tests ---
+
+    #[test]
+    fn test_validate_empty_name() {
+        let args = EditMcpToolArgs {
+            name: "".to_string(),
+            command: Some("npx".to_string()),
+            args: None,
+            env: None,
+        };
+        assert!(validate_edit_args(&args).is_err());
+        assert!(validate_edit_args(&args).unwrap_err().contains("name"));
+    }
+
+    #[test]
+    fn test_validate_no_fields_to_update() {
+        let args = EditMcpToolArgs {
+            name: "server".to_string(),
+            command: None,
+            args: None,
+            env: None,
+        };
+        assert!(validate_edit_args(&args).is_err());
+        assert!(
+            validate_edit_args(&args)
+                .unwrap_err()
+                .contains("At least one field")
+        );
+    }
+
+    #[test]
+    fn test_validate_empty_command() {
+        let args = EditMcpToolArgs {
+            name: "server".to_string(),
+            command: Some("".to_string()),
+            args: None,
+            env: None,
+        };
+        assert!(validate_edit_args(&args).is_err());
+        assert!(
+            validate_edit_args(&args)
+                .unwrap_err()
+                .contains("Command cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_empty_env_key() {
+        let mut env = HashMap::new();
+        env.insert("".to_string(), "value".to_string());
+        let args = EditMcpToolArgs {
+            name: "server".to_string(),
+            command: None,
+            args: None,
+            env: Some(env),
+        };
+        assert!(validate_edit_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_validate_valid_command_only() {
+        let args = EditMcpToolArgs {
+            name: "server".to_string(),
+            command: Some("uvx".to_string()),
+            args: None,
+            env: None,
+        };
+        assert!(validate_edit_args(&args).is_ok());
+    }
+
+    // --- Tool::call integration tests ---
+
+    #[tokio::test]
+    async fn test_edit_command() {
+        let servers = vec![test_server("my-server")];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: Some("uvx".to_string()),
+                args: None,
+                env: None,
+            })
+            .await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        assert!(output.success);
+        assert!(output.message.contains("command"));
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].command, "uvx");
+        // Other fields unchanged
+        assert_eq!(saved[0].args, vec!["test"]);
+        assert!(saved[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn test_edit_args() {
+        let servers = vec![test_server("my-server")];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: None,
+                args: Some(vec!["new-arg".to_string()]),
+                env: None,
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].args, vec!["new-arg"]);
+        assert_eq!(saved[0].command, "echo"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn test_edit_env() {
+        let mut original_env = HashMap::new();
+        original_env.insert("OLD_KEY".to_string(), "old-val".to_string());
+        let servers = vec![test_server_with_env("my-server", original_env)];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let mut new_env = HashMap::new();
+        new_env.insert("NEW_KEY".to_string(), "new-val".to_string());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: None,
+                args: None,
+                env: Some(new_env),
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].env.len(), 1);
+        assert_eq!(saved[0].env.get("NEW_KEY").unwrap(), "new-val");
+        assert!(!saved[0].env.contains_key("OLD_KEY")); // fully replaced
+    }
+
+    #[tokio::test]
+    async fn test_edit_env_sentinel_preserves_existing_value() {
+        // When the LLM sends "****" (the masked sentinel) for a key, the real
+        // stored value must be preserved — not overwritten with "****".
+        let mut original_env = HashMap::new();
+        original_env.insert("TAVILY_API_KEY".to_string(), "tvly-real-secret".to_string());
+        original_env.insert("HOST".to_string(), "localhost".to_string());
+        let servers = vec![test_server_with_env("my-server", original_env)];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        // LLM sends back the sentinel for the API key and a real value for HOST
+        let mut env_from_llm = HashMap::new();
+        env_from_llm.insert("TAVILY_API_KEY".to_string(), "****".to_string());
+        env_from_llm.insert("HOST".to_string(), "remotehost".to_string());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: None,
+                args: None,
+                env: Some(env_from_llm),
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        // Real API key must be preserved
+        assert_eq!(saved[0].env["TAVILY_API_KEY"], "tvly-real-secret");
+        // Non-sentinel value is updated normally
+        assert_eq!(saved[0].env["HOST"], "remotehost");
+    }
+
+    #[tokio::test]
+    async fn test_edit_env_sentinel_for_unknown_key_returns_validation_error() {
+        // If the LLM sends sentinel for a key that doesn't exist in the store,
+        // we must return a ValidationError — storing an empty string would create
+        // a blank credential that silently breaks the server.
+        let servers = vec![test_server("my-server")]; // no env vars
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let mut env_from_llm = HashMap::new();
+        env_from_llm.insert("NONEXISTENT_KEY".to_string(), "****".to_string());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: None,
+                args: None,
+                env: Some(env_from_llm),
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            EditMcpToolError::ValidationError(_)
+        ));
+
+        // Nothing must have been saved
+        assert!(repo.get_last_saved().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_edit_multiple_fields() {
+        let servers = vec![test_server("my-server")];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let mut env = HashMap::new();
+        env.insert("KEY".to_string(), "val".to_string());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: Some("docker".to_string()),
+                args: Some(vec!["run".to_string(), "img".to_string()]),
+                env: Some(env),
+            })
+            .await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        assert!(output.success);
+        assert!(output.message.contains("command"));
+        assert!(output.message.contains("args"));
+        assert!(output.message.contains("env"));
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].command, "docker");
+        assert_eq!(saved[0].args, vec!["run", "img"]);
+        assert_eq!(saved[0].env.get("KEY").unwrap(), "val");
+    }
+
+    #[tokio::test]
+    async fn test_edit_nonexistent_server() {
+        let servers = vec![test_server("existing")];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "nonexistent".to_string(),
+                command: Some("npx".to_string()),
+                args: None,
+                env: None,
+            })
+            .await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        assert!(!output.success);
+        assert!(output.message.contains("No MCP server named"));
+
+        assert!(repo.get_last_saved().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_edit_preserves_other_servers() {
+        let servers = vec![
+            test_server("server-a"),
+            test_server("server-b"),
+            test_server("server-c"),
+        ];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "server-b".to_string(),
+                command: Some("new-cmd".to_string()),
+                args: None,
+                env: None,
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved.len(), 3);
+        assert_eq!(saved[0].command, "echo"); // unchanged
+        assert_eq!(saved[1].command, "new-cmd"); // updated
+        assert_eq!(saved[2].command, "echo"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn test_edit_load_error() {
+        let repo = Arc::new(MockMcpRepository::with_load_error("disk read failure"));
+        let tool = EditMcpTool::new(repo);
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "any".to_string(),
+                command: Some("npx".to_string()),
+                args: None,
+                env: None,
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            EditMcpToolError::RepositoryError(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_edit_save_error() {
+        let servers = vec![test_server("target")];
+        let repo = Arc::new(MockMcpRepository::with_save_error(
+            servers,
+            "disk write failure",
+        ));
+        let tool = EditMcpTool::new(repo);
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "target".to_string(),
+                command: Some("new".to_string()),
+                args: None,
+                env: None,
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            EditMcpToolError::RepositoryError(_)
+        ));
+    }
+
+    // --- Tool definition tests ---
+
+    #[tokio::test]
+    async fn test_definition_has_correct_name() {
+        let repo = Arc::new(MockMcpRepository::with_servers(vec![]));
+        let tool = EditMcpTool::new(repo);
+
+        let def = tool.definition("test".to_string()).await;
+        assert_eq!(def.name, "edit_mcp_service");
+    }
+
+    #[tokio::test]
+    async fn test_definition_has_required_fields() {
+        let repo = Arc::new(MockMcpRepository::with_servers(vec![]));
+        let tool = EditMcpTool::new(repo);
+
+        let def = tool.definition("test".to_string()).await;
+        let required = def.parameters["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"name"));
+        // Optional fields should not be required
+        assert!(!required_names.contains(&"command"));
+        assert!(!required_names.contains(&"args"));
+        assert!(!required_names.contains(&"env"));
+    }
+
+    #[tokio::test]
+    async fn test_definition_has_all_properties() {
+        let repo = Arc::new(MockMcpRepository::with_servers(vec![]));
+        let tool = EditMcpTool::new(repo);
+
+        let def = tool.definition("test".to_string()).await;
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("name"));
+        assert!(props.contains_key("command"));
+        assert!(props.contains_key("args"));
+        assert!(props.contains_key("env"));
+        assert!(!props.contains_key("enabled")); // user-only control, not in schema
+    }
+
+    // --- Serde tests ---
+
+    #[test]
+    fn test_args_deserialize_minimal() {
+        let json = r#"{"name": "test", "command": "npx"}"#;
+        let args: EditMcpToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.name, "test");
+        assert_eq!(args.command.unwrap(), "npx");
+        assert!(args.args.is_none());
+        assert!(args.env.is_none());
+    }
+
+    #[test]
+    fn test_args_deserialize_name_only() {
+        // This is valid JSON but will fail validation (no fields to update)
+        let json = r#"{"name": "test"}"#;
+        let args: EditMcpToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.name, "test");
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn test_args_deserialize_full() {
+        let json = r#"{
+            "name": "server",
+            "command": "uvx",
+            "args": ["pkg"],
+            "env": {"KEY": "val"}
+        }"#;
+        let args: EditMcpToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.name, "server");
+        assert_eq!(args.command.unwrap(), "uvx");
+        assert_eq!(args.args.unwrap(), vec!["pkg"]);
+        assert_eq!(args.env.unwrap().get("KEY").unwrap(), "val");
+    }
+
+    #[test]
+    fn test_output_serialization() {
+        let output = EditMcpToolOutput {
+            success: true,
+            message: "Updated".to_string(),
+            server_name: "test".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"server_name\":\"test\""));
+    }
+
+    // --- Error display tests ---
+
+    #[test]
+    fn test_validation_error_display() {
+        let err = EditMcpToolError::ValidationError("bad input".to_string());
+        assert_eq!(err.to_string(), "Validation error: bad input");
+    }
+
+    #[test]
+    fn test_repository_error_display() {
+        let err = EditMcpToolError::RepositoryError("disk full".to_string());
+        assert_eq!(err.to_string(), "Repository error: disk full");
+    }
+
+    #[test]
+    fn test_tool_name_constant() {
+        assert_eq!(EditMcpTool::NAME, "edit_mcp_service");
+    }
+}

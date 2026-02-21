@@ -56,8 +56,26 @@ impl ListToolsTool {
 
         if has_add_mcp {
             native_tools.push(ToolInfo {
+                name: "list_mcp_services".to_string(),
+                description: "List all configured MCP servers (names, commands, args, enabled state, masked env vars). Call this FIRST before editing or deleting to confirm the exact server name.".to_string(),
+                source: "native".to_string(),
+            });
+            native_tools.push(ToolInfo {
                 name: "add_mcp_service".to_string(),
                 description: "Add a new MCP server configuration so it becomes available in future conversations".to_string(),
+                source: "native".to_string(),
+            });
+            native_tools.push(ToolInfo {
+                name: "delete_mcp_service".to_string(),
+                description: "Delete an existing MCP server configuration and stop it if running"
+                    .to_string(),
+                source: "native".to_string(),
+            });
+            native_tools.push(ToolInfo {
+                name: "edit_mcp_service".to_string(),
+                description:
+                    "Edit an existing MCP server's command, args, or env vars (enabling/disabling is user-only via Settings)"
+                        .to_string(),
                 source: "native".to_string(),
             });
         }

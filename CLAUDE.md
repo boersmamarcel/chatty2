@@ -792,3 +792,77 @@ To enable filesystem tools:
 2. Set workspace directory (absolute path required)
 3. Enable code execution
 4. Configure approval mode
+
+## Security Practices
+
+### Sensitive Env Var Masking
+
+MCP server env vars may contain API keys, tokens, and other secrets. The LLM must never see real values.
+
+**Rule**: Any path that sends `McpServerConfig` data to the LLM **must** call `masked_env()` instead of accessing `.env` directly.
+
+```rust
+// WRONG — sends real secrets to the LLM
+let env = server.env.clone();
+
+// CORRECT — masks sensitive values before LLM sees them
+let env = server.masked_env(); // KEY/TOKEN/SECRET/etc. → "****"
+```
+
+**Sensitive key detection** (`is_sensitive_env_key` in `mcp_store.rs`): matches keys containing KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL, AUTH, or API (case-insensitive).
+
+**Where masking is applied today:**
+- `list_mcp_services` tool output (`McpServerSummary.env`)
+
+**Where masking must be added if new LLM-facing surfaces are added:**
+- Any future tool that returns `McpServerConfig` data
+- Any future "show config" or "status" tool output
+- Log statements that could capture tool args/results in a trace visible to users
+
+### Masked Sentinel Preservation
+
+`MASKED_VALUE_SENTINEL = "****"` means "preserve the existing stored value". This is implemented in `edit_mcp_service`:
+
+```rust
+// If LLM sends back "****", keep the real stored value — don't overwrite
+if v == MASKED_VALUE_SENTINEL {
+    let existing = server.env.get(&k).cloned().unwrap_or_default();
+    (k, existing)
+} else {
+    (k, v)  // LLM sent a new real value — store it
+}
+```
+
+**If a new tool accepts env vars as input** (e.g., a future `patch_mcp_service`), apply the same sentinel resolution pattern.
+
+**If adding a new server** (`add_mcp_service`): reject `****` values with a clear error — there is no existing value to preserve.
+
+### Logging Rules
+
+Never log sensitive values. Log key *names* only.
+
+```rust
+// WRONG
+tracing::info!(env = ?server.env, "Server configured");
+
+// CORRECT
+tracing::info!(env_keys = ?server.env.keys().collect::<Vec<_>>(), "Server configured");
+```
+
+### New LLM-Facing Output Structs
+
+When adding a new `#[derive(Serialize)]` struct that will be returned as tool output:
+
+1. If it wraps `McpServerConfig`, use `masked_env()` — never `.env`
+2. If it includes any `ProviderConfig` fields, exclude `api_key` (it is never exposed to the LLM)
+3. Add a test that the output contains `"****"` for a server with a real API key
+
+### Where Real Values Are Safe
+
+These paths use raw (unmasked) values intentionally:
+
+| Location | Why raw values are safe |
+|:---------|:------------------------|
+| `McpService::start_server` | Sets env vars on child process, never sent to LLM |
+| `mcp_json_repository` | Disk persistence, private config directory |
+| `providers_store.rs` → disk | API keys for LLM API auth, private storage only |

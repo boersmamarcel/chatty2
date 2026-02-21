@@ -60,6 +60,13 @@ Connect to **OpenAI**, **Anthropic**, **Google Gemini**, **Mistral**, **Azure Op
 - **Approval workflow**: auto-approve, prompt-per-action, or deny-all modes
 - **MCP integration**: connect any MCP server for dynamic tool capabilities
 
+### Security
+- **API key masking**: MCP server env vars containing sensitive keys (API keys, tokens, secrets, passwords) are automatically masked as `****` before being shown to the LLM — the real values never leave your machine
+- **Sentinel preservation**: when the LLM edits an MCP server and returns `****` for a key, the original stored value is preserved — accidental overwrites are impossible
+- **New servers disabled by default**: MCP servers added by the LLM start as disabled — you must explicitly enable them in Settings before they run
+- **Workspace sandboxing**: filesystem and bash tools are scoped to a directory you choose; the LLM cannot access anything outside it
+- **No telemetry**: nothing is sent anywhere except directly to the LLM provider you configured
+
 ### Thinking & Traces
 - **Extended thinking** blocks for Claude's chain-of-thought reasoning
 - **Tool call traces** with input, output, duration, and status
@@ -205,8 +212,16 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 - Real-time streaming output
 - Configurable approval modes
 
-### Meta Tool
+### Meta Tools
 - `list_tools` — Lists all available tools and their schemas (for LLM self-discovery)
+
+### MCP Management Tools (optional, enable in Settings → Execution)
+- `list_mcp_services` — Lists all configured MCP servers with masked env vars (safe for LLM)
+- `add_mcp_service` — Adds a new MCP server configuration (saved as disabled; user enables it)
+- `edit_mcp_service` — Edits an existing MCP server's command, args, env vars, or enabled state
+- `delete_mcp_service` — Removes an MCP server configuration and stops it if running
+
+> **Security note:** Sensitive env var values (API keys, tokens, etc.) are always masked as `****` when shown to the LLM. Sending `****` back in an edit preserves the original stored value.
 
 ---
 

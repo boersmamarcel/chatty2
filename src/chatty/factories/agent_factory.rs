@@ -7,8 +7,9 @@ use std::sync::OnceLock;
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
-    AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, GlobSearchTool,
-    ListDirectoryTool, ListToolsTool, MoveFileTool, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, DeleteMcpTool,
+    EditMcpTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool, MoveFileTool,
+    ReadBinaryTool, ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -31,6 +32,32 @@ type FsWriteTools = (
     MoveFileTool,
     ApplyDiffTool,
 );
+
+/// All four MCP management tools bundled together.
+///
+/// All four are gated on the same `mcp_service_tool_enabled` setting, so they
+/// are always constructed (or not) as a unit.
+struct McpTools {
+    add: Option<AddMcpTool>,
+    delete: Option<DeleteMcpTool>,
+    edit: Option<EditMcpTool>,
+    list: Option<ListMcpTool>,
+}
+
+impl McpTools {
+    fn none() -> Self {
+        Self {
+            add: None,
+            delete: None,
+            edit: None,
+            list: None,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.add.is_some()
+    }
+}
 
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
@@ -64,11 +91,20 @@ fn collect_tools(
     bash_tool: Option<BashTool>,
     fs_read: Option<FsReadTools>,
     fs_write: Option<FsWriteTools>,
-    add_mcp_tool: Option<AddMcpTool>,
+    mcp_mgmt: McpTools,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
-    if let Some(t) = add_mcp_tool {
+    if let Some(t) = mcp_mgmt.list {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = mcp_mgmt.add {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = mcp_mgmt.delete {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = mcp_mgmt.edit {
         tools.push(Box::new(t));
     }
     if let Some(t) = bash_tool {
@@ -236,33 +272,55 @@ impl AgentClient {
             "Total MCP tools registered with list_tools"
         );
 
-        // Create add_mcp_service tool (conditional on settings)
-        let add_mcp_tool: Option<AddMcpTool> = {
+        // Create MCP management tools (all four are gated on the same setting)
+        let mcp_mgmt_tools = {
             let enabled = exec_settings
                 .as_ref()
                 .map(|s| s.mcp_service_tool_enabled)
                 .unwrap_or(false);
             if enabled {
-                match (
+                let (add, delete, edit) = match (
                     crate::MCP_UPDATE_SENDER.get().cloned(),
                     crate::MCP_SERVICE.get().cloned(),
                 ) {
-                    (Some(sender), Some(service)) => Some(AddMcpTool::new_with_services(
-                        crate::MCP_REPOSITORY.clone(),
-                        sender,
-                        service,
-                    )),
+                    (Some(sender), Some(service)) => (
+                        AddMcpTool::new_with_services(
+                            crate::MCP_REPOSITORY.clone(),
+                            sender.clone(),
+                            service.clone(),
+                        ),
+                        DeleteMcpTool::new_with_services(
+                            crate::MCP_REPOSITORY.clone(),
+                            sender.clone(),
+                            service.clone(),
+                        ),
+                        EditMcpTool::new_with_services(
+                            crate::MCP_REPOSITORY.clone(),
+                            sender,
+                            service,
+                        ),
+                    ),
                     _ => {
                         tracing::warn!(
                             "MCP_UPDATE_SENDER or MCP_SERVICE not initialized; \
-                             add_mcp_tool created without live services"
+                             MCP tools created without live services"
                         );
-                        Some(AddMcpTool::new(crate::MCP_REPOSITORY.clone()))
+                        (
+                            AddMcpTool::new(crate::MCP_REPOSITORY.clone()),
+                            DeleteMcpTool::new(crate::MCP_REPOSITORY.clone()),
+                            EditMcpTool::new(crate::MCP_REPOSITORY.clone()),
+                        )
                     }
+                };
+                McpTools {
+                    add: Some(add),
+                    delete: Some(delete),
+                    edit: Some(edit),
+                    list: Some(ListMcpTool::new(crate::MCP_REPOSITORY.clone())),
                 }
             } else {
-                tracing::info!("add_mcp_service tool disabled by execution settings");
-                None
+                tracing::info!("MCP management tools disabled by execution settings");
+                McpTools::none()
             }
         };
 
@@ -271,7 +329,7 @@ impl AgentClient {
             bash_tool.is_some(),
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
-            add_mcp_tool.is_some(),
+            mcp_mgmt_tools.is_enabled(),
             mcp_tool_info,
         );
 
@@ -296,7 +354,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    add_mcp_tool,
+                    mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -322,7 +380,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    add_mcp_tool,
+                    mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -344,7 +402,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    add_mcp_tool,
+                    mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -370,7 +428,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    add_mcp_tool,
+                    mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -395,7 +453,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    add_mcp_tool,
+                    mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -538,7 +596,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
-                    add_mcp_tool,
+                    mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
