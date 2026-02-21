@@ -329,8 +329,8 @@ impl StreamManager {
             if is_match {
                 Some("__pending__".to_string())
             } else {
-                // No pending key either, try pending as fallback
-                Some("__pending__".to_string())
+                // Pending stream belongs to a different conversation, don't cancel it
+                None
             }
         } else {
             None
