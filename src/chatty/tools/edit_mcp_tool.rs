@@ -193,6 +193,9 @@ impl Tool for EditMcpTool {
             });
         };
 
+        // Capture enabled state before applying changes, so we know whether to stop the old instance.
+        let was_enabled = server.enabled;
+
         // Track what changed for the log message
         let mut changes = Vec::new();
 
@@ -255,13 +258,15 @@ impl Tool for EditMcpTool {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // Restart the server if it was enabled (stop then start)
+        // Restart the server if it was running before the edit, or start it if it was just enabled.
+        // Only stop if it was previously enabled (i.e. actually running).
         let was_restarted = if let Some(ref svc) = self.mcp_service {
-            // Always stop the old instance
-            if let Err(e) = svc.stop_server(&name).await {
+            if was_enabled
+                && let Err(e) = svc.stop_server(&name).await
+            {
                 tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server for restart");
             }
-            // Start new instance if enabled
+            // Start new instance if now enabled
             if server_enabled {
                 if let Err(e) = svc.start_server(updated_server).await {
                     tracing::warn!(server = %name, error = ?e, "MCP server edited but failed to restart");
