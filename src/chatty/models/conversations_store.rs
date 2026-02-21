@@ -73,6 +73,7 @@ impl ConversationsStore {
     }
 
     /// List all conversations (sorted by updated_at descending)
+    #[allow(dead_code)]
     pub fn list_all(&self) -> Vec<&Conversation> {
         let mut convs: Vec<&Conversation> = self.conversations.values().collect();
         convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at()));

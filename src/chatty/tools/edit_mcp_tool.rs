@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
+use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
 
 /// Error type for edit_mcp tool
@@ -87,10 +87,10 @@ fn validate_edit_args(args: &EditMcpToolArgs) -> Result<(), String> {
     }
 
     // Validate command if provided
-    if let Some(ref cmd) = args.command {
-        if cmd.trim().is_empty() {
-            return Err("Command cannot be empty".to_string());
-        }
+    if let Some(ref cmd) = args.command
+        && cmd.trim().is_empty()
+    {
+        return Err("Command cannot be empty".to_string());
     }
 
     // Validate env var keys if provided
@@ -151,7 +151,7 @@ impl Tool for EditMcpTool {
                     "env": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
-                        "description": "New environment variables. CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Omit this field entirely to keep current values unchanged."
+                        "description": "New environment variables. CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Omit this field entirely to keep current values unchanged. Sensitive values (API keys, tokens, passwords) are shown as '****' — pass '****' back unchanged to preserve the existing secret value."
                     },
                     "enabled": {
                         "type": "boolean",
@@ -205,8 +205,22 @@ impl Tool for EditMcpTool {
             server.args = new_args;
             changes.push("args");
         }
-        if let Some(env) = args.env {
-            server.env = env;
+        if let Some(new_env) = args.env {
+            // For each key whose value is the masked sentinel "****", preserve the
+            // existing stored value so the LLM cannot accidentally overwrite real
+            // API keys with the literal placeholder it received.
+            let resolved_env: HashMap<String, String> = new_env
+                .into_iter()
+                .map(|(k, v)| {
+                    if v == MASKED_VALUE_SENTINEL {
+                        let existing = server.env.get(&k).cloned().unwrap_or_default();
+                        (k, existing)
+                    } else {
+                        (k, v)
+                    }
+                })
+                .collect();
+            server.env = resolved_env;
             changes.push("env");
         }
         if let Some(enabled) = args.enabled {
@@ -557,6 +571,68 @@ mod tests {
         assert_eq!(saved[0].env.len(), 1);
         assert_eq!(saved[0].env.get("NEW_KEY").unwrap(), "new-val");
         assert!(!saved[0].env.contains_key("OLD_KEY")); // fully replaced
+    }
+
+    #[tokio::test]
+    async fn test_edit_env_sentinel_preserves_existing_value() {
+        // When the LLM sends "****" (the masked sentinel) for a key, the real
+        // stored value must be preserved — not overwritten with "****".
+        let mut original_env = HashMap::new();
+        original_env.insert("TAVILY_API_KEY".to_string(), "tvly-real-secret".to_string());
+        original_env.insert("HOST".to_string(), "localhost".to_string());
+        let servers = vec![test_server_with_env("my-server", original_env)];
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        // LLM sends back the sentinel for the API key and a real value for HOST
+        let mut env_from_llm = HashMap::new();
+        env_from_llm.insert("TAVILY_API_KEY".to_string(), "****".to_string());
+        env_from_llm.insert("HOST".to_string(), "remotehost".to_string());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: None,
+                args: None,
+                env: Some(env_from_llm),
+                enabled: None,
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        // Real API key must be preserved
+        assert_eq!(saved[0].env["TAVILY_API_KEY"], "tvly-real-secret");
+        // Non-sentinel value is updated normally
+        assert_eq!(saved[0].env["HOST"], "remotehost");
+    }
+
+    #[tokio::test]
+    async fn test_edit_env_sentinel_for_unknown_key_uses_empty_string() {
+        // If the LLM sends sentinel for a key that doesn't exist in the store,
+        // we fall back to an empty string (safe default — no phantom secrets).
+        let servers = vec![test_server("my-server")]; // no env vars
+        let repo = Arc::new(MockMcpRepository::with_servers(servers));
+        let tool = EditMcpTool::new(repo.clone());
+
+        let mut env_from_llm = HashMap::new();
+        env_from_llm.insert("NONEXISTENT_KEY".to_string(), "****".to_string());
+
+        let result = tool
+            .call(EditMcpToolArgs {
+                name: "my-server".to_string(),
+                command: None,
+                args: None,
+                env: Some(env_from_llm),
+                enabled: None,
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].env["NONEXISTENT_KEY"], "");
     }
 
     #[tokio::test]

@@ -124,6 +124,7 @@ pub struct DisplayMessage {
 
 impl DisplayMessage {
     /// Create an assistant display message
+    #[allow(dead_code)]
     pub fn from_assistant_message(assistant_msg: &AssistantMessage, cx: &mut App) -> Self {
         // Only create a trace view if the trace exists AND has items
         let trace_view = assistant_msg

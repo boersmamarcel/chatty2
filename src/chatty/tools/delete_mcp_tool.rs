@@ -153,10 +153,10 @@ impl Tool for DeleteMcpTool {
         }
 
         // Stop the server process
-        if let Some(ref svc) = self.mcp_service {
-            if let Err(e) = svc.stop_server(&name).await {
-                tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server during deletion");
-            }
+        if let Some(ref svc) = self.mcp_service
+            && let Err(e) = svc.stop_server(&name).await
+        {
+            tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server during deletion");
         }
 
         Ok(DeleteMcpToolOutput {
