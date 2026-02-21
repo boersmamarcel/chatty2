@@ -209,7 +209,15 @@ impl BashExecutor {
                             }
                         }
                         Err(e) => {
-                            // Sandboxing setup failed, try unsandboxed
+                            // Security validation errors must not fall back to unsandboxed
+                            let err_str = e.to_string();
+                            if err_str.contains("invalid characters")
+                                || err_str.contains("Failed to canonicalize")
+                                || err_str.contains("outside allowed paths")
+                            {
+                                return Err(e);
+                            }
+                            // Other sandboxing infrastructure failures can fall back
                             warn!(
                                 error = ?e,
                                 "Sandboxed execution setup failed, falling back to unsandboxed"

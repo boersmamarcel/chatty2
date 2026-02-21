@@ -154,8 +154,8 @@ mod tests {
 
         // No more false positives from substring matching
         assert!(!is_sensitive_env_key("MONKEY_HOST")); // contains KEY as substring
-        assert!(!is_sensitive_env_key("TURKEY"));       // contains KEY as substring
-        assert!(!is_sensitive_env_key("WORKPATH"));     // does not match PATH
+        assert!(!is_sensitive_env_key("TURKEY")); // contains KEY as substring
+        assert!(!is_sensitive_env_key("WORKPATH")); // does not match PATH
     }
 
     #[test]

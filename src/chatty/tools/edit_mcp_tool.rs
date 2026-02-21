@@ -101,9 +101,7 @@ fn validate_edit_args(args: &EditMcpToolArgs) -> Result<(), String> {
 
     // Must provide at least one field to update
     if args.command.is_none() && args.args.is_none() && args.env.is_none() {
-        return Err(
-            "At least one field (command, args, env) must be provided to edit".to_string(),
-        );
+        return Err("At least one field (command, args, env) must be provided to edit".to_string());
     }
 
     Ok(())

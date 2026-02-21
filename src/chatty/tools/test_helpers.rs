@@ -4,9 +4,9 @@
 /// [`McpRepository`] used by `add_mcp_tool`, `delete_mcp_tool`, and
 /// `edit_mcp_tool` test suites.
 use crate::settings::models::mcp_store::McpServerConfig;
+use crate::settings::repositories::McpRepository;
 use crate::settings::repositories::mcp_repository::BoxFuture;
 use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
-use crate::settings::repositories::McpRepository;
 use std::sync::Mutex;
 
 /// In-memory mock of [`McpRepository`] for unit tests.
@@ -75,10 +75,7 @@ impl McpRepository for MockMcpRepository {
         })
     }
 
-    fn save_all(
-        &self,
-        servers: Vec<McpServerConfig>,
-    ) -> BoxFuture<'static, RepositoryResult<()>> {
+    fn save_all(&self, servers: Vec<McpServerConfig>) -> BoxFuture<'static, RepositoryResult<()>> {
         let error = self.save_error.lock().unwrap().clone();
         *self.last_saved.lock().unwrap() = Some(servers);
         Box::pin(async move {
