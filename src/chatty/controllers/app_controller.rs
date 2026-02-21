@@ -16,7 +16,7 @@ use crate::chatty::views::chat_input::ChatInputState;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
-use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
+use crate::settings::models::{GlobalMcpNotifier, McpNotifier, McpNotifierEvent};
 
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
@@ -42,6 +42,9 @@ pub struct ChattyApp {
     /// Held while a conversation is being created; prevents concurrent creations.
     /// Automatically dropped (and thus "cleared") when the task completes.
     active_create_task: Option<Task<anyhow::Result<String>>>,
+    /// Keeps the McpNotifier entity alive for the app's lifetime so that
+    /// GlobalMcpNotifier's WeakEntity remains upgradeable.
+    _mcp_notifier: Entity<McpNotifier>,
 }
 
 impl ChattyApp {
@@ -60,6 +63,13 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
+        // Create the MCP notifier and keep the strong entity alive in ChattyApp
+        // so GlobalMcpNotifier's WeakEntity remains upgradeable for the app's lifetime.
+        let mcp_notifier = cx.new(|_cx| McpNotifier::new());
+        cx.set_global(GlobalMcpNotifier {
+            entity: Some(mcp_notifier.downgrade()),
+        });
+
         let app = Self {
             chat_view,
             sidebar_view,
@@ -68,6 +78,7 @@ impl ChattyApp {
             active_stream_tasks: HashMap::new(),
             pending_task_resolved_ids: HashMap::new(),
             active_create_task: None,
+            _mcp_notifier: mcp_notifier,
         };
 
         // Store entity in global state for later access
@@ -919,10 +930,10 @@ impl ChattyApp {
             return;
         };
 
-        debug!(
+        info!(
             conv_id = %conv_id,
             model_id = %model_id,
-            "Rebuilding conversation agent after MCP change"
+            "Rebuilding conversation agent after tool set change"
         );
 
         cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
@@ -933,6 +944,18 @@ impl ChattyApp {
             let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok();
             let mcp_tools =
                 mcp_tools.and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+
+            let mcp_server_count = mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0);
+            let mcp_tool_count: usize = mcp_tools
+                .as_ref()
+                .map(|t| t.iter().map(|(_, tools, _)| tools.len()).sum())
+                .unwrap_or(0);
+            info!(
+                conv_id = %conv_id,
+                mcp_server_count,
+                mcp_tool_count,
+                "Rebuilding agent with fresh MCP tools"
+            );
 
             let (exec_settings, pending_approvals, pending_write_approvals) = cx
                 .update(|cx| {
@@ -962,7 +985,9 @@ impl ChattyApp {
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.set_agent(new_agent, model_config.id.clone());
-                    debug!(conv_id = %conv_id, "Agent rebuilt with updated MCP tools");
+                    info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
+                } else {
+                    warn!(conv_id = %conv_id, "Conversation not found during agent rebuild — skipping");
                 }
             })
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;

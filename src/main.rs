@@ -367,12 +367,6 @@ fn main() {
             entity: Some(models_notifier.downgrade()),
         });
 
-        // Initialize MCP notifier entity for event subscriptions
-        let mcp_notifier = cx.new(|_cx| settings::models::McpNotifier::new());
-        cx.set_global(settings::models::GlobalMcpNotifier {
-            entity: Some(mcp_notifier.downgrade()),
-        });
-
         // Create MCP update channel and spawn listener that updates global + emits event
         let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::channel::<
             Vec<settings::models::mcp_store::McpServerConfig>,
