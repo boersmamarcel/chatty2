@@ -1675,12 +1675,15 @@ impl ChattyApp {
                         );
                     }
                     StreamStatus::Cancelled => {
-                        self.finalize_stopped_stream(
-                            conversation_id,
-                            response_text,
-                            trace_json.clone(),
-                            cx,
-                        );
+                        // Pending streams have no conversation yet — only UI reset (done above)
+                        if conversation_id != "__pending__" {
+                            self.finalize_stopped_stream(
+                                conversation_id,
+                                response_text,
+                                trace_json.clone(),
+                                cx,
+                            );
+                        }
                     }
                     _ => {}
                 }
