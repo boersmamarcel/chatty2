@@ -1648,7 +1648,6 @@ impl ChattyApp {
             StreamManagerEvent::StreamEnded {
                 conversation_id,
                 status,
-                response_text,
                 token_usage,
                 trace_json,
             } => {
@@ -1668,7 +1667,6 @@ impl ChattyApp {
                     StreamStatus::Completed => {
                         self.finalize_completed_stream(
                             conversation_id,
-                            response_text,
                             *token_usage,
                             trace_json.clone(),
                             cx,
@@ -1679,7 +1677,6 @@ impl ChattyApp {
                         if conversation_id != "__pending__" {
                             self.finalize_stopped_stream(
                                 conversation_id,
-                                response_text,
                                 trace_json.clone(),
                                 cx,
                             );
@@ -1736,6 +1733,9 @@ impl ChattyApp {
     /// Handle the finalization of a successfully completed stream.
     /// Called from handle_stream_manager_event when StreamEnded with Completed status.
     ///
+    /// Reads the accumulated response text from `ConversationsStore.streaming_message`
+    /// (the single source of truth for streaming content).
+    ///
     /// Performs:
     /// 1. Finalize assistant message in UI (stop streaming animation)
     /// 2. Save response + trace to conversation model
@@ -1746,7 +1746,6 @@ impl ChattyApp {
     fn finalize_completed_stream(
         &mut self,
         conversation_id: &str,
-        response_text: &str,
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
         cx: &mut Context<Self>,
@@ -1762,11 +1761,16 @@ impl ChattyApp {
             }
         });
 
-        // 2. Finalize response in conversation model and check if title gen needed
+        // 2. Read response text from ConversationsStore (single source of truth),
+        //    finalize in conversation model, and check if title gen needed
         let should_generate_title =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                    conv.finalize_response(response_text.to_string());
+                    let response_text = conv
+                        .streaming_message()
+                        .cloned()
+                        .unwrap_or_default();
+                    conv.finalize_response(response_text);
                     conv.add_trace(trace_json);
                     let msg_count = conv.message_count();
                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
@@ -1891,10 +1895,12 @@ impl ChattyApp {
 
     /// Handle the finalization of a stopped stream (partial response saving).
     /// Called from handle_stream_manager_event when StreamEnded with Cancelled status.
+    ///
+    /// Reads the accumulated partial response from `ConversationsStore.streaming_message`
+    /// (the single source of truth for streaming content).
     fn finalize_stopped_stream(
         &mut self,
         conversation_id: &str,
-        response_text: &str,
         trace_json: Option<serde_json::Value>,
         cx: &mut Context<Self>,
     ) {
@@ -1908,23 +1914,15 @@ impl ChattyApp {
             }
         });
 
-        // Use response_text from StreamManager (source of truth), but fall back to
-        // Conversation model's streaming_message if StreamManager had nothing
-        let final_text = if response_text.is_empty() {
-            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                store
-                    .get_conversation(&conv_id)
-                    .and_then(|conv| conv.streaming_message().cloned())
-                    .unwrap_or_default()
-            })
-        } else {
-            response_text.to_string()
-        };
-
-        // Save the partial response to conversation history
+        // Read partial response from ConversationsStore (single source of truth)
+        // and save to conversation history
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                conv.finalize_response(final_text);
+                let partial_text = conv
+                    .streaming_message()
+                    .cloned()
+                    .unwrap_or_default();
+                conv.finalize_response(partial_text);
                 conv.add_trace(trace_json);
                 conv.set_streaming_message(None);
                 debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");

@@ -1,6 +1,8 @@
 # StreamManager Architecture
 
-The StreamManager is a centralized GPUI entity that owns all LLM response stream state, emits typed events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. It enables concurrent multi-conversation streaming where background streams continue accumulating data even when the UI is showing a different conversation.
+The StreamManager is a centralized GPUI entity that manages stream lifecycle (status, cancellation, token usage, trace), emits typed events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. It enables concurrent multi-conversation streaming where background streams continue accumulating data even when the UI is showing a different conversation.
+
+**Key design principle:** StreamManager does NOT accumulate response text. Text accumulation is the sole responsibility of `ConversationsStore.streaming_message`, ensuring a single source of truth and avoiding dual-write divergence.
 
 ## Entity Ownership
 
@@ -8,7 +10,6 @@ The StreamManager is a centralized GPUI entity that owns all LLM response stream
 GlobalStreamManager (GPUI Global)
   └── Entity<StreamManager>
         └── HashMap<String, StreamState>   (one entry per active stream)
-              ├── response_text: String
               ├── status: StreamStatus
               ├── token_usage: Option<(u32, u32)>
               ├── trace_json: Option<Value>
@@ -18,7 +19,7 @@ GlobalStreamManager (GPUI Global)
 ConversationsStore (GPUI Global)
   └── HashMap<String, Conversation>
         ├── history: Vec<Message>
-        ├── streaming_message: Option<String>   ← accumulates text during streaming
+        ├── streaming_message: Option<String>   ← single source of truth for streaming text
         ├── agent: AgentClient
         ├── model_id, title, token_usage, ...
         └── system_traces: Vec<Option<Value>>
@@ -78,24 +79,26 @@ cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
 
 All events carry a `conversation_id`. The handler checks `view.conversation_id() == Some(conversation_id)` before forwarding to ChatView -- events for non-displayed conversations are silently skipped at the UI level, while data-level operations (finalize, persist) always execute.
 
-## Dual-Write Pattern
+## Text Accumulation: Single Source of Truth
 
-During streaming, text content is written to **two** locations simultaneously:
+During streaming, text is accumulated in **one** location only:
 
 ```
 StreamChunk::Text("hello")
     │
     ├──► ConversationsStore: conv.append_streaming_content("hello")
-    │    Purpose: source of truth for background streams.
-    │    When the user switches away and back, content is restored from here.
+    │    Single source of truth for streaming text.
+    │    - Used for background stream restoration when switching conversations
+    │    - Read at finalization to save the complete response to history
     │
-    └──► StreamManager: state.response_text.push_str("hello")
-         Purpose: source of truth for finalization.
-         When stream ends, response_text is passed via StreamEnded event
-         to finalize_completed_stream / finalize_stopped_stream.
+    └──► StreamManager: handle_chunk() emits TextChunk event (pass-through only)
+         StreamManager does NOT store the text. It only forwards the event
+         to the UI subscription for real-time display.
 ```
 
-At finalization, `Conversation.streaming_message` is cleared since the response is now in `history`.
+At finalization, `finalize_completed_stream` / `finalize_stopped_stream` reads the accumulated text from `Conversation.streaming_message`, calls `conv.finalize_response()` to move it into history, then clears `streaming_message`.
+
+This design avoids dual-write divergence where two copies of the same text could fall out of sync due to independent error handling paths.
 
 ## Sequence Diagrams
 
@@ -145,7 +148,7 @@ sequenceDiagram
     SM-->>CA: StreamEnded { Completed }
     CA->>CIS: set_streaming(false)
     CA->>CV: finalize_assistant_message()
-    CA->>CS: conv.finalize_response(response_text)
+    CA->>CS: Read streaming_message, finalize_response()
     CA->>CA: Generate title, calculate cost, persist
 ```
 
@@ -261,11 +264,11 @@ sequenceDiagram
 
     Note over SM: Sets cancel_flag = true<br/>Sets status = Cancelled<br/>Drops task (backstop)
 
-    SM-->>CA: StreamEnded { conv_id, Cancelled, response_text }
+    SM-->>CA: StreamEnded { conv_id, Cancelled }
     CA->>CIS: set_streaming(false)
     CA->>CA: finalize_stopped_stream()
     CA->>CV: mark_message_cancelled()
-    CA->>CS: conv.finalize_response(partial_text)
+    CA->>CS: Read streaming_message, finalize_response(partial_text)
     CA->>CS: conv.set_streaming_message(None)
     CA->>CA: persist_conversation()
 ```

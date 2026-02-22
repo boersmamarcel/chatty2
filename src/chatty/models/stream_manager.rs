@@ -17,9 +17,12 @@ pub enum StreamStatus {
     Error(String),
 }
 
-/// Per-conversation stream state
+/// Per-conversation stream state.
+///
+/// The StreamManager does NOT accumulate response text — that is the sole
+/// responsibility of `ConversationsStore.streaming_message`. StreamManager
+/// only tracks lifecycle (status, cancellation, token usage, trace).
 pub struct StreamState {
-    pub response_text: String,
     pub status: StreamStatus,
     pub token_usage: Option<(u32, u32)>,
     pub trace_json: Option<serde_json::Value>,
@@ -78,7 +81,6 @@ pub enum StreamManagerEvent {
     StreamEnded {
         conversation_id: String,
         status: StreamStatus,
-        response_text: String,
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
     },
@@ -86,7 +88,11 @@ pub enum StreamManagerEvent {
 
 /// Centralized stream lifecycle manager.
 ///
-/// Owns all stream state in a single `HashMap<String, StreamState>`.
+/// Owns stream lifecycle state (status, cancellation, token usage, trace) in a
+/// `HashMap<String, StreamState>`. Does NOT accumulate response text — that is
+/// the sole responsibility of `ConversationsStore.streaming_message` to avoid
+/// dual-write divergence.
+///
 /// Emits `StreamManagerEvent` for decoupled UI updates.
 /// Uses cancellation tokens (`Arc<AtomicBool>`) for graceful shutdown.
 pub struct StreamManager {
@@ -122,7 +128,6 @@ impl StreamManager {
         self.streams.insert(
             conv_id.clone(),
             StreamState {
-                response_text: String::new(),
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -154,7 +159,6 @@ impl StreamManager {
         self.streams.insert(
             "__pending__".to_string(),
             StreamState {
-                response_text: String::new(),
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -182,6 +186,9 @@ impl StreamManager {
     }
 
     /// Process a stream chunk: update internal state and emit the corresponding event.
+    ///
+    /// Note: Text chunks are emitted as events for UI updates but NOT accumulated
+    /// in StreamManager. Text accumulation happens in `ConversationsStore.streaming_message`.
     pub fn handle_chunk(
         &mut self,
         conv_id: &str,
@@ -190,9 +197,6 @@ impl StreamManager {
     ) {
         match chunk {
             StreamChunk::Text(text) => {
-                if let Some(state) = self.streams.get_mut(conv_id) {
-                    state.response_text.push_str(&text);
-                }
                 cx.emit(StreamManagerEvent::TextChunk {
                     conversation_id: conv_id.to_string(),
                     text,
@@ -265,21 +269,15 @@ impl StreamManager {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.status = StreamStatus::Error(error.clone());
                 }
-                // Error handling: emit StreamEnded with error status
-                let (response_text, token_usage, trace_json) =
+                let (token_usage, trace_json) =
                     if let Some(state) = self.streams.get(conv_id) {
-                        (
-                            state.response_text.clone(),
-                            state.token_usage,
-                            state.trace_json.clone(),
-                        )
+                        (state.token_usage, state.trace_json.clone())
                     } else {
-                        (String::new(), None, None)
+                        (None, None)
                     };
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: conv_id.to_string(),
                     status: StreamStatus::Error(error),
-                    response_text,
                     token_usage,
                     trace_json,
                 });
@@ -291,13 +289,9 @@ impl StreamManager {
     /// Mark a stream as completed and emit StreamEnded.
     /// Called when the stream loop finishes normally.
     pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
-        let (response_text, token_usage, trace_json) =
+        let (token_usage, trace_json) =
             if let Some(state) = self.streams.get(conv_id) {
-                (
-                    state.response_text.clone(),
-                    state.token_usage,
-                    state.trace_json.clone(),
-                )
+                (state.token_usage, state.trace_json.clone())
             } else {
                 warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
                 return;
@@ -306,7 +300,6 @@ impl StreamManager {
         cx.emit(StreamManagerEvent::StreamEnded {
             conversation_id: conv_id.to_string(),
             status: StreamStatus::Completed,
-            response_text,
             token_usage,
             trace_json,
         });
@@ -315,8 +308,7 @@ impl StreamManager {
     }
 
     /// Gracefully stop a stream using its cancellation token.
-    /// Returns the partial response text accumulated so far.
-    pub fn stop_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) -> Option<String> {
+    pub fn stop_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
         // Try direct key first
         let key = if self.streams.contains_key(conv_id) {
             Some(conv_id.to_string())
@@ -338,18 +330,17 @@ impl StreamManager {
             None
         };
 
-        let key = key?;
+        let Some(key) = key else { return };
 
         if let Some(mut state) = self.streams.remove(&key) {
             // Set cancellation flag for graceful shutdown
             state.cancel_flag.store(true, Ordering::Relaxed);
             state.status = StreamStatus::Cancelled;
 
-            let response_text = state.response_text.clone();
             let token_usage = state.token_usage;
             let trace_json = state.trace_json.clone();
 
-            debug!(conv_id = %conv_id, text_len = response_text.len(), "Stream stopped gracefully");
+            debug!(conv_id = %conv_id, "Stream stopped gracefully");
 
             // Drop the task (backstop — the cancel flag should cause clean exit)
             drop(state.task.take());
@@ -357,7 +348,6 @@ impl StreamManager {
             cx.emit(StreamManagerEvent::StreamEnded {
                 conversation_id: conv_id.to_string(),
                 status: StreamStatus::Cancelled,
-                response_text: response_text.clone(),
                 token_usage,
                 trace_json,
             });
@@ -366,10 +356,6 @@ impl StreamManager {
             if key == "__pending__" {
                 self.pending_resolved_ids.remove("__pending__");
             }
-
-            Some(response_text)
-        } else {
-            None
         }
     }
 
@@ -381,7 +367,6 @@ impl StreamManager {
             cx.emit(StreamManagerEvent::StreamEnded {
                 conversation_id: "__pending__".to_string(),
                 status: StreamStatus::Cancelled,
-                response_text: state.response_text,
                 token_usage: state.token_usage,
                 trace_json: state.trace_json,
             });
@@ -410,12 +395,6 @@ impl StreamManager {
         !self.streams.is_empty()
     }
 
-    /// Get the accumulated response text for a stream.
-    #[allow(dead_code)]
-    pub fn get_response_text(&self, conv_id: &str) -> Option<&str> {
-        self.streams.get(conv_id).map(|s| s.response_text.as_str())
-    }
-
     /// Set trace JSON on an active stream (called before finalization).
     pub fn set_trace(&mut self, conv_id: &str, trace: Option<serde_json::Value>) {
         if let Some(state) = self.streams.get_mut(conv_id) {
@@ -432,7 +411,6 @@ impl StreamManager {
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: key,
                     status: StreamStatus::Cancelled,
-                    response_text: state.response_text,
                     token_usage: state.token_usage,
                     trace_json: state.trace_json,
                 });
@@ -472,7 +450,6 @@ mod tests {
         mgr.streams.insert(
             "__pending__".to_string(),
             StreamState {
-                response_text: String::new(),
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -490,7 +467,6 @@ mod tests {
         mgr.streams.insert(
             "__pending__".to_string(),
             StreamState {
-                response_text: "partial".to_string(),
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -507,27 +483,7 @@ mod tests {
 
         assert!(!mgr.streams.contains_key("__pending__"));
         assert!(mgr.streams.contains_key("conv-456"));
-        assert_eq!(mgr.get_response_text("conv-456"), Some("partial"));
         assert!(mgr.pending_resolved_ids.is_empty());
-    }
-
-    #[test]
-    fn test_get_response_text() {
-        let mut mgr = StreamManager::new();
-        assert_eq!(mgr.get_response_text("missing"), None);
-
-        mgr.streams.insert(
-            "conv-1".to_string(),
-            StreamState {
-                response_text: "hello world".to_string(),
-                status: StreamStatus::Active,
-                token_usage: None,
-                trace_json: None,
-                task: None,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
-            },
-        );
-        assert_eq!(mgr.get_response_text("conv-1"), Some("hello world"));
     }
 
     #[test]
@@ -536,7 +492,6 @@ mod tests {
         mgr.streams.insert(
             "conv-1".to_string(),
             StreamState {
-                response_text: String::new(),
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
