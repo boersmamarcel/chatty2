@@ -1,18 +1,22 @@
 use gpui::*;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
-use crate::chatty::models::{Conversation, ConversationsStore, StreamChunk};
+use crate::chatty::models::{
+    Conversation, ConversationsStore, GlobalStreamManager, StreamChunk, StreamManagerEvent,
+    StreamStatus,
+};
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
 use crate::chatty::services::{generate_title, stream_prompt};
-use crate::chatty::views::chat_input::ChatInputState;
+use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
+use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
@@ -31,14 +35,6 @@ pub struct ChattyApp {
     pub sidebar_view: Entity<SidebarView>,
     conversation_repo: Arc<dyn ConversationRepository>,
     is_ready: bool,
-    /// Maps conversation_id → active stream task
-    /// Allows multiple conversations to have concurrent streams
-    active_stream_tasks: HashMap<String, Task<anyhow::Result<()>>>,
-    /// Maps "__pending__" → Arc<Mutex<Option<String>>> to track resolved conversation ID
-    /// When a task is created with no conversation ID, we store a shared reference here.
-    /// The async block updates this once the real conversation ID is known.
-    /// This allows load_conversation to detect active streams even if the task hasn't been re-keyed yet.
-    pending_task_resolved_ids: HashMap<String, Arc<Mutex<Option<String>>>>,
     /// Held while a conversation is being created; prevents concurrent creations.
     /// Automatically dropped (and thus "cleared") when the task completes.
     active_create_task: Option<Task<anyhow::Result<String>>>,
@@ -75,8 +71,6 @@ impl ChattyApp {
             sidebar_view,
             conversation_repo,
             is_ready: false,
-            active_stream_tasks: HashMap::new(),
-            pending_task_resolved_ids: HashMap::new(),
             active_create_task: None,
             _mcp_notifier: mcp_notifier,
         };
@@ -114,24 +108,31 @@ impl ChattyApp {
         self.load_conversations(cx);
     }
 
-    /// Set up all callbacks between components
+    /// Set up all event subscriptions between components
+    ///
+    /// All entity-to-entity communication uses EventEmitter/cx.subscribe():
+    /// 1. SidebarView emits SidebarEvent → ChattyApp handles
+    /// 2. ChatInputState emits ChatInputEvent → ChattyApp handles
+    /// 3. McpNotifier emits McpNotifierEvent → ChattyApp handles
+    /// 4. StreamManager emits StreamManagerEvent → ChattyApp handles
     fn setup_callbacks(&self, cx: &mut Context<Self>) {
-        // Setup sidebar callbacks
-        let chat_view = self.chat_view.clone();
-        let sidebar = self.sidebar_view.clone();
-
-        // Get entity to use in callbacks (avoids window lookup issues)
-        let app_entity = cx.entity();
-
-        // New chat callback (guarded against rapid clicks via active_create_task)
-        sidebar.update(cx, |sidebar, _cx| {
-            let app = app_entity.clone();
-            sidebar.set_on_new_chat(move |cx| {
-                let app = app.clone();
-                app.update(cx, |app, cx| {
+        // SUBSCRIPTION 1: SidebarView events
+        cx.subscribe(
+            &self.sidebar_view,
+            |app, _sidebar, event: &SidebarEvent, cx| match event {
+                SidebarEvent::NewChat => {
                     if app.active_create_task.is_some() {
                         debug!("Already creating a conversation, ignoring duplicate click");
                         return;
+                    }
+                    // Cancel any pending stream before creating a new conversation
+                    if let Some(manager) = cx
+                        .try_global::<GlobalStreamManager>()
+                        .and_then(|g| g.entity.clone())
+                    {
+                        manager.update(cx, |mgr, cx| {
+                            mgr.cancel_pending(cx);
+                        });
                     }
                     let create_task = app.create_new_conversation(cx);
                     // Wrap so the guard auto-clears when the task finishes
@@ -146,157 +147,94 @@ impl ChattyApp {
                         }
                         result
                     }));
-                });
-            });
-        });
-
-        // Settings callback
-        sidebar.update(cx, |sidebar, _cx| {
-            sidebar.set_on_settings(move |cx| {
-                cx.defer(|cx| {
-                    use crate::settings::controllers::SettingsView;
-                    SettingsView::open_or_focus_settings_window(cx);
-                });
-            });
-        });
-
-        // Select conversation callback
-        sidebar.update(cx, |sidebar, _cx| {
-            let app = app_entity.clone();
-            sidebar.set_on_select_conversation(move |conv_id, cx| {
-                let app = app.clone();
-                let id = conv_id.to_string();
-                app.update(cx, |app, cx| {
-                    app.load_conversation(&id, cx);
-                });
-            });
-        });
-
-        // Delete conversation callback
-        sidebar.update(cx, |sidebar, _cx| {
-            let app = app_entity.clone();
-            sidebar.set_on_delete_conversation(move |conv_id, cx| {
-                let app = app.clone();
-                let id = conv_id.to_string();
-                app.update(cx, |app, cx| {
-                    app.delete_conversation(&id, cx);
-                });
-            });
-        });
-
-        // Toggle sidebar callback
-        sidebar.update(cx, |sidebar, _cx| {
-            sidebar.set_on_toggle(move |collapsed, _cx| {
-                // Optional: Could save collapsed state to settings here
-                debug!(collapsed = collapsed, "Sidebar toggled");
-            });
-        });
-
-        // Load more conversations callback
-        let sidebar_for_load_more = sidebar.clone();
-        sidebar.update(cx, |sidebar, _cx| {
-            sidebar.set_on_load_more(move |cx| {
-                sidebar_for_load_more.update(cx, |sidebar, cx| {
-                    let store = cx.global::<ConversationsStore>();
-                    let total = store.count();
-                    let convs = store
-                        .list_recent(sidebar.visible_limit())
-                        .iter()
-                        .map(|c| {
-                            (
-                                c.id().to_string(),
-                                c.title().to_string(),
-                                Some(c.token_usage().total_estimated_cost_usd),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    debug!(
-                        conv_count = convs.len(),
-                        total = total,
-                        limit = sidebar.visible_limit(),
-                        "Load More: Reloading conversations with new limit"
-                    );
-                    sidebar.set_conversations(convs, cx);
-                    sidebar.set_total_count(total);
-                });
-            });
-        });
-
-        // Chat input send message callback
-        chat_view.update(cx, |view, cx| {
-            let input_state = view.chat_input_state().clone();
-            let app_for_send = app_entity.clone();
-            input_state.update(cx, |state, _cx| {
-                debug!("Setting up on_send callback for chat input");
-                state.set_on_send(move |message, attachments, cx| {
-                    debug!(message = %message, attachment_count = attachments.len(), "on_send callback triggered");
-                    let app = app_for_send.clone();
-                    let msg = message.clone();
-                    let att = attachments.clone();
-
-                    debug!("Calling send_message directly via entity");
-                    app.update(cx, |app, cx| {
-                        app.send_message(msg, att, cx);
+                }
+                SidebarEvent::OpenSettings => {
+                    cx.defer(|cx| {
+                        use crate::settings::controllers::SettingsView;
+                        SettingsView::open_or_focus_settings_window(cx);
                     });
-                });
-            });
-        });
+                }
+                SidebarEvent::SelectConversation(conv_id) => {
+                    app.load_conversation(conv_id, cx);
+                }
+                SidebarEvent::DeleteConversation(conv_id) => {
+                    app.delete_conversation(conv_id, cx);
+                }
+                SidebarEvent::ToggleCollapsed(collapsed) => {
+                    // Optional: Could save collapsed state to settings here
+                    debug!(collapsed = collapsed, "Sidebar toggled");
+                }
+                SidebarEvent::LoadMore => {
+                    let sidebar = app.sidebar_view.clone();
+                    sidebar.update(cx, |sidebar, cx| {
+                        let store = cx.global::<ConversationsStore>();
+                        let total = store.count();
+                        let convs = store
+                            .list_recent(sidebar.visible_limit())
+                            .iter()
+                            .map(|c| {
+                                (
+                                    c.id().to_string(),
+                                    c.title().to_string(),
+                                    Some(c.token_usage().total_estimated_cost_usd),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        debug!(
+                            conv_count = convs.len(),
+                            total = total,
+                            limit = sidebar.visible_limit(),
+                            "Load More: Reloading conversations with new limit"
+                        );
+                        sidebar.set_conversations(convs, cx);
+                        sidebar.set_total_count(total);
+                    });
+                }
+            },
+        )
+        .detach();
 
-        // Chat input model change callback
-        chat_view.update(cx, |view, cx| {
-            let input_state = view.chat_input_state().clone();
-            let app_for_model = app_entity.clone();
-            input_state.update(cx, |state, _cx| {
-                debug!("Setting up on_model_change callback for chat input");
-                state.set_on_model_change(move |model_id, cx| {
-                    debug!(model_id = %model_id, "on_model_change callback triggered");
-                    let app = app_for_model.clone();
+        // SUBSCRIPTION 2: ChatInputState events
+        let chat_input_state = self.chat_view.read(cx).chat_input_state().clone();
+        cx.subscribe(
+            &chat_input_state,
+            |app, _input, event: &ChatInputEvent, cx| match event {
+                ChatInputEvent::Send {
+                    message,
+                    attachments,
+                } => {
+                    debug!(message = %message, attachment_count = attachments.len(), "ChatInputEvent::Send received");
+                    app.send_message(message.clone(), attachments.clone(), cx);
+                }
+                ChatInputEvent::ModelChanged(model_id) => {
+                    debug!(model_id = %model_id, "ChatInputEvent::ModelChanged received");
+                    // Defer capability update to avoid re-entering ChatInputState
+                    let chat_view = app.chat_view.clone();
                     let mid = model_id.clone();
+                    cx.defer(move |cx| {
+                        let capabilities = cx
+                            .global::<ModelsModel>()
+                            .get_model(&mid)
+                            .map(|m| (m.supports_images, m.supports_pdf))
+                            .unwrap_or((false, false));
 
-                    app.update(cx, |app, cx| {
-                        // Defer capability update to avoid re-entering ChatInputState
-                        let chat_view = app.chat_view.clone();
-                        let mid_for_defer = mid.clone();
-                        cx.defer(move |cx| {
-                            let capabilities = cx
-                                .global::<ModelsModel>()
-                                .get_model(&mid_for_defer)
-                                .map(|m| (m.supports_images, m.supports_pdf))
-                                .unwrap_or((false, false));
-
-                            chat_view.update(cx, |view, cx| {
-                                view.chat_input_state().update(cx, |state, _cx| {
-                                    state.set_capabilities(capabilities.0, capabilities.1);
-                                });
+                        chat_view.update(cx, |view, cx| {
+                            view.chat_input_state().update(cx, |state, _cx| {
+                                state.set_capabilities(capabilities.0, capabilities.1);
                             });
                         });
-
-                        app.change_conversation_model(mid, cx);
                     });
-                });
-            });
-        });
+                    app.change_conversation_model(model_id.clone(), cx);
+                }
+                ChatInputEvent::Stop => {
+                    debug!("ChatInputEvent::Stop received");
+                    app.stop_stream(cx);
+                }
+            },
+        )
+        .detach();
 
-        // Chat input stop stream callback
-        chat_view.update(cx, |view, cx| {
-            let input_state = view.chat_input_state().clone();
-            let app_for_stop = app_entity.clone();
-            input_state.update(cx, |state, _cx| {
-                debug!("Setting up on_stop callback for chat input");
-                state.set_on_stop(move |cx| {
-                    debug!("on_stop callback triggered");
-                    let app = app_for_stop.clone();
-
-                    app.update(cx, |app, cx| {
-                        // stop_stream now handles clearing the stream from HashMap
-                        // and updating UI state, so no need for separate clear_streaming_state call
-                        app.stop_stream(cx);
-                    });
-                });
-            });
-        });
-
-        // Rebuild active conversation's agent when MCP servers are toggled on/off
+        // SUBSCRIPTION 3: McpNotifier events — rebuild agent when MCP servers change
         if let Some(weak_notifier) = cx
             .try_global::<GlobalMcpNotifier>()
             .and_then(|g| g.entity.clone())
@@ -310,6 +248,17 @@ impl ChattyApp {
                     }
                 },
             )
+            .detach();
+        }
+
+        // SUBSCRIPTION 4: StreamManager events — decoupled UI updates
+        if let Some(manager) = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
+                app.handle_stream_manager_event(event, cx);
+            })
             .detach();
         }
     }
@@ -616,12 +565,6 @@ impl ChattyApp {
                 let conv_id = uuid::Uuid::new_v4().to_string();
                 let title = "New Chat".to_string();
 
-                // Cancel any pending stream for conversations without IDs
-                if let Some(task) = self.active_stream_tasks.remove("__pending__") {
-                    debug!("Cancelling pending stream when creating new conversation");
-                    drop(task);
-                }
-
                 // Clear chat view immediately so the user sees a fresh state
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone(), cx);
@@ -810,26 +753,12 @@ impl ChattyApp {
         });
 
         if let Some((model_id, streaming_content)) = minimal_data {
-            // Check if this conversation has an active stream
-            // First check direct key, then check if there's a pending task that resolved to this ID
-            let mut has_active_stream = self.active_stream_tasks.contains_key(&conv_id);
-            if !has_active_stream {
-                // Check if "__pending__" task has resolved to this conversation ID
-                has_active_stream = self
-                    .pending_task_resolved_ids
-                    .get("__pending__")
-                    .and_then(|resolved_id_mutex| resolved_id_mutex.lock().ok())
-                    .as_ref()
-                    .and_then(|resolved_id| {
-                        if resolved_id.as_ref() == Some(&conv_id) {
-                            debug!(conv_id = %conv_id, "Found active stream via pending task resolution");
-                            Some(true)
-                        } else {
-                            None
-                        }
-                    })
-                    .is_some();
-            }
+            // Check if this conversation has an active stream via StreamManager
+            let has_active_stream = cx
+                .try_global::<GlobalStreamManager>()
+                .and_then(|g| g.entity.clone())
+                .map(|mgr| mgr.read(cx).is_streaming(&conv_id))
+                .unwrap_or(false);
 
             // Get model capabilities
             let model_capabilities = cx
@@ -1200,24 +1129,17 @@ impl ChattyApp {
         .detach();
     }
 
-    /// Send a message to the LLM and stream the response
+    /// Send a message to the LLM and stream the response.
     ///
-    /// This is the main message-handling function with the following phases:
-    /// 1. Ensure conversation exists (create if needed)
-    /// 2. Update UI with user message
-    /// 3. Filter attachments based on provider capabilities
-    /// 4. Stream LLM response and update UI incrementally
-    /// 5. Finalize response and save to conversation
-    /// 6. Generate title for first exchange
-    /// 7. Update token usage and persist to disk
+    /// Spawns an async task that:
+    /// 1. Ensures a conversation exists (creates one if needed)
+    /// 2. Sets up UI with user message + assistant placeholder
+    /// 3. Filters attachments based on provider capabilities
+    /// 4. Runs the stream loop (forwards chunks to StreamManager)
+    /// 5. Extracts trace and calls `finalize_stream()` on StreamManager
     ///
-    /// # Note
-    /// This function is complex (400+ lines) and could benefit from extraction
-    /// of helper functions in future refactoring. The main complexity comes from:
-    /// - Async/await with GPUI entity updates
-    /// - Stream processing with multiple chunk types
-    /// - UI synchronization during streaming
-    /// - Title generation and token usage tracking
+    /// UI updates, finalization, title generation, token usage, and persistence
+    /// are handled by `handle_stream_manager_event()` reacting to StreamManager events.
     fn send_message(&mut self, message: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
         debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
@@ -1228,21 +1150,8 @@ impl ChattyApp {
         }
 
         let chat_view = self.chat_view.clone();
-
-        // Set streaming state to true (deferred to avoid re-entrancy)
-        cx.defer({
-            let chat_view = chat_view.clone();
-            move |cx| {
-                chat_view.update(cx, |view, cx| {
-                    view.chat_input_state().update(cx, |input, cx| {
-                        input.set_streaming(true, cx);
-                    });
-                });
-            }
-        });
         let sidebar = self.sidebar_view.clone();
         let app_entity = cx.entity();
-        let repo = self.conversation_repo.clone();
 
         // Get the conversation ID for task tracking
         // If no conversation exists, we'll create one inside the async block
@@ -1258,6 +1167,15 @@ impl ChattyApp {
 
         // Clone for the async closure to use
         let resolved_id_for_closure = resolved_id.clone();
+
+        // Create cancellation token for graceful stream shutdown
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_for_loop = cancel_flag.clone();
+
+        // Get StreamManager entity for dual-write
+        let stream_manager = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone());
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
@@ -1285,18 +1203,27 @@ impl ChattyApp {
                                     *resolved = Some(id.clone());
                                     debug!(conv_id = %id, "Updated resolved conversation ID for pending task");
                                 }
+                                // Promote the pending stream to the real conversation ID
+                                if let Some(ref sm) = stream_manager {
+                                    sm.update(cx, |mgr, _cx| {
+                                        mgr.promote_pending(&id);
+                                    })
+                                    .map_err(|e| warn!(error = ?e, "Failed to promote pending stream"))
+                                    .ok();
+                                }
                                 id
                             }
                             Err(e) => {
                                 error!(error = ?e, "Failed to create conversation");
 
-                                // Clear streaming state on error (clear all since we don't have a conv_id)
-                                app_entity
-                                    .update(cx, |app, cx| {
-                                        app.clear_streaming_state(None, cx);
+                                // Cancel pending stream on error
+                                if let Some(ref sm) = stream_manager {
+                                    sm.update(cx, |mgr, cx| {
+                                        mgr.cancel_pending(cx);
                                     })
-                                    .map_err(|e| warn!(error = ?e, "Failed to clear streaming state on error"))
+                                    .map_err(|e| warn!(error = ?e, "Failed to cancel pending stream on error"))
                                     .ok();
+                                }
 
                                 return Err(e);
                             }
@@ -1409,570 +1336,601 @@ impl ChattyApp {
 
                 debug!("Got stream, starting to process");
                 use futures::StreamExt;
-                let mut response_text = String::new();
                 let mut chunk_count = 0;
-                let mut token_usage: Option<(u32, u32)> = None;
 
                 // PHASE 4: Process LLM response stream
                 debug!("Entering stream processing loop");
                 while let Some(chunk_result) = stream.next().await {
+                    // Check cancellation token before processing
+                    if cancel_flag_for_loop.load(Ordering::Relaxed) {
+                        debug!("Stream cancelled via cancellation token");
+                        break;
+                    }
                     chunk_count += 1;
                     debug!(chunk_num = chunk_count, chunk = ?chunk_result, "Processing stream chunk");
-                    match chunk_result {
-                        Ok(StreamChunk::Text(text)) => {
-                            debug!(text = %text, "Text chunk received");
-                            response_text.push_str(&text);
 
-                            // Update the Conversation model (source of truth)
+                    match chunk_result {
+                        Ok(StreamChunk::Text(ref text)) => {
+                            // Update the Conversation model (source of truth for background streams)
                             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                    conv.append_streaming_content(&text);
+                                    conv.append_streaming_content(text);
                                 }
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
                             .ok();
-
-                            // Update UI if this conversation is currently displayed
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    let view_conv_id = view.conversation_id().cloned();
-                                    debug!(view_conv_id = ?view_conv_id, expected_conv_id = %conv_id, "Checking conversation ID");
-                                    if view_conv_id.as_ref() == Some(&conv_id) {
-                                        debug!("Conversation ID matches, appending text");
-                                        view.append_assistant_text(&text, cx);
-                                    } else {
-                                        warn!("Conversation ID mismatch, text not appended");
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         }
-                        Ok(StreamChunk::ToolCallStarted { id, name }) => {
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_tool_call_started(id.clone(), name, cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        }
-                        Ok(StreamChunk::ToolCallInput { id, arguments }) => {
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_tool_call_input(id, arguments, cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        }
-                        Ok(StreamChunk::ToolCallResult { id, result }) => {
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_tool_call_result(id, result, cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        }
-                        Ok(StreamChunk::ToolCallError { id, error }) => {
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_tool_call_error(id, error, cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        }
-                        Ok(StreamChunk::ApprovalRequested { id, command, is_sandboxed }) => {
-                            debug!(id = %id, command = %command, sandboxed = is_sandboxed, "Approval requested");
-
-                            // Forward to chat view for UI display
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_approval_requested(id, command, is_sandboxed, cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        }
-                        Ok(StreamChunk::ApprovalResolved { id, approved }) => {
-                            debug!(id = %id, approved = approved, "Approval resolved");
-
-                            // Update approval state in UI
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id() == Some(&conv_id) {
-                                        view.handle_approval_resolved(&id, approved, cx);
-                                    }
-                                })
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        }
-                        Ok(StreamChunk::TokenUsage { input_tokens, output_tokens }) => {
-                            debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Received token usage");
-                            token_usage = Some((input_tokens, output_tokens));
+                        Ok(StreamChunk::TokenUsage { .. }) => {
+                            // Token usage tracked by StreamManager
                         }
                         Ok(StreamChunk::Done) => {
                             debug!("Received Done chunk");
-                            // Don't finalize yet - there may still be buffered chunks
                             break;
                         }
-                        Ok(StreamChunk::Error(err)) => {
+                        Ok(StreamChunk::Error(ref err)) => {
                             error!(error = %err, "Stream error");
 
                             // Detect authentication errors (401/Unauthorized)
                             if err.contains("401") || err.contains("Unauthorized") {
                                 tracing::warn!("Detected Azure auth error - token likely expired");
-
-                                // Attempt to refresh the token for next request
                                 if let Some(cache) = cx.update(|cx| {
                                     cx.try_global::<crate::chatty::auth::AzureTokenCache>().cloned()
                                 }).ok().flatten() {
                                     if let Err(e) = cache.refresh_token().await {
                                         error!(error = ?e, "Failed to refresh Azure token after 401 error");
                                     } else {
-                                        tracing::info!(
-                                            "Azure token refreshed successfully. Please retry your message - \
-                                            the next request will use a fresh token."
-                                        );
+                                        tracing::info!("Azure token refreshed successfully.");
                                     }
                                 }
                             }
+                        }
+                        Ok(_) => {
+                            // ToolCall*, Approval* chunks: no local state update needed
+                        }
+                        Err(ref e) => {
+                            error!(error = %e, "Stream error");
+                        }
+                    }
 
-                            break;
+                    // Forward ALL chunks to StreamManager (emits events for UI subscription)
+                    match chunk_result {
+                        Ok(chunk) => {
+                            let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+                            if let Some(ref sm) = stream_manager {
+                                sm.update(cx, |sm, cx| sm.handle_chunk(&conv_id, chunk, cx))
+                                    .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
+                                    .ok();
+                            }
+                            if is_break {
+                                break;
+                            }
                         }
                         Err(e) => {
-                            error!(error = %e, "Stream error");
+                            if let Some(ref sm) = stream_manager {
+                                sm.update(cx, |sm, cx| {
+                                    sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
+                                })
+                                .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
+                                .ok();
+                            }
                             break;
                         }
                     }
                 }
 
-                // PHASE 5: Finalize response in conversation and UI
-                debug!("Stream loop finished, starting finalization");
+                // PHASE 5: Extract trace and finalize via StreamManager
+                // StreamManager emits StreamEnded(Completed) which triggers
+                // UI finalization, conversation model update, title gen, token usage, and persistence
+                debug!("Stream loop finished, finalizing via StreamManager");
 
-                // Extract trace before finalizing
                 let trace_json = chat_view
                     .update(cx, |view, _cx| view.extract_current_trace())
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
                     .and_then(|trace| serde_json::to_value(&trace).ok());
 
-                // Finalize UI - stop streaming animation
-                debug!("Finalizing UI");
-                chat_view
-                    .update(cx, |view, cx| {
-                        if view.conversation_id() == Some(&conv_id) {
-                            view.finalize_assistant_message(cx);
-                        }
+                if let Some(ref sm) = stream_manager {
+                    sm.update(cx, |sm, cx| {
+                        sm.set_trace(&conv_id, trace_json);
+                        sm.finalize_stream(&conv_id, cx);
                     })
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                // Finalize response in conversation
-                debug!("Finalizing response in conversation");
-                let should_generate_title = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.finalize_response(response_text.clone());
-                        conv.add_trace(trace_json);
-                        debug!("Response finalized in conversation");
-                        // Check if we should generate a title (first exchange complete)
-                        let msg_count = conv.message_count();
-                        debug!(msg_count = msg_count, "Message count after finalize");
-                        debug!(title = %conv.title(), "Current title");
-                        let should_gen = msg_count == 2 && conv.title() == "New Chat";
-                        if should_gen {
-                            debug!("Will generate title for first exchange");
-                        } else if msg_count != 2 {
-                            debug!(count = msg_count, "Skipping title generation (count != 2)");
-                        } else {
-                            debug!("Skipping title generation (title already set)");
-                        }
-                        should_gen
-                    } else {
-                        error!("Could not find conversation to finalize");
-                        false
-                    }
-                })
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                // PHASE 6: Generate title for first conversation exchange
-                if should_generate_title {
-                    // Extract agent and history synchronously
-                    let title_data = cx
-                        .update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation(&conv_id) {
-                                Ok((conv.agent().clone(), conv.history().to_vec()))
-                            } else {
-                                Err(anyhow::anyhow!("Conversation not found"))
-                            }
-                        })
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                    if let Ok((agent, history)) = title_data {
-                        // Generate title asynchronously (outside update_global)
-                        match generate_title(&agent, &history).await {
-                            Ok(new_title) => {
-                                debug!(title = %new_title, "Generated title");
-
-                                // Update title synchronously
-                                cx.update_global::<ConversationsStore, _>(
-                                    |store, _cx| {
-                                        if let Some(conv) =
-                                            store.get_conversation_mut(&conv_id)
-                                        {
-                                            conv.set_title(new_title.clone());
-                                        }
-                                    },
-                                )
-                                .map_err(|e| warn!(error = ?e, "Failed to update conversation title in store"))
-                                .ok();
-
-                                // Update sidebar to show new title
-                                sidebar
-                                    .update(cx, |sidebar, cx| {
-                                        let store = cx.global::<ConversationsStore>();
-                                        let total = store.count();
-                                        let convs = store
-                                            .list_recent(sidebar.visible_limit())
-                                            .iter()
-                                            .map(|c| {
-                                                (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd))
-                                            })
-                                            .collect::<Vec<_>>();
-                                        sidebar.set_conversations(convs, cx);
-                                        sidebar.set_total_count(total);
-                                    })
-                                    .map_err(|e| warn!(error = ?e, "Failed to update sidebar with new title"))
-                                    .ok();
-                            }
-                            Err(e) => {
-                                warn!(error = ?e, "Title generation failed");
-                            }
-                        }
-                    }
-                }
-
-                // PHASE 7: Update token usage and save conversation
-                if let Some((input_tokens, output_tokens)) = token_usage {
-                    debug!(input_tokens = input_tokens, output_tokens = output_tokens, "Processing token usage");
-
-                    // Get model pricing from the conversation's model
-                    let model_pricing_result = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        store.get_conversation(&conv_id).map(|conv| conv.model_id().to_string())
-                    });
-
-                    if let Ok(Some(model_id)) = model_pricing_result {
-                        let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
-                            models.get_model(&model_id).and_then(|model| {
-                                match (model.cost_per_million_input_tokens, model.cost_per_million_output_tokens) {
-                                    (Some(input_cost), Some(output_cost)) => Some((input_cost, output_cost)),
-                                    _ => None,
-                                }
-                            })
-                        }).ok().flatten();
-
-                        if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
-                            let mut usage = TokenUsage::new(input_tokens, output_tokens);
-                            usage.calculate_cost(cost_per_million_input, cost_per_million_output);
-                            let cost_usd = usage.estimated_cost_usd;
-
-                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                    conv.add_token_usage(usage);
-                                }
-                            }).map_err(|e| warn!(error = ?e, "Failed to update token usage in store"))
-                            .ok();
-
-                            debug!(cost_usd = ?cost_usd, "Token usage updated in conversation");
-
-                            // Update sidebar with refreshed costs
-                            debug!("Updating sidebar with new costs");
-                            let update_result = sidebar.update(cx, |sidebar, cx| {
-                                let store = cx.global::<ConversationsStore>();
-                                let total = store.count();
-                                let convs = store
-                                    .list_recent(sidebar.visible_limit())
-                                    .iter()
-                                    .map(|c| {
-                                        let cost = c.token_usage().total_estimated_cost_usd;
-                                        debug!(id = %c.id(), cost = ?cost, "Sidebar conversation cost");
-                                        (
-                                            c.id().to_string(),
-                                            c.title().to_string(),
-                                            Some(cost),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>();
-                                debug!(count = convs.len(), "Setting {} conversations on sidebar", convs.len());
-                                sidebar.set_conversations(convs, cx);
-                                sidebar.set_total_count(total);
-                            });
-                            if let Err(e) = update_result {
-                                warn!(error = ?e, "Failed to update sidebar with costs");
-                            } else {
-                                debug!("Sidebar updated successfully with new costs");
-                            }
-                        } else {
-                            debug!("No pricing information available for model");
-                        }
-                    }
-                }
-
-                // Persist to disk
-                let conv_data_res =
-                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        store.get_conversation(&conv_id).and_then(|conv| {
-                            let history = conv.serialize_history().ok()?;
-                            let traces = conv.serialize_traces().ok()?;
-                            let now = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs()
-                                as i64;
-
-                            Some(ConversationData {
-                                id: conv.id().to_string(),
-                                title: conv.title().to_string(),
-                                model_id: conv.model_id().to_string(),
-                                message_history: history,
-                                system_traces: traces,
-                                token_usage: conv
-                                    .serialize_token_usage()
-                                    .unwrap_or_else(|_| "{}".to_string()),
-                                attachment_paths: conv
-                                    .serialize_attachment_paths()
-                                    .unwrap_or_else(|_| "[]".to_string()),
-                                created_at: conv
-                                    .created_at()
-                                    .duration_since(SystemTime::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs()
-                                    as i64,
-                                updated_at: now,
-                            })
-                        })
-                    });
-                if let Ok(Some(conv_data)) = conv_data_res {
-                    repo.save(&conv_id, conv_data)
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                }
-
-                // Clear streaming state on success for this conversation
-                let conv_id_for_clear = conv_id.clone();
-                app_entity
-                    .update(cx, |app, cx| {
-                        app.clear_streaming_state(Some(&conv_id_for_clear), cx);
-                        // Also remove placeholder if it still exists
-                        app.active_stream_tasks.remove("__pending__");
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to clear streaming state"))
+                    .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
                     .ok();
+                }
 
                 Ok(())
             });
 
-        // Store the task in HashMap with conversation ID as key
-        // This allows multiple conversations to have concurrent streams
-        if let Some(conv_id) = conv_id_for_task {
-            self.active_stream_tasks.insert(conv_id, task);
-        } else if needs_conversation_creation {
-            // No conversation exists yet - use placeholder key
-            // Store resolved ID tracker so load_conversation can detect active stream
-            // even before the task is re-keyed to the real conversation ID
-            self.active_stream_tasks
-                .insert("__pending__".to_string(), task);
-            self.pending_task_resolved_ids
-                .insert("__pending__".to_string(), resolved_id);
-            debug!("Using placeholder key for task until conversation is created");
+        // Register stream with StreamManager (owns task + cancel flag)
+        if let Some(manager) = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            if let Some(ref conv_id) = conv_id_for_task {
+                manager.update(cx, |mgr, cx| {
+                    mgr.register_stream(conv_id.clone(), task, cancel_flag, cx);
+                });
+            } else if needs_conversation_creation {
+                manager.update(cx, |mgr, cx| {
+                    mgr.register_pending_stream(task, resolved_id, cancel_flag, cx);
+                });
+                debug!("Registered pending stream until conversation is created");
+            }
+        } else {
+            error!("StreamManager not available! Stream events will not be emitted.");
         }
     }
 
-    /// Stop the currently active stream for the current conversation
-    pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
-        // Get current conversation ID
-        let conv_id_opt = cx
-            .try_global::<ConversationsStore>()
-            .and_then(|store| store.active_id().cloned());
+    /// Handle events from StreamManager for decoupled UI updates
+    fn handle_stream_manager_event(&mut self, event: &StreamManagerEvent, cx: &mut Context<Self>) {
+        let chat_view = self.chat_view.clone();
 
-        if let Some(conv_id) = &conv_id_opt {
-            // Remove and drop the stream task for this specific conversation
-            if let Some(task) = self.active_stream_tasks.remove(conv_id) {
-                debug!(conversation_id = %conv_id, "Cancelling stream for conversation");
-                // Simply drop the task - GPUI will cancel it automatically
-                drop(task);
-            } else {
-                // Try the pending key (in case stream started before conversation was created)
-                if let Some(task) = self.active_stream_tasks.remove("__pending__") {
-                    debug!(conversation_id = %conv_id, "Cancelling pending stream that became this conversation");
-                    drop(task);
-                } else {
-                    debug!(conversation_id = %conv_id, "No active stream found for conversation");
-                    // No active stream, might be a race condition - still reset UI
-                }
+        match event {
+            StreamManagerEvent::StreamStarted { conversation_id } => {
+                debug!(conv_id = %conversation_id, "StreamManager: stream started");
+                // Set streaming UI state if this is the active conversation
+                let conv_id = conversation_id.clone();
+                cx.defer(move |cx| {
+                    chat_view.update(cx, |view, cx| {
+                        if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str())
+                            || conv_id == "__pending__"
+                        {
+                            view.chat_input_state().update(cx, |input, cx| {
+                                input.set_streaming(true, cx);
+                            });
+                        }
+                    });
+                });
             }
-        } else {
-            // No conversation ID yet - check for pending stream
-            if let Some(task) = self.active_stream_tasks.remove("__pending__") {
-                debug!("Cancelling pending stream (no conversation yet)");
-                drop(task);
+            StreamManagerEvent::TextChunk {
+                conversation_id,
+                text,
+            } => {
+                let text = text.clone();
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.append_assistant_text(&text, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ToolCallStarted {
+                conversation_id,
+                id,
+                name,
+            } => {
+                let id = id.clone();
+                let name = name.clone();
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_tool_call_started(id, name, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ToolCallInput {
+                conversation_id,
+                id,
+                arguments,
+            } => {
+                let id = id.clone();
+                let arguments = arguments.clone();
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_tool_call_input(id, arguments, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ToolCallResult {
+                conversation_id,
+                id,
+                result,
+            } => {
+                let id = id.clone();
+                let result = result.clone();
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_tool_call_result(id, result, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ToolCallError {
+                conversation_id,
+                id,
+                error,
+            } => {
+                let id = id.clone();
+                let error = error.clone();
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_tool_call_error(id, error, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ApprovalRequested {
+                conversation_id,
+                id,
+                command,
+                is_sandboxed,
+            } => {
+                debug!(id = %id, command = %command, sandboxed = is_sandboxed, "StreamManager: approval requested");
+                let id = id.clone();
+                let command = command.clone();
+                let is_sandboxed = *is_sandboxed;
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_approval_requested(id, command, is_sandboxed, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ApprovalResolved {
+                conversation_id,
+                id,
+                approved,
+            } => {
+                debug!(id = %id, approved = approved, "StreamManager: approval resolved");
+                let id = id.clone();
+                let approved = *approved;
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_approval_resolved(&id, approved, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::TokenUsage {
+                conversation_id: _,
+                input_tokens: _,
+                output_tokens: _,
+            } => {
+                // Token usage is handled during stream finalization, not per-chunk
+            }
+            StreamManagerEvent::StreamEnded {
+                conversation_id,
+                status,
+                token_usage,
+                trace_json,
+            } => {
+                debug!(conv_id = %conversation_id, status = ?status, "StreamManager: stream ended");
+                // Update UI streaming state
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id)
+                        || conversation_id == "__pending__"
+                    {
+                        view.chat_input_state().update(cx, |input, cx| {
+                            input.set_streaming(false, cx);
+                        });
+                    }
+                });
+
+                match status {
+                    StreamStatus::Completed => {
+                        self.finalize_completed_stream(
+                            conversation_id,
+                            *token_usage,
+                            trace_json.clone(),
+                            cx,
+                        );
+                    }
+                    StreamStatus::Cancelled => {
+                        // Pending streams have no conversation yet — only UI reset (done above)
+                        if conversation_id != "__pending__" {
+                            self.finalize_stopped_stream(conversation_id, trace_json.clone(), cx);
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Clear streaming message from Conversation model
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
+                        conv.set_streaming_message(None);
+                    }
+                });
             }
         }
+    }
 
-        let chat_view = self.chat_view.clone();
-        let repo = self.conversation_repo.clone();
+    /// Stop the currently active stream for the current conversation.
+    /// Delegates to StreamManager which sets the cancellation token and emits StreamEnded.
+    pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
+        let conv_id = cx
+            .try_global::<ConversationsStore>()
+            .and_then(|store| store.active_id().cloned())
+            .unwrap_or_else(|| "__pending__".to_string());
 
-        if let Some(conv_id) = conv_id_opt {
-            // Extract trace before finalizing UI
-            let trace_json = chat_view.update(cx, |view, _cx| {
-                view.extract_current_trace()
-                    .and_then(|trace| serde_json::to_value(&trace).ok())
+        debug!(conv_id = %conv_id, "stop_stream called");
+
+        // Extract trace before stopping (only if conversation is displayed)
+        let trace_json = self.chat_view.update(cx, |view, _cx| {
+            view.extract_current_trace()
+                .and_then(|trace| serde_json::to_value(&trace).ok())
+        });
+
+        // Set trace on StreamManager so it's included in the StreamEnded event
+        if let Some(manager) = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            manager.update(cx, |mgr, _cx| {
+                mgr.set_trace(&conv_id, trace_json);
             });
 
-            // Mark the assistant message as cancelled in UI
-            chat_view.update(cx, |view, cx| {
-                view.mark_message_cancelled(cx);
+            // Delegate cancellation to StreamManager
+            // This sets cancel flag, drops task, emits StreamEnded(Cancelled)
+            manager.update(cx, |mgr, cx| {
+                mgr.stop_stream(&conv_id, cx);
             });
-
-            // Get the partial response text from the UI (after marking as cancelled)
-            let response_text = chat_view
-                .read(cx)
-                .messages()
-                .last()
-                .map(|msg| msg.content.clone())
-                .unwrap_or_default();
-
-            // Save the partial response to conversation history (includes cancellation notice)
-            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                    conv.finalize_response(response_text);
-                    conv.add_trace(trace_json);
-                    debug!("Partial response saved to conversation after stop");
-                }
-            });
-
-            // Serialize conversation data for saving
-            let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                store.get_conversation(&conv_id).and_then(|conv| {
-                    let history = conv.serialize_history().ok()?;
-                    let traces = conv.serialize_traces().ok()?;
-                    let now = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64;
-
-                    Some(ConversationData {
-                        id: conv.id().to_string(),
-                        title: conv.title().to_string(),
-                        model_id: conv.model_id().to_string(),
-                        message_history: history,
-                        system_traces: traces,
-                        token_usage: conv
-                            .serialize_token_usage()
-                            .unwrap_or_else(|_| "{}".to_string()),
-                        attachment_paths: conv
-                            .serialize_attachment_paths()
-                            .unwrap_or_else(|_| "[]".to_string()),
-                        created_at: conv
-                            .created_at()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64,
-                        updated_at: now,
-                    })
-                })
-            });
-
-            // Save to disk asynchronously
-            if let Some(conv_data) = conv_data_opt {
-                let conv_id_for_save = conv_id.clone();
-                cx.spawn(async move |_, _cx| {
-                    if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
-                        warn!(error = ?e, "Failed to save conversation after stop");
-                    } else {
-                        debug!("Conversation saved to disk after stop");
-                    }
-                    Ok::<_, anyhow::Error>(())
-                })
-                .detach();
-            }
-
-            // Reset streaming state in UI (Bug Fix)
-            self.clear_streaming_state(Some(&conv_id), cx);
         }
 
         cx.notify();
     }
 
-    /// Clear streaming state for a specific conversation or all conversations
+    /// Handle the finalization of a successfully completed stream.
+    /// Called from handle_stream_manager_event when StreamEnded with Completed status.
     ///
-    /// If conversation_id is provided, clears only that conversation's stream.
-    /// If None, clears all streams (useful for shutdown scenarios).
+    /// Reads the accumulated response text from `ConversationsStore.streaming_message`
+    /// (the single source of truth for streaming content).
     ///
-    /// Only updates UI if the cleared conversation is currently active.
-    fn clear_streaming_state(&mut self, conversation_id: Option<&str>, cx: &mut Context<Self>) {
-        let should_update_ui = if let Some(conv_id) = conversation_id {
-            // Clear specific conversation's stream
-            self.active_stream_tasks.remove(conv_id);
+    /// Performs:
+    /// 1. Finalize assistant message in UI (stop streaming animation)
+    /// 2. Save response + trace to conversation model
+    /// 3. Process token usage and calculate cost
+    /// 4. Generate title for first exchange (async)
+    /// 5. Update sidebar with title/cost
+    /// 6. Persist conversation to disk
+    fn finalize_completed_stream(
+        &mut self,
+        conversation_id: &str,
+        token_usage: Option<(u32, u32)>,
+        trace_json: Option<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let chat_view = self.chat_view.clone();
+        let sidebar = self.sidebar_view.clone();
+        let conv_id = conversation_id.to_string();
 
-            // Also clear the resolved ID tracker if it resolves to this conversation
-            let should_remove_resolved = if let Some(resolved_id_mutex) =
-                self.pending_task_resolved_ids.get("__pending__")
-            {
-                if let Ok(resolved_id) = resolved_id_mutex.lock() {
-                    resolved_id.as_ref() == Some(&conv_id.to_string())
+        // 1. Finalize UI - stop streaming animation
+        chat_view.update(cx, |view, cx| {
+            if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                view.finalize_assistant_message(cx);
+            }
+        });
+
+        // 2. Read response text from ConversationsStore (single source of truth),
+        //    finalize in conversation model, and check if title gen needed
+        let should_generate_title =
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    let response_text = conv
+                        .streaming_message()
+                        .cloned()
+                        .unwrap_or_default();
+                    conv.finalize_response(response_text);
+                    conv.add_trace(trace_json);
+                    let msg_count = conv.message_count();
+                    let should_gen = msg_count == 2 && conv.title() == "New Chat";
+                    debug!(conv_id = %conv_id, msg_count, should_gen, "Response finalized in conversation");
+                    should_gen
                 } else {
+                    error!(conv_id = %conv_id, "Could not find conversation to finalize");
                     false
                 }
-            } else {
-                false
-            };
-            if should_remove_resolved {
-                self.pending_task_resolved_ids.remove("__pending__");
-                debug!(conv_id = %conv_id, "Cleaned up resolved ID tracker");
-            }
-
-            // Clear streaming message from Conversation model
-            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                if let Some(conv) = store.get_conversation_mut(conv_id) {
-                    conv.set_streaming_message(None);
-                }
             });
 
-            // Check if this is the currently active conversation
-            let current_conv = self
-                .chat_view
-                .read(cx)
-                .conversation_id()
-                .map(|s| s.as_str());
-            current_conv == Some(conv_id)
-        } else {
-            // Clear all streams
-            self.active_stream_tasks.clear();
-            self.pending_task_resolved_ids.clear();
-            // Note: Not clearing streaming messages from all conversations here
-            // as they will be cleared individually when streams complete
-            // Always update UI when clearing all
-            true
-        };
+        // 3. Process token usage
+        if let Some((input_tokens, output_tokens)) = token_usage {
+            debug!(input_tokens, output_tokens, "Processing token usage");
 
-        // Only update UI if the cleared conversation is currently displayed
-        if should_update_ui {
-            self.chat_view.update(cx, |view, cx| {
-                view.chat_input_state().update(cx, |input, cx| {
-                    input.set_streaming(false, cx);
+            let model_id_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                store
+                    .get_conversation(&conv_id)
+                    .map(|conv| conv.model_id().to_string())
+            });
+
+            if let Some(model_id) = model_id_opt {
+                let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
+                    models.get_model(&model_id).and_then(|model| {
+                        match (
+                            model.cost_per_million_input_tokens,
+                            model.cost_per_million_output_tokens,
+                        ) {
+                            (Some(input_cost), Some(output_cost)) => {
+                                Some((input_cost, output_cost))
+                            }
+                            _ => None,
+                        }
+                    })
                 });
-            });
+
+                if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
+                    let mut usage = TokenUsage::new(input_tokens, output_tokens);
+                    usage.calculate_cost(cost_per_million_input, cost_per_million_output);
+
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.add_token_usage(usage);
+                        }
+                    });
+                }
+            }
         }
+
+        // 4. Update sidebar with latest data
+        self.refresh_sidebar(cx);
+
+        // 5. Generate title for first exchange (async) + persist
+        if should_generate_title {
+            let conv_id_for_title = conv_id.clone();
+            let sidebar_for_title = sidebar.clone();
+
+            cx.spawn(async move |_weak, cx| {
+                // Get agent and history for title generation
+                let title_data = cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        store
+                            .get_conversation(&conv_id_for_title)
+                            .map(|conv| (conv.agent().clone(), conv.history().to_vec()))
+                    })
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                if let Some((agent, history)) = title_data {
+                    match generate_title(&agent, &history).await {
+                        Ok(new_title) => {
+                            debug!(title = %new_title, "Generated title");
+
+                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                if let Some(conv) = store.get_conversation_mut(&conv_id_for_title) {
+                                    conv.set_title(new_title);
+                                }
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
+                            .ok();
+
+                            // Update sidebar with new title
+                            sidebar_for_title
+                                .update(cx, |sidebar, cx| {
+                                    let store = cx.global::<ConversationsStore>();
+                                    let total = store.count();
+                                    let convs = store
+                                        .list_recent(sidebar.visible_limit())
+                                        .iter()
+                                        .map(|c| {
+                                            (
+                                                c.id().to_string(),
+                                                c.title().to_string(),
+                                                Some(
+                                                    c.token_usage()
+                                                        .total_estimated_cost_usd,
+                                                ),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    sidebar.set_conversations(convs, cx);
+                                    sidebar.set_total_count(total);
+                                })
+                                .map_err(|e| {
+                                    warn!(error = ?e, "Failed to update sidebar with new title")
+                                })
+                                .ok();
+                        }
+                        Err(e) => {
+                            warn!(error = ?e, "Title generation failed");
+                        }
+                    }
+                }
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        }
+
+        // 6. Persist to disk
+        self.persist_conversation(&conv_id, cx);
     }
 
-    /// Check if any stream is currently active
-    #[allow(dead_code)]
-    pub fn is_streaming(&self) -> bool {
-        !self.active_stream_tasks.is_empty()
+    /// Handle the finalization of a stopped stream (partial response saving).
+    /// Called from handle_stream_manager_event when StreamEnded with Cancelled status.
+    ///
+    /// Reads the accumulated partial response from `ConversationsStore.streaming_message`
+    /// (the single source of truth for streaming content).
+    fn finalize_stopped_stream(
+        &mut self,
+        conversation_id: &str,
+        trace_json: Option<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let chat_view = self.chat_view.clone();
+        let conv_id = conversation_id.to_string();
+
+        // Mark the assistant message as cancelled in UI
+        chat_view.update(cx, |view, cx| {
+            if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                view.mark_message_cancelled(cx);
+            }
+        });
+
+        // Read partial response from ConversationsStore (single source of truth)
+        // and save to conversation history
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                let partial_text = conv.streaming_message().cloned().unwrap_or_default();
+                conv.finalize_response(partial_text);
+                conv.add_trace(trace_json);
+                conv.set_streaming_message(None);
+                debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+            }
+        });
+
+        // Persist to disk
+        self.persist_conversation(&conv_id, cx);
     }
 
-    /// Check if a specific conversation has an active stream
-    #[allow(dead_code)]
-    pub fn is_conversation_streaming(&self, conversation_id: &str) -> bool {
-        self.active_stream_tasks.contains_key(conversation_id)
+    /// Refresh the sidebar with the latest conversation list from the store
+    fn refresh_sidebar(&self, cx: &mut Context<Self>) {
+        self.sidebar_view.update(cx, |sidebar, cx| {
+            let store = cx.global::<ConversationsStore>();
+            let total = store.count();
+            let convs = store
+                .list_recent(sidebar.visible_limit())
+                .iter()
+                .map(|c| {
+                    (
+                        c.id().to_string(),
+                        c.title().to_string(),
+                        Some(c.token_usage().total_estimated_cost_usd),
+                    )
+                })
+                .collect::<Vec<_>>();
+            sidebar.set_conversations(convs, cx);
+            sidebar.set_total_count(total);
+        });
+    }
+
+    /// Persist a conversation to disk asynchronously
+    fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
+        let conv_id = conv_id.to_string();
+        let repo = self.conversation_repo.clone();
+
+        let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            store.get_conversation(&conv_id).and_then(|conv| {
+                let history = conv.serialize_history().ok()?;
+                let traces = conv.serialize_traces().ok()?;
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+
+                Some(ConversationData {
+                    id: conv.id().to_string(),
+                    title: conv.title().to_string(),
+                    model_id: conv.model_id().to_string(),
+                    message_history: history,
+                    system_traces: traces,
+                    token_usage: conv
+                        .serialize_token_usage()
+                        .unwrap_or_else(|_| "{}".to_string()),
+                    attachment_paths: conv
+                        .serialize_attachment_paths()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    created_at: conv
+                        .created_at()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                    updated_at: now,
+                })
+            })
+        });
+
+        if let Some(conv_data) = conv_data_opt {
+            let conv_id_for_save = conv_id.clone();
+            cx.spawn(async move |_, _cx| {
+                if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
+                    warn!(error = ?e, conv_id = %conv_id_for_save, "Failed to save conversation to disk");
+                } else {
+                    debug!(conv_id = %conv_id_for_save, "Conversation saved to disk");
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        }
     }
 
     /// Get the chat input state entity

@@ -6,22 +6,25 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use super::attachment_validation::{PDF_EXTENSION, is_image_extension, validate_attachment};
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-/// Callback type for sending messages (with attachments)
-pub type SendMessageCallback =
-    Arc<dyn Fn(String, Vec<PathBuf>, &mut Context<ChatInputState>) + Send + Sync>;
+/// Events emitted by ChatInputState for entity-to-entity communication
+#[derive(Clone, Debug)]
+pub enum ChatInputEvent {
+    Send {
+        message: String,
+        attachments: Vec<PathBuf>,
+    },
+    ModelChanged(String),
+    Stop,
+}
 
-/// Callback type for model selection changes
-pub type ModelChangeCallback = Arc<dyn Fn(String, &mut Context<ChatInputState>) + Send + Sync>;
-
-/// Callback type for stopping stream
-pub type StopStreamCallback = Arc<dyn Fn(&mut Context<ChatInputState>) + Send + Sync>;
+impl EventEmitter<ChatInputEvent> for ChatInputState {}
 
 /// State for the chat input component
 /// Cache for PDF thumbnails: maps PDF path -> thumbnail path or error
@@ -31,9 +34,6 @@ pub struct ChatInputState {
     pub input: Entity<InputState>,
     attachments: Vec<PathBuf>,
     should_clear: bool,
-    on_send: Option<SendMessageCallback>,
-    on_model_change: Option<ModelChangeCallback>,
-    on_stop: Option<StopStreamCallback>,
     selected_model_id: Option<String>,
     available_models: Vec<(String, String)>, // (id, display_name)
     supports_images: bool,
@@ -48,9 +48,6 @@ impl ChatInputState {
             input,
             attachments: Vec::new(),
             should_clear: false,
-            on_send: None,
-            on_model_change: None,
-            on_stop: None,
             selected_model_id: None,
             thumbnail_cache: Arc::new(RwLock::new(HashMap::new())),
             available_models: Vec::new(),
@@ -58,30 +55,6 @@ impl ChatInputState {
             supports_pdf: false,
             is_streaming: false,
         }
-    }
-
-    /// Set the callback for sending messages
-    pub fn set_on_send<F>(&mut self, callback: F)
-    where
-        F: Fn(String, Vec<PathBuf>, &mut Context<ChatInputState>) + Send + Sync + 'static,
-    {
-        self.on_send = Some(Arc::new(callback));
-    }
-
-    /// Set the callback for model selection changes
-    pub fn set_on_model_change<F>(&mut self, callback: F)
-    where
-        F: Fn(String, &mut Context<ChatInputState>) + Send + Sync + 'static,
-    {
-        self.on_model_change = Some(Arc::new(callback));
-    }
-
-    /// Set the callback for stopping stream
-    pub fn set_on_stop<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut Context<ChatInputState>) + Send + Sync + 'static,
-    {
-        self.on_stop = Some(Arc::new(callback));
     }
 
     /// Set available models for selection
@@ -219,12 +192,11 @@ impl ChatInputState {
             return;
         }
 
-        if let Some(on_send) = &self.on_send {
-            debug!("on_send callback exists, calling it");
-            on_send(message, attachments, cx);
-        } else {
-            error!("on_send callback is NOT set");
-        }
+        debug!("Emitting ChatInputEvent::Send");
+        cx.emit(ChatInputEvent::Send {
+            message: message.clone(),
+            attachments: attachments.clone(),
+        });
 
         self.should_clear = true;
         self.clear_attachments();
@@ -233,13 +205,8 @@ impl ChatInputState {
 
     /// Stop the current stream
     pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
-        debug!("stop_stream called");
-        if let Some(on_stop) = &self.on_stop {
-            debug!("on_stop callback exists, calling it");
-            on_stop(cx);
-        } else {
-            error!("on_stop callback is NOT set");
-        }
+        debug!("stop_stream called, emitting ChatInputEvent::Stop");
+        cx.emit(ChatInputEvent::Stop);
     }
 
     /// Mark the input for clearing on next render (without sending)
@@ -460,11 +427,7 @@ impl RenderOnce for ChatInput {
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                     state_for_click.update(cx, |s, cx| {
                                         s.selected_model_id = Some(id_clone.clone());
-
-                                        if let Some(on_change) = &s.on_model_change {
-                                            on_change(id_clone.clone(), cx);
-                                        }
-
+                                        cx.emit(ChatInputEvent::ModelChanged(id_clone.clone()));
                                         cx.notify();
                                     });
                                 })

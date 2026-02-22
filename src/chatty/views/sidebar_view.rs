@@ -3,28 +3,26 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme, Collapsible, Icon, IconName, Sizable, button::Button, h_flex, v_flex,
 };
-use std::sync::Arc;
 
 use super::conversation_item::ConversationItem;
 
-/// Callback types for sidebar actions
-pub type NewChatCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
-pub type SettingsCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
-pub type SelectConversationCallback = Arc<dyn Fn(&str, &mut App) + Send + Sync>;
-pub type DeleteConversationCallback = Arc<dyn Fn(&str, &mut App) + Send + Sync>;
-pub type ToggleCallback = Arc<dyn Fn(bool, &mut App) + Send + Sync>;
-pub type LoadMoreCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
+/// Events emitted by SidebarView for entity-to-entity communication
+#[derive(Clone, Debug)]
+pub enum SidebarEvent {
+    NewChat,
+    OpenSettings,
+    SelectConversation(String),
+    DeleteConversation(String),
+    ToggleCollapsed(bool),
+    LoadMore,
+}
+
+impl EventEmitter<SidebarEvent> for SidebarView {}
 
 /// Sidebar view showing conversations
 pub struct SidebarView {
     conversations: Vec<(String, String, Option<f64>)>, // (id, title, cost)
     active_conversation_id: Option<String>,
-    on_new_chat: Option<NewChatCallback>,
-    on_settings: Option<SettingsCallback>,
-    on_select_conversation: Option<SelectConversationCallback>,
-    on_delete_conversation: Option<DeleteConversationCallback>,
-    on_toggle: Option<ToggleCallback>,
-    on_load_more: Option<LoadMoreCallback>,
     is_collapsed: bool,
     // OPTIMIZATION: Pagination for sidebar
     visible_limit: usize, // How many conversations to show (starts at 20)
@@ -36,12 +34,6 @@ impl SidebarView {
         Self {
             conversations: Vec::new(),
             active_conversation_id: None,
-            on_new_chat: None,
-            on_settings: None,
-            on_select_conversation: None,
-            on_delete_conversation: None,
-            on_toggle: None,
-            on_load_more: None,
             is_collapsed: false,
             visible_limit: 20, // Start with 20 conversations
             total_count: 0,
@@ -72,60 +64,10 @@ impl SidebarView {
         cx.notify();
     }
 
-    /// Set callback for new chat button
-    pub fn set_on_new_chat<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut App) + Send + Sync + 'static,
-    {
-        self.on_new_chat = Some(Arc::new(callback));
-    }
-
-    /// Set callback for settings button
-    pub fn set_on_settings<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut App) + Send + Sync + 'static,
-    {
-        self.on_settings = Some(Arc::new(callback));
-    }
-
-    /// Set callback for selecting a conversation
-    pub fn set_on_select_conversation<F>(&mut self, callback: F)
-    where
-        F: Fn(&str, &mut App) + Send + Sync + 'static,
-    {
-        self.on_select_conversation = Some(Arc::new(callback));
-    }
-
-    /// Set callback for deleting a conversation
-    pub fn set_on_delete_conversation<F>(&mut self, callback: F)
-    where
-        F: Fn(&str, &mut App) + Send + Sync + 'static,
-    {
-        self.on_delete_conversation = Some(Arc::new(callback));
-    }
-
-    /// Set callback for toggling sidebar collapse state
-    pub fn set_on_toggle<F>(&mut self, callback: F)
-    where
-        F: Fn(bool, &mut App) + Send + Sync + 'static,
-    {
-        self.on_toggle = Some(Arc::new(callback));
-    }
-
-    /// Set callback for loading more conversations
-    pub fn set_on_load_more<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut App) + Send + Sync + 'static,
-    {
-        self.on_load_more = Some(Arc::new(callback));
-    }
-
     /// Toggle the collapsed state of the sidebar
     pub fn toggle_collapsed(&mut self, cx: &mut Context<Self>) {
         self.is_collapsed = !self.is_collapsed;
-        if let Some(callback) = &self.on_toggle {
-            callback(self.is_collapsed, cx);
-        }
+        cx.emit(SidebarEvent::ToggleCollapsed(self.is_collapsed));
         cx.notify();
     }
 
@@ -167,10 +109,7 @@ impl Render for SidebarView {
             self.conversations.len()
         );
 
-        let on_new_chat = self.on_new_chat.clone();
-        let on_settings = self.on_settings.clone();
-        let on_select = self.on_select_conversation.clone();
-        let on_delete = self.on_delete_conversation.clone();
+        let sidebar_entity = cx.entity().clone();
         let active_id = self.active_conversation_id.clone();
 
         let width = if self.is_collapsed { px(0.) } else { px(255.) };
@@ -203,9 +142,12 @@ impl Render for SidebarView {
                                 .label(if self.is_collapsed { "+" } else { "New Chat" })
                                 .small()
                                 .w_full()
-                                .on_click(move |_event, _window, cx| {
-                                    if let Some(callback) = &on_new_chat {
-                                        callback(cx);
+                                .on_click({
+                                    let entity = sidebar_entity.clone();
+                                    move |_event, _window, cx| {
+                                        entity.update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::NewChat);
+                                        });
                                     }
                                 }),
                         ),
@@ -231,8 +173,6 @@ impl Render for SidebarView {
                                         .enumerate()
                                         .map(|(ix, (id, title, cost))| {
                                             let is_active = active_id.as_ref() == Some(id);
-                                            let on_select_clone = on_select.clone();
-                                            let on_delete_clone = on_delete.clone();
 
                                             div()
                                                 .id(ix)
@@ -244,14 +184,22 @@ impl Render for SidebarView {
                                                     .active(is_active)
                                                     .collapsed(self.is_collapsed)
                                                     .cost(*cost)
-                                                    .on_click(move |conv_id, cx| {
-                                                        if let Some(callback) = &on_select_clone {
-                                                            callback(conv_id, cx);
+                                                    .on_click({
+                                                        let entity = sidebar_entity.clone();
+                                                        let id = id.clone();
+                                                        move |_conv_id, cx| {
+                                                            entity.update(cx, |_, cx| {
+                                                                cx.emit(SidebarEvent::SelectConversation(id.clone()));
+                                                            });
                                                         }
                                                     })
-                                                    .on_delete(move |conv_id, cx| {
-                                                        if let Some(callback) = &on_delete_clone {
-                                                            callback(conv_id, cx);
+                                                    .on_delete({
+                                                        let entity = sidebar_entity.clone();
+                                                        let id = id.clone();
+                                                        move |_conv_id, cx| {
+                                                            entity.update(cx, |_, cx| {
+                                                                cx.emit(SidebarEvent::DeleteConversation(id.clone()));
+                                                            });
                                                         }
                                                     }),
                                                 )
@@ -279,17 +227,12 @@ impl Render for SidebarView {
                                                 .small()
                                                 .w_full()
                                                 .on_click({
-                                                    let on_load_more = self.on_load_more.clone();
-                                                    let sidebar_entity = cx.entity();
+                                                    let entity = sidebar_entity.clone();
                                                     move |_event, _window, cx| {
-                                                        // Increase visible limit
-                                                        sidebar_entity.update(cx, |sidebar, cx| {
+                                                        entity.update(cx, |sidebar, cx| {
                                                             sidebar.load_more(cx);
+                                                            cx.emit(SidebarEvent::LoadMore);
                                                         });
-                                                        // Trigger callback to reload conversations with new limit
-                                                        if let Some(callback) = &on_load_more {
-                                                            callback(cx);
-                                                        }
                                                     }
                                                 }),
                                         ),
@@ -313,9 +256,12 @@ impl Render for SidebarView {
                                 .label(if self.is_collapsed { "" } else { "Settings" })
                                 .small()
                                 .w_full()
-                                .on_click(move |_event, _window, cx| {
-                                    if let Some(callback) = &on_settings {
-                                        callback(cx);
+                                .on_click({
+                                    let entity = sidebar_entity.clone();
+                                    move |_event, _window, cx| {
+                                        entity.update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::OpenSettings);
+                                        });
                                     }
                                 }),
                         ),

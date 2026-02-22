@@ -230,6 +230,16 @@ fn register_actions(cx: &mut App) {
         debug!("Quit action triggered");
         chatty::services::cleanup_thumbnails();
 
+        // Stop all active streams gracefully
+        if let Some(manager) = cx
+            .try_global::<chatty::models::GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            manager.update(cx, |mgr, cx| {
+                mgr.stop_all(cx);
+            });
+        }
+
         // Shutdown all MCP servers.
         // kill_all_sync() sends SIGTERM synchronously to all child processes before
         // the process exits, preventing orphaned MCP server processes. The async
@@ -397,6 +407,14 @@ fn main() {
             }
         })
         .detach();
+
+        // Initialize StreamManager entity for tracking active LLM streams per conversation
+        // Store a strong Entity reference in the global to prevent garbage collection
+        // when the initialization closure's local variables go out of scope.
+        let stream_manager = cx.new(|_cx| chatty::models::StreamManager::new());
+        cx.set_global(chatty::models::GlobalStreamManager {
+            entity: Some(stream_manager),
+        });
 
         // Initialize error store and notifier
         cx.set_global(chatty::models::ErrorStore::new(100)); // Max 100 entries

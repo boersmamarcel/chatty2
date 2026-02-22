@@ -57,6 +57,7 @@ impl ChatView {
             if let InputEvent::PressEnter { secondary } = event {
                 // Only send on plain Enter (not Shift+Enter)
                 if !secondary {
+                    tracing::debug!("Enter key pressed, calling send_message");
                     state_for_enter.update(cx, |state, cx| {
                         state.send_message(cx);
                     });
@@ -96,11 +97,6 @@ impl ChatView {
     /// Get the current conversation ID
     pub fn conversation_id(&self) -> Option<&String> {
         self.conversation_id.as_ref()
-    }
-
-    /// Get the messages
-    pub fn messages(&self) -> &[DisplayMessage] {
-        &self.messages
     }
 
     /// Add a user message to the chat
