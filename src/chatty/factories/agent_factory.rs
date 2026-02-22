@@ -81,6 +81,72 @@ macro_rules! build_with_mcp_tools {
     }};
 }
 
+/// Recursively strip `"format"` fields from a JSON Schema object.
+///
+/// OpenAI strict-mode function calling does not support the `"format"` keyword
+/// (e.g., `"format": "uri"`). MCP tool schemas may include these, so we strip
+/// them before sending to OpenAI / Azure OpenAI.
+///
+/// TODO(#127): Remove once rig-core's `sanitize_schema()` strips `"format"`.
+fn strip_format_from_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    schema.remove("format");
+
+    if let Some(serde_json::Value::Object(props)) = schema.get_mut("properties") {
+        for prop_value in props.values_mut() {
+            if let serde_json::Value::Object(prop_obj) = prop_value {
+                strip_format_from_schema(prop_obj);
+            }
+        }
+    }
+    if let Some(serde_json::Value::Object(items)) = schema.get_mut("items") {
+        strip_format_from_schema(items);
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(serde_json::Value::Array(variants)) = schema.get_mut(key) {
+            for variant in variants.iter_mut() {
+                if let serde_json::Value::Object(obj) = variant {
+                    strip_format_from_schema(obj);
+                }
+            }
+        }
+    }
+    if let Some(serde_json::Value::Object(defs)) = schema.get_mut("$defs") {
+        for def in defs.values_mut() {
+            if let serde_json::Value::Object(def_obj) = def {
+                strip_format_from_schema(def_obj);
+            }
+        }
+    }
+}
+
+/// Sanitize MCP tool schemas for OpenAI compatibility.
+///
+/// Strips unsupported JSON Schema keywords (like `"format"`) that OpenAI's
+/// strict-mode function calling rejects.
+///
+/// TODO(#127): Remove once rig-core's `sanitize_schema()` strips `"format"`.
+fn sanitize_mcp_tools_for_openai(
+    mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+) -> Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {
+    mcp_tools.map(|servers| {
+        servers
+            .into_iter()
+            .map(|(name, tools, sink)| {
+                let sanitized_tools = tools
+                    .into_iter()
+                    .map(|mut tool| {
+                        let mut schema = (*tool.input_schema).clone();
+                        strip_format_from_schema(&mut schema);
+                        tool.input_schema = std::sync::Arc::new(schema);
+                        tool
+                    })
+                    .collect();
+                (name, sanitized_tools, sink)
+            })
+            .collect()
+    })
+}
+
 /// Collect all optional native tools into a `Vec<Box<dyn ToolDyn>>`.
 ///
 /// Replaces the former 16-branch `build_agent_with_tools!` macro. Adding a new
@@ -130,7 +196,7 @@ fn collect_tools(
 #[derive(Clone)]
 pub enum AgentClient {
     Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
-    OpenAI(Agent<rig::providers::openai::completion::CompletionModel>),
+    OpenAI(Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
     Gemini(Agent<rig::providers::gemini::completion::CompletionModel>),
     Mistral(Agent<rig::providers::mistral::completion::CompletionModel>),
     Ollama(Agent<rig::providers::ollama::CompletionModel>),
@@ -364,21 +430,30 @@ impl AgentClient {
                 let key =
                     api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
 
-                // Use the Chat Completions API instead of the Responses API.
-                // The Responses API has a known issue with reasoning models (o-series,
-                // gpt-5-nano, etc.) where multi-turn tool calls fail because reasoning
-                // items are not properly preserved in conversation history.
-                let client = rig::providers::openai::Client::new(&key)?.completions_api();
+                let client = rig::providers::openai::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble);
 
-                // Only set temperature if the model supports it
+                // Only set temperature if the model supports it (reasoning models don't)
                 if model_config.supports_temperature {
                     builder = builder.temperature(model_config.temperature as f64);
+                } else {
+                    // TODO(#127): Remove once rig-core handles reasoning IDs correctly.
+                    // Reasoning models (o-series, gpt-5-nano, etc.) need explicit reasoning
+                    // summary configuration for multi-turn tool calling to work. Without this,
+                    // the Responses API doesn't include reasoning summaries in OutputItemDone
+                    // events, causing rig-core to lose the reasoning ID when assembling
+                    // conversation history. OpenAI then rejects the next turn with:
+                    // "function_call was provided without its required reasoning item"
+                    builder = builder.additional_params(serde_json::json!({
+                        "reasoning": {
+                            "summary": "auto"
+                        }
+                    }));
                 }
 
-                // Build with all tools
+                // Build with all tools (sanitize MCP schemas for OpenAI strict mode)
                 let tool_vec = collect_tools(
                     list_tools,
                     bash_tool,
@@ -386,6 +461,7 @@ impl AgentClient {
                     fs_write_tools,
                     mcp_mgmt_tools,
                 );
+                let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::OpenAI(agent))
@@ -594,7 +670,7 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                // Build with all tools
+                // Build with all tools (sanitize MCP schemas for OpenAI strict mode)
                 let tool_vec = collect_tools(
                     list_tools,
                     bash_tool,
@@ -602,6 +678,7 @@ impl AgentClient {
                     fs_write_tools,
                     mcp_mgmt_tools,
                 );
+                let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok(AgentClient::AzureOpenAI(agent))

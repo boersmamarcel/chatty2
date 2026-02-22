@@ -6,8 +6,8 @@
 //! a JSON string *and* a raw JSON object so that Anthropic/Gemini (which send objects) and
 //! OpenAI (which sends strings) all work.
 
-use serde::de;
 use serde::Deserialize;
+use serde::de;
 use std::collections::HashMap;
 
 /// Deserialize `env` from either a JSON object or a JSON-encoded string.

@@ -44,6 +44,7 @@ actions!(
         OpenSettings,
         Quit,
         ToggleSidebar,
+        NewConversation,
         PreviousConversation,
         NextConversation,
         DeleteActiveConversation
@@ -224,6 +225,7 @@ fn register_actions(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-n", NewConversation, None),
         KeyBinding::new("cmd-up", PreviousConversation, None),
         KeyBinding::new("cmd-down", NextConversation, None),
         KeyBinding::new("cmd-backspace", DeleteActiveConversation, None),
@@ -234,6 +236,7 @@ fn register_actions(cx: &mut App) {
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-n", NewConversation, None),
         KeyBinding::new("ctrl-up", PreviousConversation, None),
         KeyBinding::new("ctrl-down", NextConversation, None),
         KeyBinding::new("ctrl-backspace", DeleteActiveConversation, None),
@@ -283,6 +286,18 @@ fn register_actions(cx: &mut App) {
                 app.sidebar_view.update(cx, |sidebar, cx| {
                     sidebar.toggle_collapsed(cx);
                 });
+            });
+        }
+    });
+    cx.on_action(|_: &NewConversation, cx: &mut App| {
+        debug!("New conversation action triggered");
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.start_new_conversation(cx);
             });
         }
     });
