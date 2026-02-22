@@ -946,7 +946,7 @@ impl ChattyApp {
                 "Rebuilding agent with fresh MCP tools"
             );
 
-            let (exec_settings, pending_approvals, pending_write_approvals) = cx
+            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts) = cx
                 .update(|cx| {
                     let settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -957,7 +957,11 @@ impl ChattyApp {
                     let write_approvals = cx
                         .global::<crate::chatty::models::WriteApprovalStore>()
                         .get_pending_approvals();
-                    (Some(settings), Some(approvals), Some(write_approvals))
+                    let artifacts = cx
+                        .global::<ConversationsStore>()
+                        .get_conversation(&conv_id)
+                        .map(|c| c.pending_artifacts());
+                    (Some(settings), Some(approvals), Some(write_approvals), artifacts)
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -968,6 +972,7 @@ impl ChattyApp {
                 exec_settings,
                 pending_approvals,
                 pending_write_approvals,
+                pending_artifacts,
             )
             .await?;
 
@@ -1031,7 +1036,12 @@ impl ChattyApp {
                         );
 
                         // Get execution settings for tool creation
-                        let (exec_settings, pending_approvals, pending_write_approvals) = cx
+                        let (
+                            exec_settings,
+                            pending_approvals,
+                            pending_write_approvals,
+                            pending_artifacts,
+                        ) = cx
                             .update(|cx| {
                                 let settings = cx
                                     .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -1042,7 +1052,16 @@ impl ChattyApp {
                                 let write_approvals = cx
                                     .global::<crate::chatty::models::WriteApprovalStore>()
                                     .get_pending_approvals();
-                                (Some(settings), Some(approvals), Some(write_approvals))
+                                let artifacts = cx
+                                    .global::<ConversationsStore>()
+                                    .get_conversation(&conv_id)
+                                    .map(|c| c.pending_artifacts());
+                                (
+                                    Some(settings),
+                                    Some(approvals),
+                                    Some(write_approvals),
+                                    artifacts,
+                                )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -1054,6 +1073,7 @@ impl ChattyApp {
                             exec_settings,
                             pending_approvals,
                             pending_write_approvals,
+                            pending_artifacts,
                         )
                         .await?;
 
@@ -1218,6 +1238,13 @@ impl ChattyApp {
         let conv_id_for_task = cx.global::<ConversationsStore>().active_id().cloned();
         let needs_conversation_creation = conv_id_for_task.is_none();
 
+        // Get pending artifacts handle for existing conversations (for stream registration)
+        let pending_artifacts_for_registration = conv_id_for_task.as_ref().and_then(|id| {
+            cx.global::<ConversationsStore>()
+                .get_conversation(id)
+                .map(|c| c.pending_artifacts())
+        });
+
         // Create shared resolved ID tracker if we need to create a conversation
         let resolved_id = if needs_conversation_creation {
             Arc::new(Mutex::new(None))
@@ -1325,12 +1352,17 @@ impl ChattyApp {
                                 .map(|m| (m.supports_pdf, m.supports_images))
                                 .unwrap_or((false, false)); // Safe fallback if model not found
 
+                            // Clear any leftover artifacts from a previous stream
+                            if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
+                                artifacts.clear();
+                            }
+
                             Ok((
                                 conv.agent().clone(),
                                 conv.history().to_vec(),
                                 model_id,
                                 supports_pdf,
-                                supports_images
+                                supports_images,
                             ))
                         } else {
                             Err(anyhow::anyhow!(
@@ -1507,11 +1539,20 @@ impl ChattyApp {
         {
             if let Some(ref conv_id) = conv_id_for_task {
                 manager.update(cx, |mgr, cx| {
-                    mgr.register_stream(conv_id.clone(), task, cancel_flag, cx);
+                    mgr.register_stream(
+                        conv_id.clone(),
+                        task,
+                        cancel_flag,
+                        pending_artifacts_for_registration,
+                        cx,
+                    );
                 });
             } else if needs_conversation_creation {
+                // For new conversations, pending_artifacts will be available after
+                // Conversation::new() creates them. We pass None here; the follow-up
+                // logic falls back to checking the conversation's artifacts directly.
                 manager.update(cx, |mgr, cx| {
-                    mgr.register_pending_stream(task, resolved_id, cancel_flag, cx);
+                    mgr.register_pending_stream(task, resolved_id, cancel_flag, None, cx);
                 });
                 debug!("Registered pending stream until conversation is created");
             }
@@ -1646,6 +1687,7 @@ impl ChattyApp {
                 status,
                 token_usage,
                 trace_json,
+                pending_artifacts,
             } => {
                 debug!(conv_id = %conversation_id, status = ?status, "StreamManager: stream ended");
                 // Update UI streaming state
@@ -1667,6 +1709,40 @@ impl ChattyApp {
                             trace_json.clone(),
                             cx,
                         );
+
+                        // Check for artifacts queued by AddAttachmentTool.
+                        // If the stream manager had them, use those; otherwise fall back
+                        // to checking the conversation directly (for pending-promoted streams).
+                        let artifacts = pending_artifacts.clone().or_else(|| {
+                            cx.try_global::<ConversationsStore>()
+                                .and_then(|store| store.get_conversation(conversation_id))
+                                .and_then(|conv| {
+                                    conv.pending_artifacts()
+                                        .lock()
+                                        .ok()
+                                        .map(|mut v| v.drain(..).collect::<Vec<_>>())
+                                })
+                                .filter(|v| !v.is_empty())
+                        });
+
+                        if let Some(artifact_paths) = artifacts
+                            && !artifact_paths.is_empty()
+                        {
+                            debug!(
+                                count = artifact_paths.len(),
+                                "Sending follow-up with queued artifacts as multimodal content"
+                            );
+                            let follow_up_text =
+                                "Here are the attached files for your analysis.".to_string();
+                            let app_weak = cx.entity().downgrade();
+                            cx.defer(move |cx| {
+                                if let Some(app) = app_weak.upgrade() {
+                                    app.update(cx, |app, cx| {
+                                        app.send_message(follow_up_text, artifact_paths, cx);
+                                    });
+                                }
+                            });
+                        }
                     }
                     StreamStatus::Cancelled => {
                         // Pending streams have no conversation yet — only UI reset (done above)

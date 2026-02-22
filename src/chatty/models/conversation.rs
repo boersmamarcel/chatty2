@@ -10,6 +10,7 @@ use rig::completion::message::{AssistantContent, Text};
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::chatty::repositories::ConversationData;
+use crate::chatty::tools::PendingArtifacts;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
@@ -27,6 +28,8 @@ pub struct Conversation {
     updated_at: SystemTime,
     /// Partial streaming message being composed (None if no active stream)
     streaming_message: Option<String>,
+    /// Shared state for artifacts queued by AddAttachmentTool during a stream
+    pending_artifacts: PendingArtifacts,
 }
 
 impl Conversation {
@@ -57,6 +60,9 @@ impl Conversation {
             provider_config.provider_type, url_info, model_config.model_identifier
         );
 
+        let pending_artifacts: PendingArtifacts =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
         let agent = AgentClient::from_model_config_with_tools(
             model_config,
             provider_config,
@@ -64,6 +70,7 @@ impl Conversation {
             exec_settings,
             pending_approvals,
             pending_write_approvals,
+            Some(pending_artifacts.clone()),
         )
         .await
         .context("Failed to create agent from config")?;
@@ -82,6 +89,7 @@ impl Conversation {
             created_at: now,
             updated_at: now,
             streaming_message: None,
+            pending_artifacts,
         })
     }
 
@@ -111,6 +119,9 @@ impl Conversation {
             data.id, provider_config.provider_type, url_info, model_config.model_identifier
         );
 
+        let pending_artifacts: PendingArtifacts =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
         // Reconstruct agent
         let agent = AgentClient::from_model_config_with_tools(
             model_config,
@@ -119,6 +130,7 @@ impl Conversation {
             exec_settings,
             pending_approvals,
             pending_write_approvals,
+            Some(pending_artifacts.clone()),
         )
         .await
         .context("Failed to create agent from config")?;
@@ -155,6 +167,7 @@ impl Conversation {
             created_at,
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
+            pending_artifacts,
         })
     }
 
@@ -275,6 +288,11 @@ impl Conversation {
     /// Get the agent
     pub fn agent(&self) -> &AgentClient {
         &self.agent
+    }
+
+    /// Get the pending artifacts handle for this conversation's tools
+    pub fn pending_artifacts(&self) -> PendingArtifacts {
+        self.pending_artifacts.clone()
     }
 
     /// Set the agent and model ID synchronously (for model switching without blocking)

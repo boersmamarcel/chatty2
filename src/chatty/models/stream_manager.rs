@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use gpui::{Entity, EventEmitter, Global, Task};
 use tracing::{debug, warn};
 
+use std::path::PathBuf;
+
 use crate::chatty::services::StreamChunk;
+use crate::chatty::tools::PendingArtifacts;
 
 /// Status of a stream lifecycle
 #[derive(Clone, Debug)]
@@ -28,6 +31,9 @@ pub struct StreamState {
     pub trace_json: Option<serde_json::Value>,
     task: Option<Task<anyhow::Result<()>>>,
     cancel_flag: Arc<AtomicBool>,
+    /// Shared reference to artifacts queued by AddAttachmentTool during this stream.
+    /// Drained on finalization to include in StreamEnded event.
+    pending_artifacts: Option<PendingArtifacts>,
 }
 
 /// Events emitted by StreamManager for decoupled UI updates.
@@ -83,6 +89,9 @@ pub enum StreamManagerEvent {
         status: StreamStatus,
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
+        /// Artifact paths queued by AddAttachmentTool during this stream.
+        /// Non-empty only when status is Completed.
+        pending_artifacts: Option<Vec<PathBuf>>,
     },
 }
 
@@ -117,6 +126,7 @@ impl StreamManager {
         conv_id: String,
         task: Task<anyhow::Result<()>>,
         cancel_flag: Arc<AtomicBool>,
+        pending_artifacts: Option<PendingArtifacts>,
         cx: &mut gpui::Context<Self>,
     ) {
         // Cancel existing stream if any
@@ -133,6 +143,7 @@ impl StreamManager {
                 trace_json: None,
                 task: Some(task),
                 cancel_flag,
+                pending_artifacts,
             },
         );
 
@@ -148,6 +159,7 @@ impl StreamManager {
         task: Task<anyhow::Result<()>>,
         resolved_id: Arc<Mutex<Option<String>>>,
         cancel_flag: Arc<AtomicBool>,
+        pending_artifacts: Option<PendingArtifacts>,
         cx: &mut gpui::Context<Self>,
     ) {
         // Cancel any existing pending stream
@@ -164,6 +176,7 @@ impl StreamManager {
                 trace_json: None,
                 task: Some(task),
                 cancel_flag,
+                pending_artifacts,
             },
         );
 
@@ -279,6 +292,7 @@ impl StreamManager {
                     status: StreamStatus::Error(error),
                     token_usage,
                     trace_json,
+                    pending_artifacts: None,
                 });
                 self.streams.remove(conv_id);
             }
@@ -287,9 +301,16 @@ impl StreamManager {
 
     /// Mark a stream as completed and emit StreamEnded.
     /// Called when the stream loop finishes normally.
+    /// Drains any pending artifacts queued by AddAttachmentTool.
     pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
-        let (token_usage, trace_json) = if let Some(state) = self.streams.get(conv_id) {
-            (state.token_usage, state.trace_json.clone())
+        let (token_usage, trace_json, artifacts) = if let Some(state) = self.streams.get(conv_id) {
+            let drained = state
+                .pending_artifacts
+                .as_ref()
+                .and_then(|pa| pa.lock().ok())
+                .map(|mut v| v.drain(..).collect::<Vec<_>>())
+                .filter(|v| !v.is_empty());
+            (state.token_usage, state.trace_json.clone(), drained)
         } else {
             warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
             return;
@@ -300,6 +321,7 @@ impl StreamManager {
             status: StreamStatus::Completed,
             token_usage,
             trace_json,
+            pending_artifacts: artifacts,
         });
 
         self.streams.remove(conv_id);
@@ -348,6 +370,7 @@ impl StreamManager {
                 status: StreamStatus::Cancelled,
                 token_usage,
                 trace_json,
+                pending_artifacts: None,
             });
 
             // Clean up pending resolved IDs if we used the pending key
@@ -367,6 +390,7 @@ impl StreamManager {
                 status: StreamStatus::Cancelled,
                 token_usage: state.token_usage,
                 trace_json: state.trace_json,
+                pending_artifacts: None,
             });
         }
         self.pending_resolved_ids.remove("__pending__");
@@ -411,6 +435,7 @@ impl StreamManager {
                     status: StreamStatus::Cancelled,
                     token_usage: state.token_usage,
                     trace_json: state.trace_json,
+                    pending_artifacts: None,
                 });
             }
         }
@@ -453,6 +478,7 @@ mod tests {
                 trace_json: None,
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
+                pending_artifacts: None,
             },
         );
         assert!(mgr.is_streaming("conv-123"));
@@ -470,6 +496,7 @@ mod tests {
                 trace_json: None,
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
+                pending_artifacts: None,
             },
         );
         mgr.pending_resolved_ids.insert(
@@ -495,6 +522,7 @@ mod tests {
                 trace_json: None,
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
+                pending_artifacts: None,
             },
         );
 

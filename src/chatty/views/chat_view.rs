@@ -791,14 +791,30 @@ impl ChatView {
         if let Some(ref pending) = self.pending_approval {
             let id = pending.id.clone();
 
-            // Resolve in approval store
+            // Try execution approval store first (bash commands)
+            let mut resolved = false;
             if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
                 use crate::chatty::models::execution_approval_store::ApprovalDecision;
-                store.resolve(&id, if approved {
+                resolved = store.resolve(&id, if approved {
                     ApprovalDecision::Approved
                 } else {
                     ApprovalDecision::Denied
                 });
+            }
+
+            // If not found in execution store, try write approval store (filesystem writes)
+            if !resolved {
+                if let Some(store) = cx.try_global::<crate::chatty::models::WriteApprovalStore>() {
+                    use crate::chatty::models::write_approval_store::WriteApprovalDecision;
+                    store.resolve(
+                        &id,
+                        if approved {
+                            WriteApprovalDecision::Approved
+                        } else {
+                            WriteApprovalDecision::Denied
+                        },
+                    );
+                }
             }
 
             // Immediately clear pending approval to hide the bar

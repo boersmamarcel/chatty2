@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
+use crate::chatty::models::execution_approval_store::notify_approval_via_global;
 use crate::chatty::models::write_approval_store::{
     PendingWriteApprovals, WriteApprovalDecision, WriteApprovalRequest, WriteOperation,
 };
@@ -36,6 +37,9 @@ async fn request_write_approval(
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
 
+    // Get description before moving operation into request
+    let description = operation.description();
+
     let request = WriteApprovalRequest {
         id: id.clone(),
         operation,
@@ -47,6 +51,9 @@ async fn request_write_approval(
         let mut store = pending.lock().unwrap();
         store.insert(id.clone(), request);
     }
+
+    // Notify the stream so the UI can show an approval bar
+    notify_approval_via_global(id.clone(), description, false);
 
     debug!(approval_id = %id, "Waiting for write approval");
 
