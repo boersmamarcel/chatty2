@@ -219,6 +219,8 @@ cx.subscribe(&input, move |_input_state, event: &InputEvent, cx| {
 
 **Gotcha**: Always call `.detach()` on subscriptions, or store the subscription handle to keep it alive.
 
+**Design rule:** All entity-to-entity communication uses `EventEmitter`/`cx.subscribe()` — no `Arc<dyn Fn>` callbacks between entities. `IntoElement` components (e.g., `ConversationItem`) keep callbacks but route them through the parent entity's `cx.emit()`. See `docs/entity-communication.md` for full rationale.
+
 ### 3. Async Patterns with Tokio Integration
 
 **When to use**: For long-running operations (file I/O, network requests, LLM calls) that shouldn't block the UI.
@@ -331,20 +333,20 @@ impl ModelsModel {
 pub struct SidebarView {
     conversations: Vec<(String, String, Option<f64>)>,
     active_conversation_id: Option<String>,
-    on_new_chat: Option<NewChatCallback>,
 }
 
-// Callbacks for communication
-pub type NewChatCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
+// Entity communication via events (not callbacks)
+#[derive(Clone, Debug)]
+pub enum SidebarEvent {
+    NewChat,
+    SelectConversation(String),
+    DeleteConversation(String),
+    // ...
+}
+
+impl EventEmitter<SidebarEvent> for SidebarView {}
 
 impl SidebarView {
-    pub fn set_on_new_chat<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut App) + Send + Sync + 'static,
-    {
-        self.on_new_chat = Some(Arc::new(callback));
-    }
-    
     pub fn set_conversations(&mut self, conversations: Vec<(String, String, Option<f64>)>, cx: &mut Context<Self>) {
         self.conversations = conversations;
         cx.notify();  // Trigger re-render
@@ -503,24 +505,32 @@ pub fn create_model(mut config: ModelConfig, cx: &mut App) {
 
 ### 8. Closure Capture Pattern
 
-**When to use**: Passing entities or data into event handlers and callbacks.
+**When to use**: Passing entities or data into event handlers and closures.
 
-**Pattern**: Clone entities/references before closures to avoid borrow checker issues.
+**Pattern**: With `cx.subscribe()`, the subscriber closure receives `&mut Self` directly — minimal cloning needed. For `IntoElement` component callbacks that must capture entity references, clone before the closure.
 
 ```rust
-// app_controller.rs
-let app_entity = cx.entity();  // Get entity reference
+// EventEmitter subscription — direct &mut Self, no clone gymnastics
+cx.subscribe(&self.sidebar_view, |app, _sidebar, event: &SidebarEvent, cx| {
+    match event {
+        SidebarEvent::SelectConversation(id) => {
+            app.load_conversation(id, cx);  // Direct access to app
+        }
+        // ...
+    }
+}).detach();
 
-sidebar.update(cx, |sidebar, _cx| {
-    let app = app_entity.clone();  // Clone before closure
-    sidebar.set_on_select_conversation(move |conv_id, cx| {
-        let app = app.clone();      // Clone again inside closure
-        let id = conv_id.to_string();
-        app.update(cx, |app, cx| {
-            app.load_conversation(&id, cx);
-        });
-    });
-});
+// IntoElement callback — must clone entity reference
+ConversationItem::new(id, title)
+    .on_click({
+        let entity = sidebar_entity.clone();  // Clone before closure
+        let id = id.clone();
+        move |_conv_id, cx| {
+            entity.update(cx, |_, cx| {
+                cx.emit(SidebarEvent::SelectConversation(id.clone()));
+            });
+        }
+    })
 ```
 
 **Gotcha**: Clone before the closure moves the data, then clone again inside if needed for multiple uses.
