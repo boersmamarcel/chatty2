@@ -15,7 +15,8 @@ use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
 use crate::chatty::services::{generate_title, stream_prompt};
-use crate::chatty::views::chat_input::ChatInputState;
+use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
+use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
@@ -107,21 +108,19 @@ impl ChattyApp {
         self.load_conversations(cx);
     }
 
-    /// Set up all callbacks between components
+    /// Set up all event subscriptions between components
+    ///
+    /// All entity-to-entity communication uses EventEmitter/cx.subscribe():
+    /// 1. SidebarView emits SidebarEvent → ChattyApp handles
+    /// 2. ChatInputState emits ChatInputEvent → ChattyApp handles
+    /// 3. McpNotifier emits McpNotifierEvent → ChattyApp handles
+    /// 4. StreamManager emits StreamManagerEvent → ChattyApp handles
     fn setup_callbacks(&self, cx: &mut Context<Self>) {
-        // Setup sidebar callbacks
-        let chat_view = self.chat_view.clone();
-        let sidebar = self.sidebar_view.clone();
-
-        // Get entity to use in callbacks (avoids window lookup issues)
-        let app_entity = cx.entity();
-
-        // New chat callback (guarded against rapid clicks via active_create_task)
-        sidebar.update(cx, |sidebar, _cx| {
-            let app = app_entity.clone();
-            sidebar.set_on_new_chat(move |cx| {
-                let app = app.clone();
-                app.update(cx, |app, cx| {
+        // SUBSCRIPTION 1: SidebarView events
+        cx.subscribe(
+            &self.sidebar_view,
+            |app, _sidebar, event: &SidebarEvent, cx| match event {
+                SidebarEvent::NewChat => {
                     if app.active_create_task.is_some() {
                         debug!("Already creating a conversation, ignoring duplicate click");
                         return;
@@ -148,157 +147,94 @@ impl ChattyApp {
                         }
                         result
                     }));
-                });
-            });
-        });
-
-        // Settings callback
-        sidebar.update(cx, |sidebar, _cx| {
-            sidebar.set_on_settings(move |cx| {
-                cx.defer(|cx| {
-                    use crate::settings::controllers::SettingsView;
-                    SettingsView::open_or_focus_settings_window(cx);
-                });
-            });
-        });
-
-        // Select conversation callback
-        sidebar.update(cx, |sidebar, _cx| {
-            let app = app_entity.clone();
-            sidebar.set_on_select_conversation(move |conv_id, cx| {
-                let app = app.clone();
-                let id = conv_id.to_string();
-                app.update(cx, |app, cx| {
-                    app.load_conversation(&id, cx);
-                });
-            });
-        });
-
-        // Delete conversation callback
-        sidebar.update(cx, |sidebar, _cx| {
-            let app = app_entity.clone();
-            sidebar.set_on_delete_conversation(move |conv_id, cx| {
-                let app = app.clone();
-                let id = conv_id.to_string();
-                app.update(cx, |app, cx| {
-                    app.delete_conversation(&id, cx);
-                });
-            });
-        });
-
-        // Toggle sidebar callback
-        sidebar.update(cx, |sidebar, _cx| {
-            sidebar.set_on_toggle(move |collapsed, _cx| {
-                // Optional: Could save collapsed state to settings here
-                debug!(collapsed = collapsed, "Sidebar toggled");
-            });
-        });
-
-        // Load more conversations callback
-        let sidebar_for_load_more = sidebar.clone();
-        sidebar.update(cx, |sidebar, _cx| {
-            sidebar.set_on_load_more(move |cx| {
-                sidebar_for_load_more.update(cx, |sidebar, cx| {
-                    let store = cx.global::<ConversationsStore>();
-                    let total = store.count();
-                    let convs = store
-                        .list_recent(sidebar.visible_limit())
-                        .iter()
-                        .map(|c| {
-                            (
-                                c.id().to_string(),
-                                c.title().to_string(),
-                                Some(c.token_usage().total_estimated_cost_usd),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    debug!(
-                        conv_count = convs.len(),
-                        total = total,
-                        limit = sidebar.visible_limit(),
-                        "Load More: Reloading conversations with new limit"
-                    );
-                    sidebar.set_conversations(convs, cx);
-                    sidebar.set_total_count(total);
-                });
-            });
-        });
-
-        // Chat input send message callback
-        chat_view.update(cx, |view, cx| {
-            let input_state = view.chat_input_state().clone();
-            let app_for_send = app_entity.clone();
-            input_state.update(cx, |state, _cx| {
-                debug!("Setting up on_send callback for chat input");
-                state.set_on_send(move |message, attachments, cx| {
-                    debug!(message = %message, attachment_count = attachments.len(), "on_send callback triggered");
-                    let app = app_for_send.clone();
-                    let msg = message.clone();
-                    let att = attachments.clone();
-
-                    debug!("Calling send_message directly via entity");
-                    app.update(cx, |app, cx| {
-                        app.send_message(msg, att, cx);
+                }
+                SidebarEvent::OpenSettings => {
+                    cx.defer(|cx| {
+                        use crate::settings::controllers::SettingsView;
+                        SettingsView::open_or_focus_settings_window(cx);
                     });
-                });
-            });
-        });
+                }
+                SidebarEvent::SelectConversation(conv_id) => {
+                    app.load_conversation(conv_id, cx);
+                }
+                SidebarEvent::DeleteConversation(conv_id) => {
+                    app.delete_conversation(conv_id, cx);
+                }
+                SidebarEvent::ToggleCollapsed(collapsed) => {
+                    // Optional: Could save collapsed state to settings here
+                    debug!(collapsed = collapsed, "Sidebar toggled");
+                }
+                SidebarEvent::LoadMore => {
+                    let sidebar = app.sidebar_view.clone();
+                    sidebar.update(cx, |sidebar, cx| {
+                        let store = cx.global::<ConversationsStore>();
+                        let total = store.count();
+                        let convs = store
+                            .list_recent(sidebar.visible_limit())
+                            .iter()
+                            .map(|c| {
+                                (
+                                    c.id().to_string(),
+                                    c.title().to_string(),
+                                    Some(c.token_usage().total_estimated_cost_usd),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        debug!(
+                            conv_count = convs.len(),
+                            total = total,
+                            limit = sidebar.visible_limit(),
+                            "Load More: Reloading conversations with new limit"
+                        );
+                        sidebar.set_conversations(convs, cx);
+                        sidebar.set_total_count(total);
+                    });
+                }
+            },
+        )
+        .detach();
 
-        // Chat input model change callback
-        chat_view.update(cx, |view, cx| {
-            let input_state = view.chat_input_state().clone();
-            let app_for_model = app_entity.clone();
-            input_state.update(cx, |state, _cx| {
-                debug!("Setting up on_model_change callback for chat input");
-                state.set_on_model_change(move |model_id, cx| {
-                    debug!(model_id = %model_id, "on_model_change callback triggered");
-                    let app = app_for_model.clone();
+        // SUBSCRIPTION 2: ChatInputState events
+        let chat_input_state = self.chat_view.read(cx).chat_input_state().clone();
+        cx.subscribe(
+            &chat_input_state,
+            |app, _input, event: &ChatInputEvent, cx| match event {
+                ChatInputEvent::Send {
+                    message,
+                    attachments,
+                } => {
+                    debug!(message = %message, attachment_count = attachments.len(), "ChatInputEvent::Send received");
+                    app.send_message(message.clone(), attachments.clone(), cx);
+                }
+                ChatInputEvent::ModelChanged(model_id) => {
+                    debug!(model_id = %model_id, "ChatInputEvent::ModelChanged received");
+                    // Defer capability update to avoid re-entering ChatInputState
+                    let chat_view = app.chat_view.clone();
                     let mid = model_id.clone();
+                    cx.defer(move |cx| {
+                        let capabilities = cx
+                            .global::<ModelsModel>()
+                            .get_model(&mid)
+                            .map(|m| (m.supports_images, m.supports_pdf))
+                            .unwrap_or((false, false));
 
-                    app.update(cx, |app, cx| {
-                        // Defer capability update to avoid re-entering ChatInputState
-                        let chat_view = app.chat_view.clone();
-                        let mid_for_defer = mid.clone();
-                        cx.defer(move |cx| {
-                            let capabilities = cx
-                                .global::<ModelsModel>()
-                                .get_model(&mid_for_defer)
-                                .map(|m| (m.supports_images, m.supports_pdf))
-                                .unwrap_or((false, false));
-
-                            chat_view.update(cx, |view, cx| {
-                                view.chat_input_state().update(cx, |state, _cx| {
-                                    state.set_capabilities(capabilities.0, capabilities.1);
-                                });
+                        chat_view.update(cx, |view, cx| {
+                            view.chat_input_state().update(cx, |state, _cx| {
+                                state.set_capabilities(capabilities.0, capabilities.1);
                             });
                         });
-
-                        app.change_conversation_model(mid, cx);
                     });
-                });
-            });
-        });
+                    app.change_conversation_model(model_id.clone(), cx);
+                }
+                ChatInputEvent::Stop => {
+                    debug!("ChatInputEvent::Stop received");
+                    app.stop_stream(cx);
+                }
+            },
+        )
+        .detach();
 
-        // Chat input stop stream callback
-        chat_view.update(cx, |view, cx| {
-            let input_state = view.chat_input_state().clone();
-            let app_for_stop = app_entity.clone();
-            input_state.update(cx, |state, _cx| {
-                debug!("Setting up on_stop callback for chat input");
-                state.set_on_stop(move |cx| {
-                    debug!("on_stop callback triggered");
-                    let app = app_for_stop.clone();
-
-                    app.update(cx, |app, cx| {
-                        // stop_stream now handles clearing the stream from HashMap
-                        // and updating UI state, so no need for separate clear_streaming_state call
-                        app.stop_stream(cx);
-                    });
-                });
-            });
-        });
-
-        // Rebuild active conversation's agent when MCP servers are toggled on/off
+        // SUBSCRIPTION 3: McpNotifier events — rebuild agent when MCP servers change
         if let Some(weak_notifier) = cx
             .try_global::<GlobalMcpNotifier>()
             .and_then(|g| g.entity.clone())
@@ -315,7 +251,7 @@ impl ChattyApp {
             .detach();
         }
 
-        // Subscribe to StreamManager events for decoupled UI updates
+        // SUBSCRIPTION 4: StreamManager events — decoupled UI updates
         if let Some(manager) = cx
             .try_global::<GlobalStreamManager>()
             .and_then(|g| g.entity.clone())
@@ -1675,11 +1611,7 @@ impl ChattyApp {
                     StreamStatus::Cancelled => {
                         // Pending streams have no conversation yet — only UI reset (done above)
                         if conversation_id != "__pending__" {
-                            self.finalize_stopped_stream(
-                                conversation_id,
-                                trace_json.clone(),
-                                cx,
-                            );
+                            self.finalize_stopped_stream(conversation_id, trace_json.clone(), cx);
                         }
                     }
                     _ => {}
@@ -1918,10 +1850,7 @@ impl ChattyApp {
         // and save to conversation history
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                let partial_text = conv
-                    .streaming_message()
-                    .cloned()
-                    .unwrap_or_default();
+                let partial_text = conv.streaming_message().cloned().unwrap_or_default();
                 conv.finalize_response(partial_text);
                 conv.add_trace(trace_json);
                 conv.set_streaming_message(None);

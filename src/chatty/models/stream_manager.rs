@@ -269,12 +269,11 @@ impl StreamManager {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.status = StreamStatus::Error(error.clone());
                 }
-                let (token_usage, trace_json) =
-                    if let Some(state) = self.streams.get(conv_id) {
-                        (state.token_usage, state.trace_json.clone())
-                    } else {
-                        (None, None)
-                    };
+                let (token_usage, trace_json) = if let Some(state) = self.streams.get(conv_id) {
+                    (state.token_usage, state.trace_json.clone())
+                } else {
+                    (None, None)
+                };
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: conv_id.to_string(),
                     status: StreamStatus::Error(error),
@@ -289,13 +288,12 @@ impl StreamManager {
     /// Mark a stream as completed and emit StreamEnded.
     /// Called when the stream loop finishes normally.
     pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
-        let (token_usage, trace_json) =
-            if let Some(state) = self.streams.get(conv_id) {
-                (state.token_usage, state.trace_json.clone())
-            } else {
-                warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
-                return;
-            };
+        let (token_usage, trace_json) = if let Some(state) = self.streams.get(conv_id) {
+            (state.token_usage, state.trace_json.clone())
+        } else {
+            warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
+            return;
+        };
 
         cx.emit(StreamManagerEvent::StreamEnded {
             conversation_id: conv_id.to_string(),

@@ -32,10 +32,10 @@ ChattyApp (GPUI Entity, window root)
   │     └── Entity<ChatInputState>
   │           ├── is_streaming: bool
   │           ├── selected_model_id, attachments
-  │           └── callbacks: on_send, on_stop, on_model_change
+  │           └── emits: ChatInputEvent (Send, ModelChanged, Stop)
   └── Entity<SidebarView>
         ├── conversations list
-        └── callbacks: on_new_chat, on_select_conversation, on_delete
+        └── emits: SidebarEvent (NewChat, OpenSettings, SelectConversation, ...)
 ```
 
 ## Event Subscription Chain
@@ -47,14 +47,12 @@ graph TD
     CV -->|creates/updates| STV[SystemTraceView]
     STV -->|cx.emit TraceEvent| CV
 
-    CIS[ChatInputState] -->|on_send callback| CA
-    CIS -->|on_stop callback| CA
-    SB[SidebarView] -->|on_new_chat callback| CA
-    SB -->|on_select_conversation callback| CA
-    MN[McpNotifier] -->|McpNotifierEvent| CA
+    CIS[ChatInputState] -->|cx.emit ChatInputEvent| CA
+    SB[SidebarView] -->|cx.emit SidebarEvent| CA
+    MN[McpNotifier] -->|cx.emit McpNotifierEvent| CA
 ```
 
-The single subscription is set up in `ChattyApp::setup_callbacks()`:
+All entity-to-entity communication uses `EventEmitter`/`cx.subscribe()`. The 4 subscriptions are set up in `ChattyApp::setup_callbacks()`:
 
 ```rust
 cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
@@ -115,7 +113,7 @@ sequenceDiagram
     participant LLM as LLM API
 
     U->>CIS: Press Enter
-    CIS->>CA: on_send(message, attachments)
+    CIS->>CA: cx.emit(ChatInputEvent::Send)
     CA->>CS: active_id() → None
 
     Note over CA: Create cancel_flag, resolved_id=Arc<Mutex<None>>
@@ -165,7 +163,7 @@ sequenceDiagram
     participant LLM as LLM API
 
     U->>CIS: Press Enter
-    CIS->>CA: on_send(message, attachments)
+    CIS->>CA: cx.emit(ChatInputEvent::Send)
     CA->>CS: active_id() → Some(conv_id)
 
     Note over CA: Create cancel_flag
@@ -211,7 +209,7 @@ sequenceDiagram
     Note over CV: Currently showing conv A (streaming)
 
     U->>SB: Click conversation B
-    SB->>CA: on_select_conversation("B")
+    SB->>CA: cx.emit(SidebarEvent::SelectConversation("B"))
     CA->>CA: load_conversation("B")
     CA->>CS: set_active("B")
     CA->>SM: is_streaming("B")? → false
@@ -231,7 +229,7 @@ sequenceDiagram
     Note over U: User switches back to A
 
     U->>SB: Click conversation A
-    SB->>CA: on_select_conversation("A")
+    SB->>CA: cx.emit(SidebarEvent::SelectConversation("A"))
     CA->>CA: load_conversation("A")
     CA->>CS: set_active("A"), get streaming_message
     CA->>SM: is_streaming("A")? → true
@@ -256,7 +254,7 @@ sequenceDiagram
     participant CV as ChatView
 
     U->>CIS: Click Stop
-    CIS->>CA: on_stop callback → stop_stream()
+    CIS->>CA: cx.emit(ChatInputEvent::Stop) → stop_stream()
     CA->>CS: active_id() → conv_id
     CA->>CV: extract_current_trace()
     CA->>SM: set_trace(conv_id, trace_json)
@@ -286,7 +284,7 @@ sequenceDiagram
     Note over SM: __pending__ stream exists
 
     U->>SB: Click New Chat
-    SB->>CA: on_new_chat callback
+    SB->>CA: cx.emit(SidebarEvent::NewChat)
     CA->>SM: cancel_pending()
 
     Note over SM: Sets cancel_flag for __pending__<br/>Emits StreamEnded { "__pending__", Cancelled }
