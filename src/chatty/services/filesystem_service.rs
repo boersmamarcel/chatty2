@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use super::path_validator::PathValidator;
@@ -51,6 +51,11 @@ impl FileSystemService {
     pub async fn new(workspace_root: &str) -> Result<Self> {
         let validator = PathValidator::new(workspace_root).await?;
         Ok(Self { validator })
+    }
+
+    /// Resolve a path within the workspace and return the canonicalized absolute path.
+    pub async fn resolve_path(&self, path: &str) -> Result<PathBuf> {
+        self.validator.validate(path).await
     }
 
     /// Read a text file and return its contents as a string.

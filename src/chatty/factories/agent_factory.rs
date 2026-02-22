@@ -7,9 +7,9 @@ use std::sync::OnceLock;
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::tools::{
-    AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool, DeleteMcpTool,
-    EditMcpTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool, MoveFileTool,
-    ReadBinaryTool, ReadFileTool, WriteFileTool,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool,
+    DeleteMcpTool, EditMcpTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
+    MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -157,6 +157,7 @@ fn collect_tools(
     bash_tool: Option<BashTool>,
     fs_read: Option<FsReadTools>,
     fs_write: Option<FsWriteTools>,
+    add_attachment: Option<AddAttachmentTool>,
     mcp_mgmt: McpTools,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
@@ -189,6 +190,9 @@ fn collect_tools(
         tools.push(Box::new(mf));
         tools.push(Box::new(ad));
     }
+    if let Some(t) = add_attachment {
+        tools.push(Box::new(t));
+    }
     tools
 }
 
@@ -205,6 +209,7 @@ pub enum AgentClient {
 
 impl AgentClient {
     /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, bash execution, and filesystem tools
+    #[allow(clippy::too_many_arguments)]
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
@@ -216,6 +221,7 @@ impl AgentClient {
         pending_write_approvals: Option<
             crate::chatty::models::write_approval_store::PendingWriteApprovals,
         >,
+        pending_artifacts: Option<PendingArtifacts>,
     ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -238,6 +244,7 @@ impl AgentClient {
         };
 
         // Create filesystem tools if a workspace directory is configured
+        let mut add_attachment_tool: Option<AddAttachmentTool> = None;
         let (fs_read_tools, fs_write_tools): (Option<FsReadTools>, Option<FsWriteTools>) =
             match exec_settings
                 .as_ref()
@@ -254,6 +261,15 @@ impl AgentClient {
                             .unwrap_or(false)
                         {
                             tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
+
+                            // Create add_attachment tool alongside read tools
+                            if let Some(ref artifacts) = pending_artifacts {
+                                add_attachment_tool = Some(AddAttachmentTool::new(
+                                    service.clone(),
+                                    artifacts.clone(),
+                                ));
+                            }
+
                             Some((
                                 ReadFileTool::new(service.clone()),
                                 ReadBinaryTool::new(service.clone()),
@@ -420,6 +436,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -459,6 +476,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
@@ -482,6 +500,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -508,6 +527,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -533,6 +553,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -676,6 +697,7 @@ impl AgentClient {
                     bash_tool,
                     fs_read_tools,
                     fs_write_tools,
+                    add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
