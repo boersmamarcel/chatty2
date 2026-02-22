@@ -256,6 +256,7 @@ cargo clippy -- -D warnings  # Lint
 ### Architecture
 
 - **Event-driven** reactive UI with GPUI's global state system
+- **Centralized stream lifecycle** via `StreamManager` entity with cancellation tokens and decoupled event-driven UI updates
 - **Streaming** LLM responses with interleaved tool calls
 - **Optimistic updates** for instant UI feedback with async persistence
 - **JSON-based** local storage for conversations, settings, and configuration
