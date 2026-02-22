@@ -1,10 +1,14 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Default maximum response length in characters
 const DEFAULT_MAX_LENGTH: usize = 50_000;
+
+/// Maximum binary response size in bytes (10 MB)
+const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Request timeout in seconds
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -24,12 +28,15 @@ pub struct FetchToolArgs {
 pub struct FetchToolOutput {
     /// HTTP status code
     pub status: u16,
-    /// The readable text content of the response
+    /// The readable text content of the response (empty for binary responses that were saved to disk)
     pub content: String,
     /// The content type of the response
     pub content_type: String,
     /// Whether the content was truncated due to max_length
     pub truncated: bool,
+    /// Path to the saved file (only present for binary content like images, PDFs, zips)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_to: Option<String>,
 }
 
 /// Error type for fetch tool
@@ -42,13 +49,18 @@ pub enum FetchToolError {
 /// Native fetch tool that provides read-only HTTP GET access to web content.
 ///
 /// Converts HTML responses to readable plain text, preserving non-HTML content as-is.
+/// Binary content (images, PDFs, zip files) is saved to the workspace directory.
 /// Enforces timeouts, size limits, and HTTPS preference for safety.
 #[derive(Clone)]
-pub struct FetchTool;
+pub struct FetchTool {
+    /// Optional workspace directory for saving downloaded binary files.
+    /// When None, binary content returns an error asking the user to configure a workspace.
+    workspace_dir: Option<PathBuf>,
+}
 
 impl FetchTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(workspace_dir: Option<PathBuf>) -> Self {
+        Self { workspace_dir }
     }
 }
 
@@ -61,10 +73,11 @@ impl Tool for FetchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "fetch".to_string(),
-            description: "Fetch a URL and return its content as readable text. \
+            description: "Fetch a URL and return its content. \
                          HTML pages are automatically converted to plain text for readability. \
+                         Binary content (images, PDFs, zip files, etc.) is saved to the workspace directory. \
                          Only performs GET requests (read-only). \
-                         Use this to look up documentation, read web pages, or fetch API responses."
+                         Use this to look up documentation, read web pages, fetch API responses, or download files."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -138,7 +151,15 @@ impl Tool for FetchTool {
                 content: body,
                 content_type,
                 truncated,
+                saved_to: None,
             });
+        }
+
+        // Determine if this is binary content that should be saved to disk
+        if is_binary_content_type(&content_type) {
+            return self
+                .handle_binary_response(response, &url, status, &content_type)
+                .await;
         }
 
         // Read body text
@@ -168,8 +189,162 @@ impl Tool for FetchTool {
             content,
             content_type,
             truncated,
+            saved_to: None,
         })
     }
+}
+
+impl FetchTool {
+    /// Handle binary responses by saving them to the workspace directory.
+    async fn handle_binary_response(
+        &self,
+        response: reqwest::Response,
+        url: &str,
+        status: u16,
+        content_type: &str,
+    ) -> Result<FetchToolOutput, FetchToolError> {
+        let workspace = self.workspace_dir.as_ref().ok_or_else(|| {
+            FetchToolError::FetchError(
+                "Cannot download binary files: no workspace directory configured. \
+                 Set a workspace directory in Settings > Code Execution to enable file downloads."
+                    .to_string(),
+            )
+        })?;
+
+        // Read binary body
+        let bytes = response.bytes().await.map_err(|e| {
+            FetchToolError::FetchError(format!("Failed to read response body: {}", e))
+        })?;
+
+        if bytes.len() > MAX_BINARY_BYTES {
+            return Err(FetchToolError::FetchError(format!(
+                "Response too large: {} bytes (max {} bytes / {} MB)",
+                bytes.len(),
+                MAX_BINARY_BYTES,
+                MAX_BINARY_BYTES / 1024 / 1024,
+            )));
+        }
+
+        // Extract filename from URL or Content-Disposition header
+        let filename = extract_filename(url, content_type);
+        let save_path = workspace.join(&filename);
+
+        // Ensure we don't overwrite existing files — add a numeric suffix if needed
+        let save_path = unique_path(save_path);
+
+        info!(
+            path = %save_path.display(),
+            size = bytes.len(),
+            "Saving binary content to workspace"
+        );
+
+        tokio::fs::write(&save_path, &bytes).await.map_err(|e| {
+            FetchToolError::FetchError(format!(
+                "Failed to save file to {}: {}",
+                save_path.display(),
+                e
+            ))
+        })?;
+
+        Ok(FetchToolOutput {
+            status,
+            content: format!(
+                "Downloaded {} ({} bytes) and saved to: {}",
+                content_type,
+                bytes.len(),
+                save_path.display()
+            ),
+            content_type: content_type.to_string(),
+            truncated: false,
+            saved_to: Some(save_path.to_string_lossy().to_string()),
+        })
+    }
+}
+
+/// Check if a content type indicates binary content that should be saved to disk.
+fn is_binary_content_type(content_type: &str) -> bool {
+    let ct = content_type.to_lowercase();
+    ct.starts_with("image/")
+        || ct.starts_with("audio/")
+        || ct.starts_with("video/")
+        || ct.contains("application/pdf")
+        || ct.contains("application/zip")
+        || ct.contains("application/gzip")
+        || ct.contains("application/x-tar")
+        || ct.contains("application/x-gzip")
+        || ct.contains("application/x-bzip2")
+        || ct.contains("application/x-7z")
+        || ct.contains("application/x-rar")
+        || ct.contains("application/octet-stream")
+        || ct.contains("application/vnd.openxmlformats") // docx, xlsx, pptx
+        || ct.contains("application/msword")
+        || ct.contains("application/vnd.ms-")
+        || ct.contains("application/wasm")
+}
+
+/// Extract a reasonable filename from a URL and content type.
+fn extract_filename(url: &str, content_type: &str) -> String {
+    // Try to get filename from the URL path
+    if let Some(path_segment) = url.split('?').next().and_then(|u| u.rsplit('/').next()) {
+        let decoded = path_segment.to_string();
+        if !decoded.is_empty() && decoded.contains('.') && decoded.len() <= 255 {
+            // Sanitize: only keep alphanumeric, dots, hyphens, underscores
+            let sanitized: String = decoded
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            if !sanitized.is_empty() && sanitized != "." && sanitized != ".." {
+                return sanitized;
+            }
+        }
+    }
+
+    // Fallback: generate name from content type
+    let extension = match content_type.split(';').next().unwrap_or("").trim() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/gzip" | "application/x-gzip" => "gz",
+        "application/x-tar" => "tar",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        _ => "bin",
+    };
+    format!("download.{}", extension)
+}
+
+/// Generate a unique file path by appending a numeric suffix if the file already exists.
+fn unique_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("bin");
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+
+    for i in 1..1000 {
+        let candidate = parent.join(format!("{}-{}.{}", stem, i, ext));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Extremely unlikely fallback
+    parent.join(format!("{}-{}.{}", stem, uuid::Uuid::new_v4(), ext))
 }
 
 /// Simple heuristic to detect HTML content when content-type is missing or ambiguous
@@ -389,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_tool_definition() {
-        let tool = FetchTool::new();
+        let tool = FetchTool::new(None);
         let def = tool.definition("test".to_string()).await;
         assert_eq!(def.name, "fetch");
         assert!(def.description.contains("Fetch a URL"));
@@ -397,12 +572,53 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_tool_invalid_url() {
-        let tool = FetchTool::new();
+        let tool = FetchTool::new(None);
         let args = FetchToolArgs {
             url: "not-a-url".to_string(),
             max_length: None,
         };
         let result = tool.call(args).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_binary_content_type() {
+        assert!(is_binary_content_type("image/png"));
+        assert!(is_binary_content_type("image/jpeg"));
+        assert!(is_binary_content_type("application/pdf"));
+        assert!(is_binary_content_type("application/zip"));
+        assert!(is_binary_content_type("application/octet-stream"));
+        assert!(is_binary_content_type(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ));
+        assert!(!is_binary_content_type("text/html"));
+        assert!(!is_binary_content_type("text/plain"));
+        assert!(!is_binary_content_type("application/json"));
+    }
+
+    #[test]
+    fn test_extract_filename_from_url() {
+        assert_eq!(
+            extract_filename("https://example.com/photo.png", "image/png"),
+            "photo.png"
+        );
+        assert_eq!(
+            extract_filename("https://example.com/docs/report.pdf?v=2", "application/pdf"),
+            "report.pdf"
+        );
+        assert_eq!(
+            extract_filename("https://example.com/", "image/png"),
+            "download.png"
+        );
+        assert_eq!(
+            extract_filename("https://example.com/archive", "application/zip"),
+            "download.zip"
+        );
+    }
+
+    #[test]
+    fn test_unique_path_no_conflict() {
+        let path = PathBuf::from("/tmp/nonexistent_test_file_12345.txt");
+        assert_eq!(unique_path(path.clone()), path);
     }
 }

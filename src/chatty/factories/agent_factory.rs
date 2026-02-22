@@ -423,8 +423,12 @@ impl AgentClient {
             .map(|s| s.fetch_enabled)
             .unwrap_or(true)
         {
-            tracing::info!("Fetch tool enabled");
-            Some(FetchTool::new())
+            let workspace = exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+                .map(std::path::PathBuf::from);
+            tracing::info!(?workspace, "Fetch tool enabled");
+            Some(FetchTool::new(workspace))
         } else {
             tracing::info!("Fetch tool disabled by execution settings");
             None
