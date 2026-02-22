@@ -9,6 +9,7 @@ use crate::chatty::services::StreamChunk;
 
 /// Status of a stream lifecycle
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum StreamStatus {
     Active,
     Completed,
@@ -29,6 +30,7 @@ pub struct StreamState {
 /// Events emitted by StreamManager for decoupled UI updates.
 /// Each variant is tagged with `conversation_id` so subscribers can filter.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum StreamManagerEvent {
     StreamStarted {
         conversation_id: String,
