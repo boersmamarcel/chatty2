@@ -17,13 +17,22 @@ pub enum ValidationError {
     FileNotFound,
 }
 
-/// Validate a file for attachment
+/// Validate a file for attachment (synchronous, for UI contexts)
 pub fn validate_attachment(path: &Path) -> Result<(), ValidationError> {
-    // Check if file exists
     let metadata = std::fs::metadata(path).map_err(|_| ValidationError::FileNotFound)?;
+    validate_attachment_metadata(path, metadata.len())
+}
 
-    // Check file size
-    let size = metadata.len();
+/// Validate a file for attachment (async, for tool/service contexts)
+pub async fn validate_attachment_async(path: &Path) -> Result<(), ValidationError> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| ValidationError::FileNotFound)?;
+    validate_attachment_metadata(path, metadata.len())
+}
+
+/// Shared validation logic for both sync and async variants
+fn validate_attachment_metadata(path: &Path, size: u64) -> Result<(), ValidationError> {
     if size > MAX_FILE_SIZE {
         return Err(ValidationError::FileTooLarge {
             size,
@@ -31,7 +40,6 @@ pub fn validate_attachment(path: &Path) -> Result<(), ValidationError> {
         });
     }
 
-    // Check extension
     let ext = path
         .extension()
         .ok_or(ValidationError::NoExtension)?

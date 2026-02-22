@@ -263,11 +263,18 @@ impl AgentClient {
                             tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
 
                             // Create add_attachment tool alongside read tools
+                            // Only register if the model supports at least one multimodal type
                             if let Some(ref artifacts) = pending_artifacts {
-                                add_attachment_tool = Some(AddAttachmentTool::new(
-                                    service.clone(),
-                                    artifacts.clone(),
-                                ));
+                                let supports_images = model_config.supports_images;
+                                let supports_pdf = model_config.supports_pdf;
+                                if supports_images || supports_pdf {
+                                    add_attachment_tool = Some(AddAttachmentTool::new(
+                                        service.clone(),
+                                        artifacts.clone(),
+                                        supports_images,
+                                        supports_pdf,
+                                    ));
+                                }
                             }
 
                             Some((
