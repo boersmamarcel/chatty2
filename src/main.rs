@@ -38,7 +38,18 @@ pub static MCP_UPDATE_SENDER: OnceLock<
 /// McpService instance accessible from tool context (no GPUI available there).
 pub static MCP_SERVICE: OnceLock<chatty::services::McpService> = OnceLock::new();
 
-actions!(chatty, [OpenSettings, Quit, ToggleSidebar]);
+actions!(
+    chatty,
+    [
+        OpenSettings,
+        Quit,
+        ToggleSidebar,
+        NewConversation,
+        PreviousConversation,
+        NextConversation,
+        DeleteActiveConversation
+    ]
+);
 
 // Global repositories
 lazy_static::lazy_static! {
@@ -214,6 +225,10 @@ fn register_actions(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-n", NewConversation, None),
+        KeyBinding::new("cmd-up", PreviousConversation, None),
+        KeyBinding::new("cmd-down", NextConversation, None),
+        KeyBinding::new("cmd-backspace", DeleteActiveConversation, None),
     ]);
 
     #[cfg(not(target_os = "macos"))]
@@ -221,6 +236,10 @@ fn register_actions(cx: &mut App) {
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-n", NewConversation, None),
+        KeyBinding::new("ctrl-up", PreviousConversation, None),
+        KeyBinding::new("ctrl-down", NextConversation, None),
+        KeyBinding::new("ctrl-backspace", DeleteActiveConversation, None),
     ]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
@@ -267,6 +286,54 @@ fn register_actions(cx: &mut App) {
                 app.sidebar_view.update(cx, |sidebar, cx| {
                     sidebar.toggle_collapsed(cx);
                 });
+            });
+        }
+    });
+    cx.on_action(|_: &NewConversation, cx: &mut App| {
+        debug!("New conversation action triggered");
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.start_new_conversation(cx);
+            });
+        }
+    });
+    cx.on_action(|_: &PreviousConversation, cx: &mut App| {
+        debug!("Previous conversation action triggered");
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.navigate_conversation(-1, cx);
+            });
+        }
+    });
+    cx.on_action(|_: &NextConversation, cx: &mut App| {
+        debug!("Next conversation action triggered");
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.navigate_conversation(1, cx);
+            });
+        }
+    });
+    cx.on_action(|_: &DeleteActiveConversation, cx: &mut App| {
+        debug!("Delete active conversation action triggered");
+        if let Some(weak_entity) = cx
+            .try_global::<GlobalChattyApp>()
+            .and_then(|global| global.entity.clone())
+            && let Some(entity) = weak_entity.upgrade()
+        {
+            entity.update(cx, |app, cx| {
+                app.delete_active_conversation(cx);
             });
         }
     });

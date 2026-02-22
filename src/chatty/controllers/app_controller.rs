@@ -121,32 +121,7 @@ impl ChattyApp {
             &self.sidebar_view,
             |app, _sidebar, event: &SidebarEvent, cx| match event {
                 SidebarEvent::NewChat => {
-                    if app.active_create_task.is_some() {
-                        debug!("Already creating a conversation, ignoring duplicate click");
-                        return;
-                    }
-                    // Cancel any pending stream before creating a new conversation
-                    if let Some(manager) = cx
-                        .try_global::<GlobalStreamManager>()
-                        .and_then(|g| g.entity.clone())
-                    {
-                        manager.update(cx, |mgr, cx| {
-                            mgr.cancel_pending(cx);
-                        });
-                    }
-                    let create_task = app.create_new_conversation(cx);
-                    // Wrap so the guard auto-clears when the task finishes
-                    app.active_create_task = Some(cx.spawn(async move |weak, cx| {
-                        let result = create_task.await;
-                        if let Some(app) = weak.upgrade() {
-                            app.update(cx, |app, _cx| app.active_create_task = None)
-                                .map_err(
-                                    |e| warn!(error = ?e, "Failed to clear active_create_task"),
-                                )
-                                .ok();
-                        }
-                        result
-                    }));
+                    app.start_new_conversation(cx);
                 }
                 SidebarEvent::OpenSettings => {
                     cx.defer(|cx| {
@@ -818,6 +793,91 @@ impl ChattyApp {
                     }
                 }
             });
+        }
+    }
+
+    /// Navigate to the next or previous conversation in the sidebar list.
+    /// `direction`: -1 for previous (up in sidebar), +1 for next (down in sidebar).
+    /// The sidebar list is sorted by updated_at descending, so "up" means older
+    /// and "down" means newer relative to the current position.
+    pub fn navigate_conversation(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let store = cx.global::<ConversationsStore>();
+        let current_id = store.active_id().cloned();
+        let conversations = store.list_recent(usize::MAX);
+
+        if conversations.is_empty() {
+            return;
+        }
+
+        let conv_ids: Vec<String> = conversations.iter().map(|c| c.id().to_string()).collect();
+
+        let target_id = if let Some(ref current) = current_id {
+            if let Some(pos) = conv_ids.iter().position(|id| id == current) {
+                let new_pos = if direction < 0 {
+                    // Up in sidebar = previous (lower index wraps to end)
+                    if pos == 0 {
+                        conv_ids.len() - 1
+                    } else {
+                        pos - 1
+                    }
+                } else {
+                    // Down in sidebar = next (higher index wraps to start)
+                    if pos + 1 >= conv_ids.len() {
+                        0
+                    } else {
+                        pos + 1
+                    }
+                };
+                conv_ids[new_pos].clone()
+            } else {
+                // Active conversation not found in list, go to first
+                conv_ids[0].clone()
+            }
+        } else {
+            // No active conversation, go to first
+            conv_ids[0].clone()
+        };
+
+        // Only switch if we're actually changing conversations
+        if current_id.as_ref() != Some(&target_id) {
+            self.load_conversation(&target_id, cx);
+        }
+    }
+
+    /// Delete the currently active conversation.
+    /// Start a new conversation, guarding against duplicate requests and cancelling
+    /// any pending stream. Used by both the sidebar button and the keyboard shortcut.
+    pub fn start_new_conversation(&mut self, cx: &mut Context<Self>) {
+        if self.active_create_task.is_some() {
+            debug!("Already creating a conversation, ignoring duplicate request");
+            return;
+        }
+        // Cancel any pending stream before creating a new conversation
+        if let Some(manager) = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            manager.update(cx, |mgr, cx| {
+                mgr.cancel_pending(cx);
+            });
+        }
+        let create_task = self.create_new_conversation(cx);
+        self.active_create_task = Some(cx.spawn(async move |weak, cx| {
+            let result = create_task.await;
+            if let Some(app) = weak.upgrade() {
+                app.update(cx, |app, _cx| app.active_create_task = None)
+                    .map_err(|e| warn!(error = ?e, "Failed to clear active_create_task"))
+                    .ok();
+            }
+            result
+        }));
+    }
+
+    pub fn delete_active_conversation(&mut self, cx: &mut Context<Self>) {
+        let active_id = cx.global::<ConversationsStore>().active_id().cloned();
+
+        if let Some(id) = active_id {
+            self.delete_conversation(&id, cx);
         }
     }
 

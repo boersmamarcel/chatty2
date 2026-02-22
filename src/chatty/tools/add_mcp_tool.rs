@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::env_serde::deserialize_env_vars;
 use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
 
@@ -26,8 +27,9 @@ pub struct AddMcpToolArgs {
     /// Command-line arguments
     #[serde(default)]
     pub args: Vec<String>,
-    /// Environment variables for the server process
-    #[serde(default)]
+    /// Environment variables for the server process.
+    /// Accepts either a JSON object or a JSON-encoded string (for OpenAI compatibility).
+    #[serde(default, deserialize_with = "deserialize_env_vars")]
     pub env: HashMap<String, String>,
 }
 
@@ -148,12 +150,11 @@ impl Tool for AddMcpTool {
                         "description": "Command-line arguments for the server command (e.g., ['-y', '@anthropic/mcp-server-fetch'])"
                     },
                     "env": {
-                        "type": "object",
-                        "additionalProperties": { "type": "string" },
-                        "description": "Environment variables to set for the server process (e.g., {'TAVILY_API_KEY': 'tvly-xxxxx'})"
+                        "type": "string",
+                        "description": "Environment variables as a JSON-encoded string (e.g., '{\"TAVILY_API_KEY\": \"tvly-xxxxx\"}'). Pass '{}' for no env vars."
                     }
                 },
-                "required": ["name", "command"]
+                "required": ["name", "command", "args", "env"]
             }),
         }
     }
@@ -624,9 +625,9 @@ mod tests {
         let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_names.contains(&"name"));
         assert!(required_names.contains(&"command"));
-        // args and env should be optional (not in required)
-        assert!(!required_names.contains(&"args"));
-        assert!(!required_names.contains(&"env"));
+        // OpenAI requires all properties to be in the required array
+        assert!(required_names.contains(&"args"));
+        assert!(required_names.contains(&"env"));
     }
 
     #[tokio::test]

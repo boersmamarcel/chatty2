@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::env_serde::deserialize_optional_env_vars;
 use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
 
@@ -29,7 +30,8 @@ pub struct EditMcpToolArgs {
     pub args: Option<Vec<String>>,
     /// New environment variables (optional, keeps existing if not provided).
     /// When provided, fully replaces the existing env vars.
-    #[serde(default)]
+    /// Accepts either a JSON object or a JSON-encoded string (for OpenAI compatibility).
+    #[serde(default, deserialize_with = "deserialize_optional_env_vars")]
     pub env: Option<HashMap<String, String>>,
 }
 
@@ -146,12 +148,11 @@ impl Tool for EditMcpTool {
                         "description": "New command-line arguments. Omit to keep current value."
                     },
                     "env": {
-                        "type": "object",
-                        "additionalProperties": { "type": "string" },
-                        "description": "New environment variables. CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Omit this field entirely to keep current values unchanged. Sensitive values (API keys, tokens, passwords) are shown as '****' — pass '****' back unchanged to preserve the existing secret value."
+                        "type": "string",
+                        "description": "New environment variables as a JSON-encoded string (e.g., '{\"API_KEY\": \"value\"}'). CAUTION: When provided, this fully REPLACES ALL existing environment variables, not just the ones listed. To add or update a single key, you must include all existing keys as well. Pass '{}' to keep current values unchanged. Sensitive values (API keys, tokens, passwords) are shown as '****' — pass '****' back unchanged to preserve the existing secret value."
                     }
                 },
-                "required": ["name"]
+                "required": ["name", "command", "args", "env"]
             }),
         }
     }
@@ -689,10 +690,10 @@ mod tests {
         let required = def.parameters["required"].as_array().unwrap();
         let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_names.contains(&"name"));
-        // Optional fields should not be required
-        assert!(!required_names.contains(&"command"));
-        assert!(!required_names.contains(&"args"));
-        assert!(!required_names.contains(&"env"));
+        // OpenAI requires all properties to be in the required array
+        assert!(required_names.contains(&"command"));
+        assert!(required_names.contains(&"args"));
+        assert!(required_names.contains(&"env"));
     }
 
     #[tokio::test]
