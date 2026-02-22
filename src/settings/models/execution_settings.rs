@@ -33,6 +33,10 @@ pub struct ExecutionSettingsModel {
     /// without explicit user action.
     #[serde(default)]
     pub mcp_service_tool_enabled: bool,
+    /// Enable the built-in fetch tool, which allows the LLM to make read-only HTTP GET requests.
+    /// Zero-configuration web access without requiring an MCP fetch server.
+    #[serde(default = "default_true")]
+    pub fetch_enabled: bool,
     /// Maximum execution time in seconds
     pub timeout_seconds: u32,
     /// Maximum output size in bytes (prevents memory exhaustion)
@@ -54,6 +58,7 @@ impl Default for ExecutionSettingsModel {
             filesystem_read_enabled: true, // Enabled by default when workspace is set
             filesystem_write_enabled: true, // Enabled by default when workspace is set
             mcp_service_tool_enabled: false,
+            fetch_enabled: true, // Enabled by default for zero-config web access
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
