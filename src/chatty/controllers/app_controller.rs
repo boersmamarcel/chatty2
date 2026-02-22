@@ -821,6 +821,66 @@ impl ChattyApp {
         }
     }
 
+    /// Navigate to the next or previous conversation in the sidebar list.
+    /// `direction`: -1 for previous (up in sidebar), +1 for next (down in sidebar).
+    /// The sidebar list is sorted by updated_at descending, so "up" means older
+    /// and "down" means newer relative to the current position.
+    pub fn navigate_conversation(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let store = cx.global::<ConversationsStore>();
+        let current_id = store.active_id().cloned();
+        let conversations = store.list_recent(usize::MAX);
+
+        if conversations.is_empty() {
+            return;
+        }
+
+        let conv_ids: Vec<String> = conversations.iter().map(|c| c.id().to_string()).collect();
+
+        let target_id = if let Some(ref current) = current_id {
+            if let Some(pos) = conv_ids.iter().position(|id| id == current) {
+                let new_pos = if direction < 0 {
+                    // Up in sidebar = previous (lower index wraps to end)
+                    if pos == 0 {
+                        conv_ids.len() - 1
+                    } else {
+                        pos - 1
+                    }
+                } else {
+                    // Down in sidebar = next (higher index wraps to start)
+                    if pos + 1 >= conv_ids.len() {
+                        0
+                    } else {
+                        pos + 1
+                    }
+                };
+                conv_ids[new_pos].clone()
+            } else {
+                // Active conversation not found in list, go to first
+                conv_ids[0].clone()
+            }
+        } else {
+            // No active conversation, go to first
+            conv_ids[0].clone()
+        };
+
+        // Only switch if we're actually changing conversations
+        if current_id.as_ref() != Some(&target_id) {
+            self.load_conversation(&target_id, cx);
+        }
+    }
+
+    /// Delete the currently active conversation.
+    pub fn delete_active_conversation(&mut self, cx: &mut Context<Self>) {
+        let active_id = cx
+            .global::<ConversationsStore>()
+            .active_id()
+            .cloned();
+
+        if let Some(id) = active_id {
+            self.delete_conversation(&id, cx);
+        }
+    }
+
     /// Change the model for the active conversation
     /// Rebuild the active conversation's agent with fresh MCP tools, keeping the same model.
     /// Called after an MCP server is enabled or disabled so the agent's tool set stays current.

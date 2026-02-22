@@ -130,7 +130,7 @@ fn collect_tools(
 #[derive(Clone)]
 pub enum AgentClient {
     Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
-    OpenAI(Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
+    OpenAI(Agent<rig::providers::openai::completion::CompletionModel>),
     Gemini(Agent<rig::providers::gemini::completion::CompletionModel>),
     Mistral(Agent<rig::providers::mistral::completion::CompletionModel>),
     Ollama(Agent<rig::providers::ollama::CompletionModel>),
@@ -364,7 +364,11 @@ impl AgentClient {
                 let key =
                     api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
 
-                let client = rig::providers::openai::Client::new(&key)?;
+                // Use the Chat Completions API instead of the Responses API.
+                // The Responses API has a known issue with reasoning models (o-series,
+                // gpt-5-nano, etc.) where multi-turn tool calls fail because reasoning
+                // items are not properly preserved in conversation history.
+                let client = rig::providers::openai::Client::new(&key)?.completions_api();
                 let mut builder = client
                     .agent(&model_config.model_identifier)
                     .preamble(&model_config.preamble);

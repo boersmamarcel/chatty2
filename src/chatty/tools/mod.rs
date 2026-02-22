@@ -3,6 +3,7 @@ pub mod bash_executor;
 pub mod bash_tool;
 pub mod delete_mcp_tool;
 pub mod edit_mcp_tool;
+mod env_serde;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod list_mcp_tool;
