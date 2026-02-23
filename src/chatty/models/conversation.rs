@@ -66,34 +66,10 @@ impl Conversation {
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        // Create shell session if execution is enabled
-        let shell_session = exec_settings.as_ref().and_then(|settings| {
-            if settings.enabled {
-                trace!(
-                    workspace = ?settings.workspace_dir,
-                    timeout = settings.timeout_seconds,
-                    max_output = settings.max_output_bytes,
-                    "Creating shell session for conversation"
-                );
-                let session = ShellSession::new(
-                    settings.workspace_dir.clone(),
-                    settings.timeout_seconds,
-                    settings.max_output_bytes,
-                );
-                Some(std::sync::Arc::new(session))
-            } else {
-                trace!("Execution disabled, skipping shell session");
-                None
-            }
-        });
-        if shell_session.is_none() && exec_settings.is_some() {
-            trace!(
-                "Shell session not created despite exec_settings being present (enabled={})",
-                exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false)
-            );
-        }
-
-        let agent = AgentClient::from_model_config_with_tools(
+        // Shell session is created inside the factory when execution is enabled.
+        // The factory returns it so we can store it on the Conversation for reuse
+        // across agent rebuilds (MCP changes, model switches).
+        let (agent, shell_session) = AgentClient::from_model_config_with_tools(
             model_config,
             provider_config,
             mcp_tools,
@@ -101,7 +77,7 @@ impl Conversation {
             pending_approvals,
             pending_write_approvals,
             Some(pending_artifacts.clone()),
-            shell_session.clone(),
+            None, // Factory creates session on-demand when execution is enabled
         )
         .await
         .context("Failed to create agent from config")?;
@@ -154,22 +130,8 @@ impl Conversation {
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        // Create shell session if execution is enabled
-        let shell_session = exec_settings.as_ref().and_then(|settings| {
-            if settings.enabled {
-                let session = ShellSession::new(
-                    settings.workspace_dir.clone(),
-                    settings.timeout_seconds,
-                    settings.max_output_bytes,
-                );
-                Some(std::sync::Arc::new(session))
-            } else {
-                None
-            }
-        });
-
-        // Reconstruct agent
-        let agent = AgentClient::from_model_config_with_tools(
+        // Reconstruct agent; factory creates shell session on-demand when execution is enabled
+        let (agent, shell_session) = AgentClient::from_model_config_with_tools(
             model_config,
             provider_config,
             mcp_tools,
@@ -177,7 +139,7 @@ impl Conversation {
             pending_approvals,
             pending_write_approvals,
             Some(pending_artifacts.clone()),
-            shell_session.clone(),
+            None, // Factory creates session on-demand
         )
         .await
         .context("Failed to create agent from config")?;

@@ -966,28 +966,8 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            // Create shell session on-demand if execution is enabled but the
-            // conversation was created before shell sessions were available
-            let shell_session = if shell_session.is_none() {
-                exec_settings.as_ref().and_then(|s| {
-                    if s.enabled {
-                        info!(conv_id = %conv_id, "Creating shell session for existing conversation during rebuild");
-                        Some(std::sync::Arc::new(
-                            crate::chatty::services::shell_service::ShellSession::new(
-                                s.workspace_dir.clone(),
-                                s.timeout_seconds,
-                                s.max_output_bytes,
-                            ),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                shell_session
-            };
-
-            let new_agent = AgentClient::from_model_config_with_tools(
+            // Factory creates shell session on-demand if not provided
+            let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
                 &model_config,
                 &provider_config,
                 mcp_tools,
@@ -995,16 +975,16 @@ impl ChattyApp {
                 pending_approvals,
                 pending_write_approvals,
                 pending_artifacts,
-                shell_session.clone(),
+                shell_session,
             )
             .await?;
 
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.set_agent(new_agent, model_config.id.clone());
-                    // Update shell session on the conversation so subsequent rebuilds reuse it
-                    if shell_session.is_some() && conv.shell_session().is_none() {
-                        conv.set_shell_session(shell_session);
+                    // Store the shell session (factory may have created it on-demand)
+                    if new_shell_session.is_some() && conv.shell_session().is_none() {
+                        conv.set_shell_session(new_shell_session);
                     }
                     info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
                 } else {
@@ -1094,48 +1074,28 @@ impl ChattyApp {
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                        // Create shell session on-demand if execution is enabled but the
-                        // conversation was created before shell sessions were available
-                        let shell_session = if shell_session.is_none() {
-                            exec_settings.as_ref().and_then(|s| {
-                                if s.enabled {
-                                    info!(conv_id = %conv_id, "Creating shell session for existing conversation during model change");
-                                    Some(std::sync::Arc::new(
-                                        crate::chatty::services::shell_service::ShellSession::new(
-                                            s.workspace_dir.clone(),
-                                            s.timeout_seconds,
-                                            s.max_output_bytes,
-                                        ),
-                                    ))
-                                } else {
-                                    None
-                                }
-                            })
-                        } else {
-                            shell_session
-                        };
-
-                        // Create new agent asynchronously with MCP tools
-                        let new_agent = AgentClient::from_model_config_with_tools(
-                            &model_config,
-                            &provider_config,
-                            mcp_tools,
-                            exec_settings,
-                            pending_approvals,
-                            pending_write_approvals,
-                            pending_artifacts,
-                            shell_session.clone(),
-                        )
-                        .await?;
+                        // Factory creates shell session on-demand if not provided
+                        let (new_agent, new_shell_session) =
+                            AgentClient::from_model_config_with_tools(
+                                &model_config,
+                                &provider_config,
+                                mcp_tools,
+                                exec_settings,
+                                pending_approvals,
+                                pending_write_approvals,
+                                pending_artifacts,
+                                shell_session,
+                            )
+                            .await?;
 
                         // Update the conversation's agent synchronously
                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(new_agent, model_config.id.clone());
-                                // Update shell session on the conversation so subsequent rebuilds reuse it
-                                if shell_session.is_some() && conv.shell_session().is_none() {
-                                    conv.set_shell_session(shell_session);
+                                // Store the shell session (factory may have created it on-demand)
+                                if new_shell_session.is_some() && conv.shell_session().is_none() {
+                                    conv.set_shell_session(new_shell_session);
                                 }
                                 Ok(())
                             } else {

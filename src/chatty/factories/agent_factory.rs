@@ -244,9 +244,35 @@ impl AgentClient {
         >,
         pending_artifacts: Option<PendingArtifacts>,
         shell_session: Option<std::sync::Arc<ShellSession>>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
+
+        // Ensure shell session exists when execution is enabled (factory-level fallback).
+        // This guarantees shell tools are created regardless of how the caller constructed
+        // the session parameter.
+        let shell_session = if shell_session.is_some() {
+            shell_session
+        } else {
+            exec_settings.as_ref().and_then(|settings| {
+                if settings.enabled {
+                    tracing::info!(
+                        workspace = ?settings.workspace_dir,
+                        "Creating shell session in factory (caller did not provide one)"
+                    );
+                    Some(std::sync::Arc::new(ShellSession::new(
+                        settings.workspace_dir.clone(),
+                        settings.timeout_seconds,
+                        settings.max_output_bytes,
+                    )))
+                } else {
+                    None
+                }
+            })
+        };
+
+        // Save a clone to return to the caller so it can be stored on the Conversation
+        let shell_session_out = shell_session.clone();
 
         // Create BashTool if execution is enabled
         let bash_tool = if let (Some(settings), Some(approvals)) =
@@ -518,7 +544,7 @@ impl AgentClient {
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Anthropic(agent))
+                Ok((AgentClient::Anthropic(agent), shell_session_out))
             }
             ProviderType::OpenAI => {
                 let key =
@@ -561,7 +587,7 @@ impl AgentClient {
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::OpenAI(agent))
+                Ok((AgentClient::OpenAI(agent), shell_session_out))
             }
             ProviderType::Gemini => {
                 let key =
@@ -586,7 +612,7 @@ impl AgentClient {
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Gemini(agent))
+                Ok((AgentClient::Gemini(agent), shell_session_out))
             }
             ProviderType::Mistral => {
                 let key = api_key
@@ -615,7 +641,7 @@ impl AgentClient {
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Mistral(agent))
+                Ok((AgentClient::Mistral(agent), shell_session_out))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -643,7 +669,7 @@ impl AgentClient {
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Ollama(agent))
+                Ok((AgentClient::Ollama(agent), shell_session_out))
             }
             ProviderType::AzureOpenAI => {
                 let raw_endpoint = base_url.ok_or_else(|| {
@@ -790,7 +816,7 @@ impl AgentClient {
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::AzureOpenAI(agent))
+                Ok((AgentClient::AzureOpenAI(agent), shell_session_out))
             }
         }
     }
