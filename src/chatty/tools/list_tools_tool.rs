@@ -46,6 +46,7 @@ impl ListToolsTool {
         has_fs_read: bool,
         has_fs_write: bool,
         has_add_mcp: bool,
+        has_fetch: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -84,6 +85,14 @@ impl ListToolsTool {
             native_tools.push(ToolInfo {
                 name: "bash".to_string(),
                 description: "**PRIMARY SHELL TOOL** - Execute ANY bash/shell/terminal command including: ls (list files), cd, pwd, grep, find, cat, echo, curl, git, npm, cargo, python, etc. Use this tool whenever you need to run command-line operations.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
+        if has_fetch {
+            native_tools.push(ToolInfo {
+                name: "fetch".to_string(),
+                description: "Fetch a URL and return its content as readable text. HTML pages are converted to plain text. Use for documentation lookups, web pages, or API responses.".to_string(),
                 source: "native".to_string(),
             });
         }
@@ -164,7 +173,7 @@ impl ListToolsTool {
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(false, false, false, false, Vec::new())
+        Self::new_with_config(false, false, false, false, false, Vec::new())
     }
 }
 
@@ -179,6 +188,7 @@ impl Tool for ListToolsTool {
             name: "list_tools".to_string(),
             description: "List all available tools including:\n\
                          - bash: Execute shell/terminal commands (ls, grep, find, cat, etc.)\n\
+                         - fetch: Fetch web URLs and return readable text content\n\
                          - Filesystem tools: read_file, write_file, list_directory, etc.\n\
                          - MCP tools: External tools from connected servers\n\
                          \n\

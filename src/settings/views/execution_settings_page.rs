@@ -17,8 +17,7 @@ pub fn execution_settings_page() -> SettingPage {
                 .title("Security Settings")
                 .description(
                     "⚠️ Enabling code execution allows the AI to run shell commands. \
-                     Commands will require approval based on your approval mode setting. \
-                     After changing these settings, start a new conversation for tools to be updated.",
+                     Commands will require approval based on your approval mode setting.",
                 )
                 .items(vec![
                     SettingItem::new(
@@ -45,8 +44,21 @@ pub fn execution_settings_page() -> SettingPage {
                     .description(
                         "When enabled, the AI can add, edit, and delete MCP servers via the \
                          add_mcp_service, edit_mcp_service, and delete_mcp_service tools. \
-                         Disable to prevent the AI from modifying MCP server configurations. \
-                         After changing this setting, start a new conversation for tools to be updated.",
+                         Disable to prevent the AI from modifying MCP server configurations.",
+                    ),
+                    SettingItem::new(
+                        "Enable Web Fetch",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().fetch_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_fetch(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Built-in read-only web fetch tool. Allows the AI to retrieve web pages \
+                         and API responses without requiring an MCP fetch server.",
                     ),
                     SettingItem::new(
                         "Approval Mode",

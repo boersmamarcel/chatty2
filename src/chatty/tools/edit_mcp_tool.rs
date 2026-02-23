@@ -286,7 +286,7 @@ impl Tool for EditMcpTool {
         };
 
         let restart_msg = if was_restarted {
-            " and restarted. Start a new conversation to use the updated tools."
+            " and restarted. The updated tools are now available."
         } else if !server_enabled {
             " (server is disabled)."
         } else {
