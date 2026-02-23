@@ -427,10 +427,14 @@ impl ShellSession {
         let marker = uuid::Uuid::new_v4().to_string().replace('-', "");
         let marker_prefix = format!("__CHATTY_SHELL_MARKER_{}_", marker);
 
-        // Write command with stderr redirect and end marker
+        // Write command with stderr redirect and end marker.
+        // Wrap in { ...; } so 2>&1 applies to the whole group — this ensures
+        // stderr is captured even when the command itself redirects to stderr
+        // (e.g. `echo msg >&2`).  Without the group, `cmd >&2 2>&1` fails
+        // because bash applies redirections left-to-right.
         // The marker line format: __CHATTY_SHELL_MARKER_{uuid}_{exit_code}__
         let wrapped_command = format!(
-            "{} 2>&1\n__chatty_ec=$?\necho \"{}${{__chatty_ec}}__\"\n",
+            "{{ {}\n}} 2>&1\n__chatty_ec=$?\necho \"{}${{__chatty_ec}}__\"\n",
             command, marker_prefix
         );
 
