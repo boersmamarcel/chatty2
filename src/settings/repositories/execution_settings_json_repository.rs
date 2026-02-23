@@ -60,8 +60,10 @@ impl ExecutionSettingsRepository for ExecutionSettingsJsonRepository {
                     .map_err(|e| RepositoryError::IoError(e.to_string()))?;
             }
 
-            // Write atomically using temp file + rename
-            let temp_path = path.with_extension("json.tmp");
+            // Write atomically using temp file + rename.
+            // Use a unique temp file name to prevent races when multiple
+            // saves run concurrently (e.g., user toggles two settings quickly).
+            let temp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
             tokio::fs::write(&temp_path, &json)
                 .await
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;

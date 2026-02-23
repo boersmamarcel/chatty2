@@ -24,7 +24,13 @@ fn notify_tool_set_changed(cx: &mut App) {
 /// Toggle code execution enabled/disabled and persist to disk
 pub fn toggle_execution(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)
-    let new_enabled = !cx.global::<ExecutionSettingsModel>().enabled;
+    let old_enabled = cx.global::<ExecutionSettingsModel>().enabled;
+    let new_enabled = !old_enabled;
+    info!(
+        old = old_enabled,
+        new = new_enabled,
+        "Toggling code execution"
+    );
     cx.global_mut::<ExecutionSettingsModel>().enabled = new_enabled;
 
     // 2. Get updated state for async save

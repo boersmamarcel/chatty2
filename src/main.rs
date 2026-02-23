@@ -793,9 +793,15 @@ fn main() {
             match repo.load().await {
                 Ok(settings) => {
                     cx.update(|cx| {
+                        info!(
+                            enabled = settings.enabled,
+                            workspace = ?settings.workspace_dir,
+                            approval_mode = ?settings.approval_mode,
+                            network_isolation = settings.network_isolation,
+                            "Execution settings loaded from disk"
+                        );
                         cx.set_global(settings);
                         exec_settings_loaded_clone.store(true, Ordering::SeqCst);
-                        info!("Execution settings loaded");
                         check_fn_3(cx);
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to update global execution settings"))

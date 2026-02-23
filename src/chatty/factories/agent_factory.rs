@@ -267,6 +267,11 @@ impl AgentClient {
                         settings.network_isolation,
                     )))
                 } else {
+                    tracing::info!(
+                        enabled = settings.enabled,
+                        workspace = ?settings.workspace_dir,
+                        "Shell session not created: execution disabled in settings"
+                    );
                     None
                 }
             })
