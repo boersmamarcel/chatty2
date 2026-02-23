@@ -946,7 +946,7 @@ impl ChattyApp {
                 "Rebuilding agent with fresh MCP tools"
             );
 
-            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts) = cx
+            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session) = cx
                 .update(|cx| {
                     let settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -957,11 +957,12 @@ impl ChattyApp {
                     let write_approvals = cx
                         .global::<crate::chatty::models::WriteApprovalStore>()
                         .get_pending_approvals();
-                    let artifacts = cx
+                    let conv = cx
                         .global::<ConversationsStore>()
-                        .get_conversation(&conv_id)
-                        .map(|c| c.pending_artifacts());
-                    (Some(settings), Some(approvals), Some(write_approvals), artifacts)
+                        .get_conversation(&conv_id);
+                    let artifacts = conv.map(|c| c.pending_artifacts());
+                    let session = conv.and_then(|c| c.shell_session());
+                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session)
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -973,6 +974,7 @@ impl ChattyApp {
                 pending_approvals,
                 pending_write_approvals,
                 pending_artifacts,
+                shell_session,
             )
             .await?;
 
@@ -1041,6 +1043,7 @@ impl ChattyApp {
                             pending_approvals,
                             pending_write_approvals,
                             pending_artifacts,
+                            shell_session,
                         ) = cx
                             .update(|cx| {
                                 let settings = cx
@@ -1052,15 +1055,16 @@ impl ChattyApp {
                                 let write_approvals = cx
                                     .global::<crate::chatty::models::WriteApprovalStore>()
                                     .get_pending_approvals();
-                                let artifacts = cx
-                                    .global::<ConversationsStore>()
-                                    .get_conversation(&conv_id)
-                                    .map(|c| c.pending_artifacts());
+                                let conv =
+                                    cx.global::<ConversationsStore>().get_conversation(&conv_id);
+                                let artifacts = conv.map(|c| c.pending_artifacts());
+                                let session = conv.and_then(|c| c.shell_session());
                                 (
                                     Some(settings),
                                     Some(approvals),
                                     Some(write_approvals),
                                     artifacts,
+                                    session,
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1074,6 +1078,7 @@ impl ChattyApp {
                             pending_approvals,
                             pending_write_approvals,
                             pending_artifacts,
+                            shell_session,
                         )
                         .await?;
 

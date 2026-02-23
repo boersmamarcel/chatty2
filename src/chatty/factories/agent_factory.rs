@@ -6,10 +6,12 @@ use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool,
     DeleteMcpTool, EditMcpTool, FetchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
-    ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -31,6 +33,14 @@ type FsWriteTools = (
     DeleteFileTool,
     MoveFileTool,
     ApplyDiffTool,
+);
+
+/// Shell session tool set (all four shell tools)
+type ShellTools = (
+    ShellExecuteTool,
+    ShellSetEnvTool,
+    ShellCdTool,
+    ShellStatusTool,
 );
 
 /// All four MCP management tools bundled together.
@@ -160,6 +170,7 @@ fn collect_tools(
     add_attachment: Option<AddAttachmentTool>,
     mcp_mgmt: McpTools,
     fetch_tool: Option<FetchTool>,
+    shell_tools: Option<ShellTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -197,6 +208,12 @@ fn collect_tools(
     if let Some(t) = fetch_tool {
         tools.push(Box::new(t));
     }
+    if let Some((exec, set_env, cd, status)) = shell_tools {
+        tools.push(Box::new(exec));
+        tools.push(Box::new(set_env));
+        tools.push(Box::new(cd));
+        tools.push(Box::new(status));
+    }
     tools
 }
 
@@ -226,6 +243,7 @@ impl AgentClient {
             crate::chatty::models::write_approval_store::PendingWriteApprovals,
         >,
         pending_artifacts: Option<PendingArtifacts>,
+        shell_session: Option<std::sync::Arc<ShellSession>>,
     ) -> Result<Self> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -246,6 +264,26 @@ impl AgentClient {
         } else {
             None
         };
+
+        // Create shell session tools if execution is enabled and a session is provided
+        let shell_tools: Option<ShellTools> =
+            if let (Some(session), Some(settings), Some(approvals)) =
+                (&shell_session, &exec_settings, &pending_approvals)
+            {
+                if settings.enabled {
+                    tracing::info!("Shell session tools enabled");
+                    Some((
+                        ShellExecuteTool::new(session.clone(), settings.clone(), approvals.clone()),
+                        ShellSetEnvTool::new(session.clone(), settings.clone()),
+                        ShellCdTool::new(session.clone(), settings.clone()),
+                        ShellStatusTool::new(session.clone()),
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
@@ -441,6 +479,7 @@ impl AgentClient {
             fs_write_tools.is_some(),
             mcp_mgmt_tools.is_enabled(),
             fetch_tool.is_some(),
+            shell_tools.is_some(),
             mcp_tool_info,
         );
 
@@ -468,6 +507,7 @@ impl AgentClient {
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -509,6 +549,7 @@ impl AgentClient {
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -534,6 +575,7 @@ impl AgentClient {
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -562,6 +604,7 @@ impl AgentClient {
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -589,6 +632,7 @@ impl AgentClient {
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -734,6 +778,7 @@ impl AgentClient {
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);

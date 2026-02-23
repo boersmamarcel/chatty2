@@ -10,6 +10,7 @@ pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
+pub mod shell_tool;
 #[cfg(test)]
 pub mod test_helpers;
 
@@ -26,3 +27,4 @@ pub use filesystem_write_tool::{
 };
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
+pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};

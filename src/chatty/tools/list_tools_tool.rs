@@ -47,6 +47,7 @@ impl ListToolsTool {
         has_fs_write: bool,
         has_add_mcp: bool,
         has_fetch: bool,
+        has_shell: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -156,6 +157,31 @@ impl ListToolsTool {
             ]);
         }
 
+        if has_shell {
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "shell_execute".to_string(),
+                    description: "Execute a command in a persistent shell session that preserves state (env vars, working directory) across calls".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "shell_set_env".to_string(),
+                    description: "Set an environment variable in the persistent shell session".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "shell_cd".to_string(),
+                    description: "Change the working directory in the persistent shell session".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "shell_status".to_string(),
+                    description: "Get the current status of the persistent shell session (cwd, env vars, pid, uptime)".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -173,7 +199,7 @@ impl ListToolsTool {
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(false, false, false, false, false, Vec::new())
+        Self::new_with_config(false, false, false, false, false, false, Vec::new())
     }
 }
 
