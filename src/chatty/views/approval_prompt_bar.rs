@@ -69,13 +69,13 @@ impl RenderOnce for ApprovalPromptBar {
         // Platform-specific button labels
         #[cfg(target_os = "macos")]
         let (approve_label, deny_label, details_label) =
-            ("Approve (⌘Y)", "Deny (⌘N)", "Details (⌘D)");
+            ("Approve (⌘Y)", "Deny (⇧⌘N)", "Details (⌘D)");
         #[cfg(target_os = "linux")]
         let (approve_label, deny_label, details_label) =
-            ("Approve (Opt+Y)", "Deny (Opt+N)", "Details (Opt+D)");
+            ("Approve (Opt+Y)", "Deny (Shift+Opt+N)", "Details (Opt+D)");
         #[cfg(target_os = "windows")]
         let (approve_label, deny_label, details_label) =
-            ("Approve (Ctrl+Y)", "Deny (Ctrl+N)", "Details (Ctrl+D)");
+            ("Approve (Ctrl+Y)", "Deny (Shift+Ctrl+N)", "Details (Ctrl+D)");
 
         // Note: Keyboard shortcuts are handled at the ChatView level, not here.
         // This component just displays the approval bar UI.

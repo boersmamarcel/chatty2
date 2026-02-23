@@ -966,7 +966,7 @@ impl Render for ChatView {
                                 });
                                 cx.stop_propagation();
                             }
-                            "n" => {
+                            "n" if modifiers.shift => {
                                 warn!("Deny shortcut triggered in ChatView");
                                 view_entity_for_keys.update(cx, |view, cx| {
                                     view.handle_floating_approval(false, cx);
