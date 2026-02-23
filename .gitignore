@@ -28,7 +28,8 @@ TEST_SUMMARY.md
 # Inspiration/reference code (should be external)
 /inspiration/
 
-.claude/
+# Claude Code local settings (keep skills/commands tracked)
+.claude/settings.local.json
 
 # Backup files
 *.bak
