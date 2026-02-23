@@ -2,7 +2,8 @@ use crate::assets::CustomIcon;
 use crate::settings::controllers::execution_settings_controller;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use gpui::*;
-use gpui_component::{Icon, Sizable, button::*};
+use gpui_component::Icon;
+use gpui_component::tooltip::Tooltip;
 
 #[derive(IntoElement, Default)]
 pub struct NetworkIndicatorView;
@@ -28,15 +29,17 @@ impl RenderOnce for NetworkIndicatorView {
             "Sandbox: network allowed for shell commands (click to block)"
         };
 
-        Button::new("network-isolation-toggle")
-            .ghost()
-            .xsmall()
-            .tooltip(tooltip)
+        div()
+            .id("network-isolation-toggle")
+            .cursor_pointer()
+            .px_1()
+            .py_0p5()
             .child(
                 Icon::new(CustomIcon::Codesandbox)
                     .size(px(12.0))
                     .text_color(icon_color),
             )
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
             .on_click(move |_event, _window, cx| {
                 execution_settings_controller::toggle_network_isolation(cx);
             })

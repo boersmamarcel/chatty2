@@ -2,7 +2,8 @@ use crate::assets::CustomIcon;
 use crate::settings::controllers::execution_settings_controller;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use gpui::*;
-use gpui_component::{Icon, Sizable, button::*};
+use gpui_component::Icon;
+use gpui_component::tooltip::Tooltip;
 
 #[derive(IntoElement, Default)]
 pub struct FetchIndicatorView;
@@ -28,15 +29,17 @@ impl RenderOnce for FetchIndicatorView {
             "Offline: AI has no internet access (click to go online)"
         };
 
-        Button::new("fetch-toggle")
-            .ghost()
-            .xsmall()
-            .tooltip(tooltip)
+        div()
+            .id("fetch-toggle")
+            .cursor_pointer()
+            .px_1()
+            .py_0p5()
             .child(
                 Icon::new(CustomIcon::Earth)
                     .size(px(12.0))
                     .text_color(icon_color),
             )
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
             .on_click(move |_event, _window, cx| {
                 execution_settings_controller::toggle_fetch(cx);
             })
