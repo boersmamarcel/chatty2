@@ -97,6 +97,11 @@ impl ShellSession {
         }
     }
 
+    /// Return the network_isolation setting this session was created with
+    pub fn network_isolation(&self) -> bool {
+        self.network_isolation
+    }
+
     /// Check if the current session process is running inside a sandbox
     pub async fn is_sandboxed(&self) -> bool {
         let process = self.process.lock().await;

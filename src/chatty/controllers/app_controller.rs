@@ -961,7 +961,21 @@ impl ChattyApp {
                         .global::<ConversationsStore>()
                         .get_conversation(&conv_id);
                     let artifacts = conv.map(|c| c.pending_artifacts());
-                    let session = conv.and_then(|c| c.shell_session());
+                    // Drop the existing shell session if network_isolation changed — it was
+                    // spawned with the old setting and cannot be reconfigured in place.
+                    // Passing None lets the factory create a fresh session with the new setting.
+                    let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
+                        if s.network_isolation() == settings.network_isolation {
+                            Some(s)
+                        } else {
+                            info!(
+                                conv_id = %conv_id,
+                                new_isolation = settings.network_isolation,
+                                "Network isolation changed — replacing shell session"
+                            );
+                            None
+                        }
+                    });
                     (Some(settings), Some(approvals), Some(write_approvals), artifacts, session)
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -982,8 +996,9 @@ impl ChattyApp {
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.set_agent(new_agent, model_config.id.clone());
-                    // Store the shell session (factory may have created it on-demand)
-                    if new_shell_session.is_some() && conv.shell_session().is_none() {
+                    // Always store the new shell session — the factory either reused the
+                    // existing one or created a fresh one (e.g. after a network_isolation change).
+                    if new_shell_session.is_some() {
                         conv.set_shell_session(new_shell_session);
                     }
                     info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
@@ -1093,8 +1108,9 @@ impl ChattyApp {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(new_agent, model_config.id.clone());
-                                // Store the shell session (factory may have created it on-demand)
-                                if new_shell_session.is_some() && conv.shell_session().is_none() {
+                                // Always store the new shell session — the factory either reused
+                                // the existing one or created a fresh one.
+                                if new_shell_session.is_some() {
                                     conv.set_shell_session(new_shell_session);
                                 }
                                 Ok(())
