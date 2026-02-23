@@ -18,7 +18,7 @@ pub fn set_global_approval_notifier(tx: mpsc::UnboundedSender<ApprovalNotificati
         .replace(tx);
 }
 
-/// Notify via global channel (called by BashExecutor)
+/// Notify via global channel (called by shell tools)
 pub fn notify_approval_via_global(id: String, command: String, is_sandboxed: bool) {
     use tracing::{debug, warn};
 

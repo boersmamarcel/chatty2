@@ -218,7 +218,7 @@ impl ShellSession {
     #[cfg(target_os = "linux")]
     fn spawn_sandboxed_linux(
         workspace_dir: &Option<String>,
-        _network_isolation: bool,
+        network_isolation: bool,
     ) -> Result<Child> {
         let mut cmd = tokio::process::Command::new("bwrap");
 
@@ -242,12 +242,16 @@ impl ShellSession {
             "/proc",
             "--dev",
             "/dev",
-            // --unshare-all includes --unshare-net, so network is always
-            // isolated in the bwrap sandbox regardless of the network_isolation flag.
-            // This matches the BashExecutor behavior.
+            // --unshare-all includes --unshare-net; we re-enable network
+            // below with --share-net when network_isolation is false.
             "--unshare-all",
             "--die-with-parent",
         ]);
+
+        // Re-enable network access when isolation is not requested
+        if !network_isolation {
+            cmd.arg("--share-net");
+        }
 
         // Check for /lib64 (exists on many 64-bit Linux systems)
         if std::path::Path::new("/lib64").exists() {
@@ -295,16 +299,15 @@ impl ShellSession {
 
     /// Build the macOS sandbox profile (SBPL)
     ///
-    /// Mirrors the BashExecutor's sandbox profile for consistency:
     /// - Allows default operations
     /// - Denies writes to sensitive system directories
     /// - Denies reads to credential files (.ssh, .aws, etc.)
-    /// - Always denies network access (matches Linux --unshare-all behavior)
+    /// - Denies network access when `network_isolation` is true
     /// - Allows writes to /tmp and workspace
     #[cfg(target_os = "macos")]
     fn build_macos_sandbox_profile(
         workspace_dir: &Option<String>,
-        _network_isolation: bool,
+        network_isolation: bool,
     ) -> Result<String> {
         let workspace_write_rule = if let Some(workspace) = workspace_dir {
             let safe_workspace = Self::escape_sandbox_path(workspace)?;
@@ -314,6 +317,12 @@ impl ShellSession {
             )
         } else {
             String::new()
+        };
+
+        let network_rule = if network_isolation {
+            "\n                ;; Deny network access (network isolation enabled)\n                (deny network*)"
+        } else {
+            "\n                ;; Network access allowed (network isolation disabled)"
         };
 
         Ok(format!(
@@ -344,13 +353,10 @@ impl ShellSession {
                     (literal "/etc/master.passwd")
                     (literal "/etc/shadow")
                 )
-
-                ;; Always deny network access in sandbox (matches Linux --unshare-all)
-                (deny network*)
-
+                {}
                 (allow file-write* (subpath "/tmp")){}
             "#,
-            workspace_write_rule
+            network_rule, workspace_write_rule
         ))
     }
 

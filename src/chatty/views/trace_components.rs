@@ -875,8 +875,8 @@ fn extract_command_display(tool_call: &ToolCallBlock) -> String {
 /// Extract the full, untruncated command string from tool call input
 fn extract_full_command(tool_call: &ToolCallBlock) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool_call.input) {
-        // For bash tool: extract "command" field
-        if tool_call.tool_name == "bash" {
+        // For shell_execute tool: extract "command" field
+        if tool_call.tool_name == "shell_execute" {
             if let Some(command) = json.get("command").and_then(|v| v.as_str()) {
                 return command.to_string();
             }

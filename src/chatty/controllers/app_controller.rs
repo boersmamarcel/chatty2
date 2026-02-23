@@ -1391,7 +1391,7 @@ impl ChattyApp {
                 let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
 
-                // Set up global notifier for BashExecutor to use
+                // Set up global notifier for shell tools to use
                 crate::chatty::models::execution_approval_store::set_global_approval_notifier(approval_tx.clone());
 
                 // Update global store with notifiers for this conversation

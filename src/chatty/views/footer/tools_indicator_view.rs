@@ -60,7 +60,7 @@ impl RenderOnce for ToolsIndicatorView {
                 .appearance(false)
                 .content(move |_, _window, cx| {
                     let settings = cx.global::<ExecutionSettingsModel>();
-                    let bash_enabled = settings.enabled;
+                    let shell_enabled = settings.enabled;
                     let workspace_set = settings.workspace_dir.is_some();
                     let fs_read_enabled = settings.filesystem_read_enabled;
                     let fs_write_enabled = settings.filesystem_write_enabled;
@@ -85,8 +85,8 @@ impl RenderOnce for ToolsIndicatorView {
                                 .child("Filesystem Tools"),
                         )
                         .child(div().h(px(1.0)).w_full().bg(cx.theme().border).mb_2())
-                        // Bash Execution - always toggleable
-                        .child(render_bash_item(bash_enabled, cx))
+                        // Shell Execution - always toggleable
+                        .child(render_shell_item(shell_enabled, cx))
                         // Filesystem Read - toggleable only if workspace_dir is set
                         .child(render_filesystem_toggle_item(
                             "Filesystem Read",
@@ -130,7 +130,7 @@ impl RenderOnce for ToolsIndicatorView {
 fn count_enabled_categories(settings: &ExecutionSettingsModel) -> usize {
     let mut count = 0;
     if settings.enabled {
-        count += 1; // Bash execution
+        count += 1; // Shell execution
     }
     if settings.workspace_dir.is_some() && settings.filesystem_read_enabled {
         count += 1; // Filesystem Read
@@ -141,9 +141,9 @@ fn count_enabled_categories(settings: &ExecutionSettingsModel) -> usize {
     count
 }
 
-/// Render the bash execution toggle button
-fn render_bash_item(enabled: bool, _cx: &App) -> impl IntoElement {
-    let button_id = SharedString::from("toggle-bash");
+/// Render the shell execution toggle button
+fn render_shell_item(enabled: bool, _cx: &App) -> impl IntoElement {
+    let button_id = SharedString::from("toggle-shell");
 
     div()
         .flex()
@@ -154,7 +154,7 @@ fn render_bash_item(enabled: bool, _cx: &App) -> impl IntoElement {
         .px_2()
         .py_1()
         .rounded_md()
-        .child(div().text_sm().child("Bash Execution"))
+        .child(div().text_sm().child("Shell Execution"))
         .child(
             Button::new(button_id)
                 .xsmall()

@@ -8,7 +8,7 @@ use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
     DeleteMcpTool, EditMcpTool, FetchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
     ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, ShellCdTool,
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
@@ -164,7 +164,6 @@ fn sanitize_mcp_tools_for_openai(
 /// branching.
 fn collect_tools(
     list_tools: ListToolsTool,
-    bash_tool: Option<BashTool>,
     fs_read: Option<FsReadTools>,
     fs_write: Option<FsWriteTools>,
     add_attachment: Option<AddAttachmentTool>,
@@ -184,9 +183,6 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = mcp_mgmt.edit {
-        tools.push(Box::new(t));
-    }
-    if let Some(t) = bash_tool {
         tools.push(Box::new(t));
     }
     if let Some((rf, rb, ld, gs)) = fs_read {
@@ -229,7 +225,7 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, bash execution, and filesystem tools
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, shell execution, and filesystem tools
     #[allow(clippy::too_many_arguments)]
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
@@ -279,23 +275,6 @@ impl AgentClient {
 
         // Save a clone to return to the caller so it can be stored on the Conversation
         let shell_session_out = shell_session.clone();
-
-        // Create BashTool if execution is enabled
-        let bash_tool = if let (Some(settings), Some(approvals)) =
-            (&exec_settings, &pending_approvals)
-        {
-            if settings.enabled {
-                let executor =
-                    crate::chatty::tools::BashExecutor::new(settings.clone(), approvals.clone());
-                Some(crate::chatty::tools::BashTool::new(std::sync::Arc::new(
-                    executor,
-                )))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
 
         // Create shell session tools if execution is enabled and a session is provided
         let shell_tools: Option<ShellTools> =
@@ -513,7 +492,6 @@ impl AgentClient {
 
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
-            bash_tool.is_some(),
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
             mcp_mgmt_tools.is_enabled(),
@@ -540,7 +518,6 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
@@ -582,7 +559,6 @@ impl AgentClient {
                 // Build with all tools (sanitize MCP schemas for OpenAI strict mode)
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
@@ -608,7 +584,6 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
@@ -637,7 +612,6 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
@@ -665,7 +639,6 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
@@ -811,7 +784,6 @@ impl AgentClient {
                 // Build with all tools (sanitize MCP schemas for OpenAI strict mode)
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
