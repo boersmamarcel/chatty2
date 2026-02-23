@@ -54,6 +54,8 @@ pub enum FetchToolError {
 /// Enforces timeouts, size limits, and HTTPS preference for safety.
 #[derive(Clone)]
 pub struct FetchTool {
+    /// Reusable HTTP client with connection pooling, timeout, and SSRF-safe redirect policy.
+    client: reqwest::Client,
     /// Optional workspace directory for saving downloaded binary files.
     /// When None, binary content returns an error asking the user to configure a workspace.
     workspace_dir: Option<PathBuf>,
@@ -61,7 +63,16 @@ pub struct FetchTool {
 
 impl FetchTool {
     pub fn new(workspace_dir: Option<PathBuf>) -> Self {
-        Self { workspace_dir }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to build HTTP client");
+        Self {
+            client,
+            workspace_dir,
+        }
     }
 }
 
@@ -113,22 +124,11 @@ impl Tool for FetchTool {
 
         info!(url = %url, max_length = max_length, "Fetching URL");
 
-        // Build HTTP client with timeout and SSRF-safe redirect policy.
-        // We disable automatic redirects and handle them manually so we can
-        // validate each redirect target against the private-host denylist.
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| {
-                FetchToolError::FetchError(format!("Failed to build HTTP client: {}", e))
-            })?;
-
         // Perform GET request, following redirects manually (max 10 hops)
         // to validate each redirect target against the private-host denylist.
         let mut current_url = url.clone();
-        let mut response = client
+        let mut response = self
+            .client
             .get(&current_url)
             .send()
             .await
@@ -170,7 +170,8 @@ impl Tool for FetchTool {
             info!(from = %current_url, to = %next_url, "Following redirect");
             current_url = next_url;
 
-            response = client
+            response = self
+                .client
                 .get(&current_url)
                 .send()
                 .await
