@@ -264,6 +264,7 @@ impl AgentClient {
                         settings.workspace_dir.clone(),
                         settings.timeout_seconds,
                         settings.max_output_bytes,
+                        settings.network_isolation,
                     )))
                 } else {
                     None

@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -29,15 +31,21 @@ struct ShellProcess {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
+    is_sandboxed: bool,
 }
 
 /// A persistent shell session that maintains state across multiple commands.
 ///
 /// The session keeps a bash process alive, preserving environment variables,
 /// working directory, and other shell state between invocations.
+///
+/// Security: When sandboxing is available (bubblewrap on Linux, sandbox-exec on macOS),
+/// the shell process runs inside a sandbox with filesystem and network restrictions.
+/// Network isolation is controlled by the `network_isolation` setting.
 pub struct ShellSession {
     process: Mutex<Option<ShellProcess>>,
     workspace_dir: Option<String>,
+    network_isolation: bool,
     timeout_seconds: u32,
     max_output_bytes: usize,
     created_at: SystemTime,
@@ -47,24 +55,64 @@ impl ShellSession {
     /// Create a new shell session with the given configuration.
     ///
     /// The bash process is not spawned until the first command is executed.
+    /// When spawned, it will run inside a sandbox if available (bubblewrap on Linux,
+    /// sandbox-exec on macOS).
     pub fn new(
         workspace_dir: Option<String>,
         timeout_seconds: u32,
         max_output_bytes: usize,
+        network_isolation: bool,
     ) -> Self {
         Self {
             process: Mutex::new(None),
             workspace_dir,
+            network_isolation,
             timeout_seconds,
             max_output_bytes,
             created_at: SystemTime::now(),
         }
     }
 
+    /// Check if sandboxing is available on this platform
+    pub fn can_sandbox() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("bwrap")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            true
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            false
+        }
+    }
+
+    /// Check if the current session process is running inside a sandbox
+    pub async fn is_sandboxed(&self) -> bool {
+        let process = self.process.lock().await;
+        process
+            .as_ref()
+            .map_or(Self::can_sandbox(), |p| p.is_sandboxed)
+    }
+
     /// Ensure the bash process is running, spawning it if necessary.
+    ///
+    /// Attempts to spawn inside a sandbox (bubblewrap on Linux, sandbox-exec on macOS).
+    /// Falls back to unsandboxed execution if sandboxing is unavailable.
     async fn ensure_started(
         process: &mut Option<ShellProcess>,
         workspace_dir: &Option<String>,
+        network_isolation: bool,
     ) -> Result<()> {
         if process.is_some() {
             // Check if process is still alive
@@ -85,20 +133,24 @@ impl ShellSession {
 
         info!(workspace = ?workspace_dir, "Spawning persistent shell session");
 
-        let mut cmd = tokio::process::Command::new("/bin/bash");
-        cmd.args(["--norc", "--noprofile"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()) // Capture stderr separately to avoid mixing
-            .kill_on_drop(true);
-
-        if let Some(dir) = workspace_dir {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("Failed to spawn shell process: {}", e))?;
+        // Try sandboxed spawn first, fall back to unsandboxed
+        let (mut child, is_sandboxed) = if Self::can_sandbox() {
+            match Self::spawn_sandboxed(workspace_dir, network_isolation) {
+                Ok(child) => {
+                    info!("Shell session spawned inside sandbox");
+                    (child, true)
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
+                    let child = Self::spawn_unsandboxed(workspace_dir)?;
+                    (child, false)
+                }
+            }
+        } else {
+            info!("Sandboxing not available, spawning unsandboxed shell session");
+            let child = Self::spawn_unsandboxed(workspace_dir)?;
+            (child, false)
+        };
 
         let stdin = child
             .stdin
@@ -110,15 +162,249 @@ impl ShellSession {
             .ok_or_else(|| anyhow!("Failed to capture shell stdout"))?;
 
         let pid = child.id();
-        info!(pid = ?pid, "Shell session started");
+        info!(pid = ?pid, sandboxed = is_sandboxed, "Shell session started");
 
         *process = Some(ShellProcess {
             child,
             stdin,
             reader: BufReader::new(stdout),
+            is_sandboxed,
         });
 
         Ok(())
+    }
+
+    /// Spawn an unsandboxed bash process (fallback)
+    fn spawn_unsandboxed(workspace_dir: &Option<String>) -> Result<Child> {
+        let mut cmd = tokio::process::Command::new("/bin/bash");
+        cmd.args(["--norc", "--noprofile"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(dir) = workspace_dir {
+            cmd.current_dir(dir);
+        }
+
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn shell process: {}", e))
+    }
+
+    /// Spawn a sandboxed bash process (Linux: bubblewrap, macOS: sandbox-exec)
+    ///
+    /// The persistent bash process runs inside the sandbox, inheriting all
+    /// restrictions (filesystem isolation, network isolation). State (env vars,
+    /// cwd) is maintained within the sandboxed process between commands.
+    fn spawn_sandboxed(workspace_dir: &Option<String>, network_isolation: bool) -> Result<Child> {
+        #[cfg(target_os = "linux")]
+        {
+            Self::spawn_sandboxed_linux(workspace_dir, network_isolation)
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Self::spawn_sandboxed_macos(workspace_dir, network_isolation)
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (workspace_dir, network_isolation);
+            Err(anyhow!("Sandboxing not supported on this platform"))
+        }
+    }
+
+    /// Spawn a sandboxed bash process using bubblewrap on Linux
+    #[cfg(target_os = "linux")]
+    fn spawn_sandboxed_linux(
+        workspace_dir: &Option<String>,
+        _network_isolation: bool,
+    ) -> Result<Child> {
+        let mut cmd = tokio::process::Command::new("bwrap");
+
+        // Bind essential system directories as read-only
+        cmd.args([
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/sbin",
+            "/sbin",
+            "--tmpfs",
+            "/tmp",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            // --unshare-all includes --unshare-net, so network is always
+            // isolated in the bwrap sandbox regardless of the network_isolation flag.
+            // This matches the BashExecutor behavior.
+            "--unshare-all",
+            "--die-with-parent",
+        ]);
+
+        // Check for /lib64 (exists on many 64-bit Linux systems)
+        if std::path::Path::new("/lib64").exists() {
+            cmd.args(["--ro-bind", "/lib64", "/lib64"]);
+        }
+
+        // Bind workspace at its original path so existing path references work
+        if let Some(workspace) = workspace_dir {
+            cmd.args(["--bind", workspace, workspace]);
+            cmd.args(["--chdir", workspace]);
+        }
+
+        cmd.args(["/bin/bash", "--norc", "--noprofile"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn sandboxed shell: {}", e))
+    }
+
+    /// Spawn a sandboxed bash process using sandbox-exec on macOS
+    #[cfg(target_os = "macos")]
+    fn spawn_sandboxed_macos(
+        workspace_dir: &Option<String>,
+        network_isolation: bool,
+    ) -> Result<Child> {
+        let profile = Self::build_macos_sandbox_profile(workspace_dir, network_isolation)?;
+
+        let mut cmd = tokio::process::Command::new("sandbox-exec");
+        cmd.args(["-p", &profile, "/bin/bash", "--norc", "--noprofile"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(workspace) = workspace_dir {
+            cmd.current_dir(workspace);
+        }
+
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn sandboxed shell: {}", e))
+    }
+
+    /// Build the macOS sandbox profile (SBPL)
+    ///
+    /// Mirrors the BashExecutor's sandbox profile for consistency:
+    /// - Allows default operations
+    /// - Denies writes to sensitive system directories
+    /// - Denies reads to credential files (.ssh, .aws, etc.)
+    /// - Optionally denies all network access
+    /// - Allows writes to /tmp and workspace
+    #[cfg(target_os = "macos")]
+    fn build_macos_sandbox_profile(
+        workspace_dir: &Option<String>,
+        network_isolation: bool,
+    ) -> Result<String> {
+        let network_rules = if network_isolation {
+            "\n                ;; Network isolation enabled - deny all network access\n                (deny network*)"
+        } else {
+            ""
+        };
+
+        let workspace_write_rule = if let Some(workspace) = workspace_dir {
+            let safe_workspace = Self::escape_sandbox_path(workspace)?;
+            format!(
+                "\n                (allow file-write* (subpath \"{}\"))",
+                safe_workspace
+            )
+        } else {
+            String::new()
+        };
+
+        Ok(format!(
+            r#"
+                (version 1)
+                (allow default)
+
+                ;; Deny write access to sensitive system directories
+                (deny file-write*
+                    (subpath "/System")
+                    (subpath "/Library")
+                    (subpath "/private/etc")
+                    (subpath "/private/var")
+                    (regex #"^/Users/[^/]+/\.ssh")
+                    (regex #"^/Users/[^/]+/\.aws")
+                    (regex #"^/Users/[^/]+/\.gnupg")
+                )
+
+                ;; Deny read access to sensitive credential files and directories
+                (deny file-read*
+                    (regex #"^/Users/[^/]+/\.ssh/")
+                    (regex #"^/Users/[^/]+/\.aws/")
+                    (regex #"^/Users/[^/]+/\.gnupg/")
+                    (regex #"^/Users/[^/]+/\.docker/config\.json$")
+                    (regex #"^/Users/[^/]+/\.kube/config$")
+                    (regex #"^/Users/[^/]+/\.netrc$")
+                    (subpath "/private/etc/ssh")
+                    (literal "/etc/master.passwd")
+                    (literal "/etc/shadow")
+                )
+                {}
+                (allow file-write* (subpath "/tmp")){}
+            "#,
+            network_rules, workspace_write_rule
+        ))
+    }
+
+    /// Validate and escape a workspace path for safe use in macOS sandbox profile.
+    ///
+    /// Prevents path injection attacks by:
+    /// 1. Validating the path is absolute
+    /// 2. Rejecting paths with suspicious characters (parentheses)
+    /// 3. Canonicalizing to resolve symlinks and relative components
+    /// 4. Escaping special characters (quotes, backslashes)
+    #[cfg(target_os = "macos")]
+    fn escape_sandbox_path(workspace: &str) -> Result<String> {
+        use std::path::Path;
+
+        let path = Path::new(workspace);
+        if !path.is_absolute() {
+            return Err(anyhow!(
+                "Workspace path must be absolute, got: {}",
+                workspace
+            ));
+        }
+
+        if workspace.contains('(') || workspace.contains(')') {
+            return Err(anyhow!(
+                "Workspace path contains invalid characters (parentheses): {}",
+                workspace
+            ));
+        }
+
+        let canonical = path.canonicalize().map_err(|e| {
+            anyhow!(
+                "Failed to canonicalize workspace path '{}': {}",
+                workspace,
+                e
+            )
+        })?;
+
+        let canonical_str = canonical
+            .to_str()
+            .ok_or_else(|| anyhow!("Workspace path contains invalid UTF-8"))?;
+
+        let escaped = canonical_str.replace('\\', "\\\\").replace('"', "\\\"");
+
+        if escaped.contains('(') || escaped.contains(')') {
+            return Err(anyhow!(
+                "Canonicalized workspace path contains invalid characters: {}",
+                canonical_str
+            ));
+        }
+
+        Ok(escaped)
     }
 
     /// Execute a command in the persistent shell session.
@@ -127,7 +413,7 @@ impl ShellSession {
     /// Returns the combined output and exit code.
     pub async fn execute(&self, command: &str) -> Result<ShellOutput> {
         let mut process = self.process.lock().await;
-        Self::ensure_started(&mut process, &self.workspace_dir).await?;
+        Self::ensure_started(&mut process, &self.workspace_dir, self.network_isolation).await?;
 
         let proc = process.as_mut().unwrap();
         let marker = uuid::Uuid::new_v4().to_string().replace('-', "");
@@ -368,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_command_execution() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
         let result = session.execute("echo 'hello world'").await;
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -378,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_environment_persistence() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         // Set an env var
         let result = session.set_env("MY_TEST_VAR", "test_value_123").await;
@@ -393,7 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_working_directory_persistence() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         // Change to /tmp
         let result = session.cd("/tmp").await;
@@ -408,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_code_capture() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         let _result = session.execute("exit 42").await;
         // After `exit 42`, the shell process dies, but it should respawn
@@ -421,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_captured() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         let result = session.execute("echo 'error message' >&2").await;
         assert!(result.is_ok());
@@ -432,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_sequence() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         // Create a file, write to it, read it back
         session.execute("export MYVAR=hello").await.unwrap();
@@ -446,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_enforcement() {
-        let session = ShellSession::new(None, 1, 51200); // 1 second timeout
+        let session = ShellSession::new(None, 1, 51200, false); // 1 second timeout
 
         let result = session.execute("sleep 10").await;
         assert!(result.is_err());
@@ -455,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_truncation() {
-        let session = ShellSession::new(None, 30, 100); // 100 byte limit
+        let session = ShellSession::new(None, 30, 100, false); // 100 byte limit
 
         let result = session.execute("seq 1 1000").await;
         assert!(result.is_ok());
@@ -470,7 +756,12 @@ mod tests {
         let workspace = temp_dir.join(format!("chatty_shell_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let session = ShellSession::new(Some(workspace.to_str().unwrap().to_string()), 30, 51200);
+        let session = ShellSession::new(
+            Some(workspace.to_str().unwrap().to_string()),
+            30,
+            51200,
+            false,
+        );
 
         // Should be able to cd within workspace (start is in workspace)
         let result = session.execute("pwd").await;
@@ -483,7 +774,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_env_var_name() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
         let result = session.set_env("INVALID-NAME", "value").await;
         assert!(result.is_err());
         assert!(
@@ -496,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_status() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         // Before any command, session is not started
         let status = session.status().await.unwrap();
@@ -514,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_respawn_after_death() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         // Start a session
         session.execute("echo 'first'").await.unwrap();
@@ -530,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
         session.execute("echo 'test'").await.unwrap();
         assert!(session.is_running().await);
 
@@ -540,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_special_characters_in_env_value() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         // Test value with special characters
         let result = session
@@ -554,7 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiline_output() {
-        let session = ShellSession::new(None, 30, 51200);
+        let session = ShellSession::new(None, 30, 51200, false);
 
         let result = session
             .execute("echo 'line1'; echo 'line2'; echo 'line3'")
@@ -564,5 +855,88 @@ mod tests {
         assert!(output.stdout.contains("line1"));
         assert!(output.stdout.contains("line2"));
         assert!(output.stdout.contains("line3"));
+    }
+
+    #[test]
+    fn test_can_sandbox() {
+        let can = ShellSession::can_sandbox();
+        // On Linux: depends on bwrap availability
+        // On macOS: always true
+        // On other platforms: false
+        #[cfg(target_os = "macos")]
+        assert!(can, "macOS should always support sandboxing");
+        let _ = can; // Avoid unused variable warning
+    }
+
+    #[tokio::test]
+    async fn test_sandboxed_session_persistence() {
+        // Verify that sandboxed sessions still maintain state
+        if !ShellSession::can_sandbox() {
+            return;
+        }
+
+        let session = ShellSession::new(None, 30, 51200, false);
+
+        // Set env var and verify it persists
+        session
+            .execute("export SANDBOX_TEST=hello_sandbox")
+            .await
+            .unwrap();
+        let result = session.execute("echo $SANDBOX_TEST").await.unwrap();
+        assert!(
+            result.stdout.contains("hello_sandbox"),
+            "Environment variables should persist in sandboxed session, got: {:?}",
+            result.stdout
+        );
+
+        // Verify sandbox state
+        assert!(session.is_sandboxed().await, "Session should be sandboxed");
+    }
+
+    #[tokio::test]
+    async fn test_sandboxed_session_with_workspace() {
+        if !ShellSession::can_sandbox() {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir();
+        let workspace = temp_dir.join(format!("chatty_sandbox_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let session = ShellSession::new(
+            Some(workspace.to_str().unwrap().to_string()),
+            30,
+            51200,
+            false,
+        );
+
+        // Should be able to execute commands in workspace
+        let result = session.execute("pwd").await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.stdout.contains(workspace.to_str().unwrap()),
+            "Should start in workspace directory, got: {:?}",
+            output.stdout
+        );
+
+        // Should be able to create files in workspace
+        let result = session
+            .execute("echo 'test' > sandbox_test.txt && cat sandbox_test.txt")
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().stdout.contains("test"));
+
+        // Cleanup
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_network_isolation_flag() {
+        // Just verify the session can be created with network_isolation=true
+        let session = ShellSession::new(None, 30, 51200, true);
+        let result = session.execute("echo 'network test'").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().stdout.contains("network test"));
     }
 }

@@ -63,8 +63,16 @@ impl ShellExecuteTool {
     }
 
     async fn request_approval(&self, command: &str) -> anyhow::Result<bool> {
+        let is_sandboxed = self.session.is_sandboxed().await;
+
         match self.settings.approval_mode {
             ApprovalMode::AutoApproveAll => Ok(true),
+            ApprovalMode::AutoApproveSandboxed if is_sandboxed => {
+                tracing::debug!(
+                    "Auto-approving sandboxed shell command (AutoApproveSandboxed mode)"
+                );
+                Ok(true)
+            }
             ApprovalMode::AutoApproveSandboxed | ApprovalMode::AlwaysAsk => {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let request_id = uuid::Uuid::new_v4().to_string();
@@ -72,7 +80,7 @@ impl ShellExecuteTool {
                 let request = ExecutionApprovalRequest {
                     id: request_id.clone(),
                     command: format!("[shell] {}", command),
-                    is_sandboxed: false,
+                    is_sandboxed,
                     created_at: std::time::SystemTime::now(),
                     responder: tx,
                 };
@@ -85,7 +93,7 @@ impl ShellExecuteTool {
                 crate::chatty::models::execution_approval_store::notify_approval_via_global(
                     request_id.clone(),
                     format!("[shell] {}", command),
-                    false,
+                    is_sandboxed,
                 );
 
                 match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
