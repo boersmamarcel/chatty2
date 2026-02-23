@@ -966,6 +966,27 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+            // Create shell session on-demand if execution is enabled but the
+            // conversation was created before shell sessions were available
+            let shell_session = if shell_session.is_none() {
+                exec_settings.as_ref().and_then(|s| {
+                    if s.enabled {
+                        info!(conv_id = %conv_id, "Creating shell session for existing conversation during rebuild");
+                        Some(std::sync::Arc::new(
+                            crate::chatty::services::shell_service::ShellSession::new(
+                                s.workspace_dir.clone(),
+                                s.timeout_seconds,
+                                s.max_output_bytes,
+                            ),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                shell_session
+            };
+
             let new_agent = AgentClient::from_model_config_with_tools(
                 &model_config,
                 &provider_config,
@@ -974,13 +995,17 @@ impl ChattyApp {
                 pending_approvals,
                 pending_write_approvals,
                 pending_artifacts,
-                shell_session,
+                shell_session.clone(),
             )
             .await?;
 
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.set_agent(new_agent, model_config.id.clone());
+                    // Update shell session on the conversation so subsequent rebuilds reuse it
+                    if shell_session.is_some() && conv.shell_session().is_none() {
+                        conv.set_shell_session(shell_session);
+                    }
                     info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
                 } else {
                     warn!(conv_id = %conv_id, "Conversation not found during agent rebuild — skipping");
@@ -1069,6 +1094,27 @@ impl ChattyApp {
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+                        // Create shell session on-demand if execution is enabled but the
+                        // conversation was created before shell sessions were available
+                        let shell_session = if shell_session.is_none() {
+                            exec_settings.as_ref().and_then(|s| {
+                                if s.enabled {
+                                    info!(conv_id = %conv_id, "Creating shell session for existing conversation during model change");
+                                    Some(std::sync::Arc::new(
+                                        crate::chatty::services::shell_service::ShellSession::new(
+                                            s.workspace_dir.clone(),
+                                            s.timeout_seconds,
+                                            s.max_output_bytes,
+                                        ),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            shell_session
+                        };
+
                         // Create new agent asynchronously with MCP tools
                         let new_agent = AgentClient::from_model_config_with_tools(
                             &model_config,
@@ -1078,7 +1124,7 @@ impl ChattyApp {
                             pending_approvals,
                             pending_write_approvals,
                             pending_artifacts,
-                            shell_session,
+                            shell_session.clone(),
                         )
                         .await?;
 
@@ -1087,6 +1133,10 @@ impl ChattyApp {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(new_agent, model_config.id.clone());
+                                // Update shell session on the conversation so subsequent rebuilds reuse it
+                                if shell_session.is_some() && conv.shell_session().is_none() {
+                                    conv.set_shell_session(shell_session);
+                                }
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))

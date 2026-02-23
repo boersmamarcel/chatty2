@@ -69,6 +69,12 @@ impl Conversation {
         // Create shell session if execution is enabled
         let shell_session = exec_settings.as_ref().and_then(|settings| {
             if settings.enabled {
+                trace!(
+                    workspace = ?settings.workspace_dir,
+                    timeout = settings.timeout_seconds,
+                    max_output = settings.max_output_bytes,
+                    "Creating shell session for conversation"
+                );
                 let session = ShellSession::new(
                     settings.workspace_dir.clone(),
                     settings.timeout_seconds,
@@ -76,9 +82,16 @@ impl Conversation {
                 );
                 Some(std::sync::Arc::new(session))
             } else {
+                trace!("Execution disabled, skipping shell session");
                 None
             }
         });
+        if shell_session.is_none() && exec_settings.is_some() {
+            trace!(
+                "Shell session not created despite exec_settings being present (enabled={})",
+                exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false)
+            );
+        }
 
         let agent = AgentClient::from_model_config_with_tools(
             model_config,
@@ -333,6 +346,12 @@ impl Conversation {
     /// Get the shell session for this conversation (if enabled)
     pub fn shell_session(&self) -> Option<std::sync::Arc<ShellSession>> {
         self.shell_session.clone()
+    }
+
+    /// Set or replace the shell session for this conversation
+    pub fn set_shell_session(&mut self, session: Option<std::sync::Arc<ShellSession>>) {
+        self.shell_session = session;
+        self.updated_at = SystemTime::now();
     }
 
     /// Set the agent and model ID synchronously (for model switching without blocking)

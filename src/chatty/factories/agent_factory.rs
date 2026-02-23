@@ -279,9 +279,16 @@ impl AgentClient {
                         ShellStatusTool::new(session.clone()),
                     ))
                 } else {
+                    tracing::info!("Shell session tools skipped: execution disabled");
                     None
                 }
             } else {
+                tracing::info!(
+                    has_shell_session = shell_session.is_some(),
+                    has_exec_settings = exec_settings.is_some(),
+                    has_pending_approvals = pending_approvals.is_some(),
+                    "Shell session tools skipped: missing required components"
+                );
                 None
             };
 
