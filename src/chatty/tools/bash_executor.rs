@@ -369,53 +369,16 @@ impl BashExecutor {
         {
             // macOS sandbox profile - permissive with specific denials
             // Using (allow default) instead of (deny default) to prevent fork() blocking
-            let profile = r#"
-                (version 1)
-                (allow default)
+            //
+            // Network is ALWAYS denied in the sandbox to match Linux behavior where
+            // --unshare-all (which includes --unshare-net) is always applied.
+            // The network_isolation setting is redundant when sandboxed but kept
+            // for documentation/API consistency.
 
-                ;; Deny write access to sensitive system directories
-                (deny file-write*
-                    (subpath "/System")
-                    (subpath "/Library")
-                    (subpath "/private/etc")
-                    (subpath "/private/var")
-                    (regex #"^/Users/[^/]+/\.ssh")
-                    (regex #"^/Users/[^/]+/\.aws")
-                    (regex #"^/Users/[^/]+/\.gnupg")
-                )
-
-                ;; Deny read access to sensitive credential files and directories
-                (deny file-read*
-                    (regex #"^/Users/[^/]+/\.ssh/")
-                    (regex #"^/Users/[^/]+/\.aws/")
-                    (regex #"^/Users/[^/]+/\.gnupg/")
-                    (regex #"^/Users/[^/]+/\.docker/config\.json$")
-                    (regex #"^/Users/[^/]+/\.kube/config$")
-                    (regex #"^/Users/[^/]+/\.netrc$")
-                    (subpath "/private/etc/ssh")
-                    (literal "/etc/master.passwd")
-                    (literal "/etc/shadow")
-                )
-
-                ;; Deny network access if network isolation is enabled
-                ;; (network rules are added conditionally below)
-
-                (allow file-write* (subpath "/tmp"))
-            "#;
-
-            // Build profile with optional workspace and network rules
+            // Build profile with optional workspace
             let profile_with_workspace = if let Some(workspace) = &self.settings.workspace_dir {
                 // Validate and escape workspace path to prevent injection attacks
                 let safe_workspace = Self::escape_sandbox_path(workspace)?;
-
-                let network_rules = if self.settings.network_isolation {
-                    r#"
-                ;; Network isolation enabled - deny all network access
-                (deny network*)
-                "#
-                } else {
-                    ""
-                };
 
                 format!(
                     r#"
@@ -445,16 +408,50 @@ impl BashExecutor {
                         (literal "/etc/master.passwd")
                         (literal "/etc/shadow")
                     )
-                    {}
+
+                    ;; Always deny network access in sandbox (matches Linux --unshare-all)
+                    (deny network*)
+
                     (allow file-write* (subpath "/tmp"))
                     (allow file-write* (subpath "{}"))
                     "#,
-                    network_rules, safe_workspace
+                    safe_workspace
                 )
-            } else if self.settings.network_isolation {
-                format!("{}\n                (deny network*)", profile)
             } else {
-                profile.to_string()
+                r#"
+                (version 1)
+                (allow default)
+
+                ;; Deny write access to sensitive system directories
+                (deny file-write*
+                    (subpath "/System")
+                    (subpath "/Library")
+                    (subpath "/private/etc")
+                    (subpath "/private/var")
+                    (regex #"^/Users/[^/]+/\.ssh")
+                    (regex #"^/Users/[^/]+/\.aws")
+                    (regex #"^/Users/[^/]+/\.gnupg")
+                )
+
+                ;; Deny read access to sensitive credential files and directories
+                (deny file-read*
+                    (regex #"^/Users/[^/]+/\.ssh/")
+                    (regex #"^/Users/[^/]+/\.aws/")
+                    (regex #"^/Users/[^/]+/\.gnupg/")
+                    (regex #"^/Users/[^/]+/\.docker/config\.json$")
+                    (regex #"^/Users/[^/]+/\.kube/config$")
+                    (regex #"^/Users/[^/]+/\.netrc$")
+                    (subpath "/private/etc/ssh")
+                    (literal "/etc/master.passwd")
+                    (literal "/etc/shadow")
+                )
+
+                ;; Always deny network access in sandbox (matches Linux --unshare-all)
+                (deny network*)
+
+                (allow file-write* (subpath "/tmp"))
+                "#
+                .to_string()
             };
 
             let mut cmd = Command::new("sandbox-exec");

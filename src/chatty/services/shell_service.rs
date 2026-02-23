@@ -299,19 +299,13 @@ impl ShellSession {
     /// - Allows default operations
     /// - Denies writes to sensitive system directories
     /// - Denies reads to credential files (.ssh, .aws, etc.)
-    /// - Optionally denies all network access
+    /// - Always denies network access (matches Linux --unshare-all behavior)
     /// - Allows writes to /tmp and workspace
     #[cfg(target_os = "macos")]
     fn build_macos_sandbox_profile(
         workspace_dir: &Option<String>,
-        network_isolation: bool,
+        _network_isolation: bool,
     ) -> Result<String> {
-        let network_rules = if network_isolation {
-            "\n                ;; Network isolation enabled - deny all network access\n                (deny network*)"
-        } else {
-            ""
-        };
-
         let workspace_write_rule = if let Some(workspace) = workspace_dir {
             let safe_workspace = Self::escape_sandbox_path(workspace)?;
             format!(
@@ -350,10 +344,13 @@ impl ShellSession {
                     (literal "/etc/master.passwd")
                     (literal "/etc/shadow")
                 )
-                {}
+
+                ;; Always deny network access in sandbox (matches Linux --unshare-all)
+                (deny network*)
+
                 (allow file-write* (subpath "/tmp")){}
             "#,
-            network_rules, workspace_write_rule
+            workspace_write_rule
         ))
     }
 
