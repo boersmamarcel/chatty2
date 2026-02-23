@@ -121,22 +121,6 @@ impl RenderOnce for ToolsIndicatorView {
                                     .child("ℹ Configure workspace in Settings to enable filesystem tools"),
                             )
                         })
-                        // Always show hint about new conversation requirement
-                        .child(
-                            div()
-                                .h(px(1.0))
-                                .w_full()
-                                .bg(cx.theme().border)
-                                .mt_2()
-                                .mb_2(),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .px_2()
-                                .child("ℹ Start a new conversation after changing tool settings"),
-                        )
                 })
         })
     }
