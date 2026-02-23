@@ -28,7 +28,10 @@ TEST_SUMMARY.md
 # Inspiration/reference code (should be external)
 /inspiration/
 
-.claude/
+# Claude Code local state (settings, cache, etc.)
+.claude/*
+# But track shared skills
+!.claude/skills/
 
 # Backup files
 *.bak
