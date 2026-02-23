@@ -17,11 +17,11 @@ impl FetchIndicatorView {
 impl RenderOnce for FetchIndicatorView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let fetch_enabled = cx.global::<ExecutionSettingsModel>().fetch_enabled;
-        // Blue = fetch enabled (online), muted = fetch disabled (offline)
+        // Blue = fetch enabled (online), Red = fetch disabled (offline)
         let icon_color = if fetch_enabled {
             rgb(0x3B82F6) // Blue-500
         } else {
-            rgb(0x6B7280) // Gray-500
+            rgb(0xEF4444) // Red-500
         };
         let tooltip = if fetch_enabled {
             "Online: AI can browse the web and download files (click to go offline)"
