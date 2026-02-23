@@ -10,6 +10,7 @@ use rig::completion::message::{AssistantContent, Text};
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::chatty::repositories::ConversationData;
+use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::PendingArtifacts;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
@@ -30,6 +31,8 @@ pub struct Conversation {
     streaming_message: Option<String>,
     /// Shared state for artifacts queued by AddAttachmentTool during a stream
     pending_artifacts: PendingArtifacts,
+    /// Persistent shell session for this conversation (lazily initialized)
+    shell_session: Option<std::sync::Arc<ShellSession>>,
 }
 
 impl Conversation {
@@ -63,7 +66,10 @@ impl Conversation {
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        let agent = AgentClient::from_model_config_with_tools(
+        // Shell session is created inside the factory when execution is enabled.
+        // The factory returns it so we can store it on the Conversation for reuse
+        // across agent rebuilds (MCP changes, model switches).
+        let (agent, shell_session) = AgentClient::from_model_config_with_tools(
             model_config,
             provider_config,
             mcp_tools,
@@ -71,6 +77,7 @@ impl Conversation {
             pending_approvals,
             pending_write_approvals,
             Some(pending_artifacts.clone()),
+            None, // Factory creates session on-demand when execution is enabled
         )
         .await
         .context("Failed to create agent from config")?;
@@ -90,6 +97,7 @@ impl Conversation {
             updated_at: now,
             streaming_message: None,
             pending_artifacts,
+            shell_session,
         })
     }
 
@@ -122,8 +130,8 @@ impl Conversation {
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        // Reconstruct agent
-        let agent = AgentClient::from_model_config_with_tools(
+        // Reconstruct agent; factory creates shell session on-demand when execution is enabled
+        let (agent, shell_session) = AgentClient::from_model_config_with_tools(
             model_config,
             provider_config,
             mcp_tools,
@@ -131,6 +139,7 @@ impl Conversation {
             pending_approvals,
             pending_write_approvals,
             Some(pending_artifacts.clone()),
+            None, // Factory creates session on-demand
         )
         .await
         .context("Failed to create agent from config")?;
@@ -168,6 +177,7 @@ impl Conversation {
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
             pending_artifacts,
+            shell_session,
         })
     }
 
@@ -293,6 +303,17 @@ impl Conversation {
     /// Get the pending artifacts handle for this conversation's tools
     pub fn pending_artifacts(&self) -> PendingArtifacts {
         self.pending_artifacts.clone()
+    }
+
+    /// Get the shell session for this conversation (if enabled)
+    pub fn shell_session(&self) -> Option<std::sync::Arc<ShellSession>> {
+        self.shell_session.clone()
+    }
+
+    /// Set or replace the shell session for this conversation
+    pub fn set_shell_session(&mut self, session: Option<std::sync::Arc<ShellSession>>) {
+        self.shell_session = session;
+        self.updated_at = SystemTime::now();
     }
 
     /// Set the agent and model ID synchronously (for model switching without blocking)

@@ -565,18 +565,25 @@ fn main() {
         cx.set_global(mcp_service);
         info!("MCP service initialized");
 
-        // Use Arc<AtomicBool> to track when both providers and models are loaded
+        // Use Arc<AtomicBool> to track when providers, models, and execution settings are loaded
 
         let providers_loaded = Arc::new(AtomicBool::new(false));
         let models_loaded = Arc::new(AtomicBool::new(false));
+        let exec_settings_loaded = Arc::new(AtomicBool::new(false));
 
-        // Helper function to check if both are loaded and trigger conversation loading
+        // Helper function to check if all three are loaded and trigger conversation loading.
+        // Execution settings must be loaded before conversations are created so that the
+        // factory sees the real `enabled` flag (not the default `false`).
         let check_and_load_conversations = {
             let providers_loaded = providers_loaded.clone();
             let models_loaded = models_loaded.clone();
+            let exec_settings_loaded = exec_settings_loaded.clone();
             move |cx: &mut App| {
-                if providers_loaded.load(Ordering::SeqCst) && models_loaded.load(Ordering::SeqCst) {
-                    info!("Both models and providers loaded, triggering conversation load");
+                if providers_loaded.load(Ordering::SeqCst)
+                    && models_loaded.load(Ordering::SeqCst)
+                    && exec_settings_loaded.load(Ordering::SeqCst)
+                {
+                    info!("Models, providers, and execution settings loaded, triggering conversation load");
 
                     // Get the ChattyApp entity and call load_conversations_after_models_ready
                     if let Some(weak_entity) = cx
@@ -666,7 +673,8 @@ fn main() {
         .detach();
 
         // Load models asynchronously without blocking startup
-        let check_fn_2 = check_and_load_conversations;
+        let check_fn_2 = check_and_load_conversations.clone();
+        let check_fn_3 = check_and_load_conversations;
         let models_loaded_clone = models_loaded.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             let repo = MODELS_REPOSITORY.clone();
@@ -776,20 +784,44 @@ fn main() {
         })
         .detach();
 
-        // Load execution settings asynchronously without blocking startup
+        // Load execution settings asynchronously without blocking startup.
+        // Must complete before conversations are loaded so the factory sees the
+        // real `enabled` flag instead of the default `false`.
+        let exec_settings_loaded_clone = exec_settings_loaded.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
             match repo.load().await {
                 Ok(settings) => {
                     cx.update(|cx| {
+                        info!(
+                            enabled = settings.enabled,
+                            workspace = ?settings.workspace_dir,
+                            approval_mode = ?settings.approval_mode,
+                            network_isolation = settings.network_isolation,
+                            "Execution settings loaded from disk"
+                        );
                         cx.set_global(settings);
-                        info!("Execution settings loaded");
+                        exec_settings_loaded_clone.store(true, Ordering::SeqCst);
+                        check_fn_3(cx);
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to update global execution settings"))
                     .ok();
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load execution settings, using defaults");
+                    // Still mark as loaded so conversations aren't blocked forever
+                    // (defaults will be used: enabled=false)
+                    cx.update(|cx| {
+                        exec_settings_loaded_clone.store(true, Ordering::SeqCst);
+                        check_fn_3(cx);
+                    })
+                    .map_err(|e| {
+                        warn!(
+                            error = ?e,
+                            "Failed to trigger conversation load after exec settings error"
+                        )
+                    })
+                    .ok();
                 }
             }
         })

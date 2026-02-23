@@ -946,7 +946,7 @@ impl ChattyApp {
                 "Rebuilding agent with fresh MCP tools"
             );
 
-            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts) = cx
+            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session) = cx
                 .update(|cx| {
                     let settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -957,15 +957,31 @@ impl ChattyApp {
                     let write_approvals = cx
                         .global::<crate::chatty::models::WriteApprovalStore>()
                         .get_pending_approvals();
-                    let artifacts = cx
+                    let conv = cx
                         .global::<ConversationsStore>()
-                        .get_conversation(&conv_id)
-                        .map(|c| c.pending_artifacts());
-                    (Some(settings), Some(approvals), Some(write_approvals), artifacts)
+                        .get_conversation(&conv_id);
+                    let artifacts = conv.map(|c| c.pending_artifacts());
+                    // Drop the existing shell session if network_isolation changed — it was
+                    // spawned with the old setting and cannot be reconfigured in place.
+                    // Passing None lets the factory create a fresh session with the new setting.
+                    let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
+                        if s.network_isolation() == settings.network_isolation {
+                            Some(s)
+                        } else {
+                            info!(
+                                conv_id = %conv_id,
+                                new_isolation = settings.network_isolation,
+                                "Network isolation changed — replacing shell session"
+                            );
+                            None
+                        }
+                    });
+                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session)
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            let new_agent = AgentClient::from_model_config_with_tools(
+            // Factory creates shell session on-demand if not provided
+            let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
                 &model_config,
                 &provider_config,
                 mcp_tools,
@@ -973,12 +989,18 @@ impl ChattyApp {
                 pending_approvals,
                 pending_write_approvals,
                 pending_artifacts,
+                shell_session,
             )
             .await?;
 
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.set_agent(new_agent, model_config.id.clone());
+                    // Always store the new shell session — the factory either reused the
+                    // existing one or created a fresh one (e.g. after a network_isolation change).
+                    if new_shell_session.is_some() {
+                        conv.set_shell_session(new_shell_session);
+                    }
                     info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
                 } else {
                     warn!(conv_id = %conv_id, "Conversation not found during agent rebuild — skipping");
@@ -1041,6 +1063,7 @@ impl ChattyApp {
                             pending_approvals,
                             pending_write_approvals,
                             pending_artifacts,
+                            shell_session,
                         ) = cx
                             .update(|cx| {
                                 let settings = cx
@@ -1052,36 +1075,44 @@ impl ChattyApp {
                                 let write_approvals = cx
                                     .global::<crate::chatty::models::WriteApprovalStore>()
                                     .get_pending_approvals();
-                                let artifacts = cx
-                                    .global::<ConversationsStore>()
-                                    .get_conversation(&conv_id)
-                                    .map(|c| c.pending_artifacts());
+                                let conv =
+                                    cx.global::<ConversationsStore>().get_conversation(&conv_id);
+                                let artifacts = conv.map(|c| c.pending_artifacts());
+                                let session = conv.and_then(|c| c.shell_session());
                                 (
                                     Some(settings),
                                     Some(approvals),
                                     Some(write_approvals),
                                     artifacts,
+                                    session,
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                        // Create new agent asynchronously with MCP tools
-                        let new_agent = AgentClient::from_model_config_with_tools(
-                            &model_config,
-                            &provider_config,
-                            mcp_tools,
-                            exec_settings,
-                            pending_approvals,
-                            pending_write_approvals,
-                            pending_artifacts,
-                        )
-                        .await?;
+                        // Factory creates shell session on-demand if not provided
+                        let (new_agent, new_shell_session) =
+                            AgentClient::from_model_config_with_tools(
+                                &model_config,
+                                &provider_config,
+                                mcp_tools,
+                                exec_settings,
+                                pending_approvals,
+                                pending_write_approvals,
+                                pending_artifacts,
+                                shell_session,
+                            )
+                            .await?;
 
                         // Update the conversation's agent synchronously
                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(new_agent, model_config.id.clone());
+                                // Always store the new shell session — the factory either reused
+                                // the existing one or created a fresh one.
+                                if new_shell_session.is_some() {
+                                    conv.set_shell_session(new_shell_session);
+                                }
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))
@@ -1376,7 +1407,7 @@ impl ChattyApp {
                 let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
 
-                // Set up global notifier for BashExecutor to use
+                // Set up global notifier for shell tools to use
                 crate::chatty::models::execution_approval_store::set_global_approval_notifier(approval_tx.clone());
 
                 // Update global store with notifiers for this conversation

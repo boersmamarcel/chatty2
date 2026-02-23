@@ -6,10 +6,12 @@ use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BashTool, CreateDirectoryTool, DeleteFileTool,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
     DeleteMcpTool, EditMcpTool, FetchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
-    ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, WriteFileTool,
+    ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -31,6 +33,14 @@ type FsWriteTools = (
     DeleteFileTool,
     MoveFileTool,
     ApplyDiffTool,
+);
+
+/// Shell session tool set (all four shell tools)
+type ShellTools = (
+    ShellExecuteTool,
+    ShellSetEnvTool,
+    ShellCdTool,
+    ShellStatusTool,
 );
 
 /// All four MCP management tools bundled together.
@@ -154,12 +164,12 @@ fn sanitize_mcp_tools_for_openai(
 /// branching.
 fn collect_tools(
     list_tools: ListToolsTool,
-    bash_tool: Option<BashTool>,
     fs_read: Option<FsReadTools>,
     fs_write: Option<FsWriteTools>,
     add_attachment: Option<AddAttachmentTool>,
     mcp_mgmt: McpTools,
     fetch_tool: Option<FetchTool>,
+    shell_tools: Option<ShellTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -173,9 +183,6 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = mcp_mgmt.edit {
-        tools.push(Box::new(t));
-    }
-    if let Some(t) = bash_tool {
         tools.push(Box::new(t));
     }
     if let Some((rf, rb, ld, gs)) = fs_read {
@@ -197,6 +204,12 @@ fn collect_tools(
     if let Some(t) = fetch_tool {
         tools.push(Box::new(t));
     }
+    if let Some((exec, set_env, cd, status)) = shell_tools {
+        tools.push(Box::new(exec));
+        tools.push(Box::new(set_env));
+        tools.push(Box::new(cd));
+        tools.push(Box::new(status));
+    }
     tools
 }
 
@@ -212,7 +225,7 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, bash execution, and filesystem tools
+    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, shell execution, and filesystem tools
     #[allow(clippy::too_many_arguments)]
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
@@ -226,26 +239,69 @@ impl AgentClient {
             crate::chatty::models::write_approval_store::PendingWriteApprovals,
         >,
         pending_artifacts: Option<PendingArtifacts>,
-    ) -> Result<Self> {
+        shell_session: Option<std::sync::Arc<ShellSession>>,
+    ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
 
-        // Create BashTool if execution is enabled
-        let bash_tool = if let (Some(settings), Some(approvals)) =
-            (&exec_settings, &pending_approvals)
-        {
-            if settings.enabled {
-                let executor =
-                    crate::chatty::tools::BashExecutor::new(settings.clone(), approvals.clone());
-                Some(crate::chatty::tools::BashTool::new(std::sync::Arc::new(
-                    executor,
-                )))
-            } else {
-                None
-            }
+        // Ensure shell session exists when execution is enabled (factory-level fallback).
+        // This guarantees shell tools are created regardless of how the caller constructed
+        // the session parameter.
+        let shell_session = if shell_session.is_some() {
+            shell_session
         } else {
-            None
+            exec_settings.as_ref().and_then(|settings| {
+                if settings.enabled {
+                    tracing::info!(
+                        workspace = ?settings.workspace_dir,
+                        "Creating shell session in factory (caller did not provide one)"
+                    );
+                    Some(std::sync::Arc::new(ShellSession::new(
+                        settings.workspace_dir.clone(),
+                        settings.timeout_seconds,
+                        settings.max_output_bytes,
+                        settings.network_isolation,
+                    )))
+                } else {
+                    tracing::info!(
+                        enabled = settings.enabled,
+                        workspace = ?settings.workspace_dir,
+                        "Shell session not created: execution disabled in settings"
+                    );
+                    None
+                }
+            })
         };
+
+        // Save a clone to return to the caller so it can be stored on the Conversation
+        let shell_session_out = shell_session.clone();
+
+        // Create shell session tools if execution is enabled and a session is provided
+        let shell_tools: Option<ShellTools> =
+            if let (Some(session), Some(settings), Some(approvals)) =
+                (&shell_session, &exec_settings, &pending_approvals)
+            {
+                if settings.enabled {
+                    tracing::info!("Shell session tools enabled");
+                    Some((
+                        ShellExecuteTool::new(session.clone(), settings.clone(), approvals.clone()),
+                        ShellSetEnvTool::new(session.clone(), settings.clone()),
+                        ShellCdTool::new(session.clone(), settings.clone()),
+                        ShellStatusTool::new(session.clone()),
+                    ))
+                } else {
+                    tracing::info!("Shell session tools skipped: execution disabled");
+                    None
+                }
+            } else {
+                tracing::info!(
+                    has_shell_session = shell_session.is_some(),
+                    has_exec_settings = exec_settings.is_some(),
+                    has_pending_approvals = pending_approvals.is_some(),
+                    "Shell session tools skipped: missing required components"
+                );
+                None
+            };
 
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
@@ -436,11 +492,11 @@ impl AgentClient {
 
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
-            bash_tool.is_some(),
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
             mcp_mgmt_tools.is_enabled(),
             fetch_tool.is_some(),
+            shell_tools.is_some(),
             mcp_tool_info,
         );
 
@@ -462,16 +518,16 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Anthropic(agent))
+                Ok((AgentClient::Anthropic(agent), shell_session_out))
             }
             ProviderType::OpenAI => {
                 let key =
@@ -503,17 +559,17 @@ impl AgentClient {
                 // Build with all tools (sanitize MCP schemas for OpenAI strict mode)
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::OpenAI(agent))
+                Ok((AgentClient::OpenAI(agent), shell_session_out))
             }
             ProviderType::Gemini => {
                 let key =
@@ -528,16 +584,16 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Gemini(agent))
+                Ok((AgentClient::Gemini(agent), shell_session_out))
             }
             ProviderType::Mistral => {
                 let key = api_key
@@ -556,16 +612,16 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Mistral(agent))
+                Ok((AgentClient::Mistral(agent), shell_session_out))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -583,16 +639,16 @@ impl AgentClient {
                 // Build with all tools
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::Ollama(agent))
+                Ok((AgentClient::Ollama(agent), shell_session_out))
             }
             ProviderType::AzureOpenAI => {
                 let raw_endpoint = base_url.ok_or_else(|| {
@@ -728,17 +784,17 @@ impl AgentClient {
                 // Build with all tools (sanitize MCP schemas for OpenAI strict mode)
                 let tool_vec = collect_tools(
                     list_tools,
-                    bash_tool,
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
+                    shell_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
-                Ok(AgentClient::AzureOpenAI(agent))
+                Ok((AgentClient::AzureOpenAI(agent), shell_session_out))
             }
         }
     }

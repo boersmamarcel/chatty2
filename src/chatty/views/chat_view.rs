@@ -1130,7 +1130,7 @@ fn friendly_tool_name(name: &str) -> String {
         "delete_file" => "Deleting file".to_string(),
         "move_file" => "Moving file".to_string(),
         "apply_diff" => "Applying diff".to_string(),
-        "bash" => "Running command".to_string(),
+        "shell_execute" => "Running command".to_string(),
         other => other.to_string(),
     }
 }

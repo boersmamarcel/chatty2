@@ -42,11 +42,11 @@ impl ListToolsTool {
     /// `mcp_tool_info` is a list of (server_name, tool_name, tool_description) tuples
     /// extracted from the MCP service so the model can discover them via `list_tools`.
     pub fn new_with_config(
-        has_bash: bool,
         has_fs_read: bool,
         has_fs_write: bool,
         has_add_mcp: bool,
         has_fetch: bool,
+        has_shell: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -77,14 +77,6 @@ impl ListToolsTool {
                 description:
                     "Edit an existing MCP server's command, args, or env vars (enabling/disabling is user-only via Settings)"
                         .to_string(),
-                source: "native".to_string(),
-            });
-        }
-
-        if has_bash {
-            native_tools.push(ToolInfo {
-                name: "bash".to_string(),
-                description: "**PRIMARY SHELL TOOL** - Execute ANY bash/shell/terminal command including: ls (list files), cd, pwd, grep, find, cat, echo, curl, git, npm, cargo, python, etc. Use this tool whenever you need to run command-line operations.".to_string(),
                 source: "native".to_string(),
             });
         }
@@ -156,6 +148,31 @@ impl ListToolsTool {
             ]);
         }
 
+        if has_shell {
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "shell_execute".to_string(),
+                    description: "Execute a command in a persistent shell session that preserves state (env vars, working directory) across calls".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "shell_set_env".to_string(),
+                    description: "Set an environment variable in the persistent shell session".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "shell_cd".to_string(),
+                    description: "Change the working directory in the persistent shell session".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "shell_status".to_string(),
+                    description: "Get the current status of the persistent shell session (cwd, env vars, pid, uptime)".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -187,8 +204,8 @@ impl Tool for ListToolsTool {
         ToolDefinition {
             name: "list_tools".to_string(),
             description: "List all available tools including:\n\
-                         - bash: Execute shell/terminal commands (ls, grep, find, cat, etc.)\n\
                          - fetch: Fetch web URLs and return readable text content\n\
+                         - shell_execute: Execute shell/terminal commands in a persistent session\n\
                          - Filesystem tools: read_file, write_file, list_directory, etc.\n\
                          - MCP tools: External tools from connected servers\n\
                          \n\
@@ -208,7 +225,7 @@ impl Tool for ListToolsTool {
         let mut all_tools = self.native_tools.clone();
         all_tools.extend(self.mcp_tools.clone());
 
-        let has_bash = self.native_tools.iter().any(|t| t.name == "bash");
+        let has_shell = self.native_tools.iter().any(|t| t.name == "shell_execute");
         let has_mcp = !self.mcp_tools.is_empty();
 
         tracing::info!(
@@ -227,9 +244,9 @@ impl Tool for ListToolsTool {
             );
         }
 
-        let note = match (has_bash, has_mcp) {
-            (true, true) => "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations. MCP tools from connected servers are also listed above — use them by name.".to_string(),
-            (true, false) => "IMPORTANT: The 'bash' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.). Use it for all command-line operations.".to_string(),
+        let note = match (has_shell, has_mcp) {
+            (true, true) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. MCP tools from connected servers are also listed above — use them by name.".to_string(),
+            (true, false) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations.".to_string(),
             (false, true) => "These are the available tools. MCP tools from connected servers are also listed — use them by name.".to_string(),
             (false, false) => "These are the native tools available.".to_string(),
         };

@@ -24,7 +24,13 @@ fn notify_tool_set_changed(cx: &mut App) {
 /// Toggle code execution enabled/disabled and persist to disk
 pub fn toggle_execution(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)
-    let new_enabled = !cx.global::<ExecutionSettingsModel>().enabled;
+    let old_enabled = cx.global::<ExecutionSettingsModel>().enabled;
+    let new_enabled = !old_enabled;
+    info!(
+        old = old_enabled,
+        new = new_enabled,
+        "Toggling code execution"
+    );
     cx.global_mut::<ExecutionSettingsModel>().enabled = new_enabled;
 
     // 2. Get updated state for async save
@@ -131,7 +137,10 @@ pub fn toggle_network_isolation(cx: &mut App) {
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt with the new network setting
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
         if let Err(e) = repo.save(settings).await {
