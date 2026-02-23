@@ -5,40 +5,40 @@ use gpui::*;
 use gpui_component::{Icon, Sizable, button::*};
 
 #[derive(IntoElement, Default)]
-pub struct NetworkIndicatorView;
+pub struct FetchIndicatorView;
 
-impl NetworkIndicatorView {
+impl FetchIndicatorView {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl RenderOnce for NetworkIndicatorView {
+impl RenderOnce for FetchIndicatorView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let network_isolation = cx.global::<ExecutionSettingsModel>().network_isolation;
-        // Blue = network allowed (isolation OFF), Red = network blocked (isolation ON)
-        let icon_color = if network_isolation {
-            rgb(0xEF4444) // Red-500
-        } else {
+        let fetch_enabled = cx.global::<ExecutionSettingsModel>().fetch_enabled;
+        // Blue = fetch enabled (online), muted = fetch disabled (offline)
+        let icon_color = if fetch_enabled {
             rgb(0x3B82F6) // Blue-500
-        };
-        let tooltip = if network_isolation {
-            "Network blocked (click to allow)"
         } else {
-            "Network allowed (click to block)"
+            rgb(0x6B7280) // Gray-500
+        };
+        let tooltip = if fetch_enabled {
+            "Web fetch enabled (click to disable)"
+        } else {
+            "Web fetch disabled (click to enable)"
         };
 
-        Button::new("network-isolation-toggle")
+        Button::new("fetch-toggle")
             .ghost()
             .xsmall()
             .tooltip(tooltip)
             .child(
-                Icon::new(CustomIcon::Codesandbox)
+                Icon::new(CustomIcon::Earth)
                     .size(px(12.0))
                     .text_color(icon_color),
             )
             .on_click(move |_event, _window, cx| {
-                execution_settings_controller::toggle_network_isolation(cx);
+                execution_settings_controller::toggle_fetch(cx);
             })
     }
 }
