@@ -23,9 +23,9 @@ impl RenderOnce for NetworkIndicatorView {
             rgb(0x3B82F6) // Blue-500
         };
         let tooltip = if network_isolation {
-            "Network blocked (click to allow)"
+            "Sandbox: network blocked for shell commands (click to allow)"
         } else {
-            "Network allowed (click to block)"
+            "Sandbox: network allowed for shell commands (click to block)"
         };
 
         Button::new("network-isolation-toggle")

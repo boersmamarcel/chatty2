@@ -23,9 +23,9 @@ impl RenderOnce for FetchIndicatorView {
             rgb(0x6B7280) // Gray-500
         };
         let tooltip = if fetch_enabled {
-            "Web fetch enabled (click to disable)"
+            "Online: AI can browse the web and download files (click to go offline)"
         } else {
-            "Web fetch disabled (click to enable)"
+            "Offline: AI has no internet access (click to go online)"
         };
 
         Button::new("fetch-toggle")
