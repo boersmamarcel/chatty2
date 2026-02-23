@@ -421,8 +421,10 @@ fn validate_url_host(url: &str) -> Result<(), FetchToolError> {
         )));
     }
 
-    // Try to parse as IP address directly
-    if let Ok(ip) = host.parse::<IpAddr>()
+    // Try to parse as IP address directly.
+    // Strip brackets for IPv6: host_str() returns "[::1]" but IpAddr expects "::1".
+    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = ip_str.parse::<IpAddr>()
         && is_private_ip(&ip)
     {
         return Err(FetchToolError::FetchError(format!(
@@ -434,7 +436,7 @@ fn validate_url_host(url: &str) -> Result<(), FetchToolError> {
     // For hostnames, resolve to IP and check the resolved address.
     // This catches DNS rebinding / split-horizon attacks where a public hostname
     // resolves to a private IP.
-    if host.parse::<IpAddr>().is_err() {
+    if ip_str.parse::<IpAddr>().is_err() {
         // Use std::net for synchronous resolution (sufficient for validation)
         if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
             for addr in addrs {
