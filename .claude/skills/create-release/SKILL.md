@@ -28,7 +28,7 @@ Before starting, verify:
    grep '^version' Cargo.toml | head -1
    ```
 
-4. **Build succeeds**:
+4. **Build succeeds** (optional — can be skipped if you trust CI, since the release workflow will catch build failures):
    ```bash
    cargo build --release 2>&1
    ```
@@ -98,11 +98,11 @@ After pushing the tag:
 
 ## What Gets Built
 
-The release pipeline builds:
-- **Linux**: `chatty-linux-x86_64.AppImage`
-- **macOS ARM**: `chatty-macos-aarch64.dmg`
-- **Windows**: `chatty-windows-x86_64.exe`
-- **Checksums**: `checksums.txt` (SHA-256)
+The release pipeline (`.github/workflows/release.yml`) builds:
+- **Linux x86_64**: `chatty-linux-x86_64.AppImage`
+- **macOS ARM**: `chatty-macos-aarch64.dmg` (code-signed if secrets configured)
+- **Windows x86_64**: `chatty-windows-x86_64.exe` (Inno Setup installer)
+- **Checksums**: `checksums.txt` (SHA-256 for all artifacts)
 
 ## Troubleshooting
 

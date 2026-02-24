@@ -15,10 +15,10 @@ Diagnoses and fixes CI failures for the Chatty project.
 
 ```bash
 # Get failed checks
-gh pr checks $0
+gh pr checks <pr-number>
 
 # Get the latest failed run
-gh run list --branch $(gh pr view $0 --json headRefName -q '.headRefName') --status failure --limit 1
+gh run list --branch $(gh pr view <pr-number> --json headRefName -q '.headRefName') --status failure --limit 1
 
 # View run logs
 gh run view <run-id> --log-failed
@@ -27,7 +27,7 @@ gh run view <run-id> --log-failed
 ### If a run ID is provided:
 
 ```bash
-gh run view $0 --log-failed
+gh run view <run-id> --log-failed
 ```
 
 ### If no argument provided:

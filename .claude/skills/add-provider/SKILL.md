@@ -88,7 +88,7 @@ let client = openai::Client::from_url(&config.base_url, &config.api_key);
 
 ### Providers with Native rig-core Support
 
-Check the [rig-core documentation](https://docs.rs/rig-core) for natively supported providers. These have dedicated client types with better type safety.
+Before defaulting to the OpenAI-compatible path, check whether rig-core has a native client for the provider. Native clients offer better type safety and may support provider-specific features. Check the existing match arms in `agent_factory.rs` for examples (Anthropic, Gemini have native clients; others use the OpenAI-compatible path).
 
 ## Checklist
 

@@ -14,8 +14,8 @@ Reviews a pull request for adherence to Chatty's architecture, patterns, and cod
 If a PR number is provided as `$ARGUMENTS`:
 
 ```bash
-gh pr diff $0
-gh pr view $0 --json title,body,files
+gh pr diff <pr-number>
+gh pr view <pr-number> --json title,body,files
 ```
 
 Otherwise, review the current branch's diff against `main`:
