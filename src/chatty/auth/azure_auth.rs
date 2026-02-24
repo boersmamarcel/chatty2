@@ -5,11 +5,104 @@ use tracing::info;
 
 const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 
+/// Try to resolve the user's full PATH by running their login shell.
+///
+/// GUI apps on macOS/Linux don't inherit the shell PATH. This spawns the user's
+/// login shell (`$SHELL -l -c '...'`) and reads back the PATH, capturing all
+/// modifications from shell config files (.bashrc, .zshrc, .profile, etc.) and
+/// tool version managers (asdf, mise, nvm, volta, fnm, sdkman, rbenv, pyenv, etc.).
+///
+/// Uses markers in the output to isolate the PATH value from any shell startup
+/// messages (MOTD, fortune, etc.). Returns None on failure or timeout (5s).
+fn resolve_login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+    // Use markers to isolate PATH from any shell startup noise (MOTD, fortune, etc.)
+    let marker_start = "__CHATTY_PATH_START__";
+    let marker_end = "__CHATTY_PATH_END__";
+    let print_cmd = format!("echo {marker_start}$PATH{marker_end}");
+
+    // Spawn the user's login shell so it sources profile/rc files
+    // (.bash_profile, .bashrc, .zshrc, .zprofile, etc.).
+    // Only `-l` (login) is used — `-i` (interactive) is avoided because it
+    // triggers TTY warnings on headless environments (CI, containers) and is
+    // unnecessary for sourcing config files.
+    // Stderr is discarded (Stdio::null) to avoid a deadlock: if stderr were
+    // piped but never drained, the child could block once the OS pipe buffer
+    // fills up (~64 KB), causing a guaranteed timeout on every invocation.
+    let mut child = std::process::Command::new(&shell)
+        .args(["-l", "-c", &print_cmd])
+        .env("TERM", "dumb")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            tracing::debug!(shell = %shell, error = ?e, "Failed to spawn login shell for PATH resolution");
+        })
+        .ok()?;
+
+    // Poll with timeout to avoid hanging if the shell blocks on interactive prompts
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut output = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    use std::io::Read;
+                    stdout.read_to_string(&mut output).ok()?;
+                }
+
+                // Extract PATH from between markers to ignore shell startup messages
+                let after_start = output.split(marker_start).nth(1)?;
+                let path = after_start.split(marker_end).next()?.trim().to_string();
+
+                if path.is_empty() {
+                    tracing::debug!(shell = %shell, "Login shell returned empty PATH");
+                    return None;
+                }
+
+                tracing::debug!(shell = %shell, "Resolved PATH from login shell");
+                return Some(path);
+            }
+            Ok(Some(_)) => {
+                tracing::debug!(shell = %shell, "Login shell exited with non-zero status");
+                return None;
+            }
+            Ok(None) if start.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                tracing::debug!(shell = %shell, "Login shell PATH resolution timed out");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(e) => {
+                tracing::debug!(shell = %shell, error = ?e, "Failed to check login shell status");
+                let _ = child.kill();
+                let _ = child.wait(); // Reap to prevent zombie
+                return None;
+            }
+        }
+    }
+}
+
 /// Augments the process PATH to include common tool installation directories.
 ///
 /// GUI apps on macOS/Linux do not inherit the shell PATH, so executables installed
-/// via Homebrew, npm, pip, uv/uvx, cargo, etc. may not be findable. This probes
-/// well-known locations and adds any that exist on disk.
+/// via Homebrew, npm, pip, uv/uvx, cargo, etc. may not be findable.
+///
+/// Strategy (two layers):
+/// 1. **Login shell resolution**: Runs `$SHELL -l -c 'echo $PATH'` to capture
+///    the user's full PATH including all config file modifications and version
+///    managers (asdf, mise, nvm, volta, fnm, sdkman, rbenv, etc.).
+/// 2. **Directory probing (fallback)**: Checks well-known installation directories
+///    that might not be in the shell config (e.g., Homebrew keg-only installs).
+///
+/// Both layers are merged and deduplicated.
 pub fn augment_gui_app_path() {
     use std::sync::OnceLock;
 
@@ -23,6 +116,21 @@ pub fn augment_gui_app_path() {
         let existing: Vec<&str> = current.split(':').collect();
 
         let mut candidates: Vec<String> = Vec::new();
+
+        // LAYER 1: Login shell PATH resolution.
+        // This captures all PATH modifications from shell config files and version
+        // managers. These paths get highest priority in the final PATH.
+        if let Some(shell_path) = resolve_login_shell_path() {
+            for p in shell_path.split(':') {
+                if !p.is_empty() {
+                    candidates.push(p.to_string());
+                }
+            }
+        }
+
+        // LAYER 2: Probe well-known installation directories as fallback.
+        // These are checked even if login shell resolution succeeded, to catch
+        // paths that might not be in the shell config (e.g., keg-only Homebrew).
 
         // Standard system / Homebrew paths
         let static_paths = [
@@ -186,4 +294,40 @@ pub async fn fetch_entra_id_token() -> Result<String> {
     )?;
 
     Ok(token_response.token.secret().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_login_shell_path_returns_path_with_separators() {
+        // On any Unix-like CI or dev machine, the login shell should return
+        // a PATH containing at least one ':' separator and `/` characters.
+        if let Some(path) = resolve_login_shell_path() {
+            assert!(
+                path.contains('/'),
+                "PATH should contain directory separators"
+            );
+            assert!(path.contains(':'), "PATH should contain colon separators");
+            assert!(
+                !path.contains("__CHATTY_PATH_"),
+                "Markers should not leak into the resolved PATH"
+            );
+        }
+        // If None, the shell is unavailable in this environment — that's OK,
+        // the function is designed to gracefully return None.
+    }
+
+    #[test]
+    fn test_resolve_login_shell_path_does_not_hang() {
+        // Verify the 5-second timeout works: this should complete quickly even
+        // if the shell has startup delays.
+        let start = std::time::Instant::now();
+        let _ = resolve_login_shell_path();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "resolve_login_shell_path should complete within the timeout"
+        );
+    }
 }

@@ -61,6 +61,21 @@ pub fn execution_settings_page() -> SettingPage {
                          and API responses without requiring an MCP fetch server.",
                     ),
                     SettingItem::new(
+                        "Enable Git Integration",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().git_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_git(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Git tools for repository operations (status, diff, log, branch, commit). \
+                         Requires a workspace directory that is a git repository. Write operations \
+                         (commit, branch) require user confirmation.",
+                    ),
+                    SettingItem::new(
                         "Approval Mode",
                         SettingField::render(|_options, _window, cx| {
                             let current_mode = cx.global::<ExecutionSettingsModel>().approval_mode.clone();
