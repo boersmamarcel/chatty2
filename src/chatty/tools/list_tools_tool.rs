@@ -41,6 +41,7 @@ impl ListToolsTool {
     ///
     /// `mcp_tool_info` is a list of (server_name, tool_name, tool_description) tuples
     /// extracted from the MCP service so the model can discover them via `list_tools`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_config(
         has_fs_read: bool,
         has_fs_write: bool,

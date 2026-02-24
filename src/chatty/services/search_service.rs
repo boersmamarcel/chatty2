@@ -115,23 +115,19 @@ impl CodeSearchService {
             "Running ripgrep search"
         );
 
-        let output = Command::new("rg")
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to run ripgrep: {}. Ensure 'rg' (ripgrep) is installed.",
-                    e
-                )
-            })?;
+        let output = Command::new("rg").args(&args).output().await.map_err(|e| {
+            anyhow!(
+                "Failed to run ripgrep: {}. Ensure 'rg' (ripgrep) is installed.",
+                e
+            )
+        })?;
 
         // ripgrep exits with 0 (matches), 1 (no matches), or 2+ (error)
-        if let Some(code) = output.status.code() {
-            if code >= 2 {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow!("ripgrep error: {}", stderr.trim()));
-            }
+        if let Some(code) = output.status.code()
+            && code >= 2
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("ripgrep error: {}", stderr.trim()));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -310,9 +306,8 @@ impl CodeSearchService {
         let mut definitions = Vec::new();
 
         'outer: for (lang, extensions, pattern_str) in language_specs {
-            let pattern = Regex::new(pattern_str).map_err(|e| {
-                anyhow!("Failed to compile definition regex for {}: {}", lang, e)
-            })?;
+            let pattern = Regex::new(pattern_str)
+                .map_err(|e| anyhow!("Failed to compile definition regex for {}: {}", lang, e))?;
 
             let files = self.collect_files_by_extensions(extensions).await;
 
@@ -562,7 +557,10 @@ type UserId = string;
         let result = service
             .glob_files(sibling.join("secret.txt").to_str().unwrap())
             .await;
-        assert!(result.is_err(), "expected access denied for sibling directory");
+        assert!(
+            result.is_err(),
+            "expected access denied for sibling directory"
+        );
     }
 
     /// parse_ripgrep_json: verifies truncation flag and exact result count.
