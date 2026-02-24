@@ -39,7 +39,7 @@ gh run list --branch $(git branch --show-current) --status failure --limit 1
 
 ## CI Pipeline Structure
 
-The Chatty CI pipeline (`ci.yml`) runs three checks on pull requests to `master`:
+The Chatty CI pipeline (`ci.yml`) runs three checks on pull requests to `main`:
 
 1. **cargo test --all-features** — Unit and integration tests
 2. **cargo fmt --check** — Code formatting validation

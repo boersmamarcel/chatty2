@@ -18,10 +18,10 @@ gh pr diff $0
 gh pr view $0 --json title,body,files
 ```
 
-Otherwise, review the current branch's diff against `master`:
+Otherwise, review the current branch's diff against `main`:
 
 ```bash
-git diff master...HEAD
+git diff main...HEAD
 ```
 
 ## Review Checklist

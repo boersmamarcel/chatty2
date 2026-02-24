@@ -18,7 +18,7 @@ Before starting, verify:
    git status --porcelain
    ```
 
-2. **On the master branch**:
+2. **On the main branch**:
    ```bash
    git branch --show-current
    ```
@@ -63,7 +63,7 @@ If no version is provided via `$ARGUMENTS`, suggest the next patch version based
 # 1. Commit version bump
 git add Cargo.toml Cargo.lock
 git commit -m "Bump version to <version>"
-git push origin master
+git push origin main
 
 # 2. Create and push tag
 git tag v<version>
@@ -75,7 +75,7 @@ git push origin v<version>
 1. Commit and push the version bump as above
 2. Direct the user to create the release via GitHub UI at:
    `https://github.com/boersmamarcel/chatty2/releases/new`
-3. Tag: `v<version>`, Target: `master`
+3. Tag: `v<version>`, Target: `main`
 
 ## Post-Release Verification
 
