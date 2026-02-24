@@ -42,23 +42,33 @@ pub enum InstallError {
 
 /// Install the release from the given path.
 ///
+/// When `relaunch` is true, the installer may launch the new version after
+/// installation (Windows). When false, the installer is told not to restart
+/// — used for install-on-quit where the user doesn't want the app to reopen.
+///
 /// Returns `Ok(true)` if a restart is needed to complete installation (Windows),
 /// `Ok(false)` if installation is complete (Linux).
 ///
 /// Note: macOS is handled separately via `launch_macos_install_helper` in `mod.rs`
 /// and does not go through this function.
 #[cfg(not(target_os = "macos"))]
-pub async fn install_release(update_path: &Path) -> Result<bool, InstallError> {
+pub async fn install_release(update_path: &Path, relaunch: bool) -> Result<bool, InstallError> {
     #[cfg(target_os = "linux")]
-    return install_release_linux(update_path).await;
+    {
+        let _ = relaunch; // Linux relaunch is handled by the caller
+        return install_release_linux(update_path).await;
+    }
 
     #[cfg(target_os = "windows")]
-    return install_release_windows(update_path).await;
+    return install_release_windows(update_path, relaunch).await;
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    Err(InstallError::InvalidUpdateFile(
-        "Unsupported platform".to_string(),
-    ))
+    {
+        let _ = relaunch;
+        Err(InstallError::InvalidUpdateFile(
+            "Unsupported platform".to_string(),
+        ))
+    }
 }
 
 // =============================================================================
@@ -122,7 +132,10 @@ async fn install_release_linux(appimage_path: &Path) -> Result<bool, InstallErro
 // =============================================================================
 
 #[cfg(target_os = "windows")]
-async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallError> {
+async fn install_release_windows(
+    installer_path: &Path,
+    relaunch: bool,
+) -> Result<bool, InstallError> {
     if installer_path.extension().and_then(|e| e.to_str()) != Some("exe") {
         return Err(InstallError::InvalidUpdateFile(
             "Expected .exe installer".to_string(),
@@ -135,25 +148,31 @@ async fn install_release_windows(installer_path: &Path) -> Result<bool, InstallE
         ));
     }
 
-    info!(installer = ?installer_path, "Launching Windows installer");
+    info!(installer = ?installer_path, relaunch = relaunch, "Launching Windows installer");
 
-    // Launch installer with Inno Setup silent flags
-    // Note: We don't use /NORESTART because the [Run] section in the .iss file
-    // handles launching the new app after installation
-    let result = Command::new(installer_path)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"])
-        .spawn();
+    // Build Inno Setup flags. When relaunch is false (install-on-quit),
+    // add /NORESTART to prevent the installer from launching the app.
+    let mut args = vec!["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"];
+    if !relaunch {
+        args.push("/NORESTART");
+    }
+
+    let result = Command::new(installer_path).args(&args).spawn();
 
     match result {
         Ok(_) => {
             info!("Installer launched successfully");
-            Ok(true) // Restart needed - installer will handle file replacement
+            Ok(true)
         }
         Err(e) => {
             // Try NSIS silent flags as fallback
             warn!(error = ?e, "Failed with Inno Setup flags, trying NSIS flags");
+            let mut nsis_args = vec!["/S"];
+            if !relaunch {
+                nsis_args.push("/NORESTART");
+            }
             Command::new(installer_path)
-                .arg("/S")
+                .args(&nsis_args)
                 .spawn()
                 .map_err(|e| {
                     InstallError::CommandFailed(format!("Failed to launch installer: {}", e))
