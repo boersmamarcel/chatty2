@@ -87,11 +87,63 @@ impl McpTools {
     }
 }
 
+/// Deduplicate MCP tools by name across all servers.
+///
+/// When multiple MCP servers are configured, they may provide tools with the same name.
+/// LLM providers (Anthropic, OpenAI, etc.) require unique tool names, so this function
+/// deduplicates by keeping the first occurrence of each tool name and logging skipped duplicates.
+fn deduplicate_mcp_tools(
+    mcp_tools: Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>,
+) -> Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)> {
+    use std::collections::HashSet;
+
+    let mut seen_tool_names = HashSet::new();
+    let mut result = Vec::new();
+
+    for (server_name, tools, sink) in mcp_tools {
+        let mut deduped_tools = Vec::new();
+        let mut skipped_count = 0;
+        let total_tools = tools.len();
+
+        for tool in tools {
+            if seen_tool_names.insert(tool.name.clone()) {
+                // New tool name, keep it
+                deduped_tools.push(tool);
+            } else {
+                // Duplicate tool name, skip it
+                tracing::warn!(
+                    server = %server_name,
+                    tool_name = %tool.name,
+                    "Skipping duplicate tool name from MCP server"
+                );
+                skipped_count += 1;
+            }
+        }
+
+        if skipped_count > 0 {
+            tracing::info!(
+                server = %server_name,
+                total = total_tools,
+                kept = deduped_tools.len(),
+                skipped = skipped_count,
+                "Deduplicated tools from MCP server"
+            );
+        }
+
+        if !deduped_tools.is_empty() {
+            result.push((server_name, deduped_tools, sink));
+        }
+    }
+
+    result
+}
+
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr) => {{
         match $mcp_tools {
             Some(tools_list) => {
-                let mut iter = tools_list
+                let deduped = deduplicate_mcp_tools(tools_list);
+                let mut iter = deduped
                     .into_iter()
                     .filter(|(_name, t, _sink)| !t.is_empty());
                 if let Some((_first_name, first_tools, first_sink)) = iter.next() {
