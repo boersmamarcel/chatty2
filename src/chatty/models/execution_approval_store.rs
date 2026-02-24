@@ -87,6 +87,58 @@ pub struct ExecutionApprovalRequest {
 /// Thread-safe storage for pending approvals (accessible from both GPUI and Tokio contexts)
 pub type PendingApprovals = Arc<Mutex<HashMap<String, ExecutionApprovalRequest>>>;
 
+/// Shared approval flow used by shell tools, git tools, and any future tool that
+/// requires user confirmation before executing.
+///
+/// `label` is a human-readable description prefixed with the tool domain
+/// (e.g. `"[git] commit with message: …"`, `"[shell] rm -rf /tmp"`).
+///
+/// Returns `Ok(true)` if approved, `Ok(false)` if denied, or an error on
+/// timeout / channel failure.
+pub async fn request_execution_approval(
+    pending: &PendingApprovals,
+    approval_mode: &crate::settings::models::execution_settings::ApprovalMode,
+    label: &str,
+    is_sandboxed: bool,
+) -> anyhow::Result<bool> {
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    match approval_mode {
+        ApprovalMode::AutoApproveAll => return Ok(true),
+        ApprovalMode::AutoApproveSandboxed if is_sandboxed => return Ok(true),
+        _ => {}
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    let request = ExecutionApprovalRequest {
+        id: request_id.clone(),
+        command: label.to_string(),
+        is_sandboxed,
+        created_at: SystemTime::now(),
+        responder: tx,
+    };
+
+    {
+        let mut store = pending.lock().unwrap();
+        store.insert(request_id.clone(), request);
+    }
+
+    notify_approval_via_global(request_id.clone(), label.to_string(), is_sandboxed);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+        Ok(Ok(ApprovalDecision::Approved)) => Ok(true),
+        Ok(Ok(ApprovalDecision::Denied)) => Ok(false),
+        Ok(Err(_)) => Err(anyhow::anyhow!("Approval channel closed")),
+        Err(_) => {
+            let mut store = pending.lock().unwrap();
+            store.remove(&request_id);
+            Err(anyhow::anyhow!("Approval timeout (5 minutes)"))
+        }
+    }
+}
+
 /// Global store for pending execution approval requests
 /// Uses Arc<Mutex<>> internally to allow access from both GPUI and async Tokio contexts
 #[derive(Clone)]

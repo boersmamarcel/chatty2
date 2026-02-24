@@ -1,5 +1,6 @@
 pub mod error_collector_layer;
 pub mod filesystem_service;
+pub mod git_service;
 pub mod llm_service;
 pub mod math_renderer_service;
 pub mod mcp_service;

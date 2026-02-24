@@ -6,6 +6,7 @@ mod env_serde;
 pub mod fetch_tool;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
+pub mod git_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
 pub mod shell_tool;
@@ -20,6 +21,10 @@ pub use fetch_tool::FetchTool;
 pub use filesystem_tool::{GlobSearchTool, ListDirectoryTool, ReadBinaryTool, ReadFileTool};
 pub use filesystem_write_tool::{
     ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, MoveFileTool, WriteFileTool,
+};
+pub use git_tool::{
+    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
+    GitSwitchBranchTool,
 };
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
