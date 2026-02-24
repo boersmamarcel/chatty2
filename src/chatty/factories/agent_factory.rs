@@ -6,10 +6,12 @@ use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::services::git_service::GitService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditMcpTool, FetchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
+    DeleteMcpTool, EditMcpTool, FetchTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
+    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
     ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, ShellCdTool,
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
 };
@@ -41,6 +43,16 @@ type ShellTools = (
     ShellSetEnvTool,
     ShellCdTool,
     ShellStatusTool,
+);
+
+/// Git integration tool set (six git tools)
+type GitTools = (
+    GitStatusTool,
+    GitDiffTool,
+    GitLogTool,
+    GitCreateBranchTool,
+    GitSwitchBranchTool,
+    GitCommitTool,
 );
 
 /// All four MCP management tools bundled together.
@@ -162,6 +174,7 @@ fn sanitize_mcp_tools_for_openai(
 /// Replaces the former 16-branch `build_agent_with_tools!` macro. Adding a new
 /// optional tool only requires one new `if let Some` block here — no combinatorial
 /// branching.
+#[allow(clippy::too_many_arguments)]
 fn collect_tools(
     list_tools: ListToolsTool,
     fs_read: Option<FsReadTools>,
@@ -170,6 +183,7 @@ fn collect_tools(
     mcp_mgmt: McpTools,
     fetch_tool: Option<FetchTool>,
     shell_tools: Option<ShellTools>,
+    git_tools: Option<GitTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -209,6 +223,14 @@ fn collect_tools(
         tools.push(Box::new(set_env));
         tools.push(Box::new(cd));
         tools.push(Box::new(status));
+    }
+    if let Some((status, diff, log, create_branch, switch_branch, commit)) = git_tools {
+        tools.push(Box::new(status));
+        tools.push(Box::new(diff));
+        tools.push(Box::new(log));
+        tools.push(Box::new(create_branch));
+        tools.push(Box::new(switch_branch));
+        tools.push(Box::new(commit));
     }
     tools
 }
@@ -490,6 +512,66 @@ impl AgentClient {
             None
         };
 
+        // Create git tools if enabled and workspace is a git repository
+        let git_tools: Option<GitTools> = if exec_settings
+            .as_ref()
+            .map(|s| s.git_enabled)
+            .unwrap_or(false)
+        {
+            match exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+            {
+                Some(workspace_dir) => match GitService::new(workspace_dir).await {
+                    Ok(service) => {
+                        let service = std::sync::Arc::new(service);
+                        let approval_mode = exec_settings
+                            .as_ref()
+                            .map(|s| s.approval_mode.clone())
+                            .unwrap_or_default();
+                        let approvals = pending_approvals.clone().unwrap_or_else(|| {
+                            std::sync::Arc::new(std::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            ))
+                        });
+
+                        tracing::info!(workspace = %workspace_dir, "Git tools enabled");
+                        Some((
+                            GitStatusTool::new(service.clone()),
+                            GitDiffTool::new(service.clone()),
+                            GitLogTool::new(service.clone()),
+                            GitCreateBranchTool::new(
+                                service.clone(),
+                                approval_mode.clone(),
+                                approvals.clone(),
+                            ),
+                            GitSwitchBranchTool::new(
+                                service.clone(),
+                                approval_mode.clone(),
+                                approvals.clone(),
+                            ),
+                            GitCommitTool::new(service, approval_mode, approvals),
+                        ))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            workspace = %workspace_dir,
+                            "Failed to initialize git tools (workspace may not be a git repository)"
+                        );
+                        None
+                    }
+                },
+                None => {
+                    tracing::info!("Git tools skipped: no workspace directory configured");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Git tools disabled by execution settings");
+            None
+        };
+
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             fs_read_tools.is_some(),
@@ -497,6 +579,7 @@ impl AgentClient {
             mcp_mgmt_tools.is_enabled(),
             fetch_tool.is_some(),
             shell_tools.is_some(),
+            git_tools.is_some(),
             mcp_tool_info,
         );
 
@@ -524,6 +607,7 @@ impl AgentClient {
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
+                    git_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -565,6 +649,7 @@ impl AgentClient {
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
+                    git_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -590,6 +675,7 @@ impl AgentClient {
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
+                    git_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -618,6 +704,7 @@ impl AgentClient {
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
+                    git_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -645,6 +732,7 @@ impl AgentClient {
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
+                    git_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -790,6 +878,7 @@ impl AgentClient {
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
+                    git_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
