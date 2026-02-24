@@ -7,7 +7,7 @@ use crate::chatty::models::execution_approval_store::{
     ApprovalDecision, ExecutionApprovalRequest, PendingApprovals,
 };
 use crate::chatty::services::git_service::{
-    GitCommitOutput, GitLogEntry, GitService, GitStatusOutput,
+    GitAddOutput, GitCommitOutput, GitLogEntry, GitService, GitStatusOutput,
 };
 use crate::settings::models::execution_settings::ApprovalMode;
 
@@ -264,6 +264,100 @@ impl Tool for GitLogTool {
         let commits = self.service.log(max_count).await?;
         let count = commits.len();
         Ok(GitLogOutput { commits, count })
+    }
+}
+
+// ── GitAddTool ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct GitAddArgs {
+    /// List of file paths to stage (relative to workspace root).
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitAddToolOutput {
+    pub staged_files: Vec<String>,
+    pub message: String,
+}
+
+impl From<GitAddOutput> for GitAddToolOutput {
+    fn from(o: GitAddOutput) -> Self {
+        Self {
+            staged_files: o.staged_files,
+            message: o.message,
+        }
+    }
+}
+
+/// Stage files for the next commit.
+#[derive(Clone)]
+pub struct GitAddTool {
+    service: Arc<GitService>,
+    approval_mode: ApprovalMode,
+    pending_approvals: PendingApprovals,
+}
+
+impl GitAddTool {
+    pub fn new(
+        service: Arc<GitService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingApprovals,
+    ) -> Self {
+        Self {
+            service,
+            approval_mode,
+            pending_approvals,
+        }
+    }
+}
+
+impl Tool for GitAddTool {
+    const NAME: &'static str = "git_add";
+    type Error = GitToolError;
+    type Args = GitAddArgs;
+    type Output = GitAddToolOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "git_add".to_string(),
+            description: "Stage files for the next git commit. Provide a list of file paths \
+                         (relative to the workspace root) to add to the staging area. Each path \
+                         must point to an existing file or directory within the workspace. Use \
+                         git_status first to see which files have changes that can be staged."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of file paths to stage (relative to workspace root)"
+                    }
+                },
+                "required": ["paths"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let file_list = args.paths.join(", ");
+        let approved = request_git_approval(
+            &self.pending_approvals,
+            &self.approval_mode,
+            &format!("stage files: {}", file_list),
+        )
+        .await?;
+
+        if !approved {
+            return Err(GitToolError::GitError(anyhow::anyhow!(
+                "Staging denied by user"
+            )));
+        }
+
+        tracing::debug!(paths = ?args.paths, "Staging files");
+        let result = self.service.add(&args.paths).await?;
+        Ok(result.into())
     }
 }
 

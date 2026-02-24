@@ -10,10 +10,10 @@ use crate::chatty::services::git_service::GitService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditMcpTool, FetchTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
-    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
-    ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
+    DeleteMcpTool, EditMcpTool, FetchTool, GitAddTool, GitCommitTool, GitCreateBranchTool,
+    GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool,
+    ListDirectoryTool, ListMcpTool, ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool,
+    ReadFileTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -45,11 +45,12 @@ type ShellTools = (
     ShellStatusTool,
 );
 
-/// Git integration tool set (six git tools)
+/// Git integration tool set (seven git tools)
 type GitTools = (
     GitStatusTool,
     GitDiffTool,
     GitLogTool,
+    GitAddTool,
     GitCreateBranchTool,
     GitSwitchBranchTool,
     GitCommitTool,
@@ -224,10 +225,11 @@ fn collect_tools(
         tools.push(Box::new(cd));
         tools.push(Box::new(status));
     }
-    if let Some((status, diff, log, create_branch, switch_branch, commit)) = git_tools {
+    if let Some((status, diff, log, add, create_branch, switch_branch, commit)) = git_tools {
         tools.push(Box::new(status));
         tools.push(Box::new(diff));
         tools.push(Box::new(log));
+        tools.push(Box::new(add));
         tools.push(Box::new(create_branch));
         tools.push(Box::new(switch_branch));
         tools.push(Box::new(commit));
@@ -540,6 +542,11 @@ impl AgentClient {
                             GitStatusTool::new(service.clone()),
                             GitDiffTool::new(service.clone()),
                             GitLogTool::new(service.clone()),
+                            GitAddTool::new(
+                                service.clone(),
+                                approval_mode.clone(),
+                                approvals.clone(),
+                            ),
                             GitCreateBranchTool::new(
                                 service.clone(),
                                 approval_mode.clone(),

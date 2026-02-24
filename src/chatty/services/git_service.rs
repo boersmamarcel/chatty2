@@ -29,6 +29,15 @@ pub struct GitLogEntry {
     pub message: String,
 }
 
+/// Output from `git add`
+#[derive(Debug, Serialize)]
+pub struct GitAddOutput {
+    /// Files that were staged
+    pub staged_files: Vec<String>,
+    /// Summary message
+    pub message: String,
+}
+
 /// Output from `git commit`
 #[derive(Debug, Serialize)]
 pub struct GitCommitOutput {
@@ -47,7 +56,6 @@ pub struct GitCommitOutput {
 /// hard reset) are intentionally excluded.
 pub struct GitService {
     workspace_root: PathBuf,
-    #[allow(dead_code)]
     validator: PathValidator,
 }
 
@@ -178,13 +186,31 @@ impl GitService {
     ///
     /// If `staged` is true, shows staged changes (`git diff --cached`).
     /// Otherwise shows unstaged changes.
-    /// If `path` is provided, restricts diff to that file.
+    /// If `path` is provided, it is validated to be within the workspace
+    /// boundary before being passed to git.
     pub async fn diff(&self, staged: bool, path: Option<&str>) -> Result<String> {
+        // Validate path is within workspace if provided
+        let validated_path: Option<String> = match path {
+            Some(p) => {
+                // Use validate_parent which handles both existing and non-existing paths
+                // (a file may be deleted but still show in diff)
+                let _ = self.validator.validate_parent(p).await.map_err(|e| {
+                    anyhow!(
+                        "Path '{}' is outside the workspace or invalid: {}",
+                        p,
+                        e
+                    )
+                })?;
+                Some(p.to_string())
+            }
+            None => None,
+        };
+
         let mut args = vec!["diff"];
         if staged {
             args.push("--cached");
         }
-        if let Some(p) = path {
+        if let Some(ref p) = validated_path {
             args.push("--");
             args.push(p);
         }
@@ -233,6 +259,48 @@ impl GitService {
         }
 
         Ok(entries)
+    }
+
+    /// Stage files for commit.
+    ///
+    /// Each path is validated to be within the workspace. Supports individual
+    /// files and directories. Does NOT accept the "." shorthand — callers
+    /// must enumerate paths explicitly to prevent accidentally staging
+    /// secrets or large binaries.
+    pub async fn add(&self, paths: &[String]) -> Result<GitAddOutput> {
+        if paths.is_empty() {
+            return Err(anyhow!("At least one path is required"));
+        }
+
+        // Validate every path is within the workspace
+        for p in paths {
+            let resolved = self.workspace_root.join(p);
+            let canonical = tokio::fs::canonicalize(&resolved).await.map_err(|e| {
+                anyhow!("Path '{}' does not exist or cannot be resolved: {}", p, e)
+            })?;
+            if !canonical.starts_with(&self.workspace_root) {
+                return Err(anyhow!(
+                    "Path '{}' is outside the workspace boundary",
+                    p
+                ));
+            }
+        }
+
+        let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        let mut args = vec!["add", "--"];
+        args.extend(path_refs.iter());
+
+        self.run_git(&args).await?;
+
+        info!(paths = ?paths, "Files staged");
+
+        Ok(GitAddOutput {
+            staged_files: paths.to_vec(),
+            message: format!(
+                "Successfully staged {} file(s)",
+                paths.len()
+            ),
+        })
     }
 
     /// Create a new branch.
@@ -480,6 +548,73 @@ mod tests {
 
         let log = service.log(3).await.unwrap();
         assert_eq!(log.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_add_single_file() {
+        let (tmp, service) = create_test_repo().await;
+
+        fs::write(tmp.path().join("new_file.txt"), "content").unwrap();
+
+        let result = service
+            .add(&["new_file.txt".to_string()])
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.staged_files, vec!["new_file.txt"]);
+
+        // Verify the file is actually staged
+        let status = service.status().await.unwrap();
+        assert!(status.staged.iter().any(|f| f.contains("new_file.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_add_multiple_files() {
+        let (tmp, service) = create_test_repo().await;
+
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "b").unwrap();
+
+        let result = service
+            .add(&["a.txt".to_string(), "b.txt".to_string()])
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.staged_files.len(), 2);
+
+        let status = service.status().await.unwrap();
+        assert!(status.staged.iter().any(|f| f.contains("a.txt")));
+        assert!(status.staged.iter().any(|f| f.contains("b.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_add_empty_paths() {
+        let (_tmp, service) = create_test_repo().await;
+
+        let result = service.add(&[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("At least one path"));
+    }
+
+    #[tokio::test]
+    async fn test_add_nonexistent_file() {
+        let (_tmp, service) = create_test_repo().await;
+
+        let result = service
+            .add(&["does_not_exist.txt".to_string()])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_add_outside_workspace() {
+        let (_tmp, service) = create_test_repo().await;
+
+        let result = service
+            .add(&["../../etc/passwd".to_string()])
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

@@ -23,7 +23,8 @@ pub use filesystem_write_tool::{
     ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, MoveFileTool, WriteFileTool,
 };
 pub use git_tool::{
-    GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
+    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
+    GitSwitchBranchTool,
 };
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
