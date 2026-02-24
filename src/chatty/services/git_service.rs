@@ -195,11 +195,7 @@ impl GitService {
                 // Use validate_parent which handles both existing and non-existing paths
                 // (a file may be deleted but still show in diff)
                 let _ = self.validator.validate_parent(p).await.map_err(|e| {
-                    anyhow!(
-                        "Path '{}' is outside the workspace or invalid: {}",
-                        p,
-                        e
-                    )
+                    anyhow!("Path '{}' is outside the workspace or invalid: {}", p, e)
                 })?;
                 Some(p.to_string())
             }
@@ -275,14 +271,11 @@ impl GitService {
         // Validate every path is within the workspace
         for p in paths {
             let resolved = self.workspace_root.join(p);
-            let canonical = tokio::fs::canonicalize(&resolved).await.map_err(|e| {
-                anyhow!("Path '{}' does not exist or cannot be resolved: {}", p, e)
-            })?;
+            let canonical = tokio::fs::canonicalize(&resolved)
+                .await
+                .map_err(|e| anyhow!("Path '{}' does not exist or cannot be resolved: {}", p, e))?;
             if !canonical.starts_with(&self.workspace_root) {
-                return Err(anyhow!(
-                    "Path '{}' is outside the workspace boundary",
-                    p
-                ));
+                return Err(anyhow!("Path '{}' is outside the workspace boundary", p));
             }
         }
 
@@ -296,10 +289,7 @@ impl GitService {
 
         Ok(GitAddOutput {
             staged_files: paths.to_vec(),
-            message: format!(
-                "Successfully staged {} file(s)",
-                paths.len()
-            ),
+            message: format!("Successfully staged {} file(s)", paths.len()),
         })
     }
 
@@ -556,9 +546,7 @@ mod tests {
 
         fs::write(tmp.path().join("new_file.txt"), "content").unwrap();
 
-        let result = service
-            .add(&["new_file.txt".to_string()])
-            .await;
+        let result = service.add(&["new_file.txt".to_string()]).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.staged_files, vec!["new_file.txt"]);
@@ -593,16 +581,19 @@ mod tests {
 
         let result = service.add(&[]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("At least one path"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("At least one path")
+        );
     }
 
     #[tokio::test]
     async fn test_add_nonexistent_file() {
         let (_tmp, service) = create_test_repo().await;
 
-        let result = service
-            .add(&["does_not_exist.txt".to_string()])
-            .await;
+        let result = service.add(&["does_not_exist.txt".to_string()]).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -611,9 +602,7 @@ mod tests {
     async fn test_add_outside_workspace() {
         let (_tmp, service) = create_test_repo().await;
 
-        let result = service
-            .add(&["../../etc/passwd".to_string()])
-            .await;
+        let result = service.add(&["../../etc/passwd".to_string()]).await;
         assert!(result.is_err());
     }
 

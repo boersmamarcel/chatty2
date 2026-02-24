@@ -11,9 +11,9 @@ use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
     DeleteMcpTool, EditMcpTool, FetchTool, GitAddTool, GitCommitTool, GitCreateBranchTool,
-    GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool,
-    ListDirectoryTool, ListMcpTool, ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool,
-    ReadFileTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
+    GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool,
+    ListMcpTool, ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool,
+    ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
