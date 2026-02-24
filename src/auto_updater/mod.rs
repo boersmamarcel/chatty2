@@ -442,6 +442,71 @@ impl AutoUpdater {
         .detach();
     }
 
+    /// Install the downloaded update without relaunching the application.
+    ///
+    /// Used for mandatory updates when the user quits the app — the update
+    /// is applied silently so the next manual launch runs the new version.
+    ///
+    /// On macOS: launches the install helper script with relaunch disabled.
+    /// On Linux: atomically replaces the AppImage without spawning a new process.
+    /// On Windows: launches the silent installer with /NORESTART flag.
+    pub fn install_on_quit(&mut self, cx: &mut App) {
+        let update_path = match &self.status {
+            AutoUpdateStatus::Ready(_, update_path) => update_path.clone(),
+            _ => {
+                warn!("Cannot install on quit: no update downloaded");
+                return;
+            }
+        };
+
+        info!("Installing pending update before quit (no relaunch)");
+
+        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
+            updater.status = AutoUpdateStatus::Installing;
+        });
+
+        #[cfg(target_os = "macos")]
+        {
+            let app_bundle = std::env::current_exe().ok().and_then(|exe| {
+                exe.ancestors()
+                    .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
+                    .map(|p| p.to_path_buf())
+            });
+
+            if let Some(bundle) = app_bundle {
+                launch_macos_install_helper(&update_path, &bundle, false);
+            } else {
+                warn!(
+                    "Could not find app bundle for install-on-quit; update will apply on next manual install"
+                );
+            }
+            cx.quit();
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            match install_release(&update_path, false).await {
+                Ok(_) => {
+                    info!("Update installed on quit — new version will be active on next launch");
+                    // On Windows, the installer was launched with /NORESTART so it
+                    // won't relaunch. On Linux, the AppImage is already replaced.
+                    cx.update(|cx| cx.quit())
+                        .map_err(|e| warn!(error = ?e, "Failed to quit after install-on-quit"))
+                        .ok();
+                }
+                Err(e) => {
+                    error!(error = ?e, "Failed to install update on quit");
+                    cx.update(|cx| cx.quit())
+                        .map_err(
+                            |e| warn!(error = ?e, "Failed to quit after failed install-on-quit"),
+                        )
+                        .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Install the downloaded update and restart the application.
     ///
     /// On macOS this uses a deferred approach for fast restart:
@@ -501,7 +566,7 @@ impl AutoUpdater {
             match app_bundle {
                 Some(bundle) => {
                     info!(bundle = ?bundle, "Found app bundle, launching install helper");
-                    launch_macos_install_helper(&update_path, &bundle);
+                    launch_macos_install_helper(&update_path, &bundle, true);
                     cx.quit();
                 }
                 None => {
@@ -546,7 +611,7 @@ impl AutoUpdater {
         // called so GPUI can close windows with its normal animations.
         #[cfg(not(target_os = "macos"))]
         cx.spawn(async move |cx: &mut AsyncApp| {
-            match install_release(&update_path).await {
+            match install_release(&update_path, true).await {
                 Ok(_) => {
                     // Linux: the AppImage on disk has already been atomically
                     // replaced.  Spawn the new binary, then quit gracefully.
@@ -914,20 +979,28 @@ fn relaunch_linux_process() -> std::io::Result<()> {
 /// Write and spawn a detached shell script that installs the macOS update
 /// after the app has fully exited.
 ///
-/// The script prioritises fast restart by launching the app immediately
-/// after copying, then running housekeeping tasks afterward:
+/// When `relaunch` is true, the script prioritises fast restart by launching
+/// the app immediately after copying. When false (install-on-quit), the app
+/// is not relaunched — the new version will be active on the next manual launch.
+///
+/// Steps:
 /// 1. Polls for app exit with 0.2 s intervals (up to 10 s total)
 /// 2. Mounts the downloaded .dmg with `hdiutil` (`-noverify` — checksum already validated)
 /// 3. Rsyncs the new .app bundle over the current installation
-/// 4. Relaunches via direct binary execution (bypasses Gatekeeper)
-/// 5. Post-launch: clears quarantine attrs, re-signs adhoc bundles, resets LS cache, unmounts DMG
+/// 4. (if relaunch) Relaunches via direct binary execution (bypasses Gatekeeper)
+/// 5. Post-install: clears quarantine attrs, re-signs adhoc bundles, resets LS cache, unmounts DMG
 #[cfg(target_os = "macos")]
-pub fn launch_macos_install_helper(dmg_path: &std::path::Path, app_bundle: &std::path::Path) {
+pub fn launch_macos_install_helper(
+    dmg_path: &std::path::Path,
+    app_bundle: &std::path::Path,
+    relaunch: bool,
+) {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
     let dmg = dmg_path.to_string_lossy();
     let bundle = app_bundle.to_string_lossy();
+    let relaunch_flag = if relaunch { "true" } else { "false" };
 
     let script = format!(
         r#"#!/bin/bash
@@ -935,6 +1008,7 @@ set -e
 
 DMG_PATH="{dmg}"
 APP_BUNDLE="{bundle}"
+RELAUNCH="{relaunch_flag}"
 LOG_FILE="$HOME/Library/Logs/chatty_update.log"
 
 # Logging function
@@ -1040,38 +1114,40 @@ fi
 
 log "App bundle replaced successfully"
 
-# Clear quarantine attributes before launch so the 'open' fallback
-# (which goes through Gatekeeper) won't be blocked by quarantine.
+# Clear quarantine attributes so Gatekeeper won't block future launches.
 xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
 
-# Relaunch the app IMMEDIATELY — don't wait for codesign/lsregister.
-# Direct binary execution bypasses Gatekeeper, so those steps are only
-# needed for future Finder/Spotlight launches and can run after relaunch.
-log "Relaunching app..."
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+if [ "$RELAUNCH" = "true" ]; then
+    # Relaunch the app IMMEDIATELY — don't wait for codesign/lsregister.
+    # Direct binary execution bypasses Gatekeeper, so those steps are only
+    # needed for future Finder/Spotlight launches and can run after relaunch.
+    log "Relaunching app..."
+    APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-if [ -x "$APP_BINARY" ]; then
-    log "Launching via direct binary: $APP_BINARY"
-    nohup "$APP_BINARY" > /dev/null 2>&1 &
-    LAUNCH_METHOD="direct"
-else
-    log "Binary not found at $APP_BINARY, falling back to 'open' command"
-    OPEN_OUTPUT=$(open -n "$APP_BUNDLE" 2>&1)
-    OPEN_EXIT=$?
+    if [ -x "$APP_BINARY" ]; then
+        log "Launching via direct binary: $APP_BINARY"
+        nohup "$APP_BINARY" > /dev/null 2>&1 &
+        LAUNCH_METHOD="direct"
+    else
+        log "Binary not found at $APP_BINARY, falling back to 'open' command"
+        OPEN_OUTPUT=$(open -n "$APP_BUNDLE" 2>&1)
+        OPEN_EXIT=$?
 
-    if [ $OPEN_EXIT -ne 0 ]; then
-        log "ERROR: open command failed with exit code $OPEN_EXIT"
-        log "Output: $OPEN_OUTPUT"
-        exit 1
+        if [ $OPEN_EXIT -ne 0 ]; then
+            log "ERROR: open command failed with exit code $OPEN_EXIT"
+            log "Output: $OPEN_OUTPUT"
+            exit 1
+        fi
+        LAUNCH_METHOD="open"
     fi
-    LAUNCH_METHOD="open"
+
+    log "App launched via $LAUNCH_METHOD, running post-install tasks in background..."
+else
+    log "Install-on-quit mode: skipping relaunch, new version will be active on next launch"
 fi
 
-log "App launched via $LAUNCH_METHOD, running post-install tasks in background..."
-
-# --- Post-launch housekeeping (non-blocking) ---
-# These tasks prepare the bundle for future Finder/Spotlight launches
-# but are NOT needed for the direct binary launch above.
+# --- Post-install housekeeping (non-blocking) ---
+# These tasks prepare the bundle for future Finder/Spotlight launches.
 
 # Re-sign adhoc/unsigned bundles for future Gatekeeper compatibility
 SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)

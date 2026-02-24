@@ -272,6 +272,20 @@ fn register_actions(cx: &mut App) {
         })
         .detach();
 
+        // Mandatory auto-update: if an update has been downloaded and is ready,
+        // install it silently before quitting so the next launch runs the new
+        // version. install_on_quit() does NOT relaunch — the user intended to
+        // quit, so we respect that while still ensuring the update is applied.
+        if let Some(updater) = cx.try_global::<AutoUpdater>()
+            && matches!(updater.status(), auto_updater::AutoUpdateStatus::Ready(..))
+        {
+            info!("Pending update found on quit — installing before exit");
+            cx.update_global::<AutoUpdater, _>(|updater, cx| {
+                updater.install_on_quit(cx);
+            });
+            return;
+        }
+
         cx.quit();
     });
     cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
