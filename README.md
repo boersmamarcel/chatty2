@@ -31,6 +31,7 @@ Grab the latest release from [GitHub Releases](https://github.com/boersmamarcel/
 |:---------|:-------|
 | macOS (Intel & Apple Silicon) | `.dmg` installer |
 | Linux (x86_64) | `.tar.gz` archive |
+| Windows (x86_64) | `.exe` installer |
 
 ### 2. Add a Provider
 
@@ -278,8 +279,9 @@ cargo clippy -- -D warnings  # Lint
 ### Packaging
 
 ```bash
-./scripts/package-macos.sh   # macOS (.app + .dmg)
-./scripts/package-linux.sh   # Linux (.tar.gz)
+./scripts/package-macos.sh        # macOS (.app + .dmg)
+./scripts/package-linux.sh        # Linux (.tar.gz)
+./scripts/package-windows.ps1     # Windows (.exe installer, run in PowerShell)
 ```
 
 ### Architecture
