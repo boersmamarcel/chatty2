@@ -8,9 +8,9 @@ const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 /// Try to resolve the user's full PATH by running their login shell.
 ///
 /// GUI apps on macOS/Linux don't inherit the shell PATH. This spawns the user's
-/// login shell (`$SHELL -l -i`) and reads back the PATH, capturing all modifications
-/// from shell config files (.bashrc, .zshrc, .profile, etc.) and tool version
-/// managers (asdf, mise, nvm, volta, fnm, sdkman, rbenv, pyenv, etc.).
+/// login shell (`$SHELL -l -c '...'`) and reads back the PATH, capturing all
+/// modifications from shell config files (.bashrc, .zshrc, .profile, etc.) and
+/// tool version managers (asdf, mise, nvm, volta, fnm, sdkman, rbenv, pyenv, etc.).
 ///
 /// Uses markers in the output to isolate the PATH value from any shell startup
 /// messages (MOTD, fortune, etc.). Returns None on failure or timeout (5s).
@@ -22,15 +22,20 @@ fn resolve_login_shell_path() -> Option<String> {
     let marker_end = "__CHATTY_PATH_END__";
     let print_cmd = format!("echo {marker_start}$PATH{marker_end}");
 
-    // Spawn the user's shell as a login + interactive shell so it sources all
-    // config files (.bash_profile, .bashrc, .zshrc, .zprofile, etc.).
-    // TERM=dumb prevents any terminal-specific escape sequences in the output.
+    // Spawn the user's login shell so it sources profile/rc files
+    // (.bash_profile, .bashrc, .zshrc, .zprofile, etc.).
+    // Only `-l` (login) is used — `-i` (interactive) is avoided because it
+    // triggers TTY warnings on headless environments (CI, containers) and is
+    // unnecessary for sourcing config files.
+    // Stderr is discarded (Stdio::null) to avoid a deadlock: if stderr were
+    // piped but never drained, the child could block once the OS pipe buffer
+    // fills up (~64 KB), causing a guaranteed timeout on every invocation.
     let mut child = std::process::Command::new(&shell)
-        .args(["-l", "-i", "-c", &print_cmd])
+        .args(["-l", "-c", &print_cmd])
         .env("TERM", "dumb")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| {
             tracing::debug!(shell = %shell, error = ?e, "Failed to spawn login shell for PATH resolution");
@@ -78,6 +83,7 @@ fn resolve_login_shell_path() -> Option<String> {
             Err(e) => {
                 tracing::debug!(shell = %shell, error = ?e, "Failed to check login shell status");
                 let _ = child.kill();
+                let _ = child.wait(); // Reap to prevent zombie
                 return None;
             }
         }
@@ -90,7 +96,7 @@ fn resolve_login_shell_path() -> Option<String> {
 /// via Homebrew, npm, pip, uv/uvx, cargo, etc. may not be findable.
 ///
 /// Strategy (two layers):
-/// 1. **Login shell resolution**: Runs `$SHELL -l -i -c 'echo $PATH'` to capture
+/// 1. **Login shell resolution**: Runs `$SHELL -l -c 'echo $PATH'` to capture
 ///    the user's full PATH including all config file modifications and version
 ///    managers (asdf, mise, nvm, volta, fnm, sdkman, rbenv, etc.).
 /// 2. **Directory probing (fallback)**: Checks well-known installation directories
