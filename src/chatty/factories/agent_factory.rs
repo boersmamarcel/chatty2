@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::tool::ToolDyn;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
@@ -170,6 +171,46 @@ fn sanitize_mcp_tools_for_openai(
                     })
                     .collect();
                 (name, sanitized_tools, sink)
+            })
+            .collect()
+    })
+}
+
+/// Remove MCP tools whose names collide with native tools or with each other.
+///
+/// Anthropic, Gemini, and other providers reject requests with duplicate tool names.
+/// Collisions happen when:
+/// - An MCP server exposes a tool with the same name as a native tool (e.g. `search_code`)
+/// - Multiple MCP servers expose tools with the same name
+///
+/// Native tools always win; for MCP-vs-MCP conflicts the first occurrence wins.
+fn dedup_mcp_tools(
+    native_tool_names: &HashSet<String>,
+    mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+) -> Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {
+    mcp_tools.map(|servers| {
+        let mut seen = native_tool_names.clone();
+        servers
+            .into_iter()
+            .map(|(server_name, tools, sink)| {
+                let deduped: Vec<_> = tools
+                    .into_iter()
+                    .filter(|tool| {
+                        let name = tool.name.to_string();
+                        if seen.contains(&name) {
+                            tracing::warn!(
+                                server = %server_name,
+                                tool_name = %name,
+                                "Skipping MCP tool: name conflicts with an existing tool"
+                            );
+                            false
+                        } else {
+                            seen.insert(name);
+                            true
+                        }
+                    })
+                    .collect();
+                (server_name, deduped, sink)
             })
             .collect()
     })
@@ -646,6 +687,8 @@ impl AgentClient {
                     git_tools,
                     search_tools,
                 );
+                let native_names: HashSet<String> = tool_vec.iter().map(|t| t.name()).collect();
+                let mcp_tools = dedup_mcp_tools(&native_names, mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok((AgentClient::Anthropic(agent), shell_session_out))
@@ -689,7 +732,9 @@ impl AgentClient {
                     git_tools,
                     search_tools,
                 );
+                let native_names: HashSet<String> = tool_vec.iter().map(|t| t.name()).collect();
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
+                let mcp_tools = dedup_mcp_tools(&native_names, mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok((AgentClient::OpenAI(agent), shell_session_out))
@@ -716,6 +761,8 @@ impl AgentClient {
                     git_tools,
                     search_tools,
                 );
+                let native_names: HashSet<String> = tool_vec.iter().map(|t| t.name()).collect();
+                let mcp_tools = dedup_mcp_tools(&native_names, mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok((AgentClient::Gemini(agent), shell_session_out))
@@ -746,6 +793,8 @@ impl AgentClient {
                     git_tools,
                     search_tools,
                 );
+                let native_names: HashSet<String> = tool_vec.iter().map(|t| t.name()).collect();
+                let mcp_tools = dedup_mcp_tools(&native_names, mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok((AgentClient::Mistral(agent), shell_session_out))
@@ -775,6 +824,8 @@ impl AgentClient {
                     git_tools,
                     search_tools,
                 );
+                let native_names: HashSet<String> = tool_vec.iter().map(|t| t.name()).collect();
+                let mcp_tools = dedup_mcp_tools(&native_names, mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok((AgentClient::Ollama(agent), shell_session_out))
@@ -922,7 +973,9 @@ impl AgentClient {
                     git_tools,
                     search_tools,
                 );
+                let native_names: HashSet<String> = tool_vec.iter().map(|t| t.name()).collect();
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
+                let mcp_tools = dedup_mcp_tools(&native_names, mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
                 Ok((AgentClient::AzureOpenAI(agent), shell_session_out))
