@@ -461,9 +461,7 @@ impl AutoUpdater {
 
         info!("Installing pending update before quit (no relaunch)");
 
-        cx.update_global::<AutoUpdater, _>(|updater, _cx| {
-            updater.status = AutoUpdateStatus::Installing;
-        });
+        self.status = AutoUpdateStatus::Installing;
 
         #[cfg(target_os = "macos")]
         {
