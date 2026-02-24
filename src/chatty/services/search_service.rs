@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use regex::Regex;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -88,7 +88,12 @@ impl CodeSearchService {
         file_type: Option<&str>,
         max_results: usize,
     ) -> Result<SearchResult> {
-        let mut args: Vec<String> = vec!["--json".to_string()];
+        // Request one extra match so we can detect truncation without a separate pass.
+        let rg_limit = max_results + 1;
+        let mut args: Vec<String> = vec![
+            "--json".to_string(),
+            format!("--max-total-count={}", rg_limit),
+        ];
 
         if case_insensitive {
             args.push("--ignore-case".to_string());
@@ -222,13 +227,11 @@ impl CodeSearchService {
     ///
     /// Results are limited to 100 matches to prevent excessive output.
     pub async fn glob_files(&self, pattern: &str) -> Result<GlobFilesResult> {
-        use std::path::Path;
-
         let workspace_root = self.workspace_root.clone();
 
         // Build full pattern anchored to workspace root
         let full_pattern = if Path::new(pattern).is_absolute() {
-            if !pattern.starts_with(workspace_root.to_str().unwrap_or("")) {
+            if !PathBuf::from(pattern).starts_with(&workspace_root) {
                 return Err(anyhow!(
                     "Access denied: glob pattern '{}' is outside the workspace root",
                     pattern
@@ -303,9 +306,10 @@ impl CodeSearchService {
             ),
         ];
 
+        const MAX_DEFINITIONS: usize = 100;
         let mut definitions = Vec::new();
 
-        for (lang, extensions, pattern_str) in language_specs {
+        'outer: for (lang, extensions, pattern_str) in language_specs {
             let pattern = Regex::new(pattern_str).map_err(|e| {
                 anyhow!("Failed to compile definition regex for {}: {}", lang, e)
             })?;
@@ -327,6 +331,9 @@ impl CodeSearchService {
                             line: line_content.trim().to_string(),
                             language: lang.to_string(),
                         });
+                        if definitions.len() >= MAX_DEFINITIONS {
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -493,5 +500,97 @@ class MyClass:
         assert!(matches[0].path.contains("main.rs"));
         assert_eq!(matches[0].line_number, 5);
         assert!(matches[0].line.contains("fn main"));
+    }
+
+    #[tokio::test]
+    async fn test_find_definition_javascript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let code = r#"
+export async function fetchData(url) {
+    return fetch(url);
+}
+
+export class UserService {
+    constructor() {}
+}
+
+const MAX_RETRIES = 3;
+
+export interface Config {
+    timeout: number;
+}
+
+type UserId = string;
+"#;
+        fs::write(tmp.path().join("service.ts"), code).unwrap();
+
+        let service = CodeSearchService::new(tmp.path().to_str().unwrap()).unwrap();
+
+        let result = service.find_definition("fetchData").await.unwrap();
+        assert_eq!(result.count, 1);
+        assert_eq!(result.definitions[0].language, "javascript");
+        assert!(result.definitions[0].line.contains("fetchData"));
+
+        let result = service.find_definition("UserService").await.unwrap();
+        assert_eq!(result.count, 1);
+        assert_eq!(result.definitions[0].language, "javascript");
+
+        let result = service.find_definition("Config").await.unwrap();
+        assert_eq!(result.count, 1);
+        assert_eq!(result.definitions[0].language, "javascript");
+
+        let result = service.find_definition("UserId").await.unwrap();
+        assert_eq!(result.count, 1);
+        assert_eq!(result.definitions[0].language, "javascript");
+    }
+
+    /// Confirms that the path-component-aware starts_with check correctly blocks
+    /// a path whose string prefix matches but is a different directory.
+    /// e.g. workspace=/tmp/work must reject /tmp/workaround/...
+    #[tokio::test]
+    async fn test_glob_files_similar_prefix_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Construct a sibling path that shares a string prefix with the workspace
+        let workspace = tmp.path().join("work");
+        let sibling = tmp.path().join("workaround");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(sibling.join("secret.txt"), "secret").unwrap();
+
+        let service = CodeSearchService::new(workspace.to_str().unwrap()).unwrap();
+        // The sibling path starts with the same string prefix but is outside the workspace
+        let result = service
+            .glob_files(sibling.join("secret.txt").to_str().unwrap())
+            .await;
+        assert!(result.is_err(), "expected access denied for sibling directory");
+    }
+
+    /// parse_ripgrep_json: verifies truncation flag and exact result count.
+    /// We test this at the parse layer since we can't guarantee rg is installed in CI.
+    #[tokio::test]
+    async fn test_parse_ripgrep_json_truncation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = CodeSearchService::new(tmp.path().to_str().unwrap()).unwrap();
+
+        // Build 5 synthetic match lines for a max_results of 3
+        let mut json = String::new();
+        for i in 1..=5u64 {
+            json.push_str(&format!(
+                r#"{{"type":"match","data":{{"path":{{"text":"{}/file.rs"}},"line_number":{},"lines":{{"text":"fn foo() {{\n"}},"submatches":[]}}}}
+"#,
+                tmp.path().display(),
+                i
+            ));
+        }
+
+        let max_results = 3;
+        let mut matches = service.parse_ripgrep_json(&json);
+        let truncated = matches.len() > max_results;
+        if truncated {
+            matches.truncate(max_results);
+        }
+
+        assert!(truncated, "expected truncated=true");
+        assert_eq!(matches.len(), max_results);
     }
 }
