@@ -852,11 +852,17 @@ impl ChatView {
         }
     }
 
-    /// Check if we're awaiting a response (streaming message with no content yet)
+    /// Check if we're awaiting a response (streaming message with no content yet
+    /// and no tool calls in progress)
     fn is_awaiting_response(&self) -> bool {
-        self.messages
-            .last()
-            .is_some_and(|msg| msg.is_streaming && msg.content.is_empty())
+        self.messages.last().is_some_and(|msg| {
+            msg.is_streaming
+                && msg.content.is_empty()
+                && !msg
+                    .live_trace
+                    .as_ref()
+                    .is_some_and(|trace| trace.has_items())
+        })
     }
 
     /// Render loading skeleton indicator
@@ -1013,8 +1019,16 @@ impl Render for ChatView {
                                             .iter()
                                             .enumerate()
                                             .filter(|(_, msg)| {
-                                                // Skip empty streaming messages (we show skeleton instead)
-                                                !(msg.is_streaming && msg.content.is_empty())
+                                                // Skip empty streaming messages that have no
+                                                // tool calls yet (we show skeleton instead).
+                                                // Once tool calls arrive the message must be
+                                                // visible so the trace/approval bar is shown.
+                                                !(msg.is_streaming
+                                                    && msg.content.is_empty()
+                                                    && !msg
+                                                        .live_trace
+                                                        .as_ref()
+                                                        .is_some_and(|trace| trace.has_items()))
                                             })
                                             .map(|(index, msg)| {
                                                 let entity_clone = chat_view_entity.clone();

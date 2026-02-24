@@ -47,18 +47,21 @@ pub fn update_or_create_provider(cx: &mut App, provider_type: ProviderType, api_
 
 /// Update or create Azure OpenAI provider (requires API key and endpoint URL)
 pub fn update_or_create_azure(cx: &mut App, api_key: String, endpoint_url: String) {
-    // Check whether a complete record already exists on disk before mutating.
-    // If so, any update (including clearing a field) must be persisted.
-    let was_complete = cx
+    // Read current Azure auth method and whether a complete record already exists.
+    // "Complete" for Azure means: has endpoint AND (has API key OR uses Entra ID),
+    // matching the same logic used in configured_providers().
+    let (uses_entra_id, was_complete) = cx
         .global::<ProviderModel>()
         .providers()
         .iter()
         .find(|p| p.provider_type == ProviderType::AzureOpenAI)
         .map(|p| {
-            p.api_key.as_ref().is_some_and(|k| !k.is_empty())
-                && p.base_url.as_ref().is_some_and(|u| !u.is_empty())
+            let has_endpoint = p.base_url.as_ref().is_some_and(|u| !u.is_empty());
+            let has_api_key = p.api_key.as_ref().is_some_and(|k| !k.is_empty());
+            let has_entra_id = p.azure_auth_method() == AzureAuthMethod::EntraId;
+            (has_entra_id, has_endpoint && (has_api_key || has_entra_id))
         })
-        .unwrap_or(false);
+        .unwrap_or((false, false));
 
     // 1. Always update in-memory state so each field round-trips correctly via
     //    the view's read callbacks (azure_api_key / azure_endpoint). Without
@@ -94,10 +97,15 @@ pub fn update_or_create_azure(cx: &mut App, api_key: String, endpoint_url: Strin
         model.add_provider(config);
     }
 
-    // 2. Only persist when both fields are now present, or when updating a
-    //    previously-complete record (e.g. user is clearing/changing a field).
-    let both_set = !api_key.is_empty() && !endpoint_url.is_empty();
-    let should_save = both_set || was_complete;
+    // 2. Only persist when the configuration is now complete, or when updating
+    //    a previously-complete record (e.g. user is clearing/changing a field).
+    //    With Entra ID auth, only endpoint_url is required (no API key needed).
+    let is_complete = if uses_entra_id {
+        !endpoint_url.is_empty()
+    } else {
+        !api_key.is_empty() && !endpoint_url.is_empty()
+    };
+    let should_save = is_complete || was_complete;
 
     // 3. Refresh UI immediately
     cx.refresh_windows();

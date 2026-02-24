@@ -37,6 +37,10 @@ pub struct ExecutionSettingsModel {
     /// Zero-configuration web access without requiring an MCP fetch server.
     #[serde(default = "default_true")]
     pub fetch_enabled: bool,
+    /// Enable git integration tools (status, diff, log, branch, commit).
+    /// Requires workspace_dir to be set and the workspace to be a git repository.
+    #[serde(default)]
+    pub git_enabled: bool,
     /// Maximum execution time in seconds
     pub timeout_seconds: u32,
     /// Maximum output size in bytes (prevents memory exhaustion)
@@ -59,6 +63,7 @@ impl Default for ExecutionSettingsModel {
             filesystem_write_enabled: true, // Enabled by default when workspace is set
             mcp_service_tool_enabled: false,
             fetch_enabled: true, // Enabled by default for zero-config web access
+            git_enabled: false,  // Opt-in: requires workspace with git repo
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
