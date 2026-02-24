@@ -758,20 +758,31 @@ impl ChatView {
                     let assistant_msg =
                         super::message_types::AssistantMessage::from_rig_content(content);
 
-                    // OPTIMIZATION: Store raw trace JSON for lazy deserialization
-                    // Only deserialize when user expands the trace view
                     let raw_trace_json = traces.get(idx).and_then(|t| t.clone());
+
+                    // Eagerly create trace view from persisted JSON so tool traces
+                    // are visible when reopening a conversation.
+                    let system_trace_view = raw_trace_json.as_ref().and_then(|trace_json| {
+                        serde_json::from_value::<super::message_types::SystemTrace>(
+                            trace_json.clone(),
+                        )
+                        .ok()
+                        .filter(|trace| trace.has_items())
+                        .map(|trace| {
+                            cx.new(|_cx| super::trace_components::SystemTraceView::new(trace))
+                        })
+                    });
 
                     if !assistant_msg.text.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::Assistant,
                             content: assistant_msg.text.clone(),
                             is_streaming: false,
-                            system_trace_view: None, // Will be created on-demand when expanded
+                            system_trace_view,
                             live_trace: None,
                             is_markdown: true,
                             attachments: Vec::new(),
-                            raw_trace_json, // Store raw JSON instead of deserializing
+                            raw_trace_json,
                         });
                     }
                 }
