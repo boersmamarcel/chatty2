@@ -451,6 +451,15 @@ mod tests {
             .await
             .unwrap();
 
+        // Disable commit signing so tests work in environments with
+        // global gpgsign enabled (e.g. CI with signing servers).
+        tokio::process::Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(path)
+            .output()
+            .await
+            .unwrap();
+
         let service = GitService::new(path).await.unwrap();
         (tmp, service)
     }
