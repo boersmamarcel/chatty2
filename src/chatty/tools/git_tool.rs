@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::chatty::models::execution_approval_store::{
-    ApprovalDecision, ExecutionApprovalRequest, PendingApprovals,
+    PendingApprovals, request_execution_approval,
 };
 use crate::chatty::services::git_service::{
     GitAddOutput, GitCommitOutput, GitLogEntry, GitService, GitStatusOutput,
@@ -19,81 +19,13 @@ pub enum GitToolError {
     GitError(#[from] anyhow::Error),
 }
 
-// ── Approval helper ─────────────────────────────────────────────────────────
-
-/// Request user approval for a git write operation.
-///
-/// Follows the same pattern as shell_tool.rs approval flow.
-async fn request_git_approval(
-    pending_approvals: &PendingApprovals,
-    approval_mode: &ApprovalMode,
-    description: &str,
-) -> anyhow::Result<bool> {
-    match approval_mode {
-        ApprovalMode::AutoApproveAll => Ok(true),
-        // Git operations are never sandboxed, so AutoApproveSandboxed behaves like AlwaysAsk
-        ApprovalMode::AutoApproveSandboxed | ApprovalMode::AlwaysAsk => {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let request_id = uuid::Uuid::new_v4().to_string();
-
-            let request = ExecutionApprovalRequest {
-                id: request_id.clone(),
-                command: format!("[git] {}", description),
-                is_sandboxed: false,
-                created_at: std::time::SystemTime::now(),
-                responder: tx,
-            };
-
-            {
-                let mut pending = pending_approvals.lock().unwrap();
-                pending.insert(request_id.clone(), request);
-            }
-
-            crate::chatty::models::execution_approval_store::notify_approval_via_global(
-                request_id.clone(),
-                format!("[git] {}", description),
-                false,
-            );
-
-            match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-                Ok(Ok(ApprovalDecision::Approved)) => Ok(true),
-                Ok(Ok(ApprovalDecision::Denied)) => Ok(false),
-                Ok(Err(_)) => Err(anyhow::anyhow!("Approval channel closed")),
-                Err(_) => {
-                    let mut pending = pending_approvals.lock().unwrap();
-                    pending.remove(&request_id);
-                    Err(anyhow::anyhow!("Approval timeout (5 minutes)"))
-                }
-            }
-        }
-    }
-}
-
 // ── GitStatusTool ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
 pub struct GitStatusArgs {}
 
-#[derive(Debug, Serialize)]
-pub struct GitStatusToolOutput {
-    pub branch: String,
-    pub staged: Vec<String>,
-    pub modified: Vec<String>,
-    pub untracked: Vec<String>,
-    pub raw: String,
-}
-
-impl From<GitStatusOutput> for GitStatusToolOutput {
-    fn from(s: GitStatusOutput) -> Self {
-        Self {
-            branch: s.branch,
-            staged: s.staged,
-            modified: s.modified,
-            untracked: s.untracked,
-            raw: s.raw,
-        }
-    }
-}
+// Service output types are reused directly as tool output (same as GitLogEntry).
+// If tool-specific formatting diverges in the future, introduce a wrapper then.
 
 /// Check the current status of the git repository.
 #[derive(Clone)]
@@ -111,7 +43,7 @@ impl Tool for GitStatusTool {
     const NAME: &'static str = "git_status";
     type Error = GitToolError;
     type Args = GitStatusArgs;
-    type Output = GitStatusToolOutput;
+    type Output = GitStatusOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -131,7 +63,7 @@ impl Tool for GitStatusTool {
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
         tracing::debug!("Checking git status");
         let status = self.service.status().await?;
-        Ok(status.into())
+        Ok(status)
     }
 }
 
@@ -275,21 +207,6 @@ pub struct GitAddArgs {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct GitAddToolOutput {
-    pub staged_files: Vec<String>,
-    pub message: String,
-}
-
-impl From<GitAddOutput> for GitAddToolOutput {
-    fn from(o: GitAddOutput) -> Self {
-        Self {
-            staged_files: o.staged_files,
-            message: o.message,
-        }
-    }
-}
-
 /// Stage files for the next commit.
 #[derive(Clone)]
 pub struct GitAddTool {
@@ -316,7 +233,7 @@ impl Tool for GitAddTool {
     const NAME: &'static str = "git_add";
     type Error = GitToolError;
     type Args = GitAddArgs;
-    type Output = GitAddToolOutput;
+    type Output = GitAddOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -342,10 +259,11 @@ impl Tool for GitAddTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let file_list = args.paths.join(", ");
-        let approved = request_git_approval(
+        let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,
-            &format!("stage files: {}", file_list),
+            &format!("[git] stage files: {}", file_list),
+            false,
         )
         .await?;
 
@@ -357,7 +275,7 @@ impl Tool for GitAddTool {
 
         tracing::debug!(paths = ?args.paths, "Staging files");
         let result = self.service.add(&args.paths).await?;
-        Ok(result.into())
+        Ok(result)
     }
 }
 
@@ -424,10 +342,11 @@ impl Tool for GitCreateBranchTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let approved = request_git_approval(
+        let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,
-            &format!("create branch '{}'", args.name),
+            &format!("[git] create branch '{}'", args.name),
+            false,
         )
         .await?;
 
@@ -509,10 +428,11 @@ impl Tool for GitSwitchBranchTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let approved = request_git_approval(
+        let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,
-            &format!("switch to branch '{}'", args.name),
+            &format!("[git] switch to branch '{}'", args.name),
+            false,
         )
         .await?;
 
@@ -537,23 +457,6 @@ impl Tool for GitSwitchBranchTool {
 pub struct GitCommitArgs {
     /// The commit message.
     pub message: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GitCommitToolOutput {
-    pub hash: String,
-    pub message: String,
-    pub summary: String,
-}
-
-impl From<GitCommitOutput> for GitCommitToolOutput {
-    fn from(c: GitCommitOutput) -> Self {
-        Self {
-            hash: c.hash,
-            message: c.message,
-            summary: c.summary,
-        }
-    }
 }
 
 /// Commit staged changes with a message.
@@ -582,7 +485,7 @@ impl Tool for GitCommitTool {
     const NAME: &'static str = "git_commit";
     type Error = GitToolError;
     type Args = GitCommitArgs;
-    type Output = GitCommitToolOutput;
+    type Output = GitCommitOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -606,10 +509,11 @@ impl Tool for GitCommitTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let approved = request_git_approval(
+        let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,
-            &format!("commit with message: \"{}\"", args.message),
+            &format!("[git] commit with message: \"{}\"", args.message),
+            false,
         )
         .await?;
 
@@ -621,6 +525,6 @@ impl Tool for GitCommitTool {
 
         tracing::debug!(message = %args.message, "Creating git commit");
         let result = self.service.commit(&args.message).await?;
-        Ok(result.into())
+        Ok(result)
     }
 }

@@ -268,15 +268,12 @@ impl GitService {
             return Err(anyhow!("At least one path is required"));
         }
 
-        // Validate every path is within the workspace
+        // Validate every path is within the workspace.
+        // Uses PathValidator::validate() which canonicalizes both the path and
+        // the workspace root, so symlinked roots (e.g. /tmp → /private/tmp on
+        // macOS) are handled correctly.
         for p in paths {
-            let resolved = self.workspace_root.join(p);
-            let canonical = tokio::fs::canonicalize(&resolved)
-                .await
-                .map_err(|e| anyhow!("Path '{}' does not exist or cannot be resolved: {}", p, e))?;
-            if !canonical.starts_with(&self.workspace_root) {
-                return Err(anyhow!("Path '{}' is outside the workspace boundary", p));
-            }
+            self.validator.validate(p).await?;
         }
 
         let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
@@ -350,9 +347,9 @@ impl GitService {
         })
     }
 
-    /// Validate a branch name for safety.
+    /// Validate a branch name per `git check-ref-format` rules.
     ///
-    /// Rejects names containing shell metacharacters or git-reserved sequences.
+    /// See <https://git-scm.com/docs/git-check-ref-format> for the full spec.
     fn validate_branch_name(name: &str) -> Result<()> {
         if name.is_empty() {
             return Err(anyhow!("Branch name cannot be empty"));
@@ -360,8 +357,12 @@ impl GitService {
         if name.len() > 255 {
             return Err(anyhow!("Branch name too long (max 255 characters)"));
         }
-        // Reject shell metacharacters and git-reserved sequences
-        let forbidden = ['~', '^', ':', '\\', ' ', '\t', '\n', '\x7f'];
+
+        // Forbidden characters: git-reserved + shell metacharacters + glob chars
+        let forbidden = [
+            '~', '^', ':', '\\', ' ', '\t', '\n', '\x7f', // original set
+            '?', '*', '[', // glob characters rejected by git
+        ];
         for ch in &forbidden {
             if name.contains(*ch) {
                 return Err(anyhow!(
@@ -370,14 +371,28 @@ impl GitService {
                 ));
             }
         }
+        // No ASCII control characters (0x00–0x1F, 0x7F)
+        if name.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return Err(anyhow!("Branch name cannot contain control characters"));
+        }
+
+        // Sequence rules
         if name.contains("..") {
             return Err(anyhow!("Branch name cannot contain '..'"));
         }
         if name.contains("@{") {
             return Err(anyhow!("Branch name cannot contain '@{{'"));
         }
+        if name.contains("//") {
+            return Err(anyhow!("Branch name cannot contain consecutive slashes"));
+        }
+
+        // Start/end rules
         if name.starts_with('-') {
             return Err(anyhow!("Branch name cannot start with '-'"));
+        }
+        if name.starts_with('/') || name.ends_with('/') {
+            return Err(anyhow!("Branch name cannot start or end with '/'"));
         }
         if name.ends_with('.') {
             return Err(anyhow!("Branch name cannot end with '.'"));
@@ -385,6 +400,21 @@ impl GitService {
         if name.ends_with(".lock") {
             return Err(anyhow!("Branch name cannot end with '.lock'"));
         }
+
+        // No path component can start with '.' (e.g. "feat/.hidden" is invalid)
+        for component in name.split('/') {
+            if component.starts_with('.') {
+                return Err(anyhow!(
+                    "Branch name component cannot start with '.': '{}'",
+                    component
+                ));
+            }
+            if component.is_empty() {
+                // Already caught by the "//" check, but be defensive
+                return Err(anyhow!("Branch name cannot contain empty path components"));
+            }
+        }
+
         Ok(())
     }
 }
@@ -681,6 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_branch_name_invalid() {
+        // Original forbidden characters
         assert!(GitService::validate_branch_name("").is_err());
         assert!(GitService::validate_branch_name("branch name").is_err());
         assert!(GitService::validate_branch_name("branch..name").is_err());
@@ -689,5 +720,21 @@ mod tests {
         assert!(GitService::validate_branch_name("branch.").is_err());
         assert!(GitService::validate_branch_name("branch~1").is_err());
         assert!(GitService::validate_branch_name("branch^2").is_err());
+
+        // Glob characters
+        assert!(GitService::validate_branch_name("branch*").is_err());
+        assert!(GitService::validate_branch_name("branch?name").is_err());
+        assert!(GitService::validate_branch_name("branch[0]").is_err());
+
+        // Consecutive slashes
+        assert!(GitService::validate_branch_name("feat//branch").is_err());
+
+        // Leading/trailing slash
+        assert!(GitService::validate_branch_name("/branch").is_err());
+        assert!(GitService::validate_branch_name("branch/").is_err());
+
+        // Dot-prefixed path component
+        assert!(GitService::validate_branch_name("feat/.hidden").is_err());
+        assert!(GitService::validate_branch_name(".branch").is_err());
     }
 }

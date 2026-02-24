@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::chatty::models::execution_approval_store::{
-    ApprovalDecision, ExecutionApprovalRequest, PendingApprovals,
+    PendingApprovals, request_execution_approval,
 };
 use crate::chatty::services::shell_service::{ShellOutput, ShellSession, ShellStatus};
-use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
+use crate::settings::models::execution_settings::ExecutionSettingsModel;
 
 // ── Error types ──────────────────────────────────────────────────────────────
 
@@ -64,50 +64,13 @@ impl ShellExecuteTool {
 
     async fn request_approval(&self, command: &str) -> anyhow::Result<bool> {
         let is_sandboxed = self.session.is_sandboxed().await;
-
-        match self.settings.approval_mode {
-            ApprovalMode::AutoApproveAll => Ok(true),
-            ApprovalMode::AutoApproveSandboxed if is_sandboxed => {
-                tracing::debug!(
-                    "Auto-approving sandboxed shell command (AutoApproveSandboxed mode)"
-                );
-                Ok(true)
-            }
-            ApprovalMode::AutoApproveSandboxed | ApprovalMode::AlwaysAsk => {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let request_id = uuid::Uuid::new_v4().to_string();
-
-                let request = ExecutionApprovalRequest {
-                    id: request_id.clone(),
-                    command: format!("[shell] {}", command),
-                    is_sandboxed,
-                    created_at: std::time::SystemTime::now(),
-                    responder: tx,
-                };
-
-                {
-                    let mut pending = self.pending_approvals.lock().unwrap();
-                    pending.insert(request_id.clone(), request);
-                }
-
-                crate::chatty::models::execution_approval_store::notify_approval_via_global(
-                    request_id.clone(),
-                    format!("[shell] {}", command),
-                    is_sandboxed,
-                );
-
-                match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-                    Ok(Ok(ApprovalDecision::Approved)) => Ok(true),
-                    Ok(Ok(ApprovalDecision::Denied)) => Ok(false),
-                    Ok(Err(_)) => Err(anyhow::anyhow!("Approval channel closed")),
-                    Err(_) => {
-                        let mut pending = self.pending_approvals.lock().unwrap();
-                        pending.remove(&request_id);
-                        Err(anyhow::anyhow!("Approval timeout (5 minutes)"))
-                    }
-                }
-            }
-        }
+        request_execution_approval(
+            &self.pending_approvals,
+            &self.settings.approval_mode,
+            &format!("[shell] {}", command),
+            is_sandboxed,
+        )
+        .await
     }
 }
 
