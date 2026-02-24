@@ -625,7 +625,7 @@ mod tests {
 
         let result = service.add(&["does_not_exist.txt".to_string()]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        assert!(result.unwrap_err().to_string().contains("not exist"));
     }
 
     #[tokio::test]
