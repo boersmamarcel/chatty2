@@ -7,13 +7,15 @@ use std::sync::OnceLock;
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::services::git_service::GitService;
+use crate::chatty::services::search_service::CodeSearchService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditMcpTool, FetchTool, GitAddTool, GitCommitTool, GitCreateBranchTool,
-    GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool,
-    ListMcpTool, ListToolsTool, MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool,
-    ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
+    DeleteMcpTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool,
+    GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
+    GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
+    MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, SearchCodeTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -55,6 +57,9 @@ type GitTools = (
     GitSwitchBranchTool,
     GitCommitTool,
 );
+
+/// Code search tool set (search_code, find_files, find_definition)
+type SearchTools = (SearchCodeTool, FindFilesTool, FindDefinitionTool);
 
 /// All four MCP management tools bundled together.
 ///
@@ -185,6 +190,7 @@ fn collect_tools(
     fetch_tool: Option<FetchTool>,
     shell_tools: Option<ShellTools>,
     git_tools: Option<GitTools>,
+    search_tools: Option<SearchTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -233,6 +239,11 @@ fn collect_tools(
         tools.push(Box::new(create_branch));
         tools.push(Box::new(switch_branch));
         tools.push(Box::new(commit));
+    }
+    if let Some((sc, ff, fd)) = search_tools {
+        tools.push(Box::new(sc));
+        tools.push(Box::new(ff));
+        tools.push(Box::new(fd));
     }
     tools
 }
@@ -329,6 +340,7 @@ impl AgentClient {
 
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
+        let mut search_tools: Option<SearchTools> = None;
         let (fs_read_tools, fs_write_tools): (Option<FsReadTools>, Option<FsWriteTools>) =
             match exec_settings
                 .as_ref()
@@ -358,6 +370,22 @@ impl AgentClient {
                                         supports_images,
                                         supports_pdf,
                                     ));
+                                }
+                            }
+
+                            // Create code search tools alongside filesystem read tools
+                            match CodeSearchService::new(workspace_dir) {
+                                Ok(search_service) => {
+                                    let search_service = std::sync::Arc::new(search_service);
+                                    tracing::info!(workspace = %workspace_dir, "Code search tools enabled");
+                                    search_tools = Some((
+                                        SearchCodeTool::new(search_service.clone()),
+                                        FindFilesTool::new(search_service.clone()),
+                                        FindDefinitionTool::new(search_service.clone()),
+                                    ));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize code search tools");
                                 }
                             }
 
@@ -587,6 +615,7 @@ impl AgentClient {
             fetch_tool.is_some(),
             shell_tools.is_some(),
             git_tools.is_some(),
+            search_tools.is_some(),
             mcp_tool_info,
         );
 
@@ -615,6 +644,7 @@ impl AgentClient {
                     fetch_tool.clone(),
                     shell_tools,
                     git_tools,
+                    search_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -657,6 +687,7 @@ impl AgentClient {
                     fetch_tool.clone(),
                     shell_tools,
                     git_tools,
+                    search_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -683,6 +714,7 @@ impl AgentClient {
                     fetch_tool.clone(),
                     shell_tools,
                     git_tools,
+                    search_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -712,6 +744,7 @@ impl AgentClient {
                     fetch_tool.clone(),
                     shell_tools,
                     git_tools,
+                    search_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -740,6 +773,7 @@ impl AgentClient {
                     fetch_tool.clone(),
                     shell_tools,
                     git_tools,
+                    search_tools,
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -886,6 +920,7 @@ impl AgentClient {
                     fetch_tool.clone(),
                     shell_tools,
                     git_tools,
+                    search_tools,
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);

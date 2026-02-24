@@ -48,6 +48,7 @@ impl ListToolsTool {
         has_fetch: bool,
         has_shell: bool,
         has_git: bool,
+        has_search: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -214,6 +215,26 @@ impl ListToolsTool {
             ]);
         }
 
+        if has_search {
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "search_code".to_string(),
+                    description: "Search for a text pattern or regex in the workspace using ripgrep. Returns matching lines with file paths and line numbers. Requires 'rg' (ripgrep) to be installed.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "find_files".to_string(),
+                    description: "Find files matching a glob pattern within the workspace. Returns matching file paths relative to the workspace root.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "find_definition".to_string(),
+                    description: "Find definitions of a symbol (function, class, struct, etc.) in the workspace. Searches Rust, JavaScript/TypeScript, and Python files.".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -231,7 +252,7 @@ impl ListToolsTool {
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(false, false, false, false, false, false, Vec::new())
+        Self::new_with_config(false, false, false, false, false, false, false, Vec::new())
     }
 }
 
