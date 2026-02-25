@@ -18,6 +18,7 @@ use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
+use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::{GlobalMcpNotifier, McpNotifier, McpNotifierEvent};
@@ -1448,7 +1449,7 @@ impl ChattyApp {
                 }
                 let max_agent_turns = cx
                     .update(|cx| {
-                        cx.global::<crate::settings::models::execution_settings::ExecutionSettingsModel>()
+                        cx.global::<ExecutionSettingsModel>()
                             .max_agent_turns as usize
                     })
                     .unwrap_or(10);

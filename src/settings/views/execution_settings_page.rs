@@ -171,8 +171,8 @@ pub fn execution_settings_page() -> SettingPage {
                     .description("Optional directory path for file operations. Leave empty to disable filesystem tools."),
                 ]),
             SettingGroup::new()
-                .title("Execution Limits")
-                .description("Resource limits for code execution")
+                .title("Agent Settings")
+                .description("Configure agent behavior for multi-step interactions")
                 .items(vec![
                     SettingItem::new(
                         "Max Agent Turns",
@@ -187,7 +187,7 @@ pub fn execution_settings_page() -> SettingPage {
                             },
                             |val: f64, cx: &mut App| {
                                 execution_settings_controller::set_max_agent_turns(
-                                    val as u32, cx,
+                                    val.clamp(1.0, 100.0) as u32, cx,
                                 );
                             },
                         )
@@ -195,8 +195,13 @@ pub fn execution_settings_page() -> SettingPage {
                     )
                     .description(
                         "Maximum number of tool-call rounds the agent can perform per response. \
-                         Higher values allow the agent to complete more complex multi-step tasks.",
+                         Applies to all agentic interactions, including code execution and MCP tool calls.",
                     ),
+                ]),
+            SettingGroup::new()
+                .title("Execution Limits")
+                .description("Resource limits for code execution (configured in settings file)")
+                .items(vec![
                     SettingItem::new(
                         "Timeout",
                         SettingField::render(|_options, _window, cx| {
