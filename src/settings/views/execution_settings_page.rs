@@ -200,31 +200,51 @@ pub fn execution_settings_page() -> SettingPage {
                 ]),
             SettingGroup::new()
                 .title("Execution Limits")
-                .description("Resource limits for code execution (configured in settings file)")
+                .description("Resource limits for code execution")
                 .items(vec![
                     SettingItem::new(
-                        "Timeout",
-                        SettingField::render(|_options, _window, cx| {
-                            let timeout = cx.global::<ExecutionSettingsModel>().timeout_seconds;
-                            div()
-                                .child(format!("{} seconds", timeout))
-                                .text_color(cx.theme().muted_foreground)
-                                .into_any_element()
-                        }),
+                        "Timeout (seconds)",
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 1.0,
+                                max: 600.0,
+                                ..Default::default()
+                            },
+                            |cx: &App| {
+                                cx.global::<ExecutionSettingsModel>().timeout_seconds as f64
+                            },
+                            |val: f64, cx: &mut App| {
+                                execution_settings_controller::set_timeout_seconds(
+                                    val.clamp(1.0, 600.0) as u32,
+                                    cx,
+                                );
+                            },
+                        )
+                        .default_value(30.0),
                     )
-                    .description("Maximum execution time for commands"),
+                    .description("Maximum execution time for commands (1–600 seconds)"),
                     SettingItem::new(
-                        "Max Output",
-                        SettingField::render(|_options, _window, cx| {
-                            let max_bytes = cx.global::<ExecutionSettingsModel>().max_output_bytes;
-                            let kb = max_bytes / 1024;
-                            div()
-                                .child(format!("{} KB", kb))
-                                .text_color(cx.theme().muted_foreground)
-                                .into_any_element()
-                        }),
+                        "Max Output (KB)",
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 1.0,
+                                max: 1024.0,
+                                ..Default::default()
+                            },
+                            |cx: &App| {
+                                (cx.global::<ExecutionSettingsModel>().max_output_bytes / 1024) as f64
+                            },
+                            |val: f64, cx: &mut App| {
+                                let kb = val.clamp(1.0, 1024.0) as usize;
+                                execution_settings_controller::set_max_output_bytes(
+                                    kb * 1024,
+                                    cx,
+                                );
+                            },
+                        )
+                        .default_value(50.0),
                     )
-                    .description("Maximum output size to prevent memory exhaustion"),
+                    .description("Maximum output size to prevent memory exhaustion (1–1024 KB)"),
                     SettingItem::new(
                         "Network Isolation",
                         SettingField::render(|_options, _window, cx| {
