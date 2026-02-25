@@ -215,8 +215,7 @@ pub fn execution_settings_page() -> SettingPage {
                             },
                             |val: f64, cx: &mut App| {
                                 execution_settings_controller::set_timeout_seconds(
-                                    val.clamp(1.0, 600.0) as u32,
-                                    cx,
+                                    val as u32, cx,
                                 );
                             },
                         )
@@ -232,13 +231,11 @@ pub fn execution_settings_page() -> SettingPage {
                                 ..Default::default()
                             },
                             |cx: &App| {
-                                (cx.global::<ExecutionSettingsModel>().max_output_bytes / 1024) as f64
+                                cx.global::<ExecutionSettingsModel>().max_output_bytes as f64 / 1024.0
                             },
                             |val: f64, cx: &mut App| {
-                                let kb = val.clamp(1.0, 1024.0) as usize;
                                 execution_settings_controller::set_max_output_bytes(
-                                    kb * 1024,
-                                    cx,
+                                    (val * 1024.0) as usize, cx,
                                 );
                             },
                         )

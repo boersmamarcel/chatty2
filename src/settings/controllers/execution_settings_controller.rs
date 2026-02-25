@@ -229,8 +229,11 @@ pub fn toggle_git(cx: &mut App) {
     .detach();
 }
 
-/// Update the shell timeout in seconds and persist to disk
+/// Update the shell timeout in seconds and persist to disk.
+/// Clamps the value to 1–600 seconds.
 pub fn set_timeout_seconds(seconds: u32, cx: &mut App) {
+    let seconds = seconds.clamp(1, 600);
+
     // 1. Apply update immediately
     info!(seconds, "Setting shell timeout");
     cx.global_mut::<ExecutionSettingsModel>().timeout_seconds = seconds;
@@ -251,8 +254,11 @@ pub fn set_timeout_seconds(seconds: u32, cx: &mut App) {
     .detach();
 }
 
-/// Update the maximum output size in bytes and persist to disk
+/// Update the maximum output size in bytes and persist to disk.
+/// Clamps the value to 1 KB – 1024 KB (1024–1048576 bytes).
 pub fn set_max_output_bytes(bytes: usize, cx: &mut App) {
+    let bytes = bytes.clamp(1024, 1024 * 1024);
+
     // 1. Apply update immediately
     info!(bytes, "Setting max output bytes");
     cx.global_mut::<ExecutionSettingsModel>().max_output_bytes = bytes;
