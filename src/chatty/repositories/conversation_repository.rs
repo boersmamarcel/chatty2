@@ -17,6 +17,11 @@ fn default_empty_attachments() -> String {
     "[]".to_string()
 }
 
+/// Default empty message timestamps for backward compatibility
+fn default_empty_timestamps() -> String {
+    "[]".to_string()
+}
+
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationData {
@@ -29,8 +34,10 @@ pub struct ConversationData {
     pub token_usage: String, // JSON-serialized ConversationTokenUsage
     #[serde(default = "default_empty_attachments")]
     pub attachment_paths: String, // JSON-serialized Vec<Vec<String>> (per-message file paths)
-    pub created_at: i64,         // Unix timestamp
-    pub updated_at: i64,         // Unix timestamp
+    #[serde(default = "default_empty_timestamps")]
+    pub message_timestamps: String, // JSON-serialized Vec<Option<i64>> (per-message Unix timestamps)
+    pub created_at: i64, // Unix timestamp
+    pub updated_at: i64, // Unix timestamp
 }
 
 /// Repository trait for conversation persistence

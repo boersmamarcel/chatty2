@@ -679,6 +679,7 @@ impl ChattyApp {
                         system_traces: "[]".to_string(),
                         token_usage: "{}".to_string(),
                         attachment_paths: "[]".to_string(),
+                        message_timestamps: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -1146,6 +1147,9 @@ impl ChattyApp {
                                             .unwrap_or_else(|_| "{}".to_string()),
                                         attachment_paths: conv
                                             .serialize_attachment_paths()
+                                            .unwrap_or_else(|_| "[]".to_string()),
+                                        message_timestamps: conv
+                                            .serialize_message_timestamps()
                                             .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
@@ -2083,6 +2087,9 @@ impl ChattyApp {
                         .unwrap_or_else(|_| "{}".to_string()),
                     attachment_paths: conv
                         .serialize_attachment_paths()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    message_timestamps: conv
+                        .serialize_message_timestamps()
                         .unwrap_or_else(|_| "[]".to_string()),
                     created_at: conv
                         .created_at()

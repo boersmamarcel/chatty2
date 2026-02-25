@@ -24,6 +24,7 @@ pub struct Conversation {
     history: Vec<Message>,
     system_traces: Vec<Option<serde_json::Value>>,
     attachment_paths: Vec<Vec<PathBuf>>,
+    message_timestamps: Vec<Option<i64>>,
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
@@ -92,6 +93,7 @@ impl Conversation {
             history: Vec::new(),
             system_traces: Vec::new(),
             attachment_paths: Vec::new(),
+            message_timestamps: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
@@ -156,6 +158,10 @@ impl Conversation {
         let attachment_paths =
             Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
 
+        // Deserialize message timestamps (with fallback to empty if not present)
+        let message_timestamps =
+            Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
+
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
             .unwrap_or_else(|_| ConversationTokenUsage::new());
@@ -172,6 +178,7 @@ impl Conversation {
             history,
             system_traces,
             attachment_paths,
+            message_timestamps,
             token_usage,
             created_at,
             updated_at,
@@ -187,10 +194,13 @@ impl Conversation {
         message: Message,
         attachments: Vec<PathBuf>,
     ) {
+        let now = SystemTime::now();
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
         self.history.push(message);
         self.system_traces.push(None);
         self.attachment_paths.push(attachments);
-        self.updated_at = SystemTime::now();
+        self.message_timestamps.push(Some(timestamp));
+        self.updated_at = now;
     }
 
     /// Finalize response after stream is consumed
@@ -202,9 +212,12 @@ impl Conversation {
             })),
         };
 
+        let now = SystemTime::now();
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
         self.history.push(assistant_message);
         self.attachment_paths.push(Vec::new());
-        self.updated_at = SystemTime::now();
+        self.message_timestamps.push(Some(timestamp));
+        self.updated_at = now;
     }
 
     /// Add a trace for the most recent message
@@ -293,6 +306,23 @@ impl Conversation {
     /// Deserialize attachment paths from JSON string
     pub fn deserialize_attachment_paths(json: &str) -> Result<Vec<Vec<PathBuf>>> {
         serde_json::from_str(json).context("Failed to deserialize attachment paths")
+    }
+
+    /// Get message timestamps (parallel to history)
+    #[allow(dead_code)]
+    pub fn message_timestamps(&self) -> &[Option<i64>] {
+        &self.message_timestamps
+    }
+
+    /// Serialize message timestamps to JSON string
+    pub fn serialize_message_timestamps(&self) -> Result<String> {
+        serde_json::to_string(&self.message_timestamps)
+            .context("Failed to serialize message timestamps")
+    }
+
+    /// Deserialize message timestamps from JSON string
+    pub fn deserialize_message_timestamps(json: &str) -> Result<Vec<Option<i64>>> {
+        serde_json::from_str(json).context("Failed to deserialize message timestamps")
     }
 
     /// Get the agent

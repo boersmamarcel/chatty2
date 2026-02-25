@@ -95,6 +95,8 @@ mod tests {
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
             token_usage: "{}".to_string(),
+            attachment_paths: "[]".to_string(),
+            message_timestamps: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -118,6 +120,8 @@ mod tests {
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
             token_usage: "{}".to_string(),
+            attachment_paths: "[]".to_string(),
+            message_timestamps: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -140,6 +144,8 @@ mod tests {
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
             token_usage: "{}".to_string(),
+            attachment_paths: "[]".to_string(),
+            message_timestamps: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -151,6 +157,8 @@ mod tests {
             message_history: "[]".to_string(),
             system_traces: "[]".to_string(),
             token_usage: "{}".to_string(),
+            attachment_paths: "[]".to_string(),
+            message_timestamps: "[]".to_string(),
             created_at: 2000,
             updated_at: 2000,
         };
