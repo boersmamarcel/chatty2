@@ -305,6 +305,7 @@ pub async fn stream_prompt(
     contents: Vec<UserContent>,
     approval_rx: Option<mpsc::UnboundedReceiver<ApprovalNotification>>,
     resolution_rx: Option<mpsc::UnboundedReceiver<ApprovalResolution>>,
+    max_agent_turns: usize,
 ) -> Result<(ResponseStream, Message)> {
     let user_message = Message::User {
         content: OneOrMany::many(contents).context("Failed to create message from contents")?,
@@ -317,7 +318,7 @@ pub async fn stream_prompt(
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
-                .multi_turn(10)
+                .multi_turn(max_agent_turns)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -330,7 +331,7 @@ pub async fn stream_prompt(
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
-                .multi_turn(10)
+                .multi_turn(max_agent_turns)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -343,7 +344,7 @@ pub async fn stream_prompt(
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
-                .multi_turn(10)
+                .multi_turn(max_agent_turns)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -356,7 +357,7 @@ pub async fn stream_prompt(
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
-                .multi_turn(10)
+                .multi_turn(max_agent_turns)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -369,7 +370,7 @@ pub async fn stream_prompt(
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
-                .multi_turn(10)
+                .multi_turn(max_agent_turns)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -382,7 +383,7 @@ pub async fn stream_prompt(
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
-                .multi_turn(10)
+                .multi_turn(max_agent_turns)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {

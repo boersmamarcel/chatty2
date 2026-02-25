@@ -5,7 +5,7 @@ use gpui_component::{
     ActiveTheme,
     button::Button,
     menu::{DropdownMenu, PopupMenuItem},
-    setting::{SettingField, SettingGroup, SettingItem, SettingPage},
+    setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
 
 pub fn execution_settings_page() -> SettingPage {
@@ -169,6 +169,34 @@ pub fn execution_settings_page() -> SettingPage {
                         ),
                     )
                     .description("Optional directory path for file operations. Leave empty to disable filesystem tools."),
+                ]),
+            SettingGroup::new()
+                .title("Agent Settings")
+                .description("Configure agent behavior for multi-step interactions")
+                .items(vec![
+                    SettingItem::new(
+                        "Max Agent Turns",
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 1.0,
+                                max: 100.0,
+                                ..Default::default()
+                            },
+                            |cx: &App| {
+                                cx.global::<ExecutionSettingsModel>().max_agent_turns as f64
+                            },
+                            |val: f64, cx: &mut App| {
+                                execution_settings_controller::set_max_agent_turns(
+                                    val.clamp(1.0, 100.0) as u32, cx,
+                                );
+                            },
+                        )
+                        .default_value(10.0),
+                    )
+                    .description(
+                        "Maximum number of tool-call rounds the agent can perform per response. \
+                         Applies to all agentic interactions, including code execution and MCP tool calls.",
+                    ),
                 ]),
             SettingGroup::new()
                 .title("Execution Limits")
