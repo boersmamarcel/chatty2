@@ -231,14 +231,6 @@ impl AssistantMessage {
             is_streaming: false,
         }
     }
-
-    pub fn with_trace(text: String, trace: SystemTrace) -> Self {
-        Self {
-            text,
-            system_trace: Some(trace),
-            is_streaming: false,
-        }
-    }
 }
 
 impl UserMessage {
@@ -279,12 +271,5 @@ impl AssistantMessage {
             .join("\n");
 
         Self::new(text)
-    }
-
-    /// Create an AssistantMessage with a trace from JSON
-    pub fn with_trace_json(text: String, trace_json: &serde_json::Value) -> Option<Self> {
-        serde_json::from_value::<SystemTrace>(trace_json.clone())
-            .ok()
-            .map(|trace| Self::with_trace(text, trace))
     }
 }
