@@ -229,6 +229,28 @@ pub fn toggle_git(cx: &mut App) {
     .detach();
 }
 
+/// Update the maximum number of agentic turns and persist to disk
+pub fn set_max_agent_turns(turns: u32, cx: &mut App) {
+    // 1. Apply update immediately
+    info!(turns, "Setting max agent turns");
+    cx.global_mut::<ExecutionSettingsModel>().max_agent_turns = turns;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately
+    cx.refresh_windows();
+
+    // 4. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle filesystem write tools enabled/disabled and persist to disk
 pub fn toggle_filesystem_write(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)

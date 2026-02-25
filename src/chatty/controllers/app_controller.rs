@@ -1446,8 +1446,15 @@ impl ChattyApp {
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
                     }
                 }
+                let max_agent_turns = cx
+                    .update(|cx| {
+                        cx.global::<crate::settings::models::execution_settings::ExecutionSettingsModel>()
+                            .max_agent_turns as usize
+                    })
+                    .unwrap_or(10);
+
                 let (mut stream, user_message) =
-                    stream_prompt(&agent, &history, contents, Some(approval_rx), Some(resolution_rx)).await?;
+                    stream_prompt(&agent, &history, contents, Some(approval_rx), Some(resolution_rx), max_agent_turns).await?;
 
                 // Update history synchronously with user message
                 cx.update_global::<ConversationsStore, _>(|store, _cx| {

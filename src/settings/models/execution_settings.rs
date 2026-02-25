@@ -47,10 +47,17 @@ pub struct ExecutionSettingsModel {
     pub max_output_bytes: usize,
     /// Enable network isolation in sandbox (when available)
     pub network_isolation: bool,
+    /// Maximum number of agentic turns (tool-call rounds) per response
+    #[serde(default = "default_max_agent_turns")]
+    pub max_agent_turns: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_agent_turns() -> u32 {
+    10
 }
 
 impl Default for ExecutionSettingsModel {
@@ -67,6 +74,7 @@ impl Default for ExecutionSettingsModel {
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
+            max_agent_turns: default_max_agent_turns(),
         }
     }
 }
