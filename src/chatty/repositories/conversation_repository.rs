@@ -22,6 +22,11 @@ fn default_empty_timestamps() -> String {
     "[]".to_string()
 }
 
+/// Default empty message feedback for backward compatibility
+fn default_empty_feedback() -> String {
+    "[]".to_string()
+}
+
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationData {
@@ -36,6 +41,8 @@ pub struct ConversationData {
     pub attachment_paths: String, // JSON-serialized Vec<Vec<String>> (per-message file paths)
     #[serde(default = "default_empty_timestamps")]
     pub message_timestamps: String, // JSON-serialized Vec<Option<i64>> (per-message Unix timestamps)
+    #[serde(default = "default_empty_feedback")]
+    pub message_feedback: String, // JSON-serialized Vec<Option<MessageFeedback>> (per-message feedback)
     pub created_at: i64, // Unix timestamp
     pub updated_at: i64, // Unix timestamp
 }

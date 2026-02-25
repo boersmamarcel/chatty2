@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
@@ -15,6 +16,13 @@ use crate::chatty::tools::PendingArtifacts;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
+/// User feedback signal for an individual assistant message
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MessageFeedback {
+    ThumbsUp,
+    ThumbsDown,
+}
+
 /// A single conversation with an AI agent
 pub struct Conversation {
     id: String,
@@ -25,6 +33,7 @@ pub struct Conversation {
     system_traces: Vec<Option<serde_json::Value>>,
     attachment_paths: Vec<Vec<PathBuf>>,
     message_timestamps: Vec<Option<i64>>,
+    message_feedback: Vec<Option<MessageFeedback>>,
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
@@ -94,6 +103,7 @@ impl Conversation {
             system_traces: Vec::new(),
             attachment_paths: Vec::new(),
             message_timestamps: Vec::new(),
+            message_feedback: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
@@ -162,6 +172,10 @@ impl Conversation {
         let message_timestamps =
             Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
 
+        // Deserialize message feedback (with fallback to empty if not present)
+        let message_feedback =
+            Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
+
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
             .unwrap_or_else(|_| ConversationTokenUsage::new());
@@ -179,6 +193,7 @@ impl Conversation {
             system_traces,
             attachment_paths,
             message_timestamps,
+            message_feedback,
             token_usage,
             created_at,
             updated_at,
@@ -200,6 +215,7 @@ impl Conversation {
         self.system_traces.push(None);
         self.attachment_paths.push(attachments);
         self.message_timestamps.push(Some(timestamp));
+        self.message_feedback.push(None);
         self.updated_at = now;
     }
 
@@ -217,6 +233,7 @@ impl Conversation {
         self.history.push(assistant_message);
         self.attachment_paths.push(Vec::new());
         self.message_timestamps.push(Some(timestamp));
+        self.message_feedback.push(None);
         self.updated_at = now;
     }
 
@@ -323,6 +340,30 @@ impl Conversation {
     /// Deserialize message timestamps from JSON string
     pub fn deserialize_message_timestamps(json: &str) -> Result<Vec<Option<i64>>> {
         serde_json::from_str(json).context("Failed to deserialize message timestamps")
+    }
+
+    /// Get message feedback (parallel to history)
+    pub fn message_feedback(&self) -> &[Option<MessageFeedback>] {
+        &self.message_feedback
+    }
+
+    /// Set feedback for a specific message by index
+    pub fn set_message_feedback(&mut self, index: usize, feedback: Option<MessageFeedback>) {
+        if index < self.message_feedback.len() {
+            self.message_feedback[index] = feedback;
+            self.updated_at = SystemTime::now();
+        }
+    }
+
+    /// Serialize message feedback to JSON string
+    pub fn serialize_message_feedback(&self) -> Result<String> {
+        serde_json::to_string(&self.message_feedback)
+            .context("Failed to serialize message feedback")
+    }
+
+    /// Deserialize message feedback from JSON string
+    pub fn deserialize_message_feedback(json: &str) -> Result<Vec<Option<MessageFeedback>>> {
+        serde_json::from_str(json).context("Failed to deserialize message feedback")
     }
 
     /// Get the agent

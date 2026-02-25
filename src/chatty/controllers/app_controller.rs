@@ -8,14 +8,15 @@ use tracing::{debug, error, info, warn};
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
-    Conversation, ConversationsStore, GlobalStreamManager, StreamChunk, StreamManagerEvent,
-    StreamStatus,
+    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamChunk,
+    StreamManagerEvent, StreamStatus,
 };
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
+use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -237,6 +238,20 @@ impl ChattyApp {
             })
             .detach();
         }
+
+        // SUBSCRIPTION 5: ChatView events — feedback persistence
+        cx.subscribe(
+            &self.chat_view,
+            |app, _chat_view, event: &ChatViewEvent, cx| match event {
+                ChatViewEvent::FeedbackChanged {
+                    history_index,
+                    feedback,
+                } => {
+                    app.handle_feedback_changed(*history_index, feedback.clone(), cx);
+                }
+            },
+        )
+        .detach();
     }
 
     /// Initialize chat input with available models
@@ -680,6 +695,7 @@ impl ChattyApp {
                         token_usage: "{}".to_string(),
                         attachment_paths: "[]".to_string(),
                         message_timestamps: "[]".to_string(),
+                        message_feedback: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -762,11 +778,12 @@ impl ChattyApp {
                             conv.history().to_vec(),
                             conv.system_traces().to_vec(),  // Clones JSON values, not deserialized traces
                             conv.attachment_paths().to_vec(),
+                            conv.message_feedback().to_vec(),
                         )
                     });
 
-                if let Some((history, traces, attachment_paths)) = conversation_data {
-                    view.load_history(&history, &traces, &attachment_paths, cx);
+                if let Some((history, traces, attachment_paths, feedback)) = conversation_data {
+                    view.load_history(&history, &traces, &attachment_paths, &feedback, cx);
                 }
 
                 // Update the selected model and capabilities in the chat input
@@ -1150,6 +1167,9 @@ impl ChattyApp {
                                             .unwrap_or_else(|_| "[]".to_string()),
                                         message_timestamps: conv
                                             .serialize_message_timestamps()
+                                            .unwrap_or_else(|_| "[]".to_string()),
+                                        message_feedback: conv
+                                            .serialize_message_feedback()
                                             .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
@@ -2062,6 +2082,25 @@ impl ChattyApp {
         });
     }
 
+    /// Handle feedback change: update ConversationsStore and persist
+    fn handle_feedback_changed(
+        &self,
+        history_index: usize,
+        feedback: Option<MessageFeedback>,
+        cx: &mut Context<Self>,
+    ) {
+        let conv_id = cx.global::<ConversationsStore>().active_id().cloned();
+
+        if let Some(conv_id) = conv_id {
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.set_message_feedback(history_index, feedback);
+                }
+            });
+            self.persist_conversation(&conv_id, cx);
+        }
+    }
+
     /// Persist a conversation to disk asynchronously
     fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
         let conv_id = conv_id.to_string();
@@ -2090,6 +2129,9 @@ impl ChattyApp {
                         .unwrap_or_else(|_| "[]".to_string()),
                     message_timestamps: conv
                         .serialize_message_timestamps()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    message_feedback: conv
+                        .serialize_message_feedback()
                         .unwrap_or_else(|_| "[]".to_string()),
                     created_at: conv
                         .created_at()
