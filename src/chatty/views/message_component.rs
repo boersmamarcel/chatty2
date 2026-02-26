@@ -729,9 +729,11 @@ where
 
             let message_with_content = container.children(children);
 
-            // Wrap with action buttons for assistant messages
+            // Wrap with action buttons for finalized assistant messages
+            // (hide feedback row while still streaming or content is empty)
+            let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
             return match msg.role {
-                MessageRole::Assistant => div()
+                MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
                     .child(message_with_content)
                     .child(render_assistant_actions(
                         &msg.content,
@@ -741,7 +743,7 @@ where
                         cx,
                     ))
                     .into_any_element(),
-                MessageRole::User => message_with_content.into_any_element(),
+                _ => message_with_content.into_any_element(),
             };
         }
     }
@@ -777,9 +779,11 @@ where
         container.child(msg.content.clone())
     };
 
-    // Wrap with action buttons for assistant messages
+    // Wrap with action buttons for finalized assistant messages
+    // (hide feedback row while still streaming or content is empty)
+    let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
     match msg.role {
-        MessageRole::Assistant => div()
+        MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
             .child(final_container)
             .child(render_assistant_actions(
                 &msg.content,
@@ -789,6 +793,6 @@ where
                 cx,
             ))
             .into_any_element(),
-        MessageRole::User => final_container.into_any_element(),
+        _ => final_container.into_any_element(),
     }
 }

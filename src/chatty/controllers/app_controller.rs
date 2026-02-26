@@ -1894,7 +1894,7 @@ impl ChattyApp {
 
         // 2. Read response text from ConversationsStore (single source of truth),
         //    finalize in conversation model, and check if title gen needed
-        let should_generate_title =
+        let (should_generate_title, assistant_history_index) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     let response_text = conv
@@ -1904,14 +1904,26 @@ impl ChattyApp {
                     conv.finalize_response(response_text);
                     conv.add_trace(trace_json);
                     let msg_count = conv.message_count();
+                    // The assistant message was just pushed; its index is msg_count - 1
+                    let assistant_idx = msg_count.saturating_sub(1);
                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
                     debug!(conv_id = %conv_id, msg_count, should_gen, "Response finalized in conversation");
-                    should_gen
+                    (should_gen, Some(assistant_idx))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    false
+                    (false, None)
                 }
             });
+
+        // 2b. Set history_index on the last assistant DisplayMessage so feedback
+        //     clicks on freshly-streamed messages are properly persisted.
+        if let Some(h_idx) = assistant_history_index {
+            chat_view.update(cx, |view, cx| {
+                if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                    view.set_last_assistant_history_index(h_idx, cx);
+                }
+            });
+        }
 
         // 3. Process token usage
         if let Some((input_tokens, output_tokens)) = token_usage {
@@ -2047,15 +2059,28 @@ impl ChattyApp {
 
         // Read partial response from ConversationsStore (single source of truth)
         // and save to conversation history
-        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+        let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 let partial_text = conv.streaming_message().cloned().unwrap_or_default();
                 conv.finalize_response(partial_text);
                 conv.add_trace(trace_json);
                 conv.set_streaming_message(None);
+                let idx = conv.message_count().saturating_sub(1);
                 debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+                Some(idx)
+            } else {
+                None
             }
         });
+
+        // Set history_index on the cancelled assistant message for feedback persistence
+        if let Some(h_idx) = assistant_history_index {
+            chat_view.update(cx, |view, cx| {
+                if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                    view.set_last_assistant_history_index(h_idx, cx);
+                }
+            });
+        }
 
         // Persist to disk
         self.persist_conversation(&conv_id, cx);

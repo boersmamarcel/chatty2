@@ -213,6 +213,25 @@ impl ChatView {
         }
     }
 
+    /// Set the history_index on the last assistant DisplayMessage.
+    ///
+    /// Called after `finalize_response` adds the assistant message to the
+    /// conversation model so the parallel-array index is known. Without this,
+    /// feedback clicks on freshly-streamed messages would be silently dropped
+    /// because the callback guards emission behind `if let Some(h_idx)`.
+    pub fn set_last_assistant_history_index(
+        &mut self,
+        history_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(last) = self.messages.last_mut() {
+            if matches!(last.role, MessageRole::Assistant) {
+                last.history_index = Some(history_index);
+                cx.notify();
+            }
+        }
+    }
+
     /// Mark the current streaming message as cancelled by the user
     pub fn mark_message_cancelled(&mut self, cx: &mut Context<Self>) {
         if let Some(last) = self.messages.last_mut() {
