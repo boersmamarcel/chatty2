@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod controllers;
+pub mod exporters;
 pub mod factories;
 pub mod models;
 pub mod repositories;

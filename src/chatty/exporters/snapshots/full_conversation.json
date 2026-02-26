@@ -1,0 +1,58 @@
+{
+  "session_id": "snap-uuid-001",
+  "agent": {
+    "model_name": "claude-sonnet-4-20250514",
+    "provider": "anthropic"
+  },
+  "steps": [
+    {
+      "source": "user",
+      "content": "Read the file /tmp/hello.txt",
+      "timestamp": 1700000000,
+      "attachments": [
+        {
+          "type": "image",
+          "path": "/tmp/screenshot.png"
+        }
+      ]
+    },
+    {
+      "source": "agent",
+      "content": "The file contains: Hello, World!",
+      "timestamp": 1700000005,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "name": "read_file",
+          "arguments": {
+            "path": "/tmp/hello.txt"
+          },
+          "output": "Hello, World!"
+        }
+      ],
+      "reasoning_content": "The user wants to read a file. I should use the read_file tool.",
+      "metrics": {
+        "input_tokens": 150,
+        "output_tokens": 350
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_input_tokens": 150,
+    "total_output_tokens": 350,
+    "total_cost_usd": 0.008
+  },
+  "extra": {
+    "feedback": [
+      null,
+      "thumbs_up"
+    ],
+    "regenerations": [
+      {
+        "message_index": 1,
+        "original_text": "Previous answer",
+        "timestamp": 1700000005
+      }
+    ]
+  }
+}

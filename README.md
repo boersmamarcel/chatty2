@@ -127,6 +127,20 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
 - **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
 
+### Training Data Export (ATIF)
+
+Chatty can export conversations in [ATIF (Agent Trajectory Interchange Format)](https://harborframework.com/docs/agents/trajectory-format), a structured JSON format designed for agent training data pipelines. Each export captures:
+
+- **Messages** — user and agent steps with full content
+- **Tool calls** — function name, arguments, and output for every tool invocation
+- **Reasoning** — chain-of-thought thinking blocks from extended thinking
+- **Timestamps** — per-message Unix timestamps
+- **Token metrics** — per-step and aggregate input/output token counts with cost
+- **Feedback** — thumbs up/down signals per assistant message
+- **Regeneration pairs** — original (rejected) vs. replacement (chosen) responses for DPO fine-tuning
+
+ATIF trajectories feed into external training pipelines, Harbor Framework workflows, and the planned in-app fine-tuning system.
+
 ### Thinking & Traces
 
 - **Extended thinking** blocks for Claude's chain-of-thought reasoning

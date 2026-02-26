@@ -17,7 +17,8 @@ use settings::SettingsView;
 use settings::repositories::{
     ExecutionSettingsJsonRepository, ExecutionSettingsRepository, GeneralSettingsJsonRepository,
     GeneralSettingsRepository, JsonFileRepository, JsonMcpRepository, JsonModelsRepository,
-    McpRepository, ModelsRepository, ProviderRepository,
+    McpRepository, ModelsRepository, ProviderRepository, TrainingSettingsJsonRepository,
+    TrainingSettingsRepository,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,6 +81,12 @@ lazy_static::lazy_static! {
     static ref EXECUTION_SETTINGS_REPOSITORY: Arc<dyn ExecutionSettingsRepository> = {
         let repo = ExecutionSettingsJsonRepository::new()
             .expect("Failed to initialize execution settings repository");
+        Arc::new(repo)
+    };
+
+    static ref TRAINING_SETTINGS_REPOSITORY: Arc<dyn TrainingSettingsRepository> = {
+        let repo = TrainingSettingsJsonRepository::new()
+            .expect("Failed to initialize training settings repository");
         Arc::new(repo)
     };
 
@@ -445,6 +452,9 @@ fn main() {
 
         // Initialize execution settings with default - will be populated async
         cx.set_global(settings::models::ExecutionSettingsModel::default());
+
+        // Initialize training settings with default - will be populated async
+        cx.set_global(settings::models::TrainingSettingsModel::default());
 
         // Initialize execution approval store for tracking pending approvals
         cx.set_global(chatty::models::ExecutionApprovalStore::new());
@@ -836,6 +846,28 @@ fn main() {
                         )
                     })
                     .ok();
+                }
+            }
+        })
+        .detach();
+
+        // Load training settings asynchronously (non-blocking, no dependencies)
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = TRAINING_SETTINGS_REPOSITORY.clone();
+            match repo.load().await {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        info!(
+                            atif_auto_export = settings.atif_auto_export,
+                            "Training settings loaded from disk"
+                        );
+                        cx.set_global(settings);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global training settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load training settings, using defaults");
                 }
             }
         })
