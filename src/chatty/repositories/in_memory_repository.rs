@@ -98,6 +98,7 @@ mod tests {
             attachment_paths: "[]".to_string(),
             message_timestamps: "[]".to_string(),
             message_feedback: "[]".to_string(),
+            regeneration_records: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -124,6 +125,7 @@ mod tests {
             attachment_paths: "[]".to_string(),
             message_timestamps: "[]".to_string(),
             message_feedback: "[]".to_string(),
+            regeneration_records: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -149,6 +151,7 @@ mod tests {
             attachment_paths: "[]".to_string(),
             message_timestamps: "[]".to_string(),
             message_feedback: "[]".to_string(),
+            regeneration_records: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
         };
@@ -163,6 +166,7 @@ mod tests {
             attachment_paths: "[]".to_string(),
             message_timestamps: "[]".to_string(),
             message_feedback: "[]".to_string(),
+            regeneration_records: "[]".to_string(),
             created_at: 2000,
             updated_at: 2000,
         };
@@ -174,5 +178,22 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].title, "Newer");
         assert_eq!(loaded[1].title, "Older");
+    }
+
+    #[test]
+    fn test_backward_compat_missing_regeneration_records() {
+        // Simulate old JSON without regeneration_records field
+        let json = r#"{
+            "id": "old-conv",
+            "title": "Old Conversation",
+            "model_id": "model-1",
+            "message_history": "[]",
+            "system_traces": "[]",
+            "created_at": 1000,
+            "updated_at": 1000
+        }"#;
+
+        let data: ConversationData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.regeneration_records, "[]");
     }
 }

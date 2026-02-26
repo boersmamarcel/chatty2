@@ -696,6 +696,7 @@ impl ChattyApp {
                         attachment_paths: "[]".to_string(),
                         message_timestamps: "[]".to_string(),
                         message_feedback: "[]".to_string(),
+                        regeneration_records: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -1170,6 +1171,9 @@ impl ChattyApp {
                                             .unwrap_or_else(|_| "[]".to_string()),
                                         message_feedback: conv
                                             .serialize_message_feedback()
+                                            .unwrap_or_else(|_| "[]".to_string()),
+                                        regeneration_records: conv
+                                            .serialize_regeneration_records()
                                             .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
@@ -2157,6 +2161,9 @@ impl ChattyApp {
                         .unwrap_or_else(|_| "[]".to_string()),
                     message_feedback: conv
                         .serialize_message_feedback()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    regeneration_records: conv
+                        .serialize_regeneration_records()
                         .unwrap_or_else(|_| "[]".to_string()),
                     created_at: conv
                         .created_at()

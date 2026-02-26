@@ -27,6 +27,11 @@ fn default_empty_feedback() -> String {
     "[]".to_string()
 }
 
+/// Default empty regeneration records for backward compatibility
+fn default_empty_regeneration_records() -> String {
+    "[]".to_string()
+}
+
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationData {
@@ -43,6 +48,8 @@ pub struct ConversationData {
     pub message_timestamps: String, // JSON-serialized Vec<Option<i64>> (per-message Unix timestamps)
     #[serde(default = "default_empty_feedback")]
     pub message_feedback: String, // JSON-serialized Vec<Option<MessageFeedback>> (per-message feedback)
+    #[serde(default = "default_empty_regeneration_records")]
+    pub regeneration_records: String, // JSON-serialized Vec<RegenerationRecord> (DPO preference pairs)
     pub created_at: i64, // Unix timestamp
     pub updated_at: i64, // Unix timestamp
 }
