@@ -8,14 +8,15 @@ use tracing::{debug, error, info, warn};
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
-    Conversation, ConversationsStore, GlobalStreamManager, StreamChunk, StreamManagerEvent,
-    StreamStatus,
+    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamChunk,
+    StreamManagerEvent, StreamStatus,
 };
 use crate::chatty::repositories::{
     ConversationData, ConversationJsonRepository, ConversationRepository,
 };
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
+use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -237,6 +238,20 @@ impl ChattyApp {
             })
             .detach();
         }
+
+        // SUBSCRIPTION 5: ChatView events — feedback persistence
+        cx.subscribe(
+            &self.chat_view,
+            |app, _chat_view, event: &ChatViewEvent, cx| match event {
+                ChatViewEvent::FeedbackChanged {
+                    history_index,
+                    feedback,
+                } => {
+                    app.handle_feedback_changed(*history_index, feedback.clone(), cx);
+                }
+            },
+        )
+        .detach();
     }
 
     /// Initialize chat input with available models
@@ -679,6 +694,8 @@ impl ChattyApp {
                         system_traces: "[]".to_string(),
                         token_usage: "{}".to_string(),
                         attachment_paths: "[]".to_string(),
+                        message_timestamps: "[]".to_string(),
+                        message_feedback: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -761,11 +778,12 @@ impl ChattyApp {
                             conv.history().to_vec(),
                             conv.system_traces().to_vec(),  // Clones JSON values, not deserialized traces
                             conv.attachment_paths().to_vec(),
+                            conv.message_feedback().to_vec(),
                         )
                     });
 
-                if let Some((history, traces, attachment_paths)) = conversation_data {
-                    view.load_history(&history, &traces, &attachment_paths, cx);
+                if let Some((history, traces, attachment_paths, feedback)) = conversation_data {
+                    view.load_history(&history, &traces, &attachment_paths, &feedback, cx);
                 }
 
                 // Update the selected model and capabilities in the chat input
@@ -1146,6 +1164,12 @@ impl ChattyApp {
                                             .unwrap_or_else(|_| "{}".to_string()),
                                         attachment_paths: conv
                                             .serialize_attachment_paths()
+                                            .unwrap_or_else(|_| "[]".to_string()),
+                                        message_timestamps: conv
+                                            .serialize_message_timestamps()
+                                            .unwrap_or_else(|_| "[]".to_string()),
+                                        message_feedback: conv
+                                            .serialize_message_feedback()
                                             .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
@@ -1870,7 +1894,7 @@ impl ChattyApp {
 
         // 2. Read response text from ConversationsStore (single source of truth),
         //    finalize in conversation model, and check if title gen needed
-        let should_generate_title =
+        let (should_generate_title, assistant_history_index) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     let response_text = conv
@@ -1880,14 +1904,26 @@ impl ChattyApp {
                     conv.finalize_response(response_text);
                     conv.add_trace(trace_json);
                     let msg_count = conv.message_count();
+                    // The assistant message was just pushed; its index is msg_count - 1
+                    let assistant_idx = msg_count.saturating_sub(1);
                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
                     debug!(conv_id = %conv_id, msg_count, should_gen, "Response finalized in conversation");
-                    should_gen
+                    (should_gen, Some(assistant_idx))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    false
+                    (false, None)
                 }
             });
+
+        // 2b. Set history_index on the last assistant DisplayMessage so feedback
+        //     clicks on freshly-streamed messages are properly persisted.
+        if let Some(h_idx) = assistant_history_index {
+            chat_view.update(cx, |view, cx| {
+                if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                    view.set_last_assistant_history_index(h_idx, cx);
+                }
+            });
+        }
 
         // 3. Process token usage
         if let Some((input_tokens, output_tokens)) = token_usage {
@@ -2023,15 +2059,28 @@ impl ChattyApp {
 
         // Read partial response from ConversationsStore (single source of truth)
         // and save to conversation history
-        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+        let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 let partial_text = conv.streaming_message().cloned().unwrap_or_default();
                 conv.finalize_response(partial_text);
                 conv.add_trace(trace_json);
                 conv.set_streaming_message(None);
+                let idx = conv.message_count().saturating_sub(1);
                 debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+                Some(idx)
+            } else {
+                None
             }
         });
+
+        // Set history_index on the cancelled assistant message for feedback persistence
+        if let Some(h_idx) = assistant_history_index {
+            chat_view.update(cx, |view, cx| {
+                if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                    view.set_last_assistant_history_index(h_idx, cx);
+                }
+            });
+        }
 
         // Persist to disk
         self.persist_conversation(&conv_id, cx);
@@ -2056,6 +2105,25 @@ impl ChattyApp {
             sidebar.set_conversations(convs, cx);
             sidebar.set_total_count(total);
         });
+    }
+
+    /// Handle feedback change: update ConversationsStore and persist
+    fn handle_feedback_changed(
+        &self,
+        history_index: usize,
+        feedback: Option<MessageFeedback>,
+        cx: &mut Context<Self>,
+    ) {
+        let conv_id = cx.global::<ConversationsStore>().active_id().cloned();
+
+        if let Some(conv_id) = conv_id {
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.set_message_feedback(history_index, feedback);
+                }
+            });
+            self.persist_conversation(&conv_id, cx);
+        }
     }
 
     /// Persist a conversation to disk asynchronously
@@ -2083,6 +2151,12 @@ impl ChattyApp {
                         .unwrap_or_else(|_| "{}".to_string()),
                     attachment_paths: conv
                         .serialize_attachment_paths()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    message_timestamps: conv
+                        .serialize_message_timestamps()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    message_feedback: conv
+                        .serialize_message_feedback()
                         .unwrap_or_else(|_| "[]".to_string()),
                     created_at: conv
                         .created_at()

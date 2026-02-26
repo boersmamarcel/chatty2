@@ -17,6 +17,7 @@ use super::message_types::{
     ToolCallState, TraceItem, UserMessage,
 };
 use super::trace_components::SystemTraceView;
+use crate::chatty::models::MessageFeedback;
 use crate::settings::models::models_store::ModelsModel;
 use std::time::SystemTime;
 
@@ -38,6 +39,19 @@ pub struct ChatView {
     /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
 }
+
+/// Events emitted by ChatView for actions that require app-level handling
+#[derive(Clone, Debug)]
+pub enum ChatViewEvent {
+    /// User toggled feedback on a message (msg_index in display messages,
+    /// history_index for the parallel array in the Conversation model)
+    FeedbackChanged {
+        history_index: usize,
+        feedback: Option<MessageFeedback>,
+    },
+}
+
+impl EventEmitter<ChatViewEvent> for ChatView {}
 
 impl ChatView {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
@@ -116,6 +130,8 @@ impl ChatView {
             live_trace: None,
             is_markdown: true,
             attachments,
+            feedback: None,
+            history_index: None,
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -135,6 +151,8 @@ impl ChatView {
             live_trace: Some(SystemTrace::new()),
             is_markdown: true,
             attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
         });
 
         debug!(
@@ -192,6 +210,25 @@ impl ChatView {
             last.live_trace = None;
 
             cx.notify();
+        }
+    }
+
+    /// Set the history_index on the last assistant DisplayMessage.
+    ///
+    /// Called after `finalize_response` adds the assistant message to the
+    /// conversation model so the parallel-array index is known. Without this,
+    /// feedback clicks on freshly-streamed messages would be silently dropped
+    /// because the callback guards emission behind `if let Some(h_idx)`.
+    pub fn set_last_assistant_history_index(
+        &mut self,
+        history_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(last) = self.messages.last_mut() {
+            if matches!(last.role, MessageRole::Assistant) {
+                last.history_index = Some(history_index);
+                cx.notify();
+            }
         }
     }
 
@@ -722,6 +759,7 @@ impl ChatView {
         history: &[rig::completion::Message],
         traces: &[Option<serde_json::Value>],
         attachment_paths: &[Vec<PathBuf>],
+        message_feedback: &[Option<crate::chatty::models::MessageFeedback>],
         cx: &mut Context<Self>,
     ) {
         use rig::completion::Message;
@@ -735,6 +773,7 @@ impl ChatView {
         self.messages.clear();
 
         for (idx, msg) in history.iter().enumerate() {
+            let feedback = message_feedback.get(idx).cloned().flatten();
             match msg {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
@@ -748,6 +787,8 @@ impl ChatView {
                             live_trace: None,
                             is_markdown: true,
                             attachments,
+                            feedback: None,
+                            history_index: Some(idx),
                         });
                     }
                 }
@@ -783,6 +824,8 @@ impl ChatView {
                             live_trace: None,
                             is_markdown: true,
                             attachments: Vec::new(),
+                            feedback,
+                            history_index: Some(idx),
                         });
                     }
                 }
@@ -1035,6 +1078,8 @@ impl Render for ChatView {
                                             })
                                             .map(|(index, msg)| {
                                                 let entity_clone = chat_view_entity.clone();
+                                                let entity_for_feedback = chat_view_entity.clone();
+                                                let history_index = msg.history_index;
                                                 render_message(
                                                     msg,
                                                     index,
@@ -1051,6 +1096,22 @@ impl Render for ChatView {
                                                             chat_view
                                                                 .collapsed_tool_calls
                                                                 .insert(key, !current);
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                    move |msg_idx, feedback, cx| {
+                                                        entity_for_feedback.update(cx, |chat_view, cx| {
+                                                            // Update display state
+                                                            if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
+                                                                display_msg.feedback = feedback.clone();
+                                                            }
+                                                            // Emit event for persistence
+                                                            if let Some(h_idx) = history_index {
+                                                                cx.emit(ChatViewEvent::FeedbackChanged {
+                                                                    history_index: h_idx,
+                                                                    feedback,
+                                                                });
+                                                            }
                                                             cx.notify();
                                                         });
                                                     },

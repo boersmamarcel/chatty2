@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
@@ -15,15 +16,33 @@ use crate::chatty::tools::PendingArtifacts;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
+/// User feedback signal for an individual assistant message
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MessageFeedback {
+    ThumbsUp,
+    ThumbsDown,
+}
+
 /// A single conversation with an AI agent
 pub struct Conversation {
     id: String,
     title: String,
     model_id: String,
     agent: AgentClient,
+    // ── Parallel arrays ──────────────────────────────────────────────
+    // The following Vecs are all parallel to `history` (one entry per message).
+    // Every push to `history` must be accompanied by a push to each Vec.
+    //
+    // Note: `system_traces` is pushed in two places — `add_user_message_with_attachments`
+    // (pushes None for user messages) and `add_trace` (pushes the real trace for
+    // assistant messages). The caller must always call `add_trace` immediately after
+    // `finalize_response` to maintain the invariant.
     history: Vec<Message>,
     system_traces: Vec<Option<serde_json::Value>>,
     attachment_paths: Vec<Vec<PathBuf>>,
+    message_timestamps: Vec<Option<i64>>,
+    message_feedback: Vec<Option<MessageFeedback>>,
+    // ── End parallel arrays ──────────────────────────────────────────
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
@@ -92,6 +111,8 @@ impl Conversation {
             history: Vec::new(),
             system_traces: Vec::new(),
             attachment_paths: Vec::new(),
+            message_timestamps: Vec::new(),
+            message_feedback: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
@@ -156,6 +177,14 @@ impl Conversation {
         let attachment_paths =
             Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
 
+        // Deserialize message timestamps (with fallback to empty if not present)
+        let message_timestamps =
+            Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
+
+        // Deserialize message feedback (with fallback to empty if not present)
+        let message_feedback =
+            Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
+
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
             .unwrap_or_else(|_| ConversationTokenUsage::new());
@@ -172,6 +201,8 @@ impl Conversation {
             history,
             system_traces,
             attachment_paths,
+            message_timestamps,
+            message_feedback,
             token_usage,
             created_at,
             updated_at,
@@ -187,10 +218,14 @@ impl Conversation {
         message: Message,
         attachments: Vec<PathBuf>,
     ) {
+        let now = SystemTime::now();
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
         self.history.push(message);
         self.system_traces.push(None);
         self.attachment_paths.push(attachments);
-        self.updated_at = SystemTime::now();
+        self.message_timestamps.push(Some(timestamp));
+        self.message_feedback.push(None);
+        self.updated_at = now;
     }
 
     /// Finalize response after stream is consumed
@@ -202,9 +237,13 @@ impl Conversation {
             })),
         };
 
+        let now = SystemTime::now();
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
         self.history.push(assistant_message);
         self.attachment_paths.push(Vec::new());
-        self.updated_at = SystemTime::now();
+        self.message_timestamps.push(Some(timestamp));
+        self.message_feedback.push(None);
+        self.updated_at = now;
     }
 
     /// Add a trace for the most recent message
@@ -293,6 +332,47 @@ impl Conversation {
     /// Deserialize attachment paths from JSON string
     pub fn deserialize_attachment_paths(json: &str) -> Result<Vec<Vec<PathBuf>>> {
         serde_json::from_str(json).context("Failed to deserialize attachment paths")
+    }
+
+    /// Get message timestamps (parallel to history)
+    #[allow(dead_code)]
+    pub fn message_timestamps(&self) -> &[Option<i64>] {
+        &self.message_timestamps
+    }
+
+    /// Serialize message timestamps to JSON string
+    pub fn serialize_message_timestamps(&self) -> Result<String> {
+        serde_json::to_string(&self.message_timestamps)
+            .context("Failed to serialize message timestamps")
+    }
+
+    /// Deserialize message timestamps from JSON string
+    pub fn deserialize_message_timestamps(json: &str) -> Result<Vec<Option<i64>>> {
+        serde_json::from_str(json).context("Failed to deserialize message timestamps")
+    }
+
+    /// Get message feedback (parallel to history)
+    pub fn message_feedback(&self) -> &[Option<MessageFeedback>] {
+        &self.message_feedback
+    }
+
+    /// Set feedback for a specific message by index
+    pub fn set_message_feedback(&mut self, index: usize, feedback: Option<MessageFeedback>) {
+        if index < self.message_feedback.len() {
+            self.message_feedback[index] = feedback;
+            self.updated_at = SystemTime::now();
+        }
+    }
+
+    /// Serialize message feedback to JSON string
+    pub fn serialize_message_feedback(&self) -> Result<String> {
+        serde_json::to_string(&self.message_feedback)
+            .context("Failed to serialize message feedback")
+    }
+
+    /// Deserialize message feedback from JSON string
+    pub fn deserialize_message_feedback(json: &str) -> Result<Vec<Option<MessageFeedback>>> {
+        serde_json::from_str(json).context("Failed to deserialize message feedback")
     }
 
     /// Get the agent

@@ -1,10 +1,11 @@
 use crate::assets::CustomIcon;
+use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::text::TextView;
-use gpui_component::{Icon, Sizable};
+use gpui_component::{Icon, IconName, Sizable};
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
@@ -117,6 +118,10 @@ pub struct DisplayMessage {
     pub is_markdown: bool,
     // File attachments (images/PDFs) for this message
     pub attachments: Vec<PathBuf>,
+    // User feedback signal (thumbs up/down) for assistant messages
+    pub feedback: Option<MessageFeedback>,
+    // Index into the conversation's history (parallel arrays) for this message
+    pub history_index: Option<usize>,
 }
 
 impl DisplayMessage {
@@ -142,6 +147,8 @@ impl DisplayMessage {
             live_trace: None,
             is_markdown: true,
             attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
         }
     }
 }
@@ -565,15 +572,101 @@ where
     container
 }
 
-pub fn render_message<F>(
+/// Render the action row (copy + feedback buttons) for assistant messages
+fn render_assistant_actions<G>(
+    content: &str,
+    feedback: &Option<MessageFeedback>,
+    index: usize,
+    on_feedback: G,
+    cx: &App,
+) -> Div
+where
+    G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
+{
+    let muted = cx.theme().muted_foreground;
+
+    let thumbs_up_active = matches!(feedback, Some(MessageFeedback::ThumbsUp));
+    let thumbs_down_active = matches!(feedback, Some(MessageFeedback::ThumbsDown));
+
+    div()
+        .flex()
+        .justify_end()
+        .gap_1()
+        .pt_2()
+        .child(
+            Button::new(ElementId::Name(format!("thumbs-up-msg-{}", index).into()))
+                .ghost()
+                .xsmall()
+                .icon(
+                    Icon::new(IconName::ThumbsUp).text_color(if thumbs_up_active {
+                        gpui_component::green_500()
+                    } else {
+                        muted
+                    }),
+                )
+                .tooltip("Good response")
+                .on_click({
+                    let on_feedback = on_feedback.clone();
+                    let new_feedback = if thumbs_up_active {
+                        None
+                    } else {
+                        Some(MessageFeedback::ThumbsUp)
+                    };
+                    move |_event, _window, cx| {
+                        on_feedback(index, new_feedback.clone(), cx);
+                    }
+                }),
+        )
+        .child(
+            Button::new(ElementId::Name(format!("thumbs-down-msg-{}", index).into()))
+                .ghost()
+                .xsmall()
+                .icon(
+                    Icon::new(IconName::ThumbsDown).text_color(if thumbs_down_active {
+                        gpui_component::red_500()
+                    } else {
+                        muted
+                    }),
+                )
+                .tooltip("Bad response")
+                .on_click({
+                    let on_feedback = on_feedback.clone();
+                    let new_feedback = if thumbs_down_active {
+                        None
+                    } else {
+                        Some(MessageFeedback::ThumbsDown)
+                    };
+                    move |_event, _window, cx| {
+                        on_feedback(index, new_feedback.clone(), cx);
+                    }
+                }),
+        )
+        .child(
+            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(CustomIcon::Copy))
+                .tooltip("Copy message")
+                .on_click({
+                    let content = content.to_string();
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                    }
+                }),
+        )
+}
+
+pub fn render_message<F, G>(
     msg: &DisplayMessage,
     index: usize,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     on_toggle_tool: F,
+    on_feedback: G,
     cx: &App,
 ) -> AnyElement
 where
     F: Fn(usize, usize, &mut App) + 'static + Clone,
+    G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
 {
     // If not in viewport window, render lightweight placeholder
     // Full render for messages in viewport
@@ -636,29 +729,21 @@ where
 
             let message_with_content = container.children(children);
 
-            // Wrap with copy button for assistant messages
+            // Wrap with action buttons for finalized assistant messages
+            // (hide feedback row while still streaming or content is empty)
+            let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
             return match msg.role {
-                MessageRole::Assistant => div()
+                MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
                     .child(message_with_content)
-                    .child(
-                        div().flex().justify_end().pt_2().child(
-                            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(CustomIcon::Copy))
-                                .tooltip("Copy message")
-                                .on_click({
-                                    let content = msg.content.clone();
-                                    move |_event, _window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            content.clone(),
-                                        ));
-                                    }
-                                }),
-                        ),
-                    )
+                    .child(render_assistant_actions(
+                        &msg.content,
+                        &msg.feedback,
+                        index,
+                        on_feedback,
+                        cx,
+                    ))
                     .into_any_element(),
-                MessageRole::User => message_with_content.into_any_element(),
+                _ => message_with_content.into_any_element(),
             };
         }
     }
@@ -694,26 +779,20 @@ where
         container.child(msg.content.clone())
     };
 
-    // Wrap with copy button for assistant messages
+    // Wrap with action buttons for finalized assistant messages
+    // (hide feedback row while still streaming or content is empty)
+    let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
     match msg.role {
-        MessageRole::Assistant => div()
+        MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
             .child(final_container)
-            .child(
-                div().flex().justify_end().pt_2().child(
-                    Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
-                        .ghost()
-                        .xsmall()
-                        .icon(Icon::new(CustomIcon::Copy))
-                        .tooltip("Copy message")
-                        .on_click({
-                            let content = msg.content.clone();
-                            move |_event, _window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
-                            }
-                        }),
-                ),
-            )
+            .child(render_assistant_actions(
+                &msg.content,
+                &msg.feedback,
+                index,
+                on_feedback,
+                cx,
+            ))
             .into_any_element(),
-        MessageRole::User => final_container.into_any_element(),
+        _ => final_container.into_any_element(),
     }
 }
