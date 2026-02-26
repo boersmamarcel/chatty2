@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod controllers;
-#[allow(dead_code)]
 pub mod exporters;
 pub mod factories;
 pub mod models;

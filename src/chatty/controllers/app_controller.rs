@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
+use crate::chatty::exporters::atif_exporter::conversation_to_atif;
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
@@ -20,8 +21,9 @@ use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
-use crate::settings::models::models_store::ModelsModel;
+use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
+use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{GlobalMcpNotifier, McpNotifier, McpNotifierEvent};
 
 /// Global state to hold the main ChattyApp entity
@@ -1915,6 +1917,15 @@ impl ChattyApp {
 
         // 6. Persist to disk
         self.persist_conversation(&conv_id, cx);
+
+        // 7. Auto-export ATIF if enabled in training settings
+        if cx
+            .try_global::<TrainingSettingsModel>()
+            .map(|s| s.atif_auto_export)
+            .unwrap_or(false)
+        {
+            self.export_conversation_atif(&conv_id, cx);
+        }
     }
 
     /// Handle the finalization of a stopped stream (partial response saving).
@@ -2201,6 +2212,125 @@ impl ChattyApp {
     #[allow(dead_code)]
     pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
         self.chat_view.read(cx).chat_input_state().clone()
+    }
+
+    /// Export a conversation as ATIF JSON to the exports directory.
+    ///
+    /// Builds ConversationData from the store, looks up the ModelConfig for
+    /// provider metadata, converts to ATIF, and writes the file asynchronously.
+    fn export_conversation_atif(&self, conv_id: &str, cx: &mut Context<Self>) {
+        let conv_id = conv_id.to_string();
+
+        // Build ConversationData and get the model config (same data as persist_conversation)
+        let export_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            store.get_conversation(&conv_id).and_then(|conv| {
+                let history = conv.serialize_history().ok()?;
+                let traces = conv.serialize_traces().ok()?;
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+
+                let conv_data = ConversationData {
+                    id: conv.id().to_string(),
+                    title: conv.title().to_string(),
+                    model_id: conv.model_id().to_string(),
+                    message_history: history,
+                    system_traces: traces,
+                    token_usage: conv
+                        .serialize_token_usage()
+                        .unwrap_or_else(|_| "{}".to_string()),
+                    attachment_paths: conv
+                        .serialize_attachment_paths()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    message_timestamps: conv
+                        .serialize_message_timestamps()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    message_feedback: conv
+                        .serialize_message_feedback()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    regeneration_records: conv
+                        .serialize_regeneration_records()
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    created_at: conv
+                        .created_at()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                    updated_at: now,
+                };
+
+                Some(conv_data)
+            })
+        });
+
+        let Some(conv_data) = export_data else {
+            warn!(conv_id = %conv_id, "Cannot export ATIF: conversation not found");
+            return;
+        };
+
+        // Look up ModelConfig for provider metadata
+        let model_config: Option<ModelConfig> = cx
+            .global::<ModelsModel>()
+            .get_model(&conv_data.model_id)
+            .cloned();
+
+        cx.spawn(async move |_, _cx| {
+            // Convert to ATIF
+            let atif_json = match conversation_to_atif(&conv_data, model_config.as_ref()) {
+                Ok(json) => json,
+                Err(e) => {
+                    warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to ATIF");
+                    return Ok::<_, anyhow::Error>(());
+                }
+            };
+
+            // Determine exports directory
+            let exports_dir = match dirs::config_dir() {
+                Some(config) => config.join("chatty").join("exports"),
+                None => {
+                    warn!("Cannot determine config directory for ATIF export");
+                    return Ok(());
+                }
+            };
+
+            // Create exports directory if needed
+            if let Err(e) = tokio::fs::create_dir_all(&exports_dir).await {
+                warn!(error = ?e, "Failed to create ATIF exports directory");
+                return Ok(());
+            }
+
+            // Write atomically using temp file + rename
+            let file_path = exports_dir.join(format!("{}.atif.json", conv_id));
+            let temp_path = file_path.with_extension(format!("json.{}.tmp", std::process::id()));
+
+            let json_str = match serde_json::to_string_pretty(&atif_json) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = ?e, conv_id = %conv_id, "Failed to serialize ATIF JSON");
+                    return Ok(());
+                }
+            };
+
+            if let Err(e) = tokio::fs::write(&temp_path, &json_str).await {
+                warn!(error = ?e, conv_id = %conv_id, "Failed to write ATIF temp file");
+                return Ok(());
+            }
+
+            if let Err(e) = tokio::fs::rename(&temp_path, &file_path).await {
+                warn!(error = ?e, conv_id = %conv_id, "Failed to rename ATIF temp file");
+                return Ok(());
+            }
+
+            debug!(
+                conv_id = %conv_id,
+                path = %file_path.display(),
+                "ATIF export saved"
+            );
+
+            Ok(())
+        })
+        .detach();
     }
 }
 

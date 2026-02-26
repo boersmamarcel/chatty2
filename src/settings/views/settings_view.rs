@@ -5,6 +5,7 @@ use crate::settings::views::execution_settings_page::execution_settings_page;
 use crate::settings::views::mcp_tools_page::mcp_tools_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
+use crate::settings::views::training_settings_page::training_settings_page;
 
 use gpui::*;
 
@@ -167,6 +168,7 @@ impl Render for SettingsView {
                 providers_page(),
                 mcp_tools_page(),
                 execution_settings_page(),
+                training_settings_page(),
             ]))
             .children(dialog_layer)
     }
