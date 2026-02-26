@@ -2136,20 +2136,24 @@ impl ChattyApp {
     /// Handle regeneration of the last assistant message.
     ///
     /// Records the original response as a DPO preference pair, removes the old
-    /// assistant message from both model and UI, persists the regeneration record,
-    /// then re-sends the original user prompt to get a new response.
+    /// assistant message from both model and UI, then re-streams using the existing
+    /// conversation history (the user message is already in history, so it is NOT
+    /// re-added).
+    ///
+    /// Phases:
+    /// 1. Remove old assistant message from model, record DPO pair
+    /// 2. Remove old assistant message from UI, start fresh assistant placeholder
+    /// 3. Stream new response from LLM using existing history
     fn handle_regeneration(&mut self, history_index: usize, cx: &mut Context<Self>) {
         let conv_id = match cx.global::<ConversationsStore>().active_id().cloned() {
             Some(id) => id,
             None => return,
         };
 
-        // Extract data from conversation and record regeneration
-        let resend_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+        // PHASE 1: Remove old assistant message and record DPO pair
+        let ok = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             let conv = store.get_conversation_mut(&conv_id)?;
 
-            // The assistant message being regenerated is at history_index.
-            // The user message that prompted it is at history_index - 1.
             if history_index == 0 || history_index >= conv.message_count() {
                 return None;
             }
@@ -2164,39 +2168,232 @@ impl ChattyApp {
                 original_timestamp.unwrap_or(0),
             );
 
-            // Extract user message text and attachments (at history_index - 1)
-            let user_idx = history_index - 1;
-            let user_text = match conv.history().get(user_idx) {
-                Some(rig::completion::Message::User { content, .. }) => content
-                    .iter()
-                    .filter_map(|uc| match uc {
-                        rig::message::UserContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                _ => return None,
-            };
-            let attachments = conv
-                .attachment_paths()
-                .get(user_idx)
-                .cloned()
-                .unwrap_or_default();
-
-            Some((user_text, attachments))
+            Some(())
         });
 
-        if let Some((user_text, attachments)) = resend_data {
-            // Remove the last assistant message from UI
-            self.chat_view.update(cx, |view, cx| {
-                view.remove_last_assistant_message(cx);
+        if ok.is_none() {
+            return;
+        }
+
+        // PHASE 2: Update UI — remove old assistant message, start fresh placeholder
+        let chat_view = self.chat_view.clone();
+        chat_view.update(cx, |view, cx| {
+            view.remove_last_assistant_message(cx);
+            view.start_assistant_message(cx);
+        });
+
+        // Persist the regeneration record before streaming
+        self.persist_conversation(&conv_id, cx);
+
+        // PHASE 3: Stream new response (without adding user message to model/UI)
+        let sidebar = self.sidebar_view.clone();
+        let pending_artifacts = cx
+            .global::<ConversationsStore>()
+            .get_conversation(&conv_id)
+            .map(|c| c.pending_artifacts());
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_for_loop = cancel_flag.clone();
+
+        let stream_manager = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone());
+
+        let conv_id_for_task = conv_id.clone();
+        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+            debug!(conv_id = %conv_id, "Regeneration: starting new stream");
+
+            // Force sidebar to re-render
+            sidebar
+                .update(cx, |_sidebar, cx| {
+                    cx.notify();
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to refresh sidebar"))
+                .ok();
+
+            // Extract agent, history (which now ends with the user message),
+            // and model capabilities
+            let (agent, history, _model_id) = cx
+                .update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation(&conv_id) {
+                        let model_id = conv.model_id().to_string();
+                        // Clear any leftover artifacts from a previous stream
+                        if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
+                            artifacts.clear();
+                        }
+                        Ok((
+                            conv.agent().clone(),
+                            conv.history().to_vec(),
+                            model_id,
+                        ))
+                    } else {
+                        Err(anyhow::anyhow!("Conversation not found for regeneration"))
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))??;
+
+            // The last message in history is the user message we want to re-send.
+            // stream_prompt expects history (previous context) + contents (new user msg).
+            // Split history into context (all but last) and extract user content from last.
+            let (history_context, user_contents) = {
+                let len = history.len();
+                if len == 0 {
+                    return Err(anyhow::anyhow!("Empty history during regeneration"));
+                }
+                let context = &history[..len - 1];
+                let last = &history[len - 1];
+                let contents = match last {
+                    rig::completion::Message::User { content, .. } => {
+                        content.iter().cloned().collect::<Vec<_>>()
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Last message in history is not a user message"
+                        ));
+                    }
+                };
+                (context.to_vec(), contents)
+            };
+
+            // Set up approval channels
+            let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+            crate::chatty::models::execution_approval_store::set_global_approval_notifier(
+                approval_tx.clone(),
+            );
+            cx.update_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore, _>(
+                |store, _cx| {
+                    store.set_notifiers(approval_tx, resolution_tx);
+                }
+            )
+            .map_err(|e| warn!(error = ?e, "Failed to update approval store"))
+            .ok();
+
+            let max_agent_turns = cx
+                .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
+                .unwrap_or(10);
+
+            let (mut stream, _user_message) = stream_prompt(
+                &agent,
+                &history_context,
+                user_contents,
+                Some(approval_rx),
+                Some(resolution_rx),
+                max_agent_turns,
+            )
+            .await?;
+
+            // NOTE: We do NOT add user_message to conversation model — it's already there
+
+            debug!("Regeneration: got stream, processing");
+            use futures::StreamExt;
+
+            while let Some(chunk_result) = stream.next().await {
+                if cancel_flag_for_loop.load(Ordering::Relaxed) {
+                    debug!("Regeneration stream cancelled");
+                    break;
+                }
+
+                match chunk_result {
+                    Ok(StreamChunk::Text(ref text)) => {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                conv.append_streaming_content(text);
+                            }
+                        })
+                        .map_err(|e| {
+                            warn!(error = ?e, "Failed to update conversation streaming content")
+                        })
+                        .ok();
+                    }
+                    Ok(StreamChunk::Done) => {
+                        debug!("Regeneration: received Done chunk");
+                        break;
+                    }
+                    Ok(StreamChunk::Error(ref err)) => {
+                        error!(error = %err, "Regeneration stream error");
+
+                        if (err.contains("401") || err.contains("Unauthorized"))
+                            && let Some(cache) = cx
+                                .update(|cx| {
+                                    cx.try_global::<crate::chatty::auth::AzureTokenCache>()
+                                        .cloned()
+                                })
+                                .ok()
+                                .flatten()
+                            && let Err(e) = cache.refresh_token().await
+                        {
+                            error!(error = ?e, "Failed to refresh Azure token");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(ref e) => {
+                        error!(error = %e, "Regeneration stream error");
+                    }
+                }
+
+                // Forward chunks to StreamManager
+                match chunk_result {
+                    Ok(chunk) => {
+                        let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+                        if let Some(ref sm) = stream_manager {
+                            sm.update(cx, |sm, cx| sm.handle_chunk(&conv_id, chunk, cx))
+                                .map_err(|e| {
+                                    warn!(error = ?e, "Failed to forward chunk to StreamManager")
+                                })
+                                .ok();
+                        }
+                        if is_break {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(ref sm) = stream_manager {
+                            sm.update(cx, |sm, cx| {
+                                sm.handle_chunk(
+                                    &conv_id,
+                                    StreamChunk::Error(e.to_string()),
+                                    cx,
+                                );
+                            })
+                            .map_err(|e| {
+                                warn!(error = ?e, "Failed to forward error to StreamManager")
+                            })
+                            .ok();
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Finalize via StreamManager
+            let trace_json = chat_view
+                .update(cx, |view, _cx| view.extract_current_trace())
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                .and_then(|trace| serde_json::to_value(&trace).ok());
+
+            if let Some(ref sm) = stream_manager {
+                sm.update(cx, |sm, cx| {
+                    sm.set_trace(&conv_id, trace_json);
+                    sm.finalize_stream(&conv_id, cx);
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to finalize regeneration stream"))
+                .ok();
+            }
+
+            Ok(())
+        });
+
+        // Register stream with StreamManager
+        if let Some(manager) = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            manager.update(cx, |mgr, cx| {
+                mgr.register_stream(conv_id_for_task, task, cancel_flag, pending_artifacts, cx);
             });
-
-            // Persist the regeneration record
-            self.persist_conversation(&conv_id, cx);
-
-            // Re-send the original user message (this will create a new stream)
-            self.send_message(user_text, attachments, cx);
+        } else {
+            error!("StreamManager not available for regeneration stream");
         }
     }
 
