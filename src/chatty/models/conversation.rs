@@ -29,11 +29,20 @@ pub struct Conversation {
     title: String,
     model_id: String,
     agent: AgentClient,
+    // ── Parallel arrays ──────────────────────────────────────────────
+    // The following Vecs are all parallel to `history` (one entry per message).
+    // Every push to `history` must be accompanied by a push to each Vec.
+    //
+    // Note: `system_traces` is pushed in two places — `add_user_message_with_attachments`
+    // (pushes None for user messages) and `add_trace` (pushes the real trace for
+    // assistant messages). The caller must always call `add_trace` immediately after
+    // `finalize_response` to maintain the invariant.
     history: Vec<Message>,
     system_traces: Vec<Option<serde_json::Value>>,
     attachment_paths: Vec<Vec<PathBuf>>,
     message_timestamps: Vec<Option<i64>>,
     message_feedback: Vec<Option<MessageFeedback>>,
+    // ── End parallel arrays ──────────────────────────────────────────
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
