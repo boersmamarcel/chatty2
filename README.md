@@ -125,6 +125,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
+- **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
 
 ### Thinking & Traces
 

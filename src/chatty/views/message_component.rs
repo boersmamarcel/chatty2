@@ -1,6 +1,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
@@ -572,16 +573,19 @@ where
     container
 }
 
-/// Render the action row (copy + feedback buttons) for assistant messages
-fn render_assistant_actions<G>(
+/// Render the action row (copy + feedback + regenerate buttons) for assistant messages
+fn render_assistant_actions<G, R>(
     content: &str,
     feedback: &Option<MessageFeedback>,
     index: usize,
+    is_last_message: bool,
     on_feedback: G,
+    on_regenerate: R,
     cx: &App,
 ) -> Div
 where
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
+    R: Fn(usize, &mut App) + 'static + Clone,
 {
     let muted = cx.theme().muted_foreground;
 
@@ -641,6 +645,21 @@ where
                     }
                 }),
         )
+        .when(is_last_message, |this| {
+            this.child(
+                Button::new(ElementId::Name(format!("regenerate-msg-{}", index).into()))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(CustomIcon::Refresh).text_color(muted))
+                    .tooltip("Regenerate response")
+                    .on_click({
+                        let on_regenerate = on_regenerate.clone();
+                        move |_event, _window, cx| {
+                            on_regenerate(index, cx);
+                        }
+                    }),
+            )
+        })
         .child(
             Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
                 .ghost()
@@ -656,17 +675,21 @@ where
         )
 }
 
-pub fn render_message<F, G>(
+#[allow(clippy::too_many_arguments)]
+pub fn render_message<F, G, R>(
     msg: &DisplayMessage,
     index: usize,
+    is_last_message: bool,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     on_toggle_tool: F,
     on_feedback: G,
+    on_regenerate: R,
     cx: &App,
 ) -> AnyElement
 where
     F: Fn(usize, usize, &mut App) + 'static + Clone,
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
+    R: Fn(usize, &mut App) + 'static + Clone,
 {
     // If not in viewport window, render lightweight placeholder
     // Full render for messages in viewport
@@ -739,7 +762,9 @@ where
                         &msg.content,
                         &msg.feedback,
                         index,
+                        is_last_message,
                         on_feedback,
+                        on_regenerate,
                         cx,
                     ))
                     .into_any_element(),
@@ -789,7 +814,9 @@ where
                 &msg.content,
                 &msg.feedback,
                 index,
+                is_last_message,
                 on_feedback,
+                on_regenerate,
                 cx,
             ))
             .into_any_element(),

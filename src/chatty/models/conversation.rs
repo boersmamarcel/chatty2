@@ -23,6 +23,21 @@ pub enum MessageFeedback {
     ThumbsDown,
 }
 
+/// Record of a regenerated assistant response, capturing the original text
+/// for DPO (Direct Preference Optimization) preference pair training data.
+/// The original text is the "rejected" response; the replacement is the "chosen" response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegenerationRecord {
+    /// Index into the conversation history identifying which assistant message was regenerated
+    pub message_index: usize,
+    /// The full text of the original (rejected) assistant response before replacement
+    pub original_text: String,
+    /// Unix timestamp (seconds) when the original response was generated
+    pub original_timestamp: i64,
+    /// Unix timestamp (seconds) when the regeneration was requested
+    pub regeneration_timestamp: i64,
+}
+
 /// A single conversation with an AI agent
 pub struct Conversation {
     id: String,
@@ -43,6 +58,8 @@ pub struct Conversation {
     message_timestamps: Vec<Option<i64>>,
     message_feedback: Vec<Option<MessageFeedback>>,
     // ── End parallel arrays ──────────────────────────────────────────
+    /// Regeneration records capturing original responses before replacement (DPO preference pairs)
+    regeneration_records: Vec<RegenerationRecord>,
     token_usage: ConversationTokenUsage,
     created_at: SystemTime,
     updated_at: SystemTime,
@@ -113,6 +130,7 @@ impl Conversation {
             attachment_paths: Vec::new(),
             message_timestamps: Vec::new(),
             message_feedback: Vec::new(),
+            regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
             updated_at: now,
@@ -185,6 +203,10 @@ impl Conversation {
         let message_feedback =
             Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
 
+        // Deserialize regeneration records (with fallback to empty if not present)
+        let regeneration_records =
+            Self::deserialize_regeneration_records(&data.regeneration_records).unwrap_or_default();
+
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
             .unwrap_or_else(|_| ConversationTokenUsage::new());
@@ -203,6 +225,7 @@ impl Conversation {
             attachment_paths,
             message_timestamps,
             message_feedback,
+            regeneration_records,
             token_usage,
             created_at,
             updated_at,
@@ -375,6 +398,83 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize message feedback")
     }
 
+    /// Get regeneration records for this conversation
+    #[allow(dead_code)]
+    pub fn regeneration_records(&self) -> &[RegenerationRecord] {
+        &self.regeneration_records
+    }
+
+    /// Record a regeneration event, capturing the original assistant response text
+    /// before it is replaced. This creates a DPO preference pair where the original
+    /// text is the "rejected" response and the new response (after regeneration) is "chosen".
+    pub fn record_regeneration(
+        &mut self,
+        message_index: usize,
+        original_text: String,
+        original_timestamp: i64,
+    ) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.regeneration_records.push(RegenerationRecord {
+            message_index,
+            original_text,
+            original_timestamp,
+            regeneration_timestamp: now,
+        });
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Serialize regeneration records to JSON string
+    pub fn serialize_regeneration_records(&self) -> Result<String> {
+        serde_json::to_string(&self.regeneration_records)
+            .context("Failed to serialize regeneration records")
+    }
+
+    /// Deserialize regeneration records from JSON string
+    pub fn deserialize_regeneration_records(json: &str) -> Result<Vec<RegenerationRecord>> {
+        serde_json::from_str(json).context("Failed to deserialize regeneration records")
+    }
+
+    /// Remove the last assistant message and its trace from all parallel arrays.
+    /// Returns the (text, timestamp) of the removed message if found, or None.
+    /// Used during regeneration to replace the old response.
+    pub fn remove_last_assistant_message(&mut self) -> Option<(String, Option<i64>)> {
+        if self.history.len() < 2 {
+            return None;
+        }
+        let last_idx = self.history.len() - 1;
+        if !matches!(self.history[last_idx], Message::Assistant { .. }) {
+            return None;
+        }
+
+        // Extract text from assistant message before removing
+        let text = match &self.history[last_idx] {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .filter_map(|ac| match ac {
+                    AssistantContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        };
+        let timestamp = self.message_timestamps.get(last_idx).copied().flatten();
+
+        // Pop from all parallel arrays
+        self.history.pop();
+        self.system_traces.pop();
+        self.attachment_paths.pop();
+        self.message_timestamps.pop();
+        self.message_feedback.pop();
+
+        self.updated_at = SystemTime::now();
+        Some((text, timestamp))
+    }
+
     /// Get the agent
     pub fn agent(&self) -> &AgentClient {
         &self.agent
@@ -441,5 +541,88 @@ impl Conversation {
         } else {
             self.streaming_message = Some(text.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_regeneration_record_serialize_roundtrip() {
+        let record = RegenerationRecord {
+            message_index: 3,
+            original_text: "The original response text".to_string(),
+            original_timestamp: 1700000000,
+            regeneration_timestamp: 1700001000,
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: RegenerationRecord = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(record, deserialized);
+    }
+
+    #[test]
+    fn test_regeneration_records_vec_serialize_roundtrip() {
+        let records = vec![
+            RegenerationRecord {
+                message_index: 1,
+                original_text: "First original".to_string(),
+                original_timestamp: 1700000000,
+                regeneration_timestamp: 1700001000,
+            },
+            RegenerationRecord {
+                message_index: 1,
+                original_text: "Second original (same message re-regenerated)".to_string(),
+                original_timestamp: 1700001000,
+                regeneration_timestamp: 1700002000,
+            },
+            RegenerationRecord {
+                message_index: 5,
+                original_text: "Different message regenerated".to_string(),
+                original_timestamp: 1700003000,
+                regeneration_timestamp: 1700004000,
+            },
+        ];
+
+        let json = serde_json::to_string(&records).unwrap();
+        let deserialized: Vec<RegenerationRecord> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(records, deserialized);
+    }
+
+    #[test]
+    fn test_empty_regeneration_records_deserialize() {
+        let json = "[]";
+        let records: Vec<RegenerationRecord> = serde_json::from_str(json).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_regenerations_same_message() {
+        let records = vec![
+            RegenerationRecord {
+                message_index: 3,
+                original_text: "Attempt 1".to_string(),
+                original_timestamp: 1700000000,
+                regeneration_timestamp: 1700001000,
+            },
+            RegenerationRecord {
+                message_index: 3,
+                original_text: "Attempt 2".to_string(),
+                original_timestamp: 1700001000,
+                regeneration_timestamp: 1700002000,
+            },
+        ];
+
+        let json = serde_json::to_string(&records).unwrap();
+        let deserialized: Vec<RegenerationRecord> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0].message_index, 3);
+        assert_eq!(deserialized[1].message_index, 3);
+        assert_eq!(deserialized[0].original_text, "Attempt 1");
+        assert_eq!(deserialized[1].original_text, "Attempt 2");
     }
 }

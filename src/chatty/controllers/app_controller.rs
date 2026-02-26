@@ -249,6 +249,9 @@ impl ChattyApp {
                 } => {
                     app.handle_feedback_changed(*history_index, feedback.clone(), cx);
                 }
+                ChatViewEvent::RegenerateMessage { history_index } => {
+                    app.handle_regeneration(*history_index, cx);
+                }
             },
         )
         .detach();
@@ -696,6 +699,7 @@ impl ChattyApp {
                         attachment_paths: "[]".to_string(),
                         message_timestamps: "[]".to_string(),
                         message_feedback: "[]".to_string(),
+                        regeneration_records: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -1171,6 +1175,9 @@ impl ChattyApp {
                                         message_feedback: conv
                                             .serialize_message_feedback()
                                             .unwrap_or_else(|_| "[]".to_string()),
+                                        regeneration_records: conv
+                                            .serialize_regeneration_records()
+                                            .unwrap_or_else(|_| "[]".to_string()),
                                         created_at: conv
                                             .created_at()
                                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -1428,26 +1435,7 @@ impl ChattyApp {
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
-                // PHASE 3: Create approval notification channels
-                let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
-                let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
-
-                // Set up global notifier for shell tools to use
-                crate::chatty::models::execution_approval_store::set_global_approval_notifier(approval_tx.clone());
-
-                // Update global store with notifiers for this conversation
-                // IMPORTANT: Use update_global to modify existing store, not set_global which replaces it
-                // Replacing the store would break the pending_requests HashMap connection
-                cx.update_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore, _>(
-                    |store, _cx| {
-                        store.set_notifiers(approval_tx, resolution_tx);
-                    }
-                )
-                .map_err(|e| warn!(error = ?e, "Failed to update approval store with notifiers"))
-                .ok();
-
-                // Prepare message contents with attachment filtering
-                debug!("Calling stream_prompt()");
+                // PHASE 3: Prepare user content and start LLM stream
                 let mut contents = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
                         text: message.clone(),
@@ -1471,128 +1459,21 @@ impl ChattyApp {
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
                     }
                 }
-                let max_agent_turns = cx
-                    .update(|cx| {
-                        cx.global::<ExecutionSettingsModel>()
-                            .max_agent_turns as usize
-                    })
-                    .unwrap_or(10);
 
-                let (mut stream, user_message) =
-                    stream_prompt(&agent, &history, contents, Some(approval_rx), Some(resolution_rx), max_agent_turns).await?;
-
-                // Update history synchronously with user message
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.add_user_message_with_attachments(user_message, attachments.clone());
-                    }
-                })
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                debug!("Got stream, starting to process");
-                use futures::StreamExt;
-                let mut chunk_count = 0;
-
-                // PHASE 4: Process LLM response stream
-                debug!("Entering stream processing loop");
-                while let Some(chunk_result) = stream.next().await {
-                    // Check cancellation token before processing
-                    if cancel_flag_for_loop.load(Ordering::Relaxed) {
-                        debug!("Stream cancelled via cancellation token");
-                        break;
-                    }
-                    chunk_count += 1;
-                    debug!(chunk_num = chunk_count, chunk = ?chunk_result, "Processing stream chunk");
-
-                    match chunk_result {
-                        Ok(StreamChunk::Text(ref text)) => {
-                            // Update the Conversation model (source of truth for background streams)
-                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                    conv.append_streaming_content(text);
-                                }
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
-                            .ok();
-                        }
-                        Ok(StreamChunk::TokenUsage { .. }) => {
-                            // Token usage tracked by StreamManager
-                        }
-                        Ok(StreamChunk::Done) => {
-                            debug!("Received Done chunk");
-                            break;
-                        }
-                        Ok(StreamChunk::Error(ref err)) => {
-                            error!(error = %err, "Stream error");
-
-                            // Detect authentication errors (401/Unauthorized)
-                            if err.contains("401") || err.contains("Unauthorized") {
-                                tracing::warn!("Detected Azure auth error - token likely expired");
-                                if let Some(cache) = cx.update(|cx| {
-                                    cx.try_global::<crate::chatty::auth::AzureTokenCache>().cloned()
-                                }).ok().flatten() {
-                                    if let Err(e) = cache.refresh_token().await {
-                                        error!(error = ?e, "Failed to refresh Azure token after 401 error");
-                                    } else {
-                                        tracing::info!("Azure token refreshed successfully.");
-                                    }
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            // ToolCall*, Approval* chunks: no local state update needed
-                        }
-                        Err(ref e) => {
-                            error!(error = %e, "Stream error");
-                        }
-                    }
-
-                    // Forward ALL chunks to StreamManager (emits events for UI subscription)
-                    match chunk_result {
-                        Ok(chunk) => {
-                            let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
-                            if let Some(ref sm) = stream_manager {
-                                sm.update(cx, |sm, cx| sm.handle_chunk(&conv_id, chunk, cx))
-                                    .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
-                                    .ok();
-                            }
-                            if is_break {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(ref sm) = stream_manager {
-                                sm.update(cx, |sm, cx| {
-                                    sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
-                                })
-                                .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
-                                .ok();
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // PHASE 5: Extract trace and finalize via StreamManager
-                // StreamManager emits StreamEnded(Completed) which triggers
-                // UI finalization, conversation model update, title gen, token usage, and persistence
-                debug!("Stream loop finished, finalizing via StreamManager");
-
-                let trace_json = chat_view
-                    .update(cx, |view, _cx| view.extract_current_trace())
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                    .and_then(|trace| serde_json::to_value(&trace).ok());
-
-                if let Some(ref sm) = stream_manager {
-                    sm.update(cx, |sm, cx| {
-                        sm.set_trace(&conv_id, trace_json);
-                        sm.finalize_stream(&conv_id, cx);
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
-                    .ok();
-                }
-
-                Ok(())
+                // PHASE 4: Run shared LLM stream (approval setup, streaming, finalization)
+                run_llm_stream(
+                    conv_id,
+                    agent,
+                    history,
+                    contents,
+                    true, // add user message to conversation model
+                    attachments,
+                    chat_view,
+                    stream_manager,
+                    cancel_flag_for_loop,
+                    cx,
+                )
+                .await
             });
 
         // Register stream with StreamManager (owns task + cancel flag)
@@ -2126,6 +2007,137 @@ impl ChattyApp {
         }
     }
 
+    /// Handle regeneration of the last assistant message.
+    ///
+    /// Records the original response as a DPO preference pair, removes the old
+    /// assistant message from both model and UI, then re-streams using the existing
+    /// conversation history (the user message is already in history, so it is NOT
+    /// re-added). Uses the shared `run_llm_stream` helper for the streaming phase.
+    fn handle_regeneration(&mut self, history_index: usize, cx: &mut Context<Self>) {
+        let conv_id = match cx.global::<ConversationsStore>().active_id().cloned() {
+            Some(id) => id,
+            None => return,
+        };
+
+        // PHASE 1: Remove old assistant message and record DPO pair
+        let ok = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            let conv = store.get_conversation_mut(&conv_id)?;
+
+            if history_index == 0 || history_index >= conv.message_count() {
+                return None;
+            }
+
+            let (original_text, original_timestamp) = conv.remove_last_assistant_message()?;
+
+            conv.record_regeneration(
+                history_index,
+                original_text,
+                original_timestamp.unwrap_or(0),
+            );
+
+            Some(())
+        });
+
+        if ok.is_none() {
+            return;
+        }
+
+        // PHASE 2: Update UI — remove old assistant message, start fresh placeholder
+        let chat_view = self.chat_view.clone();
+        chat_view.update(cx, |view, cx| {
+            view.remove_last_assistant_message(cx);
+            view.start_assistant_message(cx);
+        });
+
+        // Persist the regeneration record before streaming
+        self.persist_conversation(&conv_id, cx);
+
+        // PHASE 3: Stream new response via shared helper
+        let sidebar = self.sidebar_view.clone();
+        let pending_artifacts = cx
+            .global::<ConversationsStore>()
+            .get_conversation(&conv_id)
+            .map(|c| c.pending_artifacts());
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_for_loop = cancel_flag.clone();
+
+        let stream_manager = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone());
+
+        let conv_id_for_task = conv_id.clone();
+        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+            debug!(conv_id = %conv_id, "Regeneration: starting new stream");
+
+            // Force sidebar to re-render
+            sidebar
+                .update(cx, |_sidebar, cx| {
+                    cx.notify();
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to refresh sidebar"))
+                .ok();
+
+            // Extract agent and history (ends with the user message after removal)
+            let (agent, history) = cx
+                .update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation(&conv_id) {
+                        if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
+                            artifacts.clear();
+                        }
+                        Ok((conv.agent().clone(), conv.history().to_vec()))
+                    } else {
+                        Err(anyhow::anyhow!("Conversation not found for regeneration"))
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!(e.to_string()))??;
+
+            // Split history: context (all but last) + user content (last message)
+            let len = history.len();
+            if len == 0 {
+                return Err(anyhow::anyhow!("Empty history during regeneration"));
+            }
+            let history_context = history[..len - 1].to_vec();
+            let user_contents = match &history[len - 1] {
+                rig::completion::Message::User { content, .. } => {
+                    content.iter().cloned().collect::<Vec<_>>()
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Last message in history is not a user message"
+                    ));
+                }
+            };
+
+            // Run shared LLM stream (do NOT add user message — it's already in history)
+            run_llm_stream(
+                conv_id,
+                agent,
+                history_context,
+                user_contents,
+                false, // user message already in model
+                vec![],
+                chat_view,
+                stream_manager,
+                cancel_flag_for_loop,
+                cx,
+            )
+            .await
+        });
+
+        // Register stream with StreamManager
+        if let Some(manager) = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|g| g.entity.clone())
+        {
+            manager.update(cx, |mgr, cx| {
+                mgr.register_stream(conv_id_for_task, task, cancel_flag, pending_artifacts, cx);
+            });
+        } else {
+            error!("StreamManager not available for regeneration stream");
+        }
+    }
+
     /// Persist a conversation to disk asynchronously
     fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
         let conv_id = conv_id.to_string();
@@ -2158,6 +2170,9 @@ impl ChattyApp {
                     message_feedback: conv
                         .serialize_message_feedback()
                         .unwrap_or_else(|_| "[]".to_string()),
+                    regeneration_records: conv
+                        .serialize_regeneration_records()
+                        .unwrap_or_else(|_| "[]".to_string()),
                     created_at: conv
                         .created_at()
                         .duration_since(SystemTime::UNIX_EPOCH)
@@ -2187,6 +2202,179 @@ impl ChattyApp {
     pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
         self.chat_view.read(cx).chat_input_state().clone()
     }
+}
+
+/// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
+///
+/// Handles:
+/// 1. Approval channel setup
+/// 2. `stream_prompt()` call
+/// 3. Optionally adding user message to conversation model
+/// 4. Stream processing loop (chunks -> ConversationsStore + StreamManager)
+/// 5. Trace extraction and StreamManager finalization
+///
+/// Callers are responsible for their own preamble (conversation creation, UI message
+/// addition, DPO recording, etc.) and for registering the returned task with StreamManager.
+#[allow(clippy::too_many_arguments)]
+async fn run_llm_stream(
+    conv_id: String,
+    agent: AgentClient,
+    history: Vec<rig::completion::Message>,
+    user_contents: Vec<rig::message::UserContent>,
+    add_user_message_to_model: bool,
+    attachment_paths: Vec<PathBuf>,
+    chat_view: Entity<ChatView>,
+    stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
+    cancel_flag: Arc<AtomicBool>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    // 1. Create approval notification channels
+    let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    crate::chatty::models::execution_approval_store::set_global_approval_notifier(
+        approval_tx.clone(),
+    );
+    cx.update_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore, _>(
+        |store, _cx| {
+            store.set_notifiers(approval_tx, resolution_tx);
+        },
+    )
+    .map_err(|e| warn!(error = ?e, "Failed to update approval store with notifiers"))
+    .ok();
+
+    // 2. Get max agent turns
+    let max_agent_turns = cx
+        .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
+        .unwrap_or(10);
+
+    // 3. Call stream_prompt
+    debug!(conv_id = %conv_id, "Calling stream_prompt()");
+    let (mut stream, user_message) = stream_prompt(
+        &agent,
+        &history,
+        user_contents,
+        Some(approval_rx),
+        Some(resolution_rx),
+        max_agent_turns,
+    )
+    .await?;
+
+    // 4. Optionally add user message to conversation model
+    if add_user_message_to_model {
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                conv.add_user_message_with_attachments(user_message, attachment_paths);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    }
+
+    // 5. Stream processing loop
+    debug!(conv_id = %conv_id, "Entering stream processing loop");
+    use futures::StreamExt;
+
+    while let Some(chunk_result) = stream.next().await {
+        // Check cancellation token before processing
+        if cancel_flag.load(Ordering::Relaxed) {
+            debug!(conv_id = %conv_id, "Stream cancelled via cancellation token");
+            break;
+        }
+
+        match chunk_result {
+            Ok(StreamChunk::Text(ref text)) => {
+                // Update the Conversation model (source of truth for background streams)
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                        conv.append_streaming_content(text);
+                    }
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
+                .ok();
+            }
+            Ok(StreamChunk::TokenUsage { .. }) => {
+                // Token usage tracked by StreamManager
+            }
+            Ok(StreamChunk::Done) => {
+                debug!(conv_id = %conv_id, "Received Done chunk");
+                break;
+            }
+            Ok(StreamChunk::Error(ref err)) => {
+                error!(error = %err, conv_id = %conv_id, "Stream error");
+
+                // Detect authentication errors (401/Unauthorized)
+                if err.contains("401") || err.contains("Unauthorized") {
+                    tracing::warn!("Detected Azure auth error - token likely expired");
+                    if let Some(cache) = cx
+                        .update(|cx| {
+                            cx.try_global::<crate::chatty::auth::AzureTokenCache>()
+                                .cloned()
+                        })
+                        .ok()
+                        .flatten()
+                    {
+                        if let Err(e) = cache.refresh_token().await {
+                            error!(error = ?e, "Failed to refresh Azure token after 401 error");
+                        } else {
+                            tracing::info!("Azure token refreshed successfully.");
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                // ToolCall*, Approval* chunks: no local state update needed
+            }
+            Err(ref e) => {
+                error!(error = %e, conv_id = %conv_id, "Stream error");
+            }
+        }
+
+        // Forward ALL chunks to StreamManager (emits events for UI subscription)
+        match chunk_result {
+            Ok(chunk) => {
+                let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+                if let Some(ref sm) = stream_manager {
+                    sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                        sm.handle_chunk(&conv_id, chunk, cx)
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
+                    .ok();
+                }
+                if is_break {
+                    break;
+                }
+            }
+            Err(e) => {
+                if let Some(ref sm) = stream_manager {
+                    sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                        sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
+                    .ok();
+                }
+                break;
+            }
+        }
+    }
+
+    // 6. Extract trace and finalize via StreamManager
+    debug!(conv_id = %conv_id, "Stream loop finished, finalizing via StreamManager");
+
+    let trace_json = chat_view
+        .update(cx, |view, _cx| view.extract_current_trace())
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        .and_then(|trace| serde_json::to_value(&trace).ok());
+
+    if let Some(ref sm) = stream_manager {
+        sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+            sm.set_trace(&conv_id, trace_json);
+            sm.finalize_stream(&conv_id, cx);
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
+        .ok();
+    }
+
+    Ok(())
 }
 
 /// Convert a file attachment to a rig-core UserContent
