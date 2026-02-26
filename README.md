@@ -141,6 +141,21 @@ Chatty can export conversations in [ATIF (Agent Trajectory Interchange Format)](
 
 ATIF trajectories feed into external training pipelines, Harbor Framework workflows, and the planned in-app fine-tuning system.
 
+### Training Data Export (JSONL)
+
+Chatty can also export conversations in JSONL format for direct use with fine-tuning APIs:
+
+- **SFT (Supervised Fine-Tuning)** — conversations in ChatML format (`{"messages": [{"role": "...", "content": "..."}]}`) compatible with OpenAI, Anthropic, Together AI, and other fine-tuning services
+- **DPO (Direct Preference Optimization)** — preference pairs from regenerated responses (`{"prompt": [...], "chosen": "...", "rejected": "..."}`) for RLHF training
+
+Key features:
+- **Automatic deduplication** — re-exported conversations replace previous entries (keyed by `_conversation_id`)
+- **Multimodal stripping** — images and PDFs are stripped, keeping only text content (most fine-tuning APIs don't support multimodal inputs)
+- **Quality filtering** — optional feedback-based filtering to exclude thumbs-down conversations
+- **Tool call support** — optionally include tool calls and results in ChatML format
+
+SFT data is appended to `sft.jsonl` and DPO pairs to `dpo.jsonl` in the exports directory (`~/.config/chatty/exports/`). Enable auto-export in **Settings > Training Data**.
+
 ### Thinking & Traces
 
 - **Extended thinking** blocks for Claude's chain-of-thought reasoning

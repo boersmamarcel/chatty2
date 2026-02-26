@@ -8,6 +8,10 @@ pub struct TrainingSettingsModel {
     /// Opt-in: disabled by default.
     #[serde(default)]
     pub atif_auto_export: bool,
+    /// Auto-export conversations as JSONL (SFT + DPO) after each completed assistant response.
+    /// Opt-in: disabled by default.
+    #[serde(default)]
+    pub jsonl_auto_export: bool,
 }
 
 impl Global for TrainingSettingsModel {}
