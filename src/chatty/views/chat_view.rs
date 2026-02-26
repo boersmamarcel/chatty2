@@ -49,6 +49,8 @@ pub enum ChatViewEvent {
         history_index: usize,
         feedback: Option<MessageFeedback>,
     },
+    /// User clicked "Regenerate" on an assistant message
+    RegenerateMessage { history_index: usize },
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
@@ -747,6 +749,18 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Remove the last assistant message from the display (used for regeneration)
+    pub fn remove_last_assistant_message(&mut self, cx: &mut Context<Self>) {
+        if self
+            .messages
+            .last()
+            .is_some_and(|m| matches!(m.role, MessageRole::Assistant))
+        {
+            self.messages.pop();
+            cx.notify();
+        }
+    }
+
     /// Clear all messages from the chat view
     pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
@@ -1061,28 +1075,47 @@ impl Render for ChatView {
                                             self.collapsed_tool_calls.clone();
                                         let chat_view_entity = cx.entity();
 
-                                        self.messages
+                                        // Compute visible messages and find the last visible assistant index
+                                        let visible_messages: Vec<(usize, &DisplayMessage)> =
+                                            self.messages
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(_, msg)| {
+                                                    // Skip empty streaming messages that have no
+                                                    // tool calls yet (we show skeleton instead).
+                                                    // Once tool calls arrive the message must be
+                                                    // visible so the trace/approval bar is shown.
+                                                    !(msg.is_streaming
+                                                        && msg.content.is_empty()
+                                                        && !msg
+                                                            .live_trace
+                                                            .as_ref()
+                                                            .is_some_and(|trace| trace.has_items()))
+                                                })
+                                                .collect();
+
+                                        let last_visible_assistant_idx = visible_messages
                                             .iter()
-                                            .enumerate()
-                                            .filter(|(_, msg)| {
-                                                // Skip empty streaming messages that have no
-                                                // tool calls yet (we show skeleton instead).
-                                                // Once tool calls arrive the message must be
-                                                // visible so the trace/approval bar is shown.
-                                                !(msg.is_streaming
-                                                    && msg.content.is_empty()
-                                                    && !msg
-                                                        .live_trace
-                                                        .as_ref()
-                                                        .is_some_and(|trace| trace.has_items()))
+                                            .rev()
+                                            .find(|(_, msg)| {
+                                                matches!(msg.role, MessageRole::Assistant)
+                                                    && !msg.is_streaming
+                                                    && msg.live_trace.is_none()
                                             })
+                                            .map(|(idx, _)| *idx);
+
+                                        visible_messages
+                                            .into_iter()
                                             .map(|(index, msg)| {
                                                 let entity_clone = chat_view_entity.clone();
                                                 let entity_for_feedback = chat_view_entity.clone();
+                                                let entity_for_regenerate = chat_view_entity.clone();
                                                 let history_index = msg.history_index;
+                                                let is_last_message = last_visible_assistant_idx == Some(index);
                                                 render_message(
                                                     msg,
                                                     index,
+                                                    is_last_message,
                                                     &collapsed_tool_calls,
                                                     move |msg_idx, tool_idx, cx| {
                                                         entity_clone.update(cx, |chat_view, cx| {
@@ -1113,6 +1146,15 @@ impl Render for ChatView {
                                                                 });
                                                             }
                                                             cx.notify();
+                                                        });
+                                                    },
+                                                    move |_msg_idx, cx| {
+                                                        entity_for_regenerate.update(cx, |_chat_view, cx| {
+                                                            if let Some(h_idx) = history_index {
+                                                                cx.emit(ChatViewEvent::RegenerateMessage {
+                                                                    history_index: h_idx,
+                                                                });
+                                                            }
                                                         });
                                                     },
                                                     cx,

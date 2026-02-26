@@ -249,6 +249,9 @@ impl ChattyApp {
                 } => {
                     app.handle_feedback_changed(*history_index, feedback.clone(), cx);
                 }
+                ChatViewEvent::RegenerateMessage { history_index } => {
+                    app.handle_regeneration(*history_index, cx);
+                }
             },
         )
         .detach();
@@ -2127,6 +2130,73 @@ impl ChattyApp {
                 }
             });
             self.persist_conversation(&conv_id, cx);
+        }
+    }
+
+    /// Handle regeneration of the last assistant message.
+    ///
+    /// Records the original response as a DPO preference pair, removes the old
+    /// assistant message from both model and UI, persists the regeneration record,
+    /// then re-sends the original user prompt to get a new response.
+    fn handle_regeneration(&mut self, history_index: usize, cx: &mut Context<Self>) {
+        let conv_id = match cx.global::<ConversationsStore>().active_id().cloned() {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Extract data from conversation and record regeneration
+        let resend_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            let conv = store.get_conversation_mut(&conv_id)?;
+
+            // The assistant message being regenerated is at history_index.
+            // The user message that prompted it is at history_index - 1.
+            if history_index == 0 || history_index >= conv.message_count() {
+                return None;
+            }
+
+            // Extract original assistant text and timestamp for DPO record
+            let (original_text, original_timestamp) = conv.remove_last_assistant_message()?;
+
+            // Record the regeneration (DPO preference pair)
+            conv.record_regeneration(
+                history_index,
+                original_text,
+                original_timestamp.unwrap_or(0),
+            );
+
+            // Extract user message text and attachments (at history_index - 1)
+            let user_idx = history_index - 1;
+            let user_text = match conv.history().get(user_idx) {
+                Some(rig::completion::Message::User { content, .. }) => content
+                    .iter()
+                    .filter_map(|uc| match uc {
+                        rig::message::UserContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => return None,
+            };
+            let attachments = conv
+                .attachment_paths()
+                .get(user_idx)
+                .cloned()
+                .unwrap_or_default();
+
+            Some((user_text, attachments))
+        });
+
+        if let Some((user_text, attachments)) = resend_data {
+            // Remove the last assistant message from UI
+            self.chat_view.update(cx, |view, cx| {
+                view.remove_last_assistant_message(cx);
+            });
+
+            // Persist the regeneration record
+            self.persist_conversation(&conv_id, cx);
+
+            // Re-send the original user message (this will create a new stream)
+            self.send_message(user_text, attachments, cx);
         }
     }
 

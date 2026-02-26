@@ -407,7 +407,6 @@ impl Conversation {
     /// Record a regeneration event, capturing the original assistant response text
     /// before it is replaced. This creates a DPO preference pair where the original
     /// text is the "rejected" response and the new response (after regeneration) is "chosen".
-    #[allow(dead_code)]
     pub fn record_regeneration(
         &mut self,
         message_index: usize,
@@ -437,6 +436,43 @@ impl Conversation {
     /// Deserialize regeneration records from JSON string
     pub fn deserialize_regeneration_records(json: &str) -> Result<Vec<RegenerationRecord>> {
         serde_json::from_str(json).context("Failed to deserialize regeneration records")
+    }
+
+    /// Remove the last assistant message and its trace from all parallel arrays.
+    /// Returns the (text, timestamp) of the removed message if found, or None.
+    /// Used during regeneration to replace the old response.
+    pub fn remove_last_assistant_message(&mut self) -> Option<(String, Option<i64>)> {
+        if self.history.len() < 2 {
+            return None;
+        }
+        let last_idx = self.history.len() - 1;
+        if !matches!(self.history[last_idx], Message::Assistant { .. }) {
+            return None;
+        }
+
+        // Extract text from assistant message before removing
+        let text = match &self.history[last_idx] {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .filter_map(|ac| match ac {
+                    AssistantContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        };
+        let timestamp = self.message_timestamps.get(last_idx).copied().flatten();
+
+        // Pop from all parallel arrays
+        self.history.pop();
+        self.system_traces.pop();
+        self.attachment_paths.pop();
+        self.message_timestamps.pop();
+        self.message_feedback.pop();
+
+        self.updated_at = SystemTime::now();
+        Some((text, timestamp))
     }
 
     /// Get the agent
