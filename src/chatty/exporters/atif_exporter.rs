@@ -167,28 +167,27 @@ fn build_agent_step(
         .collect::<Vec<_>>()
         .join("");
 
-    let mut tool_calls: Vec<AtifToolCall> = content
+    // Parse system trace for reasoning content and tool outputs (keyed by ToolCallBlock.id)
+    let (reasoning_content, trace_outputs) = parse_trace(trace_json);
+
+    // Build tool calls from rig AssistantContent, enriching with trace outputs.
+    // The rig ToolCall.id matches the trace ToolCallBlock.id, so we use it for lookup
+    // before mapping to the ATIF id (which prefers call_id when available).
+    let tool_calls: Vec<AtifToolCall> = content
         .iter()
         .filter_map(|ac| match ac {
-            AssistantContent::ToolCall(tc) => Some(AtifToolCall {
-                id: tc.call_id.clone().unwrap_or_else(|| tc.id.clone()),
-                name: tc.function.name.clone(),
-                arguments: tc.function.arguments.clone(),
-                output: None,
-            }),
+            AssistantContent::ToolCall(tc) => {
+                let output = trace_outputs.get(&tc.id).cloned();
+                Some(AtifToolCall {
+                    id: tc.call_id.clone().unwrap_or_else(|| tc.id.clone()),
+                    name: tc.function.name.clone(),
+                    arguments: tc.function.arguments.clone(),
+                    output,
+                })
+            }
             _ => None,
         })
         .collect();
-
-    // Parse system trace for reasoning content and tool outputs
-    let (reasoning_content, trace_outputs) = parse_trace(trace_json);
-
-    // Enrich tool calls with outputs from trace
-    for tc in &mut tool_calls {
-        if let Some(output) = trace_outputs.get(&tc.name) {
-            tc.output = Some(output.clone());
-        }
-    }
 
     AtifStep {
         source: "agent".to_string(),
@@ -201,7 +200,7 @@ fn build_agent_step(
     }
 }
 
-/// Parse a system trace JSON, returning (reasoning_text, tool_output_by_tool_name).
+/// Parse a system trace JSON, returning (reasoning_text, tool_output_by_id).
 fn parse_trace(trace_json: Option<serde_json::Value>) -> (Option<String>, HashMap<String, String>) {
     let mut outputs = HashMap::new();
     let trace_json = match trace_json {
@@ -233,7 +232,7 @@ fn parse_trace(trace_json: Option<serde_json::Value>) -> (Option<String>, HashMa
         if let TraceItem::ToolCall(tc) = item
             && let Some(output) = &tc.output
         {
-            outputs.insert(tc.tool_name.clone(), output.clone());
+            outputs.insert(tc.id.clone(), output.clone());
         }
     }
 
@@ -508,10 +507,12 @@ mod tests {
         };
         let json = serde_json::to_value(&trace).unwrap();
         let (_, outputs) = parse_trace(Some(json));
+        // Keyed by ToolCallBlock.id, not tool_name
         assert_eq!(
-            outputs.get("read_file").map(|s| s.as_str()),
+            outputs.get("call_abc").map(|s| s.as_str()),
             Some("file contents here")
         );
+        assert!(outputs.get("read_file").is_none());
     }
 
     #[test]
@@ -848,6 +849,89 @@ mod tests {
         );
         let result = conversation_to_atif(&conv, None).unwrap();
         assert_eq!(result["steps"][0]["tool_calls"][0]["output"], "Hello World");
+    }
+
+    #[test]
+    fn duplicate_tool_names_matched_by_id() {
+        use rig::completion::message::{ToolCall, ToolFunction};
+
+        // Two read_file calls in one agent step — same tool name, different ids
+        let trace = SystemTrace {
+            items: vec![
+                TraceItem::ToolCall(ToolCallBlock {
+                    id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    display_name: "read_file".to_string(),
+                    input: r#"{"path":"/tmp/a.txt"}"#.to_string(),
+                    output: Some("contents of A".to_string()),
+                    output_preview: None,
+                    state: ToolCallState::Success,
+                    duration: None,
+                    text_before: String::new(),
+                }),
+                TraceItem::ToolCall(ToolCallBlock {
+                    id: "tc_2".to_string(),
+                    tool_name: "read_file".to_string(),
+                    display_name: "read_file".to_string(),
+                    input: r#"{"path":"/tmp/b.txt"}"#.to_string(),
+                    output: Some("contents of B".to_string()),
+                    output_preview: None,
+                    state: ToolCallState::Success,
+                    duration: None,
+                    text_before: String::new(),
+                }),
+            ],
+            total_duration: None,
+            active_tool_index: None,
+        };
+
+        let history = vec![Message::Assistant {
+            id: None,
+            content: OneOrMany::many(vec![
+                AssistantContent::ToolCall(ToolCall {
+                    id: "tc_1".to_string(),
+                    call_id: Some("call_001".to_string()),
+                    function: ToolFunction {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "/tmp/a.txt"}),
+                    },
+                    signature: None,
+                    additional_params: None,
+                }),
+                AssistantContent::ToolCall(ToolCall {
+                    id: "tc_2".to_string(),
+                    call_id: Some("call_002".to_string()),
+                    function: ToolFunction {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "/tmp/b.txt"}),
+                    },
+                    signature: None,
+                    additional_params: None,
+                }),
+            ])
+            .unwrap(),
+        }];
+
+        let conv = make_conversation_data(
+            "id",
+            "m",
+            history,
+            vec![Some(serde_json::to_value(&trace).unwrap())],
+            ConversationTokenUsage::default(),
+            vec![vec![]],
+            vec![None],
+            vec![None],
+            vec![],
+        );
+        let result = conversation_to_atif(&conv, None).unwrap();
+        let tool_calls = result["steps"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 2);
+        // Each tool call gets its own distinct output
+        assert_eq!(tool_calls[0]["output"], "contents of A");
+        assert_eq!(tool_calls[1]["output"], "contents of B");
+        // ATIF ids are the call_ids
+        assert_eq!(tool_calls[0]["id"], "call_001");
+        assert_eq!(tool_calls[1]["id"], "call_002");
     }
 
     #[test]
