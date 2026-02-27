@@ -7,7 +7,9 @@ use nix::unistd::Pid;
 use rmcp::service::ServiceExt;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -31,6 +33,13 @@ pub struct McpConnection {
 
 impl McpConnection {
     /// Create a new MCP connection by spawning a child process
+    ///
+    /// Captures stderr from the child process so that if initialization fails
+    /// (e.g. "connection closed: initialize response"), the error message
+    /// includes the server's stderr output for diagnostics.
+    ///
+    /// Initialization is given a 30-second timeout to prevent hanging on
+    /// servers that start but never complete the MCP handshake.
     pub async fn spawn(config: McpServerConfig) -> Result<Self> {
         let name = config.name.clone();
 
@@ -49,18 +58,45 @@ impl McpConnection {
             }
         });
 
-        // Spawn the child process
-        let transport = TokioChildProcess::new(cmd)
+        // Spawn the child process with stderr piped so we can capture
+        // diagnostic output if initialization fails.
+        let (transport, stderr) = TokioChildProcess::builder(cmd)
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| format!("Failed to spawn MCP server: {}", name))?;
 
         // Get process ID before serving
         let pid = transport.id();
 
-        // Create the service
-        let service = ()
-            .serve(transport)
-            .await
-            .with_context(|| format!("Failed to initialize MCP service: {}", name))?;
+        // Initialize the MCP handshake with a timeout.
+        // Many servers fail silently (exit before responding to initialize),
+        // which would otherwise hang forever.
+        const INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let init_result = tokio::time::timeout(INIT_TIMEOUT, ().serve(transport)).await;
+
+        let service = match init_result {
+            Ok(Ok(service)) => service,
+            Ok(Err(init_err)) => {
+                // Initialization failed — read stderr for diagnostics
+                let stderr_output = read_stderr(stderr).await;
+                let mut msg = format!("Failed to initialize MCP server: {name}");
+                if !stderr_output.is_empty() {
+                    msg.push_str(&format!("\n--- server stderr ---\n{stderr_output}"));
+                }
+                return Err(anyhow::anyhow!(msg).context(init_err.to_string()));
+            }
+            Err(_elapsed) => {
+                let stderr_output = read_stderr(stderr).await;
+                let mut msg = format!(
+                    "MCP server '{name}' timed out during initialization ({INIT_TIMEOUT:?})"
+                );
+                if !stderr_output.is_empty() {
+                    msg.push_str(&format!("\n--- server stderr ---\n{stderr_output}"));
+                }
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
 
         // Log server info
         let server_info = service.peer_info();
@@ -106,6 +142,19 @@ impl McpConnection {
             .with_context(|| format!("Failed to cancel MCP service: {}", self.name))?;
 
         Ok(())
+    }
+}
+
+/// Read up to 4 KiB of stderr from a child process, best-effort.
+/// Returns an empty string if stderr is `None` or unreadable.
+async fn read_stderr(stderr: Option<tokio::process::ChildStderr>) -> String {
+    let Some(mut stderr) = stderr else {
+        return String::new();
+    };
+    let mut buf = vec![0u8; 4096];
+    match tokio::time::timeout(std::time::Duration::from_millis(500), stderr.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => String::from_utf8_lossy(&buf[..n]).trim().to_string(),
+        _ => String::new(),
     }
 }
 
