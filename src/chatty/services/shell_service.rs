@@ -499,7 +499,11 @@ impl ShellSession {
                     truncated,
                 })
             }
-            Ok(Err(e)) => Err(e),
+            Ok(Err(e)) => {
+                // Process terminated (e.g., EOF). Clear so next call respawns.
+                process.take();
+                Err(e)
+            }
             Err(_) => {
                 // Timeout - the process may be stuck. Kill and respawn on next use.
                 warn!(
