@@ -1,0 +1,275 @@
+name: Prepare Release
+
+# Automated release pipeline: bumps version, generates changelog, creates tag + GitHub release.
+# The GitHub release creation triggers the existing Release workflow for cross-platform builds.
+#
+# Two ways to trigger:
+#   1. Manually via Actions UI (workflow_dispatch)
+#   2. Merge a PR with a release label: release:patch, release:minor, or release:major
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      version_override:
+        description: "Explicit version (overrides bump type, e.g. 1.2.3)"
+        required: false
+        type: string
+      dry_run:
+        description: "Dry run — show what would happen without creating anything"
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Serialize release runs — a second merge must wait for the first to finish
+# (cancel-in-progress: false) to avoid partial version bumps or duplicate tags.
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    # Run if: manual trigger OR (PR merged to main AND has a release label AND is not a docs-only PR)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       !startsWith(github.event.pull_request.head.ref, 'docs/') &&
+       !contains(github.event.pull_request.labels.*.name, 'documentation') &&
+       (contains(github.event.pull_request.labels.*.name, 'release:patch') ||
+        contains(github.event.pull_request.labels.*.name, 'release:minor') ||
+        contains(github.event.pull_request.labels.*.name, 'release:major')))
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for changelog generation
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine bump type from PR label
+        id: bump_type
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUMP: ${{ inputs.bump }}
+          INPUT_OVERRIDE: ${{ inputs.version_override }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "bump=$INPUT_BUMP" >> $GITHUB_OUTPUT
+            echo "override=$INPUT_OVERRIDE" >> $GITHUB_OUTPUT
+            echo "dry_run=$INPUT_DRY_RUN" >> $GITHUB_OUTPUT
+          else
+            # Extract bump type from PR labels (passed via env to avoid shell injection)
+            if echo "$PR_LABELS" | grep -q "release:major"; then
+              echo "bump=major" >> $GITHUB_OUTPUT
+            elif echo "$PR_LABELS" | grep -q "release:minor"; then
+              echo "bump=minor" >> $GITHUB_OUTPUT
+            else
+              echo "bump=patch" >> $GITHUB_OUTPUT
+            fi
+            echo "override=" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine new version
+        id: version
+        run: |
+          # Get current version from Cargo.toml
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT"
+
+          BUMP="${{ steps.bump_type.outputs.bump }}"
+          OVERRIDE="${{ steps.bump_type.outputs.override }}"
+
+          if [ -n "$OVERRIDE" ]; then
+            NEW="$OVERRIDE"
+            echo "Using explicit version override: $NEW"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            case "$BUMP" in
+              major) NEW="$((MAJOR + 1)).0.0" ;;
+              minor) NEW="$MAJOR.$((MINOR + 1)).0" ;;
+              patch) NEW="$MAJOR.$MINOR.$((PATCH + 1))" ;;
+            esac
+            echo "Bumping $BUMP: $CURRENT -> $NEW"
+          fi
+
+          echo "new=$NEW" >> $GITHUB_OUTPUT
+          echo "tag=v$NEW" >> $GITHUB_OUTPUT
+
+      - name: Check tag does not already exist
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists. Aborting."
+            exit 1
+          fi
+          echo "Tag $TAG is available."
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          NEW_TAG="${{ steps.version.outputs.tag }}"
+          NEW_VERSION="${{ steps.version.outputs.new }}"
+
+          # Find the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          FIRST_RELEASE=false
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous tag found — using last 50 commits"
+            RANGE="HEAD"
+            FIRST_RELEASE=true
+          else
+            echo "Previous tag: $PREV_TAG"
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          # Generate categorized changelog from conventional-ish commits
+          {
+            echo "## What's Changed in v${NEW_VERSION}"
+            echo ""
+
+            # Collect commits, categorize by prefix
+            FEATURES=""
+            FIXES=""
+            OTHER=""
+
+            while IFS= read -r line; do
+              HASH=$(echo "$line" | cut -d' ' -f1)
+              MSG=$(echo "$line" | cut -d' ' -f2-)
+              ENTRY="- ${MSG} (${HASH:0:7})"
+
+              # Categorize
+              case "$MSG" in
+                [Aa]dd*|[Ff]eat*|[Nn]ew*|[Ii]mplement*|[Ww]ire*)
+                  FEATURES="${FEATURES}${ENTRY}"$'\n' ;;
+                [Ff]ix*|[Bb]ug*|[Rr]esolve*|[Cc]orrect*)
+                  FIXES="${FIXES}${ENTRY}"$'\n' ;;
+                [Bb]ump\ version*|[Mm]erge\ pull\ request*)
+                  ;; # Skip version bumps and merge commits
+                *)
+                  OTHER="${OTHER}${ENTRY}"$'\n' ;;
+              esac
+            done < <(git log --oneline --no-merges --max-count=50 "$RANGE")
+
+            if [ "$FIRST_RELEASE" = "true" ]; then
+              echo "> **Note**: This is the first release. Only the most recent 50 commits are shown."
+              echo ""
+            fi
+
+            if [ -n "$FEATURES" ]; then
+              echo "### Features & Improvements"
+              echo "$FEATURES"
+            fi
+
+            if [ -n "$FIXES" ]; then
+              echo "### Bug Fixes"
+              echo "$FIXES"
+            fi
+
+            if [ -n "$OTHER" ]; then
+              echo "### Other Changes"
+              echo "$OTHER"
+            fi
+
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full diff**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${NEW_TAG}"
+            fi
+          } > changelog.md
+
+          echo "Generated changelog:"
+          cat changelog.md
+
+          # Store for later steps (use delimiter for multiline)
+          {
+            echo "body<<CHANGELOG_EOF"
+            cat changelog.md
+            echo "CHANGELOG_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Dry run summary
+        if: steps.bump_type.outputs.dry_run == 'true'
+        run: |
+          echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ steps.version.outputs.current }} → ${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Bump type**: ${{ inputs.bump }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Changelog Preview" >> $GITHUB_STEP_SUMMARY
+          cat changelog.md >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*No changes were made (dry run).*" >> $GITHUB_STEP_SUMMARY
+
+      - name: Bump version in Cargo.toml
+        if: steps.bump_type.outputs.dry_run != 'true'
+        run: |
+          CURRENT="${{ steps.version.outputs.current }}"
+          NEW="${{ steps.version.outputs.new }}"
+          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" Cargo.toml
+          echo "Updated Cargo.toml:"
+          grep '^version' Cargo.toml | head -1
+
+      - name: Update Cargo.lock
+        if: steps.bump_type.outputs.dry_run != 'true'
+        run: |
+          # If Cargo.lock exists, update only the chatty package entry
+          # (cargo update --workspace would bump all transitive dependencies)
+          if [ -f Cargo.lock ]; then
+            NEW="${{ steps.version.outputs.new }}"
+            rustup default stable 2>/dev/null || true
+            cargo update --precise "$NEW" chatty
+            echo "Updated Cargo.lock for chatty=$NEW"
+          fi
+
+      - name: Commit version bump
+        if: steps.bump_type.outputs.dry_run != 'true'
+        run: |
+          NEW="${{ steps.version.outputs.new }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Bump version to ${NEW}"
+          git push origin main
+
+      - name: Create tag and GitHub release
+        if: steps.bump_type.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.new }}"
+
+          # Create annotated tag
+          git tag -a "$TAG" -m "Release $VERSION"
+          git push origin "$TAG"
+
+          # Create GitHub release (triggers the Release workflow)
+          gh release create "$TAG" \
+            --title "Chatty $VERSION" \
+            --notes-file changelog.md
+
+          echo "## Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: $VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: $TAG" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The [Release workflow](https://github.com/${{ github.repository }}/actions/workflows/release.yml) has been triggered and will build cross-platform artifacts." >> $GITHUB_STEP_SUMMARY

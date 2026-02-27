@@ -319,6 +319,22 @@ cargo clippy -- -D warnings  # Lint
 ./scripts/package-windows.ps1     # Windows (.exe installer, run in PowerShell)
 ```
 
+### CI/CD & Releasing
+
+PRs to `main` run CI automatically (tests, formatting, clippy, AI code review). Cargo dependencies are cached across runs.
+
+**To release a new version**, add a label to your PR before merging:
+
+| Label | Effect |
+|:------|:-------|
+| `release:patch` | Bump `0.1.52` → `0.1.53` |
+| `release:minor` | Bump `0.1.52` → `0.2.0` |
+| `release:major` | Bump `0.1.52` → `1.0.0` |
+
+Merging the PR triggers the full pipeline: version bump → changelog generation → git tag → GitHub Release → cross-platform builds (Linux AppImage, macOS DMG, Windows EXE).
+
+You can also trigger a release manually from **Actions → Prepare Release → Run workflow**.
+
 ### Architecture
 
 - **Event-driven** reactive UI with GPUI's global state system
