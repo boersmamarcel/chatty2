@@ -120,9 +120,11 @@ jobs:
 
           # Find the previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          FIRST_RELEASE=false
           if [ -z "$PREV_TAG" ]; then
-            echo "No previous tag found — using full history"
+            echo "No previous tag found — using last 50 commits"
             RANGE="HEAD"
+            FIRST_RELEASE=true
           else
             echo "Previous tag: $PREV_TAG"
             RANGE="${PREV_TAG}..HEAD"
@@ -154,7 +156,12 @@ jobs:
                 *)
                   OTHER="${OTHER}${ENTRY}"$'\n' ;;
               esac
-            done < <(git log --oneline --no-merges "$RANGE")
+            done < <(git log --oneline --no-merges --max-count=50 "$RANGE")
+
+            if [ "$FIRST_RELEASE" = "true" ]; then
+              echo "> **Note**: This is the first release. Only the most recent 50 commits are shown."
+              echo ""
+            fi
 
             if [ -n "$FEATURES" ]; then
               echo "### Features & Improvements"
@@ -213,13 +220,13 @@ jobs:
       - name: Update Cargo.lock
         if: steps.bump_type.outputs.dry_run != 'true'
         run: |
-          # If Cargo.lock exists, update it to reflect the new version
+          # If Cargo.lock exists, update only the chatty package entry
+          # (cargo update --workspace would bump all transitive dependencies)
           if [ -f Cargo.lock ]; then
-            # Use cargo update to refresh just the workspace package
-            # This requires Rust, but we only need it for lock file update
+            NEW="${{ steps.version.outputs.new }}"
             rustup default stable 2>/dev/null || true
-            cargo update --workspace
-            echo "Updated Cargo.lock"
+            cargo update --precise "$NEW" chatty
+            echo "Updated Cargo.lock for chatty=$NEW"
           fi
 
       - name: Commit version bump
