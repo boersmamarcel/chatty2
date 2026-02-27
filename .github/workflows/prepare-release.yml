@@ -33,6 +33,12 @@ on:
 permissions:
   contents: write
 
+# Serialize release runs — a second merge must wait for the first to finish
+# (cancel-in-progress: false) to avoid partial version bumps or duplicate tags.
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
