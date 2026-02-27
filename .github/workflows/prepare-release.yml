@@ -2,6 +2,10 @@ name: Prepare Release
 
 # Automated release pipeline: bumps version, generates changelog, creates tag + GitHub release.
 # The GitHub release creation triggers the existing Release workflow for cross-platform builds.
+#
+# Two ways to trigger:
+#   1. Manually via Actions UI (workflow_dispatch)
+#   2. Merge a PR with a release label: release:patch, release:minor, or release:major
 on:
   workflow_dispatch:
     inputs:
@@ -22,6 +26,9 @@ on:
         required: false
         type: boolean
         default: false
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
   contents: write
@@ -32,12 +39,40 @@ env:
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    # Run if: manual trigger OR (PR merged to main AND has a release label)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       (contains(github.event.pull_request.labels.*.name, 'release:patch') ||
+        contains(github.event.pull_request.labels.*.name, 'release:minor') ||
+        contains(github.event.pull_request.labels.*.name, 'release:major')))
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Full history needed for changelog generation
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine bump type from PR label
+        id: bump_type
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "bump=${{ inputs.bump }}" >> $GITHUB_OUTPUT
+            echo "override=${{ inputs.version_override }}" >> $GITHUB_OUTPUT
+            echo "dry_run=${{ inputs.dry_run }}" >> $GITHUB_OUTPUT
+          else
+            # Extract bump type from PR labels
+            LABELS='${{ toJSON(github.event.pull_request.labels.*.name) }}'
+            if echo "$LABELS" | grep -q "release:major"; then
+              echo "bump=major" >> $GITHUB_OUTPUT
+            elif echo "$LABELS" | grep -q "release:minor"; then
+              echo "bump=minor" >> $GITHUB_OUTPUT
+            else
+              echo "bump=patch" >> $GITHUB_OUTPUT
+            fi
+            echo "override=" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Determine new version
         id: version
@@ -47,17 +82,20 @@ jobs:
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "Current version: $CURRENT"
 
-          if [ -n "${{ inputs.version_override }}" ]; then
-            NEW="${{ inputs.version_override }}"
+          BUMP="${{ steps.bump_type.outputs.bump }}"
+          OVERRIDE="${{ steps.bump_type.outputs.override }}"
+
+          if [ -n "$OVERRIDE" ]; then
+            NEW="$OVERRIDE"
             echo "Using explicit version override: $NEW"
           else
             IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-            case "${{ inputs.bump }}" in
+            case "$BUMP" in
               major) NEW="$((MAJOR + 1)).0.0" ;;
               minor) NEW="$MAJOR.$((MINOR + 1)).0" ;;
               patch) NEW="$MAJOR.$MINOR.$((PATCH + 1))" ;;
             esac
-            echo "Bumping ${{ inputs.bump }}: $CURRENT -> $NEW"
+            echo "Bumping $BUMP: $CURRENT -> $NEW"
           fi
 
           echo "new=$NEW" >> $GITHUB_OUTPUT
@@ -147,7 +185,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Dry run summary
-        if: inputs.dry_run
+        if: steps.bump_type.outputs.dry_run == 'true'
         run: |
           echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -162,7 +200,7 @@ jobs:
           echo "*No changes were made (dry run).*" >> $GITHUB_STEP_SUMMARY
 
       - name: Bump version in Cargo.toml
-        if: ${{ !inputs.dry_run }}
+        if: steps.bump_type.outputs.dry_run != 'true'
         run: |
           CURRENT="${{ steps.version.outputs.current }}"
           NEW="${{ steps.version.outputs.new }}"
@@ -171,7 +209,7 @@ jobs:
           grep '^version' Cargo.toml | head -1
 
       - name: Update Cargo.lock
-        if: ${{ !inputs.dry_run }}
+        if: steps.bump_type.outputs.dry_run != 'true'
         run: |
           # If Cargo.lock exists, update it to reflect the new version
           if [ -f Cargo.lock ]; then
@@ -183,7 +221,7 @@ jobs:
           fi
 
       - name: Commit version bump
-        if: ${{ !inputs.dry_run }}
+        if: steps.bump_type.outputs.dry_run != 'true'
         run: |
           NEW="${{ steps.version.outputs.new }}"
           git config user.name "github-actions[bot]"
@@ -193,7 +231,7 @@ jobs:
           git push origin main
 
       - name: Create tag and GitHub release
-        if: ${{ !inputs.dry_run }}
+        if: steps.bump_type.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
