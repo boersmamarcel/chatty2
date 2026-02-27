@@ -57,17 +57,22 @@ jobs:
 
       - name: Determine bump type from PR label
         id: bump_type
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUMP: ${{ inputs.bump }}
+          INPUT_OVERRIDE: ${{ inputs.version_override }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "bump=${{ inputs.bump }}" >> $GITHUB_OUTPUT
-            echo "override=${{ inputs.version_override }}" >> $GITHUB_OUTPUT
-            echo "dry_run=${{ inputs.dry_run }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "bump=$INPUT_BUMP" >> $GITHUB_OUTPUT
+            echo "override=$INPUT_OVERRIDE" >> $GITHUB_OUTPUT
+            echo "dry_run=$INPUT_DRY_RUN" >> $GITHUB_OUTPUT
           else
-            # Extract bump type from PR labels
-            LABELS='${{ toJSON(github.event.pull_request.labels.*.name) }}'
-            if echo "$LABELS" | grep -q "release:major"; then
+            # Extract bump type from PR labels (passed via env to avoid shell injection)
+            if echo "$PR_LABELS" | grep -q "release:major"; then
               echo "bump=major" >> $GITHUB_OUTPUT
-            elif echo "$LABELS" | grep -q "release:minor"; then
+            elif echo "$PR_LABELS" | grep -q "release:minor"; then
               echo "bump=minor" >> $GITHUB_OUTPUT
             else
               echo "bump=patch" >> $GITHUB_OUTPUT
