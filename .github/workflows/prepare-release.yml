@@ -39,10 +39,12 @@ env:
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
-    # Run if: manual trigger OR (PR merged to main AND has a release label)
+    # Run if: manual trigger OR (PR merged to main AND has a release label AND is not a docs-only PR)
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
+       !startsWith(github.event.pull_request.head.ref, 'docs/') &&
+       !contains(github.event.pull_request.labels.*.name, 'documentation') &&
        (contains(github.event.pull_request.labels.*.name, 'release:patch') ||
         contains(github.event.pull_request.labels.*.name, 'release:minor') ||
         contains(github.event.pull_request.labels.*.name, 'release:major')))

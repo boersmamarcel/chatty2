@@ -13,7 +13,10 @@ jobs:
     # that only touch docs/CI/config files (nothing user-facing).
     if: >-
       github.event.pull_request.merged == true &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-readme')
+      github.event.pull_request.user.login != 'github-actions[bot]' &&
+      !startsWith(github.event.pull_request.head.ref, 'docs/') &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-readme') &&
+      !contains(github.event.pull_request.labels.*.name, 'documentation')
     runs-on: ubuntu-latest
     permissions:
       contents: write
