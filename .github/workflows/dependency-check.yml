@@ -2,7 +2,9 @@ name: Dependency Update Check
 
 on:
   workflow_run:
-    workflows: ["Release"]
+    # "Prepare Release" covers the automated path (Release runs inline via workflow_call).
+    # "Release" covers the manual path (standalone release via GitHub UI).
+    workflows: ["Prepare Release", "Release"]
     types:
       - completed
   workflow_dispatch:

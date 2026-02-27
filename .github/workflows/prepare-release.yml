@@ -1,7 +1,7 @@
 name: Prepare Release
 
-# Automated release pipeline: bumps version, generates changelog, creates tag + GitHub release.
-# The GitHub release creation triggers the existing Release workflow for cross-platform builds.
+# Automated release pipeline: bumps version, generates changelog, creates tag + GitHub release,
+# then calls the Release workflow directly to build cross-platform artifacts.
 #
 # Two ways to trigger:
 #   1. Manually via Actions UI (workflow_dispatch)
@@ -43,7 +43,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  prepare-release:
+  prepare:
     runs-on: ubuntu-latest
     # Run if: manual trigger OR (PR merged to main AND has a release label AND is not a docs-only PR)
     if: >-
@@ -54,15 +54,15 @@ jobs:
        (contains(github.event.pull_request.labels.*.name, 'release:patch') ||
         contains(github.event.pull_request.labels.*.name, 'release:minor') ||
         contains(github.event.pull_request.labels.*.name, 'release:major')))
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.new }}
+      dry_run: ${{ steps.bump_type.outputs.dry_run }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Full history needed for changelog generation
-          # A PAT is required so that the git push and gh release create
-          # events are NOT suppressed by GitHub's GITHUB_TOKEN anti-recursion
-          # rule. Without this, the Release workflow won't trigger.
-          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Determine bump type from PR label
         id: bump_type
@@ -256,7 +256,7 @@ jobs:
       - name: Create tag and GitHub release
         if: steps.bump_type.outputs.dry_run != 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           VERSION="${{ steps.version.outputs.new }}"
@@ -265,7 +265,7 @@ jobs:
           git tag -a "$TAG" -m "Release $VERSION"
           git push origin "$TAG"
 
-          # Create GitHub release (triggers the Release workflow)
+          # Create GitHub release (artifacts will be uploaded by the Release workflow)
           gh release create "$TAG" \
             --title "Chatty $VERSION" \
             --notes-file changelog.md
@@ -274,5 +274,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Version**: $VERSION" >> $GITHUB_STEP_SUMMARY
           echo "**Tag**: $TAG" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The [Release workflow](https://github.com/${{ github.repository }}/actions/workflows/release.yml) has been triggered and will build cross-platform artifacts." >> $GITHUB_STEP_SUMMARY
+
+  # Build cross-platform artifacts and upload to the GitHub release.
+  # Called directly via workflow_call — no event-based handoff needed.
+  build-and-upload:
+    needs: prepare
+    if: needs.prepare.outputs.dry_run != 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit

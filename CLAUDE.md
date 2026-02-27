@@ -103,12 +103,12 @@ sudo apt-get install -y \
 | Workflow | Trigger | Purpose |
 |:---------|:--------|:--------|
 | **CI** (`ci.yml`) | PR to `main` | Tests, formatting check, clippy lints. Cargo dependencies and build artifacts are cached. |
-| **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version in `Cargo.toml`, generates categorized changelog, commits, creates tag + GitHub Release. |
-| **Release** (`release.yml`) | GitHub Release published (triggered by Prepare Release) | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
+| **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version in `Cargo.toml`, generates categorized changelog, commits, creates tag + GitHub Release, then calls Release workflow directly via `workflow_call`. |
+| **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
 | **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated | Automated AI code review via Claude. |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
 | **Update README** (`update-readme.yml`) | PR merged to `main` | Claude analyzes the diff; if user-facing features changed, opens a follow-up PR with README updates. Add `skip-readme` label to opt out. |
-| **Dependency Check** (`dependency-check.yml`) | After successful Release, or manual | Checks crates.io for dependency updates, creates grouped tech-debt issues. |
+| **Dependency Check** (`dependency-check.yml`) | After successful Prepare Release or Release, or manual | Checks crates.io for dependency updates, creates grouped tech-debt issues. |
 
 ### Release Flow
 
@@ -118,16 +118,19 @@ The recommended release flow from Claude Code:
 /create-release patch   # Adds release:patch label to current PR
 ```
 
-Then merge the PR. The full pipeline runs automatically:
+Then merge the PR. The full pipeline runs as a single workflow:
 
 ```
-PR merge → Prepare Release → Release (3 platforms)
-           (bump, changelog,   (build, sign, notarize,
-            tag, GH release)    package, checksums)
+PR merge → Prepare Release ──────────────────────────────────────────►
+           (bump, changelog,    calls release.yml    (build 3 platforms,
+            tag, GH release) ── via workflow_call ──► checksums, upload)
 ```
+
+Key design: Prepare Release calls Release directly via `workflow_call` — no event-based handoff, no PAT needed, build status appears inline.
 
 Alternative triggers:
 - **Manual**: Actions UI → Prepare Release → Run workflow (with bump type selector and dry run option)
+- **Manual release**: GitHub UI → Create Release → Release workflow runs standalone
 - **On `main`**: `/create-release patch` triggers `workflow_dispatch` directly
 
 ### Changelog Generation
