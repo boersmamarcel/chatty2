@@ -62,10 +62,15 @@ macro_rules! process_agent_stream {
                             rig::streaming::StreamedAssistantContent::Text(text) => {
                                 yield Ok(StreamChunk::Text(text.text));
                             }
-                            rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id: _ } => {
+                            rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                 use tracing::info;
+                                // Use call_id > non-empty id > internal_call_id as fallback.
+                                // Ollama returns empty id and no call_id, so internal_call_id
+                                // (a unique nanoid from rig-core) is needed to correctly
+                                // correlate ToolCallStarted/Input/Result events in the UI.
                                 let tool_id = tool_call.call_id.clone()
-                                    .unwrap_or_else(|| tool_call.id.clone());
+                                    .or_else(|| if tool_call.id.is_empty() { None } else { Some(tool_call.id.clone()) })
+                                    .unwrap_or_else(|| internal_call_id.clone());
                                 info!(
                                     tool_id = %tool_id,
                                     tool_name = %tool_call.function.name,
@@ -88,7 +93,7 @@ macro_rules! process_agent_stream {
                         use rig::streaming::StreamedUserContent;
                         use rig::completion::message::ToolResultContent;
 
-                        let StreamedUserContent::ToolResult { tool_result, internal_call_id: _ } = user_content;
+                        let StreamedUserContent::ToolResult { tool_result, internal_call_id } = user_content;
                         let content_text = tool_result.content.iter()
                             .filter_map(|c| match c {
                                 ToolResultContent::Text(text) => Some(text.text.clone()),
@@ -97,8 +102,10 @@ macro_rules! process_agent_stream {
                             .collect::<Vec<_>>()
                             .join("\n");
 
+                        // Same fallback chain as ToolCall: call_id > non-empty id > internal_call_id
                         let call_id = tool_result.call_id.clone()
-                            .unwrap_or_else(|| tool_result.id.clone());
+                            .or_else(|| if tool_result.id.is_empty() { None } else { Some(tool_result.id.clone()) })
+                            .unwrap_or_else(|| internal_call_id.clone());
 
                         let is_error = content_text.trim_start().starts_with("Error:")
                             || content_text.trim_start().starts_with("ERROR:")
@@ -168,10 +175,11 @@ macro_rules! process_agent_stream_with_approvals {
                                     rig::streaming::StreamedAssistantContent::Text(text) => {
                                         yield Ok(StreamChunk::Text(text.text));
                                     }
-                                    rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id: _ } => {
+                                    rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                         use tracing::info;
                                         let tool_id = tool_call.call_id.clone()
-                                            .unwrap_or_else(|| tool_call.id.clone());
+                                            .or_else(|| if tool_call.id.is_empty() { None } else { Some(tool_call.id.clone()) })
+                                            .unwrap_or_else(|| internal_call_id.clone());
                                         info!(
                                             tool_id = %tool_id,
                                             tool_name = %tool_call.function.name,
@@ -194,7 +202,7 @@ macro_rules! process_agent_stream_with_approvals {
                                 use rig::streaming::StreamedUserContent;
                                 use rig::completion::message::ToolResultContent;
 
-                                let StreamedUserContent::ToolResult { tool_result, internal_call_id: _ } = user_content;
+                                let StreamedUserContent::ToolResult { tool_result, internal_call_id } = user_content;
                                 let content_text = tool_result.content.iter()
                                     .filter_map(|c| match c {
                                         ToolResultContent::Text(text) => Some(text.text.clone()),
@@ -204,7 +212,8 @@ macro_rules! process_agent_stream_with_approvals {
                                     .join("\n");
 
                                 let call_id = tool_result.call_id.clone()
-                                    .unwrap_or_else(|| tool_result.id.clone());
+                                    .or_else(|| if tool_result.id.is_empty() { None } else { Some(tool_result.id.clone()) })
+                                    .unwrap_or_else(|| internal_call_id.clone());
 
                                 let is_error = content_text.trim_start().starts_with("Error:")
                                     || content_text.trim_start().starts_with("ERROR:")
