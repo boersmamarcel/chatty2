@@ -36,6 +36,9 @@ flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.10"
 
+# Date/time formatting (ISO 8601 timestamps for ATIF)
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
 # Logging and error handling
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rig::completion::Message;
 use rig::completion::message::{AssistantContent, UserContent};
 
@@ -12,6 +13,9 @@ use crate::chatty::repositories::ConversationData;
 use crate::chatty::views::message_types::{SystemTrace, TraceItem};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderType;
+
+/// ATIF schema version this exporter produces.
+const SCHEMA_VERSION: &str = "ATIF-v1.6";
 
 /// Convert a persisted conversation into ATIF JSON format.
 ///
@@ -55,19 +59,23 @@ pub fn conversation_to_atif(
         let timestamp = timestamps.get(idx).copied().flatten();
         let msg_attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
         let trace_json = traces.get(idx).cloned().flatten();
+        let step_id = (idx as u32) + 1;
 
         let step =
             match message {
-                Message::User { content } => build_user_step(content, timestamp, &msg_attachments),
+                Message::User { content } => {
+                    build_user_step(step_id, content, timestamp, &msg_attachments)
+                }
                 Message::Assistant { content, .. } => {
                     let metrics = token_usage.message_usages.get(assistant_turn_idx).map(|u| {
                         AtifStepMetrics {
-                            input_tokens: u.input_tokens,
-                            output_tokens: u.output_tokens,
+                            prompt_tokens: Some(u.input_tokens),
+                            completion_tokens: Some(u.output_tokens),
+                            cost_usd: u.estimated_cost_usd,
                         }
                     });
                     assistant_turn_idx += 1;
-                    build_agent_step(content, timestamp, trace_json, metrics)
+                    build_agent_step(step_id, content, timestamp, trace_json, metrics)
                 }
             };
         steps.push(step);
@@ -75,20 +83,22 @@ pub fn conversation_to_atif(
 
     // PHASE 4: Build final_metrics
     let final_metrics = AtifFinalMetrics {
-        total_input_tokens: token_usage.total_input_tokens,
-        total_output_tokens: token_usage.total_output_tokens,
-        total_cost_usd: token_usage.total_estimated_cost_usd,
+        total_prompt_tokens: Some(token_usage.total_input_tokens),
+        total_completion_tokens: Some(token_usage.total_output_tokens),
+        total_cost_usd: Some(token_usage.total_estimated_cost_usd),
+        total_steps: Some(steps.len() as u32),
     };
 
     // PHASE 5: Build extra (feedback + regenerations)
     let extra = build_extra(&feedback, &regeneration_records);
 
     let export = AtifExport {
+        schema_version: SCHEMA_VERSION.to_string(),
         session_id: conversation.id.clone(),
         agent,
         steps,
-        final_metrics,
-        extra,
+        final_metrics: Some(final_metrics),
+        extra: Some(extra),
     };
 
     serde_json::to_value(&export).context("Failed to serialize ATIF export")
@@ -96,13 +106,20 @@ pub fn conversation_to_atif(
 
 fn build_agent(model_id: &str, model_config: Option<&ModelConfig>) -> AtifAgent {
     match model_config {
-        Some(cfg) => AtifAgent {
-            model_name: cfg.model_identifier.clone(),
-            provider: provider_name(&cfg.provider_type),
-        },
+        Some(cfg) => {
+            let provider = provider_name(&cfg.provider_type);
+            AtifAgent {
+                name: "chatty".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                model_name: Some(cfg.model_identifier.clone()),
+                extra: Some(serde_json::json!({ "provider": provider })),
+            }
+        }
         None => AtifAgent {
-            model_name: model_id.to_string(),
-            provider: "unknown".to_string(),
+            name: "chatty".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            model_name: Some(model_id.to_string()),
+            extra: Some(serde_json::json!({ "provider": "unknown" })),
         },
     }
 }
@@ -119,7 +136,33 @@ fn provider_name(provider_type: &ProviderType) -> String {
     .to_string()
 }
 
+/// Format a unix epoch timestamp as ISO 8601 UTC string.
+fn format_timestamp(epoch_secs: i64) -> String {
+    DateTime::<Utc>::from_timestamp(epoch_secs, 0)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("{}", epoch_secs))
+}
+
+/// Classify a file path as an image MIME type, or return None for non-image files.
+fn image_media_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+    {
+        Some(ext) => match ext.as_str() {
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "png" => Some("image/png"),
+            "gif" => Some("image/gif"),
+            "webp" => Some("image/webp"),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
 fn build_user_step(
+    step_id: u32,
     content: &rig::OneOrMany<UserContent>,
     timestamp: Option<i64>,
     attachment_paths: &[String],
@@ -133,26 +176,42 @@ fn build_user_step(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let attachments = attachment_paths
+    // Build message: plain string if no image attachments, ContentPart array otherwise
+    let image_attachments: Vec<&String> = attachment_paths
         .iter()
-        .map(|p| AtifAttachment {
-            attachment_type: classify_attachment(Path::new(p)),
-            path: p.clone(),
-        })
+        .filter(|p| image_media_type(Path::new(p)).is_some())
         .collect();
 
+    let message = if image_attachments.is_empty() {
+        AtifMessage::Text(text)
+    } else {
+        let mut parts = vec![AtifContentPart::Text { text }];
+        for path in image_attachments {
+            let media_type = image_media_type(Path::new(path)).unwrap_or("image/png");
+            parts.push(AtifContentPart::Image {
+                source: AtifImageSource {
+                    media_type: media_type.to_string(),
+                    path: path.clone(),
+                },
+            });
+        }
+        AtifMessage::Parts(parts)
+    };
+
     AtifStep {
+        step_id,
+        timestamp: timestamp.map(format_timestamp),
         source: "user".to_string(),
-        content: text,
-        timestamp,
-        attachments,
-        tool_calls: Vec::new(),
+        message,
         reasoning_content: None,
+        tool_calls: None,
+        observation: None,
         metrics: None,
     }
 }
 
 fn build_agent_step(
+    step_id: u32,
     content: &rig::OneOrMany<AssistantContent>,
     timestamp: Option<i64>,
     trace_json: Option<serde_json::Value>,
@@ -170,32 +229,52 @@ fn build_agent_step(
     // Parse system trace for reasoning content and tool outputs (keyed by ToolCallBlock.id)
     let (reasoning_content, trace_outputs) = parse_trace(trace_json);
 
-    // Build tool calls from rig AssistantContent, enriching with trace outputs.
-    // The rig ToolCall.id matches the trace ToolCallBlock.id, so we use it for lookup
-    // before mapping to the ATIF id (which prefers call_id when available).
-    let tool_calls: Vec<AtifToolCall> = content
-        .iter()
-        .filter_map(|ac| match ac {
-            AssistantContent::ToolCall(tc) => {
-                let output = trace_outputs.get(&tc.id).cloned();
-                Some(AtifToolCall {
-                    id: tc.call_id.clone().unwrap_or_else(|| tc.id.clone()),
-                    name: tc.function.name.clone(),
-                    arguments: tc.function.arguments.clone(),
-                    output,
-                })
+    // Build tool calls from rig AssistantContent, collecting observation results
+    let mut tool_calls_vec: Vec<AtifToolCall> = Vec::new();
+    let mut observation_results: Vec<AtifObservationResult> = Vec::new();
+
+    for ac in content.iter() {
+        if let AssistantContent::ToolCall(tc) = ac {
+            let atif_id = tc.call_id.clone().unwrap_or_else(|| tc.id.clone());
+
+            tool_calls_vec.push(AtifToolCall {
+                tool_call_id: atif_id.clone(),
+                function_name: tc.function.name.clone(),
+                arguments: tc.function.arguments.clone(),
+            });
+
+            // If we have output from the trace, add it to observation results
+            if let Some(output) = trace_outputs.get(&tc.id) {
+                observation_results.push(AtifObservationResult {
+                    source_call_id: Some(atif_id),
+                    content: Some(output.clone()),
+                });
             }
-            _ => None,
+        }
+    }
+
+    let tool_calls = if tool_calls_vec.is_empty() {
+        None
+    } else {
+        Some(tool_calls_vec)
+    };
+
+    let observation = if observation_results.is_empty() {
+        None
+    } else {
+        Some(AtifObservation {
+            results: observation_results,
         })
-        .collect();
+    };
 
     AtifStep {
+        step_id,
+        timestamp: timestamp.map(format_timestamp),
         source: "agent".to_string(),
-        content: text,
-        timestamp,
-        attachments: Vec::new(),
-        tool_calls,
+        message: AtifMessage::Text(text),
         reasoning_content,
+        tool_calls,
+        observation,
         metrics,
     }
 }
@@ -237,19 +316,6 @@ fn parse_trace(trace_json: Option<serde_json::Value>) -> (Option<String>, HashMa
     }
 
     (reasoning_content, outputs)
-}
-
-fn classify_attachment(path: &Path) -> String {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-    {
-        Some(ext) if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") => {
-            "image".to_string()
-        }
-        _ => "document".to_string(),
-    }
 }
 
 fn build_extra(
@@ -354,34 +420,36 @@ mod tests {
         }
     }
 
-    // ── classify_attachment tests ──────────────────────────────────────
+    // ── format_timestamp tests ────────────────────────────────────────
 
     #[test]
-    fn classify_attachment_image_extensions() {
-        for ext in &["jpg", "jpeg", "png", "gif", "webp", "JPG", "PNG"] {
-            let p = format!("file.{}", ext);
-            assert_eq!(
-                classify_attachment(Path::new(&p)),
-                "image",
-                "Expected image for .{}",
-                ext
-            );
-        }
+    fn format_timestamp_produces_iso8601() {
+        assert_eq!(format_timestamp(1700000000), "2023-11-14T22:13:20Z");
     }
 
     #[test]
-    fn classify_attachment_pdf_is_document() {
-        assert_eq!(classify_attachment(Path::new("report.pdf")), "document");
+    fn format_timestamp_epoch_zero() {
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
+    }
+
+    // ── image_media_type tests ────────────────────────────────────────
+
+    #[test]
+    fn image_media_type_image_extensions() {
+        assert_eq!(image_media_type(Path::new("f.jpg")), Some("image/jpeg"));
+        assert_eq!(image_media_type(Path::new("f.jpeg")), Some("image/jpeg"));
+        assert_eq!(image_media_type(Path::new("f.png")), Some("image/png"));
+        assert_eq!(image_media_type(Path::new("f.gif")), Some("image/gif"));
+        assert_eq!(image_media_type(Path::new("f.webp")), Some("image/webp"));
+        assert_eq!(image_media_type(Path::new("f.JPG")), Some("image/jpeg"));
+        assert_eq!(image_media_type(Path::new("f.PNG")), Some("image/png"));
     }
 
     #[test]
-    fn classify_attachment_unknown_is_document() {
-        assert_eq!(classify_attachment(Path::new("data.csv")), "document");
-    }
-
-    #[test]
-    fn classify_attachment_no_extension_is_document() {
-        assert_eq!(classify_attachment(Path::new("Makefile")), "document");
+    fn image_media_type_non_image_returns_none() {
+        assert_eq!(image_media_type(Path::new("report.pdf")), None);
+        assert_eq!(image_media_type(Path::new("data.csv")), None);
+        assert_eq!(image_media_type(Path::new("Makefile")), None);
     }
 
     // ── provider_name tests ───────────────────────────────────────────
@@ -507,7 +575,6 @@ mod tests {
         };
         let json = serde_json::to_value(&trace).unwrap();
         let (_, outputs) = parse_trace(Some(json));
-        // Keyed by ToolCallBlock.id, not tool_name
         assert_eq!(
             outputs.get("call_abc").map(|s| s.as_str()),
             Some("file contents here")
@@ -524,6 +591,23 @@ mod tests {
     }
 
     // ── conversation_to_atif integration tests ────────────────────────
+
+    #[test]
+    fn schema_version_present() {
+        let conv = make_conversation_data(
+            "test-uuid",
+            "model-1",
+            vec![],
+            vec![],
+            ConversationTokenUsage::default(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let result = conversation_to_atif(&conv, None).unwrap();
+        assert_eq!(result["schema_version"], "ATIF-v1.6");
+    }
 
     #[test]
     fn empty_history_produces_empty_steps() {
@@ -575,8 +659,10 @@ mod tests {
         );
         let cfg = make_model_config(ProviderType::Anthropic);
         let result = conversation_to_atif(&conv, Some(&cfg)).unwrap();
+        assert_eq!(result["agent"]["name"], "chatty");
+        assert!(result["agent"]["version"].as_str().is_some());
         assert_eq!(result["agent"]["model_name"], "claude-sonnet-4-20250514");
-        assert_eq!(result["agent"]["provider"], "anthropic");
+        assert_eq!(result["agent"]["extra"]["provider"], "anthropic");
     }
 
     #[test]
@@ -593,8 +679,9 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
+        assert_eq!(result["agent"]["name"], "chatty");
         assert_eq!(result["agent"]["model_name"], "some-model-id");
-        assert_eq!(result["agent"]["provider"], "unknown");
+        assert_eq!(result["agent"]["extra"]["provider"], "unknown");
     }
 
     #[test]
@@ -611,9 +698,10 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
+        assert_eq!(result["steps"][0]["step_id"], 1);
         assert_eq!(result["steps"][0]["source"], "user");
-        assert_eq!(result["steps"][0]["content"], "Hello!");
-        assert_eq!(result["steps"][0]["timestamp"], 1700000000);
+        assert_eq!(result["steps"][0]["message"], "Hello!");
+        assert_eq!(result["steps"][0]["timestamp"], "2023-11-14T22:13:20Z");
     }
 
     #[test]
@@ -630,13 +718,14 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
+        assert_eq!(result["steps"][0]["step_id"], 1);
         assert_eq!(result["steps"][0]["source"], "agent");
-        assert_eq!(result["steps"][0]["content"], "Hi there!");
-        assert_eq!(result["steps"][0]["timestamp"], 1700000005);
+        assert_eq!(result["steps"][0]["message"], "Hi there!");
+        assert_eq!(result["steps"][0]["timestamp"], "2023-11-14T22:13:25Z");
     }
 
     #[test]
-    fn timestamps_preserved_as_null_when_missing() {
+    fn timestamps_omitted_when_missing() {
         let conv = make_conversation_data(
             "id",
             "m",
@@ -649,7 +738,30 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
-        assert!(result["steps"][0]["timestamp"].is_null());
+        assert!(result["steps"][0].get("timestamp").is_none());
+    }
+
+    #[test]
+    fn step_ids_sequential_from_one() {
+        let conv = make_conversation_data(
+            "id",
+            "m",
+            vec![
+                user_message("Hi"),
+                assistant_message("Hello"),
+                user_message("Bye"),
+            ],
+            vec![None, None, None],
+            ConversationTokenUsage::default(),
+            vec![vec![], vec![], vec![]],
+            vec![None, None, None],
+            vec![None, None, None],
+            vec![],
+        );
+        let result = conversation_to_atif(&conv, None).unwrap();
+        assert_eq!(result["steps"][0]["step_id"], 1);
+        assert_eq!(result["steps"][1]["step_id"], 2);
+        assert_eq!(result["steps"][2]["step_id"], 3);
     }
 
     #[test]
@@ -671,9 +783,9 @@ mod tests {
         let result = conversation_to_atif(&conv, None).unwrap();
         // User step has no metrics
         assert!(result["steps"][0].get("metrics").is_none());
-        // Agent step has metrics
-        assert_eq!(result["steps"][1]["metrics"]["input_tokens"], 100);
-        assert_eq!(result["steps"][1]["metrics"]["output_tokens"], 200);
+        // Agent step has metrics with spec-compliant names
+        assert_eq!(result["steps"][1]["metrics"]["prompt_tokens"], 100);
+        assert_eq!(result["steps"][1]["metrics"]["completion_tokens"], 200);
     }
 
     #[test]
@@ -703,13 +815,14 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
-        assert_eq!(result["final_metrics"]["total_input_tokens"], 250);
-        assert_eq!(result["final_metrics"]["total_output_tokens"], 500);
+        assert_eq!(result["final_metrics"]["total_prompt_tokens"], 250);
+        assert_eq!(result["final_metrics"]["total_completion_tokens"], 500);
         assert_eq!(result["final_metrics"]["total_cost_usd"], 0.015);
+        assert_eq!(result["final_metrics"]["total_steps"], 4);
     }
 
     #[test]
-    fn attachments_classified_correctly() {
+    fn image_attachments_in_message_content_parts() {
         let conv = make_conversation_data(
             "id",
             "m",
@@ -726,84 +839,43 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
-        let attachments = result["steps"][0]["attachments"].as_array().unwrap();
-        assert_eq!(attachments.len(), 3);
-        assert_eq!(attachments[0]["type"], "image");
-        assert_eq!(attachments[0]["path"], "/tmp/photo.jpg");
-        assert_eq!(attachments[1]["type"], "document");
-        assert_eq!(attachments[2]["type"], "image");
+        // message is an array of ContentParts (images present)
+        let message = result["steps"][0]["message"].as_array().unwrap();
+        // First part is text
+        assert_eq!(message[0]["type"], "text");
+        assert_eq!(message[0]["text"], "See attached");
+        // Second part is image (jpg — pdf is non-image so excluded)
+        assert_eq!(message[1]["type"], "image");
+        assert_eq!(message[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(message[1]["source"]["path"], "/tmp/photo.jpg");
+        // Third part is image (png)
+        assert_eq!(message[2]["type"], "image");
+        assert_eq!(message[2]["source"]["media_type"], "image/png");
+        assert_eq!(message[2]["source"]["path"], "/tmp/image.png");
+        // PDF is not in message parts (non-image)
+        assert_eq!(message.len(), 3);
     }
 
     #[test]
-    fn tool_calls_extracted_from_assistant_content() {
-        use rig::completion::message::{ToolCall, ToolFunction};
-
-        let history = vec![Message::Assistant {
-            id: None,
-            content: OneOrMany::one(AssistantContent::ToolCall(ToolCall {
-                id: "tc_1".to_string(),
-                call_id: Some("call_abc".to_string()),
-                function: ToolFunction {
-                    name: "read_file".to_string(),
-                    arguments: serde_json::json!({"path": "/tmp/file.txt"}),
-                },
-                signature: None,
-                additional_params: None,
-            })),
-        }];
-
+    fn no_image_attachments_produces_plain_string_message() {
         let conv = make_conversation_data(
             "id",
             "m",
-            history,
+            vec![user_message("See attached")],
             vec![None],
             ConversationTokenUsage::default(),
-            vec![vec![]],
+            vec![vec!["/tmp/doc.pdf".to_string()]],
             vec![None],
             vec![None],
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
-        let tool_calls = result["steps"][0]["tool_calls"].as_array().unwrap();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0]["id"], "call_abc");
-        assert_eq!(tool_calls[0]["name"], "read_file");
-        assert_eq!(tool_calls[0]["arguments"]["path"], "/tmp/file.txt");
+        // message is a plain string (no image attachments)
+        assert_eq!(result["steps"][0]["message"], "See attached");
     }
 
     #[test]
-    fn reasoning_extracted_from_trace() {
-        let trace = SystemTrace {
-            items: vec![TraceItem::Thinking(ThinkingBlock {
-                content: "Let me think about this...".to_string(),
-                summary: "Thinking".to_string(),
-                duration: None,
-                state: ThinkingState::Completed,
-            })],
-            total_duration: None,
-            active_tool_index: None,
-        };
-
-        let conv = make_conversation_data(
-            "id",
-            "m",
-            vec![assistant_message("Here is my answer")],
-            vec![Some(serde_json::to_value(&trace).unwrap())],
-            ConversationTokenUsage::default(),
-            vec![vec![]],
-            vec![None],
-            vec![None],
-            vec![],
-        );
-        let result = conversation_to_atif(&conv, None).unwrap();
-        assert_eq!(
-            result["steps"][0]["reasoning_content"],
-            "Let me think about this..."
-        );
-    }
-
-    #[test]
-    fn tool_output_enriched_from_trace() {
+    fn tool_calls_with_observation() {
         use rig::completion::message::{ToolCall, ToolFunction};
 
         let trace = SystemTrace {
@@ -848,14 +920,59 @@ mod tests {
             vec![],
         );
         let result = conversation_to_atif(&conv, None).unwrap();
-        assert_eq!(result["steps"][0]["tool_calls"][0]["output"], "Hello World");
+
+        // Tool call uses spec field names
+        let tool_calls = result["steps"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["tool_call_id"], "call_abc");
+        assert_eq!(tool_calls[0]["function_name"], "read_file");
+        assert_eq!(tool_calls[0]["arguments"]["path"], "/tmp/file.txt");
+        // No "output" on tool_call
+        assert!(tool_calls[0].get("output").is_none());
+
+        // Tool output in observation
+        let observation = &result["steps"][0]["observation"];
+        let results = observation["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["source_call_id"], "call_abc");
+        assert_eq!(results[0]["content"], "Hello World");
+    }
+
+    #[test]
+    fn reasoning_extracted_from_trace() {
+        let trace = SystemTrace {
+            items: vec![TraceItem::Thinking(ThinkingBlock {
+                content: "Let me think about this...".to_string(),
+                summary: "Thinking".to_string(),
+                duration: None,
+                state: ThinkingState::Completed,
+            })],
+            total_duration: None,
+            active_tool_index: None,
+        };
+
+        let conv = make_conversation_data(
+            "id",
+            "m",
+            vec![assistant_message("Here is my answer")],
+            vec![Some(serde_json::to_value(&trace).unwrap())],
+            ConversationTokenUsage::default(),
+            vec![vec![]],
+            vec![None],
+            vec![None],
+            vec![],
+        );
+        let result = conversation_to_atif(&conv, None).unwrap();
+        assert_eq!(
+            result["steps"][0]["reasoning_content"],
+            "Let me think about this..."
+        );
     }
 
     #[test]
     fn duplicate_tool_names_matched_by_id() {
         use rig::completion::message::{ToolCall, ToolFunction};
 
-        // Two read_file calls in one agent step — same tool name, different ids
         let trace = SystemTrace {
             items: vec![
                 TraceItem::ToolCall(ToolCallBlock {
@@ -926,12 +1043,15 @@ mod tests {
         let result = conversation_to_atif(&conv, None).unwrap();
         let tool_calls = result["steps"][0]["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 2);
-        // Each tool call gets its own distinct output
-        assert_eq!(tool_calls[0]["output"], "contents of A");
-        assert_eq!(tool_calls[1]["output"], "contents of B");
-        // ATIF ids are the call_ids
-        assert_eq!(tool_calls[0]["id"], "call_001");
-        assert_eq!(tool_calls[1]["id"], "call_002");
+        assert_eq!(tool_calls[0]["tool_call_id"], "call_001");
+        assert_eq!(tool_calls[1]["tool_call_id"], "call_002");
+
+        let obs = result["steps"][0]["observation"]["results"]
+            .as_array()
+            .unwrap();
+        assert_eq!(obs.len(), 2);
+        assert_eq!(obs[0]["content"], "contents of A");
+        assert_eq!(obs[1]["content"], "contents of B");
     }
 
     #[test]
@@ -999,8 +1119,8 @@ mod tests {
             updated_at: 0,
         };
         let result = conversation_to_atif(&conv, None).unwrap();
-        assert_eq!(result["final_metrics"]["total_input_tokens"], 0);
-        assert_eq!(result["final_metrics"]["total_output_tokens"], 0);
+        assert_eq!(result["final_metrics"]["total_prompt_tokens"], 0);
+        assert_eq!(result["final_metrics"]["total_completion_tokens"], 0);
         assert_eq!(result["final_metrics"]["total_cost_usd"], 0.0);
     }
 
@@ -1025,24 +1145,23 @@ mod tests {
 
     #[test]
     fn shorter_parallel_arrays_dont_panic() {
-        // History has 2 messages but timestamps/feedback only have 1
         let conv = make_conversation_data(
             "id",
             "m",
             vec![user_message("Hi"), assistant_message("Hello")],
-            vec![None], // shorter than history
+            vec![None],
             ConversationTokenUsage::default(),
-            vec![vec![]],           // shorter than history
-            vec![Some(1700000000)], // shorter than history
-            vec![None],             // shorter than history
+            vec![vec![]],
+            vec![Some(1700000000)],
+            vec![None],
             vec![],
         );
         let result = conversation_to_atif(&conv, None);
         assert!(result.is_ok());
         let val = result.unwrap();
         assert_eq!(val["steps"].as_array().unwrap().len(), 2);
-        // Second step has no timestamp (out of bounds defaults to None)
-        assert!(val["steps"][1]["timestamp"].is_null());
+        // Second step has no timestamp (out of bounds)
+        assert!(val["steps"][1].get("timestamp").is_none());
     }
 
     // ── Snapshot test ─────────────────────────────────────────────────

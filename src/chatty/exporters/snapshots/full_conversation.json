@@ -1,46 +1,68 @@
 {
+  "schema_version": "ATIF-v1.6",
   "session_id": "snap-uuid-001",
   "agent": {
+    "name": "chatty",
+    "version": "0.1.52",
     "model_name": "claude-sonnet-4-20250514",
-    "provider": "anthropic"
+    "extra": {
+      "provider": "anthropic"
+    }
   },
   "steps": [
     {
+      "step_id": 1,
+      "timestamp": "2023-11-14T22:13:20Z",
       "source": "user",
-      "content": "Read the file /tmp/hello.txt",
-      "timestamp": 1700000000,
-      "attachments": [
+      "message": [
+        {
+          "type": "text",
+          "text": "Read the file /tmp/hello.txt"
+        },
         {
           "type": "image",
-          "path": "/tmp/screenshot.png"
+          "source": {
+            "media_type": "image/png",
+            "path": "/tmp/screenshot.png"
+          }
         }
       ]
     },
     {
+      "step_id": 2,
+      "timestamp": "2023-11-14T22:13:25Z",
       "source": "agent",
-      "content": "The file contains: Hello, World!",
-      "timestamp": 1700000005,
+      "message": "The file contains: Hello, World!",
+      "reasoning_content": "The user wants to read a file. I should use the read_file tool.",
       "tool_calls": [
         {
-          "id": "call_001",
-          "name": "read_file",
+          "tool_call_id": "call_001",
+          "function_name": "read_file",
           "arguments": {
             "path": "/tmp/hello.txt"
-          },
-          "output": "Hello, World!"
+          }
         }
       ],
-      "reasoning_content": "The user wants to read a file. I should use the read_file tool.",
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_001",
+            "content": "Hello, World!"
+          }
+        ]
+      },
       "metrics": {
-        "input_tokens": 150,
-        "output_tokens": 350
+        "prompt_tokens": 150,
+        "completion_tokens": 350,
+        "cost_usd": 0.008
       }
     }
   ],
   "final_metrics": {
-    "total_input_tokens": 150,
-    "total_output_tokens": 350,
-    "total_cost_usd": 0.008
+    "total_prompt_tokens": 150,
+    "total_completion_tokens": 350,
+    "total_cost_usd": 0.008,
+    "total_steps": 2
   },
   "extra": {
     "feedback": [
