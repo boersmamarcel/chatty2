@@ -1242,8 +1242,15 @@ mod tests {
 
         let cfg = make_model_config(ProviderType::Anthropic);
         let result = conversation_to_atif(&conv, Some(&cfg)).unwrap();
-        let actual = serde_json::to_string_pretty(&result).unwrap();
-        let expected = include_str!("snapshots/full_conversation.json");
+        let mut expected: serde_json::Value =
+            serde_json::from_str(include_str!("snapshots/full_conversation.json")).unwrap();
+
+        // Normalize version field so the snapshot doesn't break on version bumps
+        let mut actual = result.clone();
+        actual["agent"]["version"] = serde_json::json!("VERSION");
+        expected["agent"]["version"] = serde_json::json!("VERSION");
+
+        // Semantic comparison: key order doesn't matter
         assert_eq!(actual, expected);
     }
 }
