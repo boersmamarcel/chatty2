@@ -1,0 +1,116 @@
+name: Update README
+
+# When a PR is merged to main, Claude analyzes the changes and opens a follow-up
+# PR to update README.md if user-facing features or behavior changed.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  update-readme:
+    # Only run when a PR is actually merged (not just closed), and skip PRs
+    # that only touch docs/CI/config files (nothing user-facing).
+    if: >-
+      github.event.pull_request.merged == true &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-readme')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Update README with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--allowed-tools "Read,Edit,Bash(git diff:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(git checkout -b:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git config:*)"'
+          prompt: |
+            # README Update Agent
+
+            A PR was just merged to main. Your job is to determine whether README.md
+            needs to be updated to reflect the changes, and if so, open a follow-up PR.
+
+            ## Context
+
+            - Merged PR: #${{ github.event.pull_request.number }}
+            - Title: ${{ github.event.pull_request.title }}
+            - Author: ${{ github.event.pull_request.user.login }}
+
+            ## Step 1: Analyze the merged PR
+
+            Run `gh pr diff ${{ github.event.pull_request.number }}` to see what changed.
+            Also run `gh pr view ${{ github.event.pull_request.number }}` for the PR description.
+
+            ## Step 2: Decide if README needs updating
+
+            The README is user-facing product documentation. It should be updated ONLY when
+            the merged PR introduces changes that a **user of the application** would notice:
+
+            **DO update for:**
+            - New user-facing features (new UI elements, new settings, new tools)
+            - Changed behavior (different defaults, renamed options, new workflows)
+            - New provider support or model capabilities
+            - New export formats or integrations
+            - Changed installation or setup steps
+            - New keyboard shortcuts or UI interactions
+
+            **DO NOT update for:**
+            - Internal refactoring (renaming internal functions, restructuring modules)
+            - Bug fixes (unless they change documented behavior)
+            - CI/CD changes, workflow updates, dependency bumps
+            - Test additions or changes
+            - Code style / formatting changes
+            - Performance optimizations (unless they change user-visible behavior)
+            - Changes to CLAUDE.md, .github/, scripts/, or other non-user-facing files
+
+            If no README update is needed, simply output "No README update needed" and stop.
+            Do NOT create a PR or branch.
+
+            ## Step 3: Update README.md
+
+            If an update IS needed:
+
+            1. Read the current README.md to understand its structure and style
+            2. Make focused, minimal edits — only add/change what's necessary
+            3. Match the existing tone, formatting, and structure
+            4. Place new content in the appropriate existing section
+            5. Do NOT rewrite sections that weren't affected
+            6. Do NOT add changelog entries — this is product docs, not a changelog
+
+            ## Step 4: Open a follow-up PR
+
+            Create a branch and PR with the README changes:
+
+            ```bash
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout -b docs/readme-update-pr-${{ github.event.pull_request.number }}
+            git add README.md
+            git commit -m "Update README for #${{ github.event.pull_request.number }}"
+            git push -u origin docs/readme-update-pr-${{ github.event.pull_request.number }}
+            ```
+
+            Then create the PR:
+
+            ```bash
+            gh pr create \
+              --title "docs: Update README for ${{ github.event.pull_request.title }}" \
+              --body "Auto-generated README update reflecting changes from #${{ github.event.pull_request.number }}.
+
+            **Source PR:** #${{ github.event.pull_request.number }} by @${{ github.event.pull_request.user.login }}
+
+            Please review the documentation changes and merge if accurate." \
+              --label "documentation"
+            ```
+
+            IMPORTANT: The follow-up PR should be small and focused. If the source PR
+            touched many things, only update the README for the user-visible parts.
