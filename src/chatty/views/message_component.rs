@@ -123,6 +123,8 @@ pub struct DisplayMessage {
     pub feedback: Option<MessageFeedback>,
     // Index into the conversation's history (parallel arrays) for this message
     pub history_index: Option<usize>,
+    // Turn number (each user+assistant exchange = one turn)
+    pub turn_number: Option<usize>,
 }
 
 impl DisplayMessage {
@@ -150,6 +152,7 @@ impl DisplayMessage {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            turn_number: None,
         }
     }
 }
@@ -704,6 +707,18 @@ where
         MessageRole::User => container.bg(cx.theme().secondary),
         MessageRole::Assistant => container, // No background, uses main bg
     };
+
+    // Show turn number label on user messages
+    if let (MessageRole::User, Some(turn)) = (&msg.role, msg.turn_number) {
+        container = container.child(
+            div().flex().justify_end().child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("Turn {turn}")),
+            ),
+        );
+    }
 
     // Check if we should render interleaved content (tool calls mixed with text)
     let should_interleave =

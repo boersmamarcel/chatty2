@@ -115,6 +115,15 @@ impl ChatView {
         self.conversation_id.as_ref()
     }
 
+    /// Compute the current turn number (each user message starts a new turn).
+    fn current_turn_number(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::User))
+            .count()
+            + 1
+    }
+
     /// Add a user message to the chat
     pub fn add_user_message(
         &mut self,
@@ -124,6 +133,7 @@ impl ChatView {
     ) {
         debug!(message = %text, attachment_count = attachments.len(), "Adding user message");
 
+        let turn = self.current_turn_number();
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
             content: text.clone(),
@@ -134,6 +144,7 @@ impl ChatView {
             attachments,
             feedback: None,
             history_index: None,
+            turn_number: Some(turn),
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -145,6 +156,8 @@ impl ChatView {
     pub fn start_assistant_message(&mut self, cx: &mut Context<Self>) {
         debug!("Starting assistant message");
 
+        // Assistant message belongs to the same turn as the preceding user message
+        let turn = self.messages.iter().rev().find_map(|m| m.turn_number);
         self.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -155,6 +168,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            turn_number: turn,
         });
 
         debug!(
@@ -786,6 +800,7 @@ impl ChatView {
 
         self.messages.clear();
 
+        let mut turn_number: usize = 0;
         for (idx, msg) in history.iter().enumerate() {
             let feedback = message_feedback.get(idx).cloned().flatten();
             match msg {
@@ -793,6 +808,7 @@ impl ChatView {
                     let user_msg = UserMessage::from_rig_content(content);
                     let attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
                     if !user_msg.text.is_empty() || !attachments.is_empty() {
+                        turn_number += 1;
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,
                             content: user_msg.text,
@@ -803,6 +819,7 @@ impl ChatView {
                             attachments,
                             feedback: None,
                             history_index: Some(idx),
+                            turn_number: Some(turn_number),
                         });
                     }
                 }
@@ -840,6 +857,7 @@ impl ChatView {
                             attachments: Vec::new(),
                             feedback,
                             history_index: Some(idx),
+                            turn_number: Some(turn_number),
                         });
                     }
                 }
