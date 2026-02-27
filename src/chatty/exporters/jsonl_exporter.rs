@@ -4,18 +4,10 @@ use anyhow::{Context, Result};
 use rig::completion::Message;
 use rig::completion::message::{AssistantContent, UserContent};
 
-use crate::chatty::models::conversation::{MessageFeedback, RegenerationRecord};
+use crate::chatty::models::conversation::RegenerationRecord;
 use crate::chatty::repositories::ConversationData;
 use crate::chatty::views::message_types::{SystemTrace, TraceItem};
 use crate::settings::models::models_store::ModelConfig;
-
-/// Filter for feedback-based conversation selection
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub enum FeedbackFilter {
-    /// Skip conversations containing any thumbs-down feedback
-    ThumbsUpOnly,
-}
 
 /// Configuration options for SFT JSONL export
 #[derive(Clone, Debug)]
@@ -24,8 +16,6 @@ pub struct SftExportOptions {
     pub include_system_prompt: bool,
     /// If true, include tool_call and tool messages in ChatML format
     pub include_tool_calls: bool,
-    /// When set to ThumbsUpOnly, skip conversations containing any thumbs-down feedback
-    pub feedback_filter: Option<FeedbackFilter>,
     /// Skip conversations with fewer messages than this threshold
     pub min_messages: usize,
 }
@@ -35,7 +25,6 @@ impl Default for SftExportOptions {
         Self {
             include_system_prompt: true,
             include_tool_calls: false,
-            feedback_filter: None,
             min_messages: 2,
         }
     }
@@ -43,14 +32,14 @@ impl Default for SftExportOptions {
 
 /// Convert a persisted conversation into SFT (Supervised Fine-Tuning) JSONL format.
 ///
-/// Returns `Ok(None)` if the conversation is filtered out (too few messages,
-/// feedback filter, etc.) or `Ok(Some(value))` with a ChatML-format JSON object.
+/// Returns `Ok(None)` if the conversation is filtered out (too few messages, etc.)
+/// or `Ok(Some(value))` with a ChatML-format JSON object.
 ///
 /// This is a pure function with no side effects.
 ///
 /// Phases:
 /// 1. Deserialize parallel arrays from ConversationData
-/// 2. Apply min_messages and feedback filters
+/// 2. Apply min_messages filter
 /// 3. Build ChatML messages array (text-only, stripping multimodal content)
 /// 4. Return JSON object with messages and _conversation_id
 pub fn conversation_to_sft_jsonl(
@@ -61,23 +50,12 @@ pub fn conversation_to_sft_jsonl(
     // PHASE 1: Deserialize parallel arrays
     let history: Vec<Message> = serde_json::from_str(&conversation.message_history)
         .context("Failed to parse message_history")?;
-    let feedback: Vec<Option<MessageFeedback>> =
-        serde_json::from_str(&conversation.message_feedback).unwrap_or_default();
     let traces: Vec<Option<serde_json::Value>> =
         serde_json::from_str(&conversation.system_traces).unwrap_or_default();
 
     // PHASE 2: Apply filters
     if history.len() < options.min_messages {
         return Ok(None);
-    }
-
-    if let Some(FeedbackFilter::ThumbsUpOnly) = &options.feedback_filter {
-        let has_thumbs_down = feedback
-            .iter()
-            .any(|f| matches!(f, Some(MessageFeedback::ThumbsDown)));
-        if has_thumbs_down {
-            return Ok(None);
-        }
     }
 
     // PHASE 3: Build ChatML messages array
@@ -330,7 +308,7 @@ fn parse_trace_outputs(trace_json: serde_json::Value) -> HashMap<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chatty::models::conversation::RegenerationRecord;
+    use crate::chatty::models::conversation::{MessageFeedback, RegenerationRecord};
     use crate::chatty::views::message_types::{ToolCallBlock, ToolCallState};
     use crate::settings::models::providers_store::ProviderType;
     use rig::OneOrMany;
@@ -492,42 +470,6 @@ mod tests {
         let messages = val["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "user");
-    }
-
-    #[test]
-    fn sft_feedback_filter_excludes_thumbs_down() {
-        let conv = make_conversation_data(
-            "conv-1",
-            "m",
-            vec![user_message("Hi"), assistant_message("Hello")],
-            vec![None, None],
-            vec![None, Some(MessageFeedback::ThumbsDown)],
-            vec![],
-        );
-        let opts = SftExportOptions {
-            feedback_filter: Some(FeedbackFilter::ThumbsUpOnly),
-            ..Default::default()
-        };
-        let result = conversation_to_sft_jsonl(&conv, None, &opts).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn sft_feedback_filter_allows_thumbs_up() {
-        let conv = make_conversation_data(
-            "conv-1",
-            "m",
-            vec![user_message("Hi"), assistant_message("Hello")],
-            vec![None, None],
-            vec![None, Some(MessageFeedback::ThumbsUp)],
-            vec![],
-        );
-        let opts = SftExportOptions {
-            feedback_filter: Some(FeedbackFilter::ThumbsUpOnly),
-            ..Default::default()
-        };
-        let result = conversation_to_sft_jsonl(&conv, None, &opts).unwrap();
-        assert!(result.is_some());
     }
 
     #[test]
