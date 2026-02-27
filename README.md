@@ -151,10 +151,15 @@ Chatty can also export conversations in JSONL format for direct use with fine-tu
 Key features:
 - **Automatic deduplication** — re-exported conversations replace previous entries (keyed by `_conversation_id`)
 - **Multimodal stripping** — images and PDFs are stripped, keeping only text content (most fine-tuning APIs don't support multimodal inputs)
-- **Quality filtering** — optional feedback-based filtering to exclude thumbs-down conversations
 - **Tool call support** — optionally include tool calls and results in ChatML format
 
-SFT data is appended to `sft.jsonl` and DPO pairs to `dpo.jsonl` in the exports directory (`~/.config/chatty/exports/`). Enable auto-export in **Settings > Training Data**.
+SFT data is appended to `sft.jsonl` and DPO pairs to `dpo.jsonl` in the exports directory:
+
+- **macOS**: `~/Library/Application Support/chatty/exports/`
+- **Linux**: `~/.config/chatty/exports/` (or `$XDG_CONFIG_HOME/chatty/exports/`)
+- **Windows**: `%APPDATA%\chatty\exports\`
+
+Enable auto-export in **Settings > Training Data**.
 
 ### Thinking & Traces
 

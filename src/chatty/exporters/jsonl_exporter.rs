@@ -11,7 +11,7 @@ use crate::settings::models::models_store::ModelConfig;
 
 /// Configuration options for SFT JSONL export
 #[derive(Clone, Debug)]
-pub struct SftExportOptions {
+pub(crate) struct SftExportOptions {
     /// If true and ModelConfig.preamble is non-empty, prepend a system message
     pub include_system_prompt: bool,
     /// If true, include tool_call and tool messages in ChatML format
@@ -303,6 +303,60 @@ fn parse_trace_outputs(trace_json: serde_json::Value) -> HashMap<String, String>
     }
 
     outputs
+}
+
+/// Append JSONL lines to a file, replacing any existing lines with the same `_conversation_id`.
+///
+/// Strategy:
+/// 1. Read existing file (if any)
+/// 2. Filter out lines matching the conversation_id
+/// 3. Append new lines
+/// 4. Write atomically (temp file + rename)
+pub(crate) async fn append_jsonl_with_dedup(
+    path: &std::path::Path,
+    new_lines: &[serde_json::Value],
+    conversation_id: &str,
+) -> anyhow::Result<()> {
+    // Read existing content
+    let existing = match tokio::fs::read_to_string(path).await {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    // Filter out old lines for this conversation_id
+    let mut output_lines: Vec<String> = existing
+        .lines()
+        .filter(|line| {
+            if line.trim().is_empty() {
+                return false;
+            }
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(val) => {
+                    val.get("_conversation_id").and_then(|v| v.as_str()) != Some(conversation_id)
+                }
+                Err(_) => true, // Keep unparseable lines
+            }
+        })
+        .map(|s| s.to_string())
+        .collect();
+
+    // Append new lines
+    for val in new_lines {
+        output_lines.push(serde_json::to_string(val)?);
+    }
+
+    // Write atomically
+    let temp_path = path.with_extension(format!("jsonl.{}.tmp", std::process::id()));
+    let content = if output_lines.is_empty() {
+        String::new()
+    } else {
+        output_lines.join("\n") + "\n"
+    };
+    tokio::fs::write(&temp_path, &content).await?;
+    tokio::fs::rename(&temp_path, path).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]

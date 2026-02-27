@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::chatty::exporters::atif_exporter::conversation_to_atif;
 use crate::chatty::exporters::jsonl_exporter::{
-    SftExportOptions, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
+    SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
 };
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
@@ -2167,43 +2167,9 @@ impl ChattyApp {
         let repo = self.conversation_repo.clone();
 
         let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store.get_conversation(&conv_id).and_then(|conv| {
-                let history = conv.serialize_history().ok()?;
-                let traces = conv.serialize_traces().ok()?;
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-
-                Some(ConversationData {
-                    id: conv.id().to_string(),
-                    title: conv.title().to_string(),
-                    model_id: conv.model_id().to_string(),
-                    message_history: history,
-                    system_traces: traces,
-                    token_usage: conv
-                        .serialize_token_usage()
-                        .unwrap_or_else(|_| "{}".to_string()),
-                    attachment_paths: conv
-                        .serialize_attachment_paths()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    message_timestamps: conv
-                        .serialize_message_timestamps()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    message_feedback: conv
-                        .serialize_message_feedback()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    regeneration_records: conv
-                        .serialize_regeneration_records()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    created_at: conv
-                        .created_at()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
-                    updated_at: now,
-                })
-            })
+            store
+                .get_conversation(&conv_id)
+                .and_then(build_conversation_data)
         });
 
         if let Some(conv_data) = conv_data_opt {
@@ -2235,45 +2201,9 @@ impl ChattyApp {
 
         // Build ConversationData and get the model config (same data as persist_conversation)
         let export_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store.get_conversation(&conv_id).and_then(|conv| {
-                let history = conv.serialize_history().ok()?;
-                let traces = conv.serialize_traces().ok()?;
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-
-                let conv_data = ConversationData {
-                    id: conv.id().to_string(),
-                    title: conv.title().to_string(),
-                    model_id: conv.model_id().to_string(),
-                    message_history: history,
-                    system_traces: traces,
-                    token_usage: conv
-                        .serialize_token_usage()
-                        .unwrap_or_else(|_| "{}".to_string()),
-                    attachment_paths: conv
-                        .serialize_attachment_paths()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    message_timestamps: conv
-                        .serialize_message_timestamps()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    message_feedback: conv
-                        .serialize_message_feedback()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    regeneration_records: conv
-                        .serialize_regeneration_records()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    created_at: conv
-                        .created_at()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
-                    updated_at: now,
-                };
-
-                Some(conv_data)
-            })
+            store
+                .get_conversation(&conv_id)
+                .and_then(build_conversation_data)
         });
 
         let Some(conv_data) = export_data else {
@@ -2354,43 +2284,9 @@ impl ChattyApp {
 
         // Build ConversationData (same pattern as export_conversation_atif)
         let export_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store.get_conversation(&conv_id).and_then(|conv| {
-                let history = conv.serialize_history().ok()?;
-                let traces = conv.serialize_traces().ok()?;
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-
-                Some(ConversationData {
-                    id: conv.id().to_string(),
-                    title: conv.title().to_string(),
-                    model_id: conv.model_id().to_string(),
-                    message_history: history,
-                    system_traces: traces,
-                    token_usage: conv
-                        .serialize_token_usage()
-                        .unwrap_or_else(|_| "{}".to_string()),
-                    attachment_paths: conv
-                        .serialize_attachment_paths()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    message_timestamps: conv
-                        .serialize_message_timestamps()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    message_feedback: conv
-                        .serialize_message_feedback()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    regeneration_records: conv
-                        .serialize_regeneration_records()
-                        .unwrap_or_else(|_| "[]".to_string()),
-                    created_at: conv
-                        .created_at()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
-                    updated_at: now,
-                })
-            })
+            store
+                .get_conversation(&conv_id)
+                .and_then(build_conversation_data)
         });
 
         let Some(conv_data) = export_data else {
@@ -2478,58 +2374,47 @@ impl ChattyApp {
     }
 }
 
-/// Append JSONL lines to a file, replacing any existing lines with the same _conversation_id.
+/// Serialize a `Conversation` into a `ConversationData` snapshot suitable for persistence
+/// or export. Returns `None` if history or traces cannot be serialized.
 ///
-/// Strategy:
-/// 1. Read existing file (if any)
-/// 2. Filter out lines matching the conversation_id
-/// 3. Append new lines
-/// 4. Write atomically (temp file + rename)
-async fn append_jsonl_with_dedup(
-    path: &std::path::Path,
-    new_lines: &[serde_json::Value],
-    conversation_id: &str,
-) -> anyhow::Result<()> {
-    // Read existing content
-    let existing = match tokio::fs::read_to_string(path).await {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.into()),
-    };
+/// Sets `updated_at` to the current time; all other timestamps are taken from the
+/// conversation itself.
+fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
+    let history = conv.serialize_history().ok()?;
+    let traces = conv.serialize_traces().ok()?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
 
-    // Filter out old lines for this conversation_id
-    let mut output_lines: Vec<String> = existing
-        .lines()
-        .filter(|line| {
-            if line.trim().is_empty() {
-                return false;
-            }
-            match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(val) => {
-                    val.get("_conversation_id").and_then(|v| v.as_str()) != Some(conversation_id)
-                }
-                Err(_) => true, // Keep unparseable lines
-            }
-        })
-        .map(|s| s.to_string())
-        .collect();
-
-    // Append new lines
-    for val in new_lines {
-        output_lines.push(serde_json::to_string(val)?);
-    }
-
-    // Write atomically
-    let temp_path = path.with_extension(format!("jsonl.{}.tmp", std::process::id()));
-    let content = if output_lines.is_empty() {
-        String::new()
-    } else {
-        output_lines.join("\n") + "\n"
-    };
-    tokio::fs::write(&temp_path, &content).await?;
-    tokio::fs::rename(&temp_path, path).await?;
-
-    Ok(())
+    Some(ConversationData {
+        id: conv.id().to_string(),
+        title: conv.title().to_string(),
+        model_id: conv.model_id().to_string(),
+        message_history: history,
+        system_traces: traces,
+        token_usage: conv
+            .serialize_token_usage()
+            .unwrap_or_else(|_| "{}".to_string()),
+        attachment_paths: conv
+            .serialize_attachment_paths()
+            .unwrap_or_else(|_| "[]".to_string()),
+        message_timestamps: conv
+            .serialize_message_timestamps()
+            .unwrap_or_else(|_| "[]".to_string()),
+        message_feedback: conv
+            .serialize_message_feedback()
+            .unwrap_or_else(|_| "[]".to_string()),
+        regeneration_records: conv
+            .serialize_regeneration_records()
+            .unwrap_or_else(|_| "[]".to_string()),
+        created_at: conv
+            .created_at()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
+        updated_at: now,
+    })
 }
 
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
