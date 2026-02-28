@@ -1701,14 +1701,14 @@ impl ChattyApp {
                     StreamStatus::Completed => {
                         // Drain artifacts queued by AddAttachmentTool.
                         // Primary source: StreamState.pending_artifacts (set via set_pending_artifacts).
-                        // Fallback: drain directly from the conversation's pending_artifacts.
-                        let from_event = pending_artifacts.is_some();
+                        // Fallback: drain directly from the conversation's pending_artifacts
+                        // (for edge cases where set_pending_artifacts wasn't wired).
                         let artifacts = pending_artifacts
                             .clone()
                             .or_else(|| {
-                                debug!(
+                                warn!(
                                     conv_id = %conversation_id,
-                                    "Artifacts not in event, trying fallback drain from conversation"
+                                    "Artifacts missing from event, draining from conversation"
                                 );
                                 cx.try_global::<ConversationsStore>()
                                     .and_then(|store| store.get_conversation(conversation_id))
@@ -1721,13 +1721,6 @@ impl ChattyApp {
                                     .filter(|v| !v.is_empty())
                             })
                             .unwrap_or_default();
-
-                        debug!(
-                            conv_id = %conversation_id,
-                            from_event,
-                            artifact_count = artifacts.len(),
-                            "Artifact drain complete"
-                        );
 
                         self.finalize_completed_stream(
                             conversation_id,
