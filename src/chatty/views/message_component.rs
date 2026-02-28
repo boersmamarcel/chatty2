@@ -417,7 +417,7 @@ fn is_image_file(path: &std::path::Path) -> bool {
 }
 
 /// Render attachment images as thumbnails above the message text
-fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
+fn render_attachments(attachments: &[PathBuf], id_prefix: &str, cx: &App) -> Div {
     let border_color = cx.theme().border;
 
     div()
@@ -426,7 +426,7 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         .gap_2()
         .mb_2()
         .children(attachments.iter().enumerate().map(|(i, path)| {
-            let element_id = ElementId::Name(format!("msg-{}-attachment-{}", index, i).into());
+            let element_id = ElementId::Name(format!("{}-att-{}", id_prefix, i).into());
 
             if is_image_file(path) {
                 // Render image thumbnail
@@ -571,8 +571,11 @@ where
                 )
                 && let Some(path) = extract_attachment_path(tool_call)
             {
-                container =
-                    container.child(render_attachments(&[path], index * 100 + tool_idx, cx));
+                container = container.child(render_attachments(
+                    &[path],
+                    &format!("msg-{index}-tool-{tool_idx}"),
+                    cx,
+                ));
             }
         }
     }
@@ -734,7 +737,11 @@ where
     // For assistant messages with interleaved tool calls, attachments are rendered
     // inline after the `add_attachment` tool call that produced them (see render_interleaved_content).
     if !msg.attachments.is_empty() && !should_interleave {
-        container = container.child(render_attachments(&msg.attachments, index, cx));
+        container = container.child(render_attachments(
+            &msg.attachments,
+            &format!("msg-{index}"),
+            cx,
+        ));
     }
 
     // Parse content for thinking blocks (for assistant messages)
@@ -844,5 +851,70 @@ where
             ))
             .into_any_element(),
         _ => final_container.into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Re-import standard #[test] to shadow gpui::test from `use gpui::*`
+    use core::prelude::rust_2021::test;
+
+    use super::*;
+    use std::time::Duration;
+
+    /// Helper to build a ToolCallBlock with the given output.
+    fn make_tool_call(output: Option<&str>) -> super::super::message_types::ToolCallBlock {
+        super::super::message_types::ToolCallBlock {
+            id: "test-id".to_string(),
+            tool_name: "add_attachment".to_string(),
+            display_name: "add_attachment".to_string(),
+            input: "{}".to_string(),
+            output: output.map(|s| s.to_string()),
+            output_preview: None,
+            state: super::super::message_types::ToolCallState::Success,
+            duration: Some(Duration::from_millis(100)),
+            text_before: String::new(),
+        }
+    }
+
+    #[test]
+    fn extract_attachment_path_valid_json() {
+        let tc = make_tool_call(Some(
+            r#"{"path": "/tmp/output/chart.png", "file_type": "image", "message": "ok"}"#,
+        ));
+        assert_eq!(
+            extract_attachment_path(&tc),
+            Some(PathBuf::from("/tmp/output/chart.png"))
+        );
+    }
+
+    #[test]
+    fn extract_attachment_path_no_output() {
+        let tc = make_tool_call(None);
+        assert_eq!(extract_attachment_path(&tc), None);
+    }
+
+    #[test]
+    fn extract_attachment_path_invalid_json() {
+        let tc = make_tool_call(Some("not json at all"));
+        assert_eq!(extract_attachment_path(&tc), None);
+    }
+
+    #[test]
+    fn extract_attachment_path_missing_path_field() {
+        let tc = make_tool_call(Some(r#"{"file_type": "image", "message": "ok"}"#));
+        assert_eq!(extract_attachment_path(&tc), None);
+    }
+
+    #[test]
+    fn extract_attachment_path_path_not_string() {
+        let tc = make_tool_call(Some(r#"{"path": 42}"#));
+        assert_eq!(extract_attachment_path(&tc), None);
+    }
+
+    #[test]
+    fn extract_attachment_path_empty_json_object() {
+        let tc = make_tool_call(Some("{}"));
+        assert_eq!(extract_attachment_path(&tc), None);
     }
 }

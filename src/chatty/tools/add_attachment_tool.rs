@@ -60,6 +60,9 @@ impl Tool for AddAttachmentTool {
                          Supported formats: PNG, JPG, JPEG, GIF, WebP, SVG, BMP (images), PDF (documents).\n\
                          Maximum file size: 5MB.\n\
                          \n\
+                         Note: the file is always displayed to the user, but on text-only models \
+                         you cannot analyze the file contents — describe what you generated instead.\n\
+                         \n\
                          Examples:\n\
                          - Show a generated plot: {\"path\": \"output/chart.png\"}\n\
                          - Display a screenshot: {\"path\": \"screenshots/page.png\"}\n\
@@ -259,6 +262,7 @@ mod tests {
         assert_eq!(def.name, "add_attachment");
         assert!(def.description.contains("inline"));
         assert!(def.description.contains("5MB"));
+        assert!(def.description.contains("text-only models"));
         assert_eq!(def.parameters["required"][0], "path");
     }
 
