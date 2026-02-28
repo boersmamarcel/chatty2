@@ -50,6 +50,7 @@ impl ListToolsTool {
         has_shell: bool,
         has_git: bool,
         has_search: bool,
+        has_add_attachment: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -236,6 +237,14 @@ impl ListToolsTool {
             ]);
         }
 
+        if has_add_attachment {
+            native_tools.push(ToolInfo {
+                name: "add_attachment".to_string(),
+                description: "Display an image or PDF file inline in the chat response. Use this to show generated plots, charts, screenshots, or documents. Supported formats: PNG, JPG, JPEG, GIF, WebP, SVG, BMP (images), PDF (documents). Maximum file size: 5MB.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -253,7 +262,17 @@ impl ListToolsTool {
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(false, false, false, false, false, false, false, Vec::new())
+        Self::new_with_config(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+        )
     }
 }
 
@@ -271,6 +290,7 @@ impl Tool for ListToolsTool {
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
                          - Filesystem tools: read_file, write_file, list_directory, etc.\n\
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit\n\
+                         - add_attachment: Display images or PDFs inline in chat responses\n\
                          - MCP tools: External tools from connected servers\n\
                          \n\
                          Use this to discover what capabilities you have for task execution. \

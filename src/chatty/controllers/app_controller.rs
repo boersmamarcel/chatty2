@@ -1358,10 +1358,22 @@ impl ChattyApp {
                                     *resolved = Some(id.clone());
                                     debug!(conv_id = %id, "Updated resolved conversation ID for pending task");
                                 }
-                                // Promote the pending stream to the real conversation ID
+                                // Get conversation's PendingArtifacts handle before promoting
+                                let pending_arts = cx.update(|cx| {
+                                    cx.global::<ConversationsStore>()
+                                        .get_conversation(&id)
+                                        .map(|c| c.pending_artifacts())
+                                }).ok().flatten();
+
+                                // Promote the pending stream and wire up artifacts
                                 if let Some(ref sm) = stream_manager {
                                     sm.update(cx, |mgr, _cx| {
                                         mgr.promote_pending(&id);
+                                        // Wire the conversation's PendingArtifacts to the StreamState
+                                        // so finalize_stream can drain them directly
+                                        if let Some(arts) = pending_arts {
+                                            mgr.set_pending_artifacts(&id, arts);
+                                        }
                                     })
                                     .map_err(|e| warn!(error = ?e, "Failed to promote pending stream"))
                                     .ok();
@@ -1408,7 +1420,7 @@ impl ChattyApp {
                 .ok();
 
                 // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images) = cx
+                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_attachment_paths) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
@@ -1431,6 +1443,7 @@ impl ChattyApp {
                                 model_id,
                                 supports_pdf,
                                 supports_images,
+                                conv.attachment_paths().to_vec(),
                             ))
                         } else {
                             Err(anyhow::anyhow!(
@@ -1462,6 +1475,25 @@ impl ChattyApp {
                     match attachment_to_user_content(path).await {
                         Ok(content) => contents.push(content),
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
+                    }
+                }
+
+                // Include the most recent assistant-generated attachments so the LLM
+                // can reference displayed images/PDFs in follow-up questions.
+                let assistant_att_paths = select_recent_assistant_attachments(
+                    &history,
+                    &conv_attachment_paths,
+                    provider_supports_images,
+                    provider_supports_pdf,
+                );
+                for path in &assistant_att_paths {
+                    match attachment_to_user_content(path).await {
+                        Ok(content) => contents.push(content),
+                        Err(e) => warn!(
+                            ?path,
+                            error = ?e,
+                            "Failed to include assistant attachment"
+                        ),
                     }
                 }
 
@@ -1652,43 +1684,47 @@ impl ChattyApp {
 
                 match status {
                     StreamStatus::Completed => {
+                        // Drain artifacts queued by AddAttachmentTool.
+                        // Primary source: StreamState.pending_artifacts (set via set_pending_artifacts).
+                        // Fallback: drain directly from the conversation's pending_artifacts
+                        // (for edge cases where set_pending_artifacts wasn't wired).
+                        let artifacts = pending_artifacts
+                            .clone()
+                            .or_else(|| {
+                                cx.try_global::<ConversationsStore>()
+                                    .and_then(|store| store.get_conversation(conversation_id))
+                                    .and_then(|conv| {
+                                        conv.pending_artifacts()
+                                            .lock()
+                                            .ok()
+                                            .map(|mut v| v.drain(..).collect::<Vec<_>>())
+                                    })
+                                    .filter(|v| !v.is_empty())
+                                    .inspect(|v| {
+                                        warn!(
+                                            conv_id = %conversation_id,
+                                            count = v.len(),
+                                            "Artifacts missing from event, recovered via fallback drain"
+                                        );
+                                    })
+                            })
+                            .unwrap_or_default();
+
                         self.finalize_completed_stream(
                             conversation_id,
                             *token_usage,
                             trace_json.clone(),
+                            artifacts.clone(),
                             cx,
                         );
 
-                        // Check for artifacts queued by AddAttachmentTool.
-                        // If the stream manager had them, use those; otherwise fall back
-                        // to checking the conversation directly (for pending-promoted streams).
-                        let artifacts = pending_artifacts.clone().or_else(|| {
-                            cx.try_global::<ConversationsStore>()
-                                .and_then(|store| store.get_conversation(conversation_id))
-                                .and_then(|conv| {
-                                    conv.pending_artifacts()
-                                        .lock()
-                                        .ok()
-                                        .map(|mut v| v.drain(..).collect::<Vec<_>>())
-                                })
-                                .filter(|v| !v.is_empty())
-                        });
-
-                        if let Some(artifact_paths) = artifacts
-                            && !artifact_paths.is_empty()
-                        {
-                            debug!(
-                                count = artifact_paths.len(),
-                                "Sending follow-up with queued artifacts as multimodal content"
-                            );
-                            let follow_up_text =
-                                "Here are the attached files for your analysis.".to_string();
-                            let app_weak = cx.entity().downgrade();
-                            cx.defer(move |cx| {
-                                if let Some(app) = app_weak.upgrade() {
-                                    app.update(cx, |app, cx| {
-                                        app.send_message(follow_up_text, artifact_paths, cx);
-                                    });
+                        // Update display message with attachment paths
+                        if !artifacts.is_empty() {
+                            chat_view.update(cx, |view, cx| {
+                                if view.conversation_id() == Some(conversation_id)
+                                    || conversation_id == "__pending__"
+                                {
+                                    view.set_last_assistant_attachments(artifacts, cx);
                                 }
                             });
                         }
@@ -1765,6 +1801,7 @@ impl ChattyApp {
         conversation_id: &str,
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
+        artifact_paths: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         let chat_view = self.chat_view.clone();
@@ -1787,7 +1824,7 @@ impl ChattyApp {
                         .streaming_message()
                         .cloned()
                         .unwrap_or_default();
-                    conv.finalize_response(response_text);
+                    conv.finalize_response(response_text, artifact_paths);
                     conv.add_trace(trace_json);
                     let msg_count = conv.message_count();
                     // The assistant message was just pushed; its index is msg_count - 1
@@ -1966,7 +2003,7 @@ impl ChattyApp {
         let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 let partial_text = conv.streaming_message().cloned().unwrap_or_default();
-                conv.finalize_response(partial_text);
+                conv.finalize_response(partial_text, Vec::new());
                 conv.add_trace(trace_json);
                 conv.set_streaming_message(None);
                 let idx = conv.message_count().saturating_sub(1);
@@ -2590,6 +2627,46 @@ async fn run_llm_stream(
     Ok(())
 }
 
+/// Select attachment paths from the most recent assistant message that the
+/// current model can handle. Returns paths filtered by capability.
+///
+/// Used to include tool-generated images/PDFs in follow-up prompts so the
+/// LLM can reference previously displayed files.
+fn select_recent_assistant_attachments(
+    history: &[rig::completion::Message],
+    attachment_paths: &[Vec<PathBuf>],
+    supports_images: bool,
+    supports_pdf: bool,
+) -> Vec<PathBuf> {
+    if !supports_images && !supports_pdf {
+        return Vec::new();
+    }
+    for (i, msg) in history.iter().enumerate().rev() {
+        if matches!(msg, rig::completion::Message::Assistant { .. })
+            && let Some(att_paths) = attachment_paths.get(i)
+            && !att_paths.is_empty()
+        {
+            return att_paths
+                .iter()
+                .filter(|path| {
+                    let is_pdf = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("pdf"))
+                        .unwrap_or(false);
+                    if is_pdf {
+                        supports_pdf
+                    } else {
+                        supports_images
+                    }
+                })
+                .cloned()
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
 /// Convert a file attachment to a rig-core UserContent
 async fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message::UserContent> {
     let ext = path
@@ -2631,5 +2708,140 @@ async fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message:
             Some(rig::completion::message::DocumentMediaType::PDF),
         )),
         _ => Err(anyhow::anyhow!("Unsupported file type: {}", ext)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Re-import standard #[test] to shadow gpui::test from `use gpui::*`
+    use core::prelude::rust_2021::test;
+
+    use super::*;
+    use rig::OneOrMany;
+    use rig::completion::message::{AssistantContent, Text};
+    use rig::message::{Message, UserContent};
+
+    fn user_msg(text: &str) -> Message {
+        Message::User {
+            content: OneOrMany::one(UserContent::text(text)),
+        }
+    }
+
+    fn assistant_msg(text: &str) -> Message {
+        Message::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::Text(Text {
+                text: text.to_string(),
+            })),
+        }
+    }
+
+    #[test]
+    fn select_attachments_no_assistant_messages() {
+        let history = vec![user_msg("hello")];
+        let attachment_paths = vec![vec![]];
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, true, true);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn select_attachments_returns_image_paths() {
+        let history = vec![user_msg("hi"), assistant_msg("here's a chart")];
+        let attachment_paths = vec![vec![], vec![PathBuf::from("/tmp/chart.png")]];
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, true, false);
+        assert_eq!(result, vec![PathBuf::from("/tmp/chart.png")]);
+    }
+
+    #[test]
+    fn select_attachments_filters_pdf_when_unsupported() {
+        let history = vec![user_msg("hi"), assistant_msg("report")];
+        let attachment_paths = vec![
+            vec![],
+            vec![
+                PathBuf::from("/tmp/chart.png"),
+                PathBuf::from("/tmp/report.pdf"),
+            ],
+        ];
+        // images supported, pdf not
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, true, false);
+        assert_eq!(result, vec![PathBuf::from("/tmp/chart.png")]);
+    }
+
+    #[test]
+    fn select_attachments_filters_images_when_unsupported() {
+        let history = vec![user_msg("hi"), assistant_msg("report")];
+        let attachment_paths = vec![
+            vec![],
+            vec![
+                PathBuf::from("/tmp/chart.png"),
+                PathBuf::from("/tmp/report.pdf"),
+            ],
+        ];
+        // pdf supported, images not
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, false, true);
+        assert_eq!(result, vec![PathBuf::from("/tmp/report.pdf")]);
+    }
+
+    #[test]
+    fn select_attachments_returns_most_recent_only() {
+        let history = vec![
+            user_msg("first"),
+            assistant_msg("old chart"),
+            user_msg("second"),
+            assistant_msg("new chart"),
+        ];
+        let attachment_paths = vec![
+            vec![],
+            vec![PathBuf::from("/tmp/old.png")],
+            vec![],
+            vec![PathBuf::from("/tmp/new.png")],
+        ];
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, true, true);
+        assert_eq!(result, vec![PathBuf::from("/tmp/new.png")]);
+    }
+
+    #[test]
+    fn select_attachments_skips_assistant_without_attachments() {
+        // Most recent assistant has no attachments, but an earlier one does
+        let history = vec![
+            user_msg("first"),
+            assistant_msg("has chart"),
+            user_msg("second"),
+            assistant_msg("no chart"),
+        ];
+        let attachment_paths = vec![
+            vec![],
+            vec![PathBuf::from("/tmp/old.png")],
+            vec![],
+            vec![], // most recent assistant has empty attachments
+        ];
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, true, true);
+        // Should skip the empty one and find the older one
+        assert_eq!(result, vec![PathBuf::from("/tmp/old.png")]);
+    }
+
+    #[test]
+    fn select_attachments_no_capability_returns_empty() {
+        let history = vec![user_msg("hi"), assistant_msg("chart")];
+        let attachment_paths = vec![vec![], vec![PathBuf::from("/tmp/chart.png")]];
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, false, false);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn select_attachments_mismatched_lengths_no_panic() {
+        // attachment_paths shorter than history
+        let history = vec![user_msg("hi"), assistant_msg("chart")];
+        let attachment_paths = vec![vec![]]; // only 1 entry for 2 messages
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, true, true);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn select_attachments_pdf_case_insensitive() {
+        let history = vec![user_msg("hi"), assistant_msg("report")];
+        let attachment_paths = vec![vec![], vec![PathBuf::from("/tmp/report.PDF")]];
+        let result = select_recent_assistant_attachments(&history, &attachment_paths, false, true);
+        assert_eq!(result, vec![PathBuf::from("/tmp/report.PDF")]);
     }
 }
