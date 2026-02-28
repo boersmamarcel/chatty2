@@ -846,6 +846,7 @@ impl ChatView {
             }
         }
 
+        self.scroll_to_bottom();
         cx.notify();
     }
 
