@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Chatty</h1>
-
+ 
 <p align="center">
   <strong>A fast, native desktop chat client for LLMs — built with Rust and GPU-accelerated rendering.</strong>
 </p>
