@@ -90,7 +90,7 @@ See [Tools & MCP](#tools--mcp) below for details.
 
 **Real tool use, properly sandboxed.** Give your LLM filesystem access, a bash shell, and MCP servers — all within a workspace sandbox. On Linux, shell commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with namespace isolation. On macOS, they use `sandbox-exec` with policy profiles that block access to `.ssh`, `.aws`, and other sensitive directories. You choose the approval mode: ask every time, auto-approve, or deny all.
 
-**Multi-turn agents.** Your LLM can chain up to 10 tool calls per response — read files, run commands, analyze results, and iterate. It can even fetch web pages and attach images or PDFs it finds for its own analysis.
+**Multi-turn agents.** Your LLM can chain up to 10 tool calls per response — read files, run commands, analyze results, and iterate. It can generate plots, charts, and documents and display them inline in the chat. With multimodal models, you can ask follow-up questions that reference those generated files directly.
 
 **Privacy first.** Run fully local with Ollama — no data leaves your machine. No telemetry, no tracking. Conversations are stored as local JSON files, never uploaded anywhere.
 
@@ -195,6 +195,7 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `delete_file` | Delete files or directories | Yes |
 | `move_file` | Move or rename files | Yes |
 | `bash` | Execute shell commands (sandboxed, streaming output) | Yes |
+| `add_attachment` | Display a generated image or PDF inline in the chat | No |
 | `list_tools` | Lists all available tools and schemas | No |
 
 ### MCP Servers
