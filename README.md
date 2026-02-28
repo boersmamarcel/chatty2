@@ -1,9 +1,9 @@
 <p align="center">
   <img src="assets/app_icon/ai-2.png" alt="Chatty" width="128" height="128">
 </p>
-
+  
 <h1 align="center">Chatty</h1>
-
+ 
 <p align="center">
   <strong>A fast, native desktop chat client for LLMs — built with Rust and GPU-accelerated rendering.</strong>
 </p>
