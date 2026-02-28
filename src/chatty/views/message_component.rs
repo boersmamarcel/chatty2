@@ -463,6 +463,15 @@ fn render_attachments(attachments: &[PathBuf], index: usize, cx: &App) -> Div {
         }))
 }
 
+/// Extract the file path from an `add_attachment` tool call output JSON.
+/// Returns `None` if the output is missing, not valid JSON, or lacks a `"path"` field.
+fn extract_attachment_path(tool_call: &super::message_types::ToolCallBlock) -> Option<PathBuf> {
+    let output = tool_call.output.as_ref()?;
+    let json: serde_json::Value = serde_json::from_str(output).ok()?;
+    let path_str = json.get("path")?.as_str()?;
+    Some(PathBuf::from(path_str))
+}
+
 /// Render interleaved content: text segments mixed with tool calls
 fn render_interleaved_content<F>(
     msg: &DisplayMessage,
@@ -553,6 +562,18 @@ where
                     cx,
                 ),
             ));
+
+            // If this is a successful add_attachment call, render the image/PDF inline
+            if tool_call.tool_name == "add_attachment"
+                && matches!(
+                    tool_call.state,
+                    super::message_types::ToolCallState::Success
+                )
+                && let Some(path) = extract_attachment_path(tool_call)
+            {
+                container =
+                    container.child(render_attachments(&[path], index * 100 + tool_idx, cx));
+            }
         }
     }
 
@@ -709,8 +730,10 @@ where
     let should_interleave =
         matches!(msg.role, MessageRole::Assistant) && msg.system_trace_view.is_some();
 
-    // Render attachments (images/PDFs) if present
-    if !msg.attachments.is_empty() {
+    // Render attachments (images/PDFs) if present.
+    // For assistant messages with interleaved tool calls, attachments are rendered
+    // inline after the `add_attachment` tool call that produced them (see render_interleaved_content).
+    if !msg.attachments.is_empty() && !should_interleave {
         container = container.child(render_attachments(&msg.attachments, index, cx));
     }
 

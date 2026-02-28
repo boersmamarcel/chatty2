@@ -198,6 +198,16 @@ impl StreamManager {
         self.pending_resolved_ids.remove("__pending__");
     }
 
+    /// Set the pending artifacts handle on a promoted stream.
+    /// Called after `promote_pending()` to wire up the conversation's artifact storage
+    /// so that `finalize_stream()` can drain artifacts queued by `AddAttachmentTool`.
+    pub fn set_pending_artifacts(&mut self, conv_id: &str, artifacts: PendingArtifacts) {
+        if let Some(state) = self.streams.get_mut(conv_id) {
+            state.pending_artifacts = Some(artifacts);
+            debug!(conv_id = %conv_id, "Set pending artifacts on stream state");
+        }
+    }
+
     /// Process a stream chunk: update internal state and emit the corresponding event.
     ///
     /// Note: Text chunks are emitted as events for UI updates but NOT accumulated
@@ -304,12 +314,19 @@ impl StreamManager {
     /// Drains any pending artifacts queued by AddAttachmentTool.
     pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
         let (token_usage, trace_json, artifacts) = if let Some(state) = self.streams.get(conv_id) {
+            let has_artifacts_handle = state.pending_artifacts.is_some();
             let drained = state
                 .pending_artifacts
                 .as_ref()
                 .and_then(|pa| pa.lock().ok())
                 .map(|mut v| v.drain(..).collect::<Vec<_>>())
                 .filter(|v| !v.is_empty());
+            debug!(
+                conv_id = %conv_id,
+                has_artifacts_handle,
+                artifact_count = drained.as_ref().map(|v| v.len()).unwrap_or(0),
+                "finalize_stream: draining pending artifacts"
+            );
             (state.token_usage, state.trace_json.clone(), drained)
         } else {
             warn!(conv_id = %conv_id, "finalize_stream called but no stream found");

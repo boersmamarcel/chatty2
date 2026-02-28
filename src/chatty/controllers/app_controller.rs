@@ -1353,10 +1353,22 @@ impl ChattyApp {
                                     *resolved = Some(id.clone());
                                     debug!(conv_id = %id, "Updated resolved conversation ID for pending task");
                                 }
-                                // Promote the pending stream to the real conversation ID
+                                // Get conversation's PendingArtifacts handle before promoting
+                                let pending_arts = cx.update(|cx| {
+                                    cx.global::<ConversationsStore>()
+                                        .get_conversation(&id)
+                                        .map(|c| c.pending_artifacts())
+                                }).ok().flatten();
+
+                                // Promote the pending stream and wire up artifacts
                                 if let Some(ref sm) = stream_manager {
                                     sm.update(cx, |mgr, _cx| {
                                         mgr.promote_pending(&id);
+                                        // Wire the conversation's PendingArtifacts to the StreamState
+                                        // so finalize_stream can drain them directly
+                                        if let Some(arts) = pending_arts {
+                                            mgr.set_pending_artifacts(&id, arts);
+                                        }
                                     })
                                     .map_err(|e| warn!(error = ?e, "Failed to promote pending stream"))
                                     .ok();
@@ -1403,7 +1415,7 @@ impl ChattyApp {
                 .ok();
 
                 // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images) = cx
+                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_attachment_paths) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
@@ -1426,6 +1438,7 @@ impl ChattyApp {
                                 model_id,
                                 supports_pdf,
                                 supports_images,
+                                conv.attachment_paths().to_vec(),
                             ))
                         } else {
                             Err(anyhow::anyhow!(
@@ -1457,6 +1470,45 @@ impl ChattyApp {
                     match attachment_to_user_content(path).await {
                         Ok(content) => contents.push(content),
                         Err(e) => warn!(?path, error = ?e, "Failed to convert attachment"),
+                    }
+                }
+
+                // Include the most recent assistant-generated attachments so the LLM
+                // can reference displayed images/PDFs in follow-up questions.
+                // Only included when the model supports the format.
+                if provider_supports_images || provider_supports_pdf {
+                    for (i, msg) in history.iter().enumerate().rev() {
+                        if matches!(msg, rig::completion::Message::Assistant { .. })
+                            && let Some(att_paths) = conv_attachment_paths.get(i)
+                            && !att_paths.is_empty()
+                        {
+                            debug!(
+                                count = att_paths.len(),
+                                "Including assistant attachments for multimodal context"
+                            );
+                            for path in att_paths {
+                                let is_pdf = path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|e| e.eq_ignore_ascii_case("pdf"))
+                                    .unwrap_or(false);
+                                if is_pdf && !provider_supports_pdf {
+                                    continue;
+                                }
+                                if !is_pdf && !provider_supports_images {
+                                    continue;
+                                }
+                                match attachment_to_user_content(path).await {
+                                    Ok(content) => contents.push(content),
+                                    Err(e) => warn!(
+                                        ?path,
+                                        error = ?e,
+                                        "Failed to include assistant attachment"
+                                    ),
+                                }
+                            }
+                            break; // Only include the most recent assistant attachments
+                        }
                     }
                 }
 
@@ -1647,43 +1699,51 @@ impl ChattyApp {
 
                 match status {
                     StreamStatus::Completed => {
+                        // Drain artifacts queued by AddAttachmentTool.
+                        // Primary source: StreamState.pending_artifacts (set via set_pending_artifacts).
+                        // Fallback: drain directly from the conversation's pending_artifacts.
+                        let from_event = pending_artifacts.is_some();
+                        let artifacts = pending_artifacts
+                            .clone()
+                            .or_else(|| {
+                                debug!(
+                                    conv_id = %conversation_id,
+                                    "Artifacts not in event, trying fallback drain from conversation"
+                                );
+                                cx.try_global::<ConversationsStore>()
+                                    .and_then(|store| store.get_conversation(conversation_id))
+                                    .and_then(|conv| {
+                                        conv.pending_artifacts()
+                                            .lock()
+                                            .ok()
+                                            .map(|mut v| v.drain(..).collect::<Vec<_>>())
+                                    })
+                                    .filter(|v| !v.is_empty())
+                            })
+                            .unwrap_or_default();
+
+                        debug!(
+                            conv_id = %conversation_id,
+                            from_event,
+                            artifact_count = artifacts.len(),
+                            "Artifact drain complete"
+                        );
+
                         self.finalize_completed_stream(
                             conversation_id,
                             *token_usage,
                             trace_json.clone(),
+                            artifacts.clone(),
                             cx,
                         );
 
-                        // Check for artifacts queued by AddAttachmentTool.
-                        // If the stream manager had them, use those; otherwise fall back
-                        // to checking the conversation directly (for pending-promoted streams).
-                        let artifacts = pending_artifacts.clone().or_else(|| {
-                            cx.try_global::<ConversationsStore>()
-                                .and_then(|store| store.get_conversation(conversation_id))
-                                .and_then(|conv| {
-                                    conv.pending_artifacts()
-                                        .lock()
-                                        .ok()
-                                        .map(|mut v| v.drain(..).collect::<Vec<_>>())
-                                })
-                                .filter(|v| !v.is_empty())
-                        });
-
-                        if let Some(artifact_paths) = artifacts
-                            && !artifact_paths.is_empty()
-                        {
-                            debug!(
-                                count = artifact_paths.len(),
-                                "Sending follow-up with queued artifacts as multimodal content"
-                            );
-                            let follow_up_text =
-                                "Here are the attached files for your analysis.".to_string();
-                            let app_weak = cx.entity().downgrade();
-                            cx.defer(move |cx| {
-                                if let Some(app) = app_weak.upgrade() {
-                                    app.update(cx, |app, cx| {
-                                        app.send_message(follow_up_text, artifact_paths, cx);
-                                    });
+                        // Update display message with attachment paths
+                        if !artifacts.is_empty() {
+                            chat_view.update(cx, |view, cx| {
+                                if view.conversation_id() == Some(conversation_id)
+                                    || conversation_id == "__pending__"
+                                {
+                                    view.set_last_assistant_attachments(artifacts, cx);
                                 }
                             });
                         }
@@ -1760,6 +1820,7 @@ impl ChattyApp {
         conversation_id: &str,
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
+        artifact_paths: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         let chat_view = self.chat_view.clone();
@@ -1782,7 +1843,7 @@ impl ChattyApp {
                         .streaming_message()
                         .cloned()
                         .unwrap_or_default();
-                    conv.finalize_response(response_text);
+                    conv.finalize_response(response_text, artifact_paths);
                     conv.add_trace(trace_json);
                     let msg_count = conv.message_count();
                     // The assistant message was just pushed; its index is msg_count - 1
@@ -1943,7 +2004,7 @@ impl ChattyApp {
         let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 let partial_text = conv.streaming_message().cloned().unwrap_or_default();
-                conv.finalize_response(partial_text);
+                conv.finalize_response(partial_text, Vec::new());
                 conv.add_trace(trace_json);
                 conv.set_streaming_message(None);
                 let idx = conv.message_count().saturating_sub(1);
