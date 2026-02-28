@@ -1,15 +1,14 @@
 name: Dependency Update Check
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types:
-      - completed
+  # Run once a week (Monday 9:00 UTC) instead of after every release
+  schedule:
+    - cron: "0 9 * * 1"
   workflow_dispatch:
 
 jobs:
   check-dependencies:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

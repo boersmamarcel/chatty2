@@ -77,11 +77,11 @@ Fall back to triggering the workflow directly.
 
 ## What Happens Next
 
-The `prepare-release` workflow handles everything automatically:
+The `prepare-release` workflow handles everything in a single run:
 1. Bumps version in `Cargo.toml` + `Cargo.lock`
 2. Generates a categorized changelog from commits since last tag
 3. Commits, creates an annotated tag, and creates a GitHub Release
-4. The GitHub Release triggers the `release.yml` build pipeline
+4. Calls `release.yml` directly via `workflow_call` to build artifacts (no event-based handoff)
 
 The build pipeline produces:
 - **Linux x86_64**: `chatty-linux-x86_64.AppImage`
