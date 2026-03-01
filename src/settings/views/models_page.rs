@@ -81,6 +81,8 @@ impl ModelsListView {
         let preamble_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("System instructions for the model"));
         let max_tokens_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 4096"));
+        let max_context_window_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 200000"));
         let top_p_input = cx.new(|cx| InputState::new(window, cx).placeholder("0.0 - 1.0"));
         let cost_input_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 2.50"));
         let cost_output_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g., 10.00"));
@@ -229,6 +231,16 @@ impl ModelsListView {
                                                 v_flex()
                                                     .gap_1()
                                                     .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .child("Max Context Window (optional)"),
+                                                    )
+                                                    .child(Input::new(&max_context_window_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
                                                         div().text_sm().child("Top P (optional)"),
                                                     )
                                                     .child(Input::new(&top_p_input)),
@@ -280,6 +292,8 @@ impl ModelsListView {
                                                 let temperature_input = temperature_input.clone();
                                                 let preamble_input = preamble_input.clone();
                                                 let max_tokens_input = max_tokens_input.clone();
+                                                let max_context_window_input =
+                                                    max_context_window_input.clone();
                                                 let top_p_input = top_p_input.clone();
                                                 let cost_input_input = cost_input_input.clone();
                                                 let cost_output_input = cost_output_input.clone();
@@ -296,6 +310,8 @@ impl ModelsListView {
                                                     let preamble = preamble_input.read(cx).value();
                                                     let max_tokens_str =
                                                         max_tokens_input.read(cx).value();
+                                                    let max_context_window_str =
+                                                        max_context_window_input.read(cx).value();
                                                     let top_p_str = top_p_input.read(cx).value();
                                                     let provider_index =
                                                         provider_select.read(cx).selected_index(cx);
@@ -326,6 +342,17 @@ impl ModelsListView {
                                                             None
                                                         } else {
                                                             max_tokens_str
+                                                                .parse::<i32>()
+                                                                .ok()
+                                                                .filter(|&v| v > 0)
+                                                        };
+
+                                                    let max_context_window =
+                                                        if max_context_window_str.trim().is_empty()
+                                                        {
+                                                            None
+                                                        } else {
+                                                            max_context_window_str
                                                                 .parse::<i32>()
                                                                 .ok()
                                                                 .filter(|&v| v > 0)
@@ -404,6 +431,7 @@ impl ModelsListView {
                                                         temperature,
                                                         preamble: preamble.to_string(),
                                                         max_tokens,
+                                                        max_context_window,
                                                         top_p,
                                                         extra_params,
                                                         cost_per_million_input_tokens,
@@ -478,6 +506,13 @@ impl ModelsListView {
             let mut state = InputState::new(window, cx).placeholder("e.g., 4096");
             if let Some(max_tokens) = existing_model.max_tokens {
                 state.set_value(max_tokens.to_string(), window, cx);
+            }
+            state
+        });
+        let max_context_window_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("e.g., 200000");
+            if let Some(max_context_window) = existing_model.max_context_window {
+                state.set_value(max_context_window.to_string(), window, cx);
             }
             state
         });
@@ -621,6 +656,16 @@ impl ModelsListView {
                                                 v_flex()
                                                     .gap_1()
                                                     .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .child("Max Context Window (optional)"),
+                                                    )
+                                                    .child(Input::new(&max_context_window_input)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
                                                         div().text_sm().child("Top P (optional)"),
                                                     )
                                                     .child(Input::new(&top_p_input)),
@@ -672,6 +717,8 @@ impl ModelsListView {
                                                 let temperature_input = temperature_input.clone();
                                                 let preamble_input = preamble_input.clone();
                                                 let max_tokens_input = max_tokens_input.clone();
+                                                let max_context_window_input =
+                                                    max_context_window_input.clone();
                                                 let top_p_input = top_p_input.clone();
                                                 let cost_input_input = cost_input_input.clone();
                                                 let cost_output_input = cost_output_input.clone();
@@ -690,6 +737,8 @@ impl ModelsListView {
                                                     let preamble = preamble_input.read(cx).value();
                                                     let max_tokens_str =
                                                         max_tokens_input.read(cx).value();
+                                                    let max_context_window_str =
+                                                        max_context_window_input.read(cx).value();
                                                     let top_p_str = top_p_input.read(cx).value();
                                                     let provider_index =
                                                         provider_select.read(cx).selected_index(cx);
@@ -720,6 +769,17 @@ impl ModelsListView {
                                                             None
                                                         } else {
                                                             max_tokens_str
+                                                                .parse::<i32>()
+                                                                .ok()
+                                                                .filter(|&v| v > 0)
+                                                        };
+
+                                                    let max_context_window =
+                                                        if max_context_window_str.trim().is_empty()
+                                                        {
+                                                            None
+                                                        } else {
+                                                            max_context_window_str
                                                                 .parse::<i32>()
                                                                 .ok()
                                                                 .filter(|&v| v > 0)
@@ -798,6 +858,7 @@ impl ModelsListView {
                                                         temperature,
                                                         preamble: preamble.to_string(),
                                                         max_tokens,
+                                                        max_context_window,
                                                         top_p,
                                                         extra_params,
                                                         cost_per_million_input_tokens,
