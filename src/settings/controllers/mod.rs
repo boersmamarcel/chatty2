@@ -4,6 +4,7 @@ pub mod mcp_controller;
 pub mod models_controller;
 pub mod providers_controller;
 pub mod settings_controller;
+pub mod training_settings_controller;
 pub mod user_secrets_controller;
 
 pub use settings_controller::{GlobalSettingsWindow, SettingsView};

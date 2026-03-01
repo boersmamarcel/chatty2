@@ -198,6 +198,15 @@ impl StreamManager {
         self.pending_resolved_ids.remove("__pending__");
     }
 
+    /// Set the pending artifacts handle on a promoted stream.
+    /// Called after `promote_pending()` to wire up the conversation's artifact storage
+    /// so that `finalize_stream()` can drain artifacts queued by `AddAttachmentTool`.
+    pub fn set_pending_artifacts(&mut self, conv_id: &str, artifacts: PendingArtifacts) {
+        if let Some(state) = self.streams.get_mut(conv_id) {
+            state.pending_artifacts = Some(artifacts);
+        }
+    }
+
     /// Process a stream chunk: update internal state and emit the corresponding event.
     ///
     /// Note: Text chunks are emitted as events for UI updates but NOT accumulated

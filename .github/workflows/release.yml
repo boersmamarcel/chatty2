@@ -1,9 +1,15 @@
 name: Release
 
-# Triggered when a release is published via the GitHub UI.
-# GitHub UI creates both the release and the tag atomically,
-# so only one event is needed.
+# Two entry points:
+#   1. Called directly by Prepare Release via workflow_call (primary path)
+#   2. Triggered by a manually-published GitHub Release (fallback)
 on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Git tag to build from (e.g. v1.2.3)"
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -19,13 +25,27 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
     steps:
+      - name: Resolve tag name
+        id: resolve_tag
+        run: |
+          # workflow_call passes tag_name as input; release event has it on the event object
+          TAG="${{ inputs.tag_name || github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            echo "::error::No tag name provided"
+            exit 1
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Resolved tag: $TAG"
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve_tag.outputs.tag }}
 
       - name: Extract and validate version
         id: version
         run: |
-          TAG_NAME="${{ github.event.release.tag_name }}"
+          TAG_NAME="${{ steps.resolve_tag.outputs.tag }}"
 
           # Extract version from tag (remove 'v' prefix if present)
           TAG_VERSION="${TAG_NAME#v}"
@@ -53,9 +73,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.tag_name }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-release-${{ runner.os }}-
 
       - name: Install Linux dependencies
         run: |
@@ -97,9 +130,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.tag_name }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-release-${{ runner.os }}-
 
       - name: Build release binary
         run: cargo build --release
@@ -152,9 +198,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.tag_name }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-release-${{ runner.os }}-
 
       - name: Build release binary
         run: cargo build --release
@@ -173,7 +232,7 @@ jobs:
           name: windows-x86_64-setup
           path: scripts/chatty-windows-x86_64.exe
 
-  create-release:
+  upload-assets:
     needs: [validate-version, build-linux, build-macos-arm, build-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -209,32 +268,17 @@ jobs:
           echo "=== Final release assets ==="
           ls -lah release-assets/
 
-      - name: Debug release assets
-        run: |
-          echo "=== Downloaded artifacts structure ==="
-          find artifacts -type f
-          echo ""
-          echo "=== Release assets directory ==="
-          ls -lah release-assets/
-          echo ""
-          echo "=== File types ==="
-          file release-assets/*
-
       - name: Generate checksums
         run: |
           cd release-assets
-          # Generate SHA-256 checksums for all release assets
           sha256sum * > checksums.txt
-          cat checksums.txt
           echo "Generated checksums:"
           cat checksums.txt
 
       - name: Validate checksums coverage
         run: |
           cd release-assets
-          # Count actual files (excluding checksums.txt itself)
           ASSET_COUNT=$(ls -1 | grep -v checksums.txt | wc -l)
-          # Count checksums in checksums.txt
           CHECKSUM_COUNT=$(wc -l < checksums.txt)
 
           echo "Asset files: $ASSET_COUNT"
@@ -242,14 +286,11 @@ jobs:
 
           if [ "$ASSET_COUNT" -ne "$CHECKSUM_COUNT" ]; then
             echo "::error::Checksum mismatch! $ASSET_COUNT assets but $CHECKSUM_COUNT checksums"
-            echo "Assets:"
             ls -1 | grep -v checksums.txt
-            echo "Checksums:"
             cat checksums.txt
             exit 1
           fi
 
-          # Verify each asset has a checksum
           for file in *; do
             if [ "$file" != "checksums.txt" ]; then
               if ! grep -q "$file" checksums.txt; then

@@ -234,6 +234,22 @@ impl ChatView {
         }
     }
 
+    /// Set attachments on the last assistant DisplayMessage.
+    /// Called after finalization when tool calls generated files (e.g. plots)
+    /// that should be displayed inline in the assistant's response.
+    pub fn set_last_assistant_attachments(
+        &mut self,
+        attachments: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(last) = self.messages.last_mut() {
+            if matches!(last.role, MessageRole::Assistant) {
+                last.attachments = attachments;
+                cx.notify();
+            }
+        }
+    }
+
     /// Mark the current streaming message as cancelled by the user
     pub fn mark_message_cancelled(&mut self, cx: &mut Context<Self>) {
         if let Some(last) = self.messages.last_mut() {
@@ -358,8 +374,17 @@ impl ChatView {
         self.scroll_to_bottom();
     }
 
-    /// Helper method to update a tool call by ID in the live trace
-    /// This works even after active_tool_index has been cleared
+    /// Helper method to update a tool call by ID in the live trace.
+    /// This works even after active_tool_index has been cleared.
+    ///
+    /// Uses a two-pass reverse scan to handle non-unique tool call IDs
+    /// (e.g., multiple "shell_execute" calls that share the same ID when
+    /// rig-core doesn't provide a unique call_id):
+    ///
+    /// 1. First pass (reverse): find the LAST entry with matching ID that
+    ///    is still in Running state — targets the most recent pending call.
+    /// 2. Fallback pass (reverse): find the LAST entry with matching ID
+    ///    regardless of state — handles late-arriving updates.
     fn update_tool_call_by_id<F>(&mut self, tool_id: &str, updater: F) -> bool
     where
         F: FnOnce(&mut ToolCallBlock),
@@ -380,8 +405,21 @@ impl ChatView {
             }
         };
 
-        // Find the tool call by ID in the items
-        for item in trace.items.iter_mut() {
+        // Pass 1 (reverse): find the last entry with matching ID still in Running state.
+        // This correctly targets the most recent pending tool call when IDs are
+        // non-unique (e.g., multiple "shell_execute" calls).
+        for item in trace.items.iter_mut().rev() {
+            if let super::message_types::TraceItem::ToolCall(tc) = item {
+                if tc.id == tool_id && matches!(tc.state, ToolCallState::Running) {
+                    updater(tc);
+                    return true;
+                }
+            }
+        }
+
+        // Pass 2 (fallback, reverse): no Running entry found — update the last
+        // entry with matching ID regardless of state.
+        for item in trace.items.iter_mut().rev() {
             if let super::message_types::TraceItem::ToolCall(tc) = item {
                 if tc.id == tool_id {
                     updater(tc);
@@ -829,7 +867,8 @@ impl ChatView {
                                 })
                             });
 
-                    if !assistant_msg.text.is_empty() {
+                    let attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
+                    if !assistant_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::Assistant,
                             content: assistant_msg.text.clone(),
@@ -837,7 +876,7 @@ impl ChatView {
                             system_trace_view,
                             live_trace: None,
                             is_markdown: true,
-                            attachments: Vec::new(),
+                            attachments,
                             feedback,
                             history_index: Some(idx),
                         });
@@ -846,6 +885,7 @@ impl ChatView {
             }
         }
 
+        self.scroll_to_bottom();
         cx.notify();
     }
 

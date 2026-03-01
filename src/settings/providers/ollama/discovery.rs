@@ -54,11 +54,12 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
 
     for m in tags_response.models {
         let identifier = m.name.clone();
-        // Create a friendly display name (capitalize first letter, remove tags)
-        let display_name = identifier
-            .split(':')
-            .next()
-            .unwrap_or(&identifier)
+        // Create a friendly display name:
+        //   "qwen:3b"               → "Qwen 3b"
+        //   "llama3.2-vision:latest" → "Llama3.2 Vision"
+        //   "mistral:latest"         → "Mistral"
+        let (base, tag) = identifier.split_once(':').unwrap_or((&identifier, ""));
+        let base_name = base
             .split('-')
             .map(|s| {
                 let mut c = s.chars();
@@ -69,6 +70,11 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
             })
             .collect::<Vec<_>>()
             .join(" ");
+        let display_name = if tag.is_empty() || tag == "latest" {
+            base_name
+        } else {
+            format!("{} {}", base_name, tag)
+        };
 
         // Query /api/show to check for vision capability
         let supports_vision = check_model_vision(&client, base_url, &identifier).await;

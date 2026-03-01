@@ -98,8 +98,49 @@ sudo apt-get install -y \
 
 ## CI/CD
 
-- **CI**: Runs on pull requests to `main` - tests, formatting check, and clippy
-- **Release**: Runs on push to `main` - builds for Linux x86_64, macOS Intel, and macOS ARM, then creates GitHub releases
+### Workflows
+
+| Workflow | Trigger | Purpose |
+|:---------|:--------|:--------|
+| **CI** (`ci.yml`) | PR to `main` | Tests, formatting check, clippy lints. Cargo dependencies and build artifacts are cached. |
+| **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version in `Cargo.toml`, generates categorized changelog, commits, creates tag + GitHub Release, then calls Release workflow directly via `workflow_call`. |
+| **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
+| **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated | Automated AI code review via Claude. |
+| **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
+| **Update README** (`update-readme.yml`) | PR merged to `main` | Claude analyzes the diff; if user-facing features changed, opens a follow-up PR with README updates. Add `skip-readme` label to opt out. |
+| **Dependency Check** (`dependency-check.yml`) | Weekly (Monday 9:00 UTC) or manual | Checks crates.io for dependency updates, creates grouped tech-debt issues. |
+
+### Release Flow
+
+The recommended release flow from Claude Code:
+
+```
+/create-release patch   # Adds release:patch label to current PR
+```
+
+Then merge the PR. The full pipeline runs as a single workflow:
+
+```
+PR merge → Prepare Release ──────────────────────────────────────────►
+           (bump, changelog,    calls release.yml    (build 3 platforms,
+            tag, GH release) ── via workflow_call ──► checksums, upload)
+```
+
+Key design: Prepare Release calls Release directly via `workflow_call` — no event-based handoff, no PAT needed, build status appears inline.
+
+Alternative triggers:
+- **Manual**: Actions UI → Prepare Release → Run workflow (with bump type selector and dry run option)
+- **Manual release**: GitHub UI → Create Release → Release workflow runs standalone
+- **On `main`**: `/create-release patch` triggers `workflow_dispatch` directly
+
+### Changelog Generation
+
+The Prepare Release workflow auto-generates release notes by parsing commits since the last tag:
+- **Features & Improvements**: commits starting with Add, Feat, New, Implement, Wire
+- **Bug Fixes**: commits starting with Fix, Bug, Resolve, Correct
+- **Other Changes**: everything else (version bumps and merge commits are excluded)
+
+The changelog becomes the GitHub Release body automatically.
 
 ## Idiomatic Patterns
 

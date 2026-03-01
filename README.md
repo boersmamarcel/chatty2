@@ -1,9 +1,9 @@
 <p align="center">
   <img src="assets/app_icon/ai-2.png" alt="Chatty" width="128" height="128">
 </p>
-
+  
 <h1 align="center">Chatty</h1>
-
+ 
 <p align="center">
   <strong>A fast, native desktop chat client for LLMs — built with Rust and GPU-accelerated rendering.</strong>
 </p>
@@ -90,7 +90,7 @@ See [Tools & MCP](#tools--mcp) below for details.
 
 **Real tool use, properly sandboxed.** Give your LLM filesystem access, a bash shell, and MCP servers — all within a workspace sandbox. On Linux, shell commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with namespace isolation. On macOS, they use `sandbox-exec` with policy profiles that block access to `.ssh`, `.aws`, and other sensitive directories. You choose the approval mode: ask every time, auto-approve, or deny all.
 
-**Multi-turn agents.** Your LLM can chain up to 10 tool calls per response — read files, run commands, analyze results, and iterate. It can even fetch web pages and attach images or PDFs it finds for its own analysis.
+**Multi-turn agents.** Your LLM can chain up to 10 tool calls per response — read files, run commands, analyze results, and iterate. It can generate plots, charts, and documents and display them inline in the chat. With multimodal models, you can ask follow-up questions that reference those generated files directly.
 
 **Privacy first.** Run fully local with Ollama — no data leaves your machine. No telemetry, no tracking. Conversations are stored as local JSON files, never uploaded anywhere.
 
@@ -127,6 +127,40 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
 - **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
 
+### Training Data Export (ATIF)
+
+Chatty can export conversations in [ATIF (Agent Trajectory Interchange Format)](https://harborframework.com/docs/agents/trajectory-format), a structured JSON format designed for agent training data pipelines. Each export captures:
+
+- **Messages** — user and agent steps with full content
+- **Tool calls** — function name, arguments, and output for every tool invocation
+- **Reasoning** — chain-of-thought thinking blocks from extended thinking
+- **Timestamps** — per-message Unix timestamps
+- **Token metrics** — per-step and aggregate input/output token counts with cost
+- **Feedback** — thumbs up/down signals per assistant message
+- **Regeneration pairs** — original (rejected) vs. replacement (chosen) responses for DPO fine-tuning
+
+ATIF trajectories feed into external training pipelines, Harbor Framework workflows, and the planned in-app fine-tuning system.
+
+### Training Data Export (JSONL)
+
+Chatty can also export conversations in JSONL format for direct use with fine-tuning APIs:
+
+- **SFT (Supervised Fine-Tuning)** — conversations in ChatML format (`{"messages": [{"role": "...", "content": "..."}]}`) compatible with OpenAI, Anthropic, Together AI, and other fine-tuning services
+- **DPO (Direct Preference Optimization)** — preference pairs from regenerated responses (`{"prompt": [...], "chosen": "...", "rejected": "..."}`) for RLHF training
+
+Key features:
+- **Automatic deduplication** — re-exported conversations replace previous entries (keyed by `_conversation_id`)
+- **Multimodal stripping** — images and PDFs are stripped, keeping only text content (most fine-tuning APIs don't support multimodal inputs)
+- **Tool call support** — optionally include tool calls and results in ChatML format
+
+SFT data is appended to `sft.jsonl` and DPO pairs to `dpo.jsonl` in the exports directory:
+
+- **macOS**: `~/Library/Application Support/chatty/exports/`
+- **Linux**: `~/.config/chatty/exports/` (or `$XDG_CONFIG_HOME/chatty/exports/`)
+- **Windows**: `%APPDATA%\chatty\exports\`
+
+Enable auto-export in **Settings > Training Data**.
+
 ### Thinking & Traces
 
 - **Extended thinking** blocks for Claude's chain-of-thought reasoning
@@ -161,6 +195,7 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `delete_file` | Delete files or directories | Yes |
 | `move_file` | Move or rename files | Yes |
 | `bash` | Execute shell commands (sandboxed, streaming output) | Yes |
+| `add_attachment` | Display a generated image or PDF inline in the chat | No |
 | `list_tools` | Lists all available tools and schemas | No |
 
 ### MCP Servers
@@ -285,6 +320,22 @@ cargo clippy -- -D warnings  # Lint
 ./scripts/package-windows.ps1     # Windows (.exe installer, run in PowerShell)
 ```
 
+### CI/CD & Releasing
+
+PRs to `main` run CI automatically (tests, formatting, clippy, AI code review). Cargo dependencies are cached across runs.
+
+**To release a new version**, add a label to your PR before merging:
+
+| Label | Effect |
+|:------|:-------|
+| `release:patch` | Bump `0.1.52` → `0.1.53` |
+| `release:minor` | Bump `0.1.52` → `0.2.0` |
+| `release:major` | Bump `0.1.52` → `1.0.0` |
+
+Merging the PR triggers the full pipeline: version bump → changelog generation → git tag → GitHub Release → cross-platform builds (Linux AppImage, macOS DMG, Windows EXE).
+
+You can also trigger a release manually from **Actions → Prepare Release → Run workflow**.
+
 ### Architecture
 
 - **Event-driven** reactive UI with GPUI's global state system
@@ -301,3 +352,4 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation and coding pa
 ## License
 
 MIT
+<!-- release-flow-test -->

@@ -1,14 +1,14 @@
 [package]
 name = "chatty"
-version = "0.1.50"
+version = "0.1.57"
 edition = "2024"
 
 [dependencies]
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
-rig-core = "0.31.0"
-rmcp = { version = "0.13", features = ["client", "macros", "transport-child-process"] }
+rig-core = { git = "https://github.com/0xPlaygrounds/rig", branch = "main" }
+rmcp = { version = "0.16", features = ["client", "macros", "transport-child-process"] }
 nix = { version = "0.29", features = ["signal"] }
 
 # Persistence layer dependencies
@@ -35,6 +35,9 @@ tempfile = "3.10"
 flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.10"
+
+# Date/time formatting (ISO 8601 timestamps for ATIF)
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # Logging and error handling
 tracing = "0.1"

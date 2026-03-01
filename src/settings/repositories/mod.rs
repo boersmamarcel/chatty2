@@ -8,6 +8,8 @@ pub mod mcp_repository;
 pub mod models_json_repository;
 pub mod models_repository;
 pub mod provider_repository;
+pub mod training_settings_json_repository;
+pub mod training_settings_repository;
 pub mod user_secrets_json_repository;
 pub mod user_secrets_repository;
 
@@ -21,5 +23,7 @@ pub use mcp_repository::McpRepository;
 pub use models_json_repository::JsonModelsRepository;
 pub use models_repository::ModelsRepository;
 pub use provider_repository::ProviderRepository;
+pub use training_settings_json_repository::TrainingSettingsJsonRepository;
+pub use training_settings_repository::TrainingSettingsRepository;
 pub use user_secrets_json_repository::UserSecretsJsonRepository;
 pub use user_secrets_repository::UserSecretsRepository;

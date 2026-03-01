@@ -33,22 +33,13 @@ pub struct AddAttachmentOutput {
 pub struct AddAttachmentTool {
     service: Arc<FileSystemService>,
     pending_artifacts: PendingArtifacts,
-    supports_images: bool,
-    supports_pdf: bool,
 }
 
 impl AddAttachmentTool {
-    pub fn new(
-        service: Arc<FileSystemService>,
-        pending_artifacts: PendingArtifacts,
-        supports_images: bool,
-        supports_pdf: bool,
-    ) -> Self {
+    pub fn new(service: Arc<FileSystemService>, pending_artifacts: PendingArtifacts) -> Self {
         Self {
             service,
             pending_artifacts,
-            supports_images,
-            supports_pdf,
         }
     }
 }
@@ -62,18 +53,20 @@ impl Tool for AddAttachmentTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "add_attachment".to_string(),
-            description: "Attach an image or PDF file for multimodal analysis. \
-                         The file will be sent as visual/document content that you can inspect \
-                         and analyze in your next response. Use this when you need to visually \
-                         examine an image or read a PDF document.\n\
+            description: "Display an image or PDF file inline in the chat response. \
+                         Use this to show generated plots, charts, screenshots, or documents \
+                         to the user. The file will appear visually in your response message.\n\
                          \n\
                          Supported formats: PNG, JPG, JPEG, GIF, WebP, SVG, BMP (images), PDF (documents).\n\
                          Maximum file size: 5MB.\n\
                          \n\
+                         Note: the file is always displayed to the user, but on text-only models \
+                         you cannot analyze the file contents — describe what you generated instead.\n\
+                         \n\
                          Examples:\n\
-                         - Attach an image: {\"path\": \"screenshots/page.png\"}\n\
-                         - Attach a PDF: {\"path\": \"reports/analysis.pdf\"}\n\
-                         - Attach downloaded file: {\"path\": \"downloads/chart.jpg\"}"
+                         - Show a generated plot: {\"path\": \"output/chart.png\"}\n\
+                         - Display a screenshot: {\"path\": \"screenshots/page.png\"}\n\
+                         - Show a PDF document: {\"path\": \"reports/analysis.pdf\"}"
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -113,21 +106,7 @@ impl Tool for AddAttachmentTool {
             "image".to_string()
         };
 
-        // Reject unsupported types based on model capabilities
-        if is_pdf && !self.supports_pdf {
-            return Err(AddAttachmentError::OperationError(anyhow::anyhow!(
-                "The current model does not support PDF attachments. \
-                 Use read_file to read the PDF as text instead."
-            )));
-        }
-        if !is_pdf && !self.supports_images {
-            return Err(AddAttachmentError::OperationError(anyhow::anyhow!(
-                "The current model does not support image attachments. \
-                 This model is text-only and cannot analyze images."
-            )));
-        }
-
-        // Queue the path for multimodal sending after the stream completes
+        // Queue the path for inline display after the stream completes
         if let Ok(mut artifacts) = self.pending_artifacts.lock() {
             artifacts.push(canonical.clone());
         }
@@ -136,8 +115,7 @@ impl Tool for AddAttachmentTool {
             path: canonical.display().to_string(),
             file_type: file_type.clone(),
             message: format!(
-                "File '{}' ({}) has been queued as an attachment. \
-                 It will be sent as multimodal content for your analysis.",
+                "File '{}' ({}) will be displayed inline in your response.",
                 args.path, file_type
             ),
         })
@@ -152,10 +130,7 @@ mod tests {
     use std::path::Path;
 
     /// Create a tool backed by a real temp workspace
-    async fn create_test_tool(
-        supports_images: bool,
-        supports_pdf: bool,
-    ) -> (AddAttachmentTool, PendingArtifacts, PathBuf) {
+    async fn create_test_tool() -> (AddAttachmentTool, PendingArtifacts, PathBuf) {
         let workspace = std::env::temp_dir().join("chatty_add_attachment_tests");
         let _ = fs::create_dir_all(&workspace);
         let service = Arc::new(
@@ -164,7 +139,7 @@ mod tests {
                 .unwrap(),
         );
         let pending: PendingArtifacts = Arc::new(Mutex::new(Vec::new()));
-        let tool = AddAttachmentTool::new(service, pending.clone(), supports_images, supports_pdf);
+        let tool = AddAttachmentTool::new(service, pending.clone());
         (tool, pending, workspace)
     }
 
@@ -178,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_queues_valid_image() {
-        let (tool, pending, workspace) = create_test_tool(true, false).await;
+        let (tool, pending, workspace) = create_test_tool().await;
         create_test_file(&workspace, "photo.png", 1024);
 
         let result = tool
@@ -197,7 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_queues_valid_pdf() {
-        let (tool, pending, workspace) = create_test_tool(true, true).await;
+        let (tool, pending, workspace) = create_test_tool().await;
         create_test_file(&workspace, "report.pdf", 2048);
 
         let result = tool
@@ -216,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_accumulates_multiple_attachments() {
-        let (tool, pending, workspace) = create_test_tool(true, true).await;
+        let (tool, pending, workspace) = create_test_tool().await;
         create_test_file(&workspace, "a.png", 512);
         create_test_file(&workspace, "b.jpg", 512);
         create_test_file(&workspace, "c.pdf", 512);
@@ -248,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_rejects_nonexistent_file() {
-        let (tool, pending, _workspace) = create_test_tool(true, true).await;
+        let (tool, pending, _workspace) = create_test_tool().await;
 
         let result = tool
             .call(AddAttachmentArgs {
@@ -262,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_rejects_unsupported_extension() {
-        let (tool, pending, workspace) = create_test_tool(true, true).await;
+        let (tool, pending, workspace) = create_test_tool().await;
         create_test_file(&workspace, "notes.txt", 512);
 
         let result = tool
@@ -277,56 +252,17 @@ mod tests {
         let _ = fs::remove_file(workspace.join("notes.txt"));
     }
 
-    // ── capability-rejection tests ──
-
-    #[tokio::test]
-    async fn test_call_rejects_image_when_not_supported() {
-        let (tool, pending, workspace) = create_test_tool(false, true).await;
-        create_test_file(&workspace, "photo.png", 1024);
-
-        let result = tool
-            .call(AddAttachmentArgs {
-                path: "photo.png".into(),
-            })
-            .await;
-
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("does not support image"));
-        assert!(pending.lock().unwrap().is_empty());
-
-        let _ = fs::remove_file(workspace.join("photo.png"));
-    }
-
-    #[tokio::test]
-    async fn test_call_rejects_pdf_when_not_supported() {
-        let (tool, pending, workspace) = create_test_tool(true, false).await;
-        create_test_file(&workspace, "doc.pdf", 1024);
-
-        let result = tool
-            .call(AddAttachmentArgs {
-                path: "doc.pdf".into(),
-            })
-            .await;
-
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("does not support PDF"));
-        assert!(pending.lock().unwrap().is_empty());
-
-        let _ = fs::remove_file(workspace.join("doc.pdf"));
-    }
-
     // ── tool definition test ──
 
     #[tokio::test]
     async fn test_definition_metadata() {
-        let (tool, _, _workspace) = create_test_tool(true, true).await;
+        let (tool, _, _workspace) = create_test_tool().await;
         let def = tool.definition("test".into()).await;
 
         assert_eq!(def.name, "add_attachment");
-        assert!(def.description.contains("multimodal"));
+        assert!(def.description.contains("inline"));
         assert!(def.description.contains("5MB"));
+        assert!(def.description.contains("text-only models"));
         assert_eq!(def.parameters["required"][0], "path");
     }
 

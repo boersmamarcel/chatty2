@@ -416,19 +416,14 @@ impl AgentClient {
                         {
                             tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
 
-                            // Create add_attachment tool alongside read tools
-                            // Only register if the model supports at least one multimodal type
+                            // Create add_attachment tool alongside read tools.
+                            // Available for all models — the tool displays files inline
+                            // in the chat and does not require multimodal model support.
                             if let Some(ref artifacts) = pending_artifacts {
-                                let supports_images = model_config.supports_images;
-                                let supports_pdf = model_config.supports_pdf;
-                                if supports_images || supports_pdf {
-                                    add_attachment_tool = Some(AddAttachmentTool::new(
-                                        service.clone(),
-                                        artifacts.clone(),
-                                        supports_images,
-                                        supports_pdf,
-                                    ));
-                                }
+                                add_attachment_tool = Some(AddAttachmentTool::new(
+                                    service.clone(),
+                                    artifacts.clone(),
+                                ));
                             }
 
                             // Create code search tools alongside filesystem read tools
@@ -674,6 +669,7 @@ impl AgentClient {
             shell_tools.is_some(),
             git_tools.is_some(),
             search_tools.is_some(),
+            add_attachment_tool.is_some(),
             mcp_tool_info,
         );
 
