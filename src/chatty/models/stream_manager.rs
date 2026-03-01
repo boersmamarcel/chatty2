@@ -152,7 +152,7 @@ impl StreamManager {
                 task: Some(task),
                 cancel_flag,
                 pending_artifacts,
-                pending_text: String::new(),
+                pending_text: String::with_capacity(4096),
                 last_flush: Instant::now(),
             },
         );
@@ -187,7 +187,7 @@ impl StreamManager {
                 task: Some(task),
                 cancel_flag,
                 pending_artifacts,
-                pending_text: String::new(),
+                pending_text: String::with_capacity(4096),
                 last_flush: Instant::now(),
             },
         );
