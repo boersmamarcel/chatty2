@@ -76,7 +76,8 @@ fn render_header(cx: &App) -> impl IntoElement {
         .bg(cx.theme().muted)
         .child(
             div()
-                .w(px(160.))
+                .w(px(140.))
+                .flex_shrink_0()
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
@@ -85,6 +86,7 @@ fn render_header(cx: &App) -> impl IntoElement {
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
@@ -93,6 +95,7 @@ fn render_header(cx: &App) -> impl IntoElement {
         .child(
             div()
                 .w(px(120.))
+                .flex_shrink_0()
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
@@ -128,29 +131,34 @@ fn render_server_row(
         .items_center()
         .border_b_1()
         .border_color(cx.theme().border)
-        // Name column
+        // Name column — fixed width, no wrap
         .child(
             div()
-                .w(px(160.))
+                .w(px(140.))
+                .flex_shrink_0()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().foreground)
                 .overflow_hidden()
+                .whitespace_nowrap()
                 .child(name),
         )
-        // Command column
+        // Command column — flexible, truncates on overflow
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .overflow_hidden()
+                .whitespace_nowrap()
                 .child(command_display),
         )
-        // Actions column
+        // Actions column — fixed width, no shrink
         .child(
             h_flex()
                 .w(px(120.))
+                .flex_shrink_0()
                 .gap_1()
                 .justify_end()
                 .child(
