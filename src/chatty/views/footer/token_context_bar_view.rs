@@ -18,6 +18,12 @@ impl RenderOnce for TokenContextBarView {
         let store = cx.global::<ConversationsStore>();
         let data = store.active_id().and_then(|active_id| {
             let conv = store.get_conversation(active_id)?;
+            // Use the most recent turn's input_tokens as the context-window fill estimate.
+            // For Anthropic and OpenAI, input_tokens per turn is cumulative — it includes
+            // the full prompt + all prior turns — so the last entry accurately reflects
+            // how much of the context window the current conversation occupies.
+            // Providers that report per-message *delta* tokens instead of cumulative totals
+            // will underreport here; no such provider is currently supported.
             let current_tokens = conv
                 .token_usage()
                 .message_usages
