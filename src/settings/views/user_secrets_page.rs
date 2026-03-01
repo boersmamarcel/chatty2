@@ -100,6 +100,18 @@ impl SecretsTableView {
                                                         return;
                                                     }
 
+                                                    if !key
+                                                        .chars()
+                                                        .all(|c| c.is_alphanumeric() || c == '_')
+                                                    {
+                                                        window.push_notification(
+                                                            "Variable name must contain only \
+                                                             letters, digits, and underscores",
+                                                            cx,
+                                                        );
+                                                        return;
+                                                    }
+
                                                     user_secrets_controller::add_secret(
                                                         key, value, cx,
                                                     );
