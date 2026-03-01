@@ -544,7 +544,7 @@ impl ChatView {
                 cx.notify();
             }
             TraceEvent::ToolCallOutputReceived { tool_id, .. } => {
-                warn!("Tool call {} received output", tool_id);
+                debug!("Tool call {} received output", tool_id);
                 cx.notify();
             }
             _ => {}
