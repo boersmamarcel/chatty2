@@ -1,7 +1,7 @@
 use crate::settings::controllers::providers_controller;
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderModel, ProviderType};
 use gpui::{
-    App, AppContext as _, Entity, SharedString, Styled, Window, prelude::FluentBuilder as _,
+    App, AppContext as _, Axis, Entity, SharedString, Styled, Window, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     AxisExt as _, Sizable,
@@ -79,7 +79,8 @@ fn create_ollama_group() -> SettingGroup {
                     },
                 ),
             )
-            .description("Ollama server URL (default: http://localhost:11434)"),
+            .description("Ollama server URL (default: http://localhost:11434)")
+            .layout(Axis::Vertical),
         ])
 }
 
@@ -127,7 +128,8 @@ fn create_azure_openai_group() -> SettingGroup {
                     },
                 ),
             )
-            .description("Azure API key (not needed if using Entra ID)"),
+            .description("Azure API key (not needed if using Entra ID)")
+            .layout(Axis::Vertical),
             SettingItem::new(
                 "Endpoint URL",
                 SettingField::input(
@@ -138,7 +140,8 @@ fn create_azure_openai_group() -> SettingGroup {
                     },
                 ),
             )
-            .description("Azure resource URL (e.g., https://my-resource.openai.azure.com)"),
+            .description("Azure resource URL (e.g., https://my-resource.openai.azure.com)")
+            .layout(Axis::Vertical),
         ])
 }
 
@@ -258,6 +261,7 @@ fn create_provider_group(
                     },
                 ),
             )
-            .description(api_key_description),
+            .description(api_key_description)
+            .layout(Axis::Vertical),
         ])
 }
