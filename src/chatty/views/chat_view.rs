@@ -858,11 +858,9 @@ impl ChatView {
                                 match serde_json::from_value::<super::message_types::SystemTrace>(
                                     trace_json.clone(),
                                 ) {
-                                    Ok(trace) if trace.has_items() => {
-                                        Some(cx.new(|_cx| {
-                                            super::trace_components::SystemTraceView::new(trace)
-                                        }))
-                                    }
+                                    Ok(trace) if trace.has_items() => Some(cx.new(|_cx| {
+                                        super::trace_components::SystemTraceView::new(trace)
+                                    })),
                                     Ok(_) => None, // trace exists but has no items
                                     Err(e) => {
                                         tracing::warn!(
