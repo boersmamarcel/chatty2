@@ -1904,18 +1904,17 @@ impl ChattyApp {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id_for_title) {
                                     conv.set_title(new_title.clone());
                                 }
+                                // Compute cost separately to avoid simultaneous borrow
+                                let cost = store
+                                    .get_conversation(&conv_id_for_title)
+                                    .map(|c| c.token_usage().total_estimated_cost_usd)
+                                    .unwrap_or(0.0);
+                                let now_ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64;
                                 // Also update metadata so sidebar reflects the new title
-                                store.upsert_metadata(
-                                    &conv_id_for_title,
-                                    &new_title,
-                                    store.get_conversation(&conv_id_for_title)
-                                        .map(|c| c.token_usage().total_estimated_cost_usd)
-                                        .unwrap_or(0.0),
-                                    std::time::SystemTime::now()
-                                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs() as i64,
-                                );
+                                store.upsert_metadata(&conv_id_for_title, &new_title, cost, now_ts);
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
                             .ok();
@@ -2195,9 +2194,7 @@ impl ChattyApp {
             let total_cost = extract_total_cost_from_token_usage(&conv_data.token_usage);
             cx.update_global::<ConversationsStore, _>(|store, _| {
                 store.upsert_metadata(&conv_data.id, &conv_data.title, total_cost, conv_data.updated_at);
-            })
-            .map_err(|e| warn!(error = ?e, "Failed to update metadata after persist"))
-            .ok();
+            });
 
             let conv_id_for_save = conv_id.clone();
             cx.spawn(async move |_, _cx| {
