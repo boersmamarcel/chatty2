@@ -49,20 +49,28 @@ pub struct ShellSession {
     timeout_seconds: u32,
     max_output_bytes: usize,
     created_at: SystemTime,
+    /// Environment variables injected on shell startup (user secrets).
+    /// Re-injected on every respawn so secrets survive shell restarts.
+    startup_env_vars: Vec<(String, String)>,
+    /// Key names of user secrets, for masking in status output.
+    secret_key_names: Vec<String>,
 }
 
 impl ShellSession {
-    /// Create a new shell session with the given configuration.
+    /// Create a new shell session with user secrets that will be injected
+    /// as environment variables on every shell (re)start.
     ///
     /// The bash process is not spawned until the first command is executed.
     /// When spawned, it will run inside a sandbox if available (bubblewrap on Linux,
-    /// sandbox-exec on macOS).
-    pub fn new(
+    /// sandbox-exec on macOS). Pass an empty `secrets` vec for no env injection.
+    pub fn with_secrets(
         workspace_dir: Option<String>,
         timeout_seconds: u32,
         max_output_bytes: usize,
         network_isolation: bool,
+        secrets: Vec<(String, String)>,
     ) -> Self {
+        let secret_key_names = secrets.iter().map(|(k, _)| k.clone()).collect();
         Self {
             process: Mutex::new(None),
             workspace_dir,
@@ -70,7 +78,14 @@ impl ShellSession {
             timeout_seconds,
             max_output_bytes,
             created_at: SystemTime::now(),
+            startup_env_vars: secrets,
+            secret_key_names,
         }
+    }
+
+    /// Return the key names of user secrets (for masking in tool output).
+    pub fn secret_key_names(&self) -> &[String] {
+        &self.secret_key_names
     }
 
     /// Check if sandboxing is available on this platform
@@ -114,10 +129,12 @@ impl ShellSession {
     ///
     /// Attempts to spawn inside a sandbox (bubblewrap on Linux, sandbox-exec on macOS).
     /// Falls back to unsandboxed execution if sandboxing is unavailable.
+    /// After spawning, injects any `startup_env_vars` (user secrets) via export commands.
     async fn ensure_started(
         process: &mut Option<ShellProcess>,
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        startup_env_vars: &[(String, String)],
     ) -> Result<()> {
         if process.is_some() {
             // Check if process is still alive
@@ -157,7 +174,7 @@ impl ShellSession {
             (child, false)
         };
 
-        let stdin = child
+        let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Failed to capture shell stdin"))?;
@@ -168,6 +185,26 @@ impl ShellSession {
 
         let pid = child.id();
         info!(pid = ?pid, sandboxed = is_sandboxed, "Shell session started");
+
+        // Inject user secrets as environment variables before any user commands.
+        // Written directly to stdin to avoid going through execute() which would
+        // re-enter the mutex.
+        if !startup_env_vars.is_empty() {
+            let secret_keys: Vec<&str> = startup_env_vars.iter().map(|(k, _)| k.as_str()).collect();
+            info!(keys = ?secret_keys, "Injecting user secrets into shell session");
+
+            for (key, value) in startup_env_vars {
+                // Validate key (same rules as set_env)
+                if key.chars().all(|c| c.is_alphanumeric() || c == '_') && !key.is_empty() {
+                    let escaped_value = value.replace('\'', "'\\''");
+                    let cmd = format!("export {}='{}'\n", key, escaped_value);
+                    stdin.write_all(cmd.as_bytes()).await?;
+                } else {
+                    warn!(key = %key, "Skipping invalid secret key name");
+                }
+            }
+            stdin.flush().await?;
+        }
 
         *process = Some(ShellProcess {
             child,
@@ -421,7 +458,13 @@ impl ShellSession {
     /// Returns the combined output and exit code.
     pub async fn execute(&self, command: &str) -> Result<ShellOutput> {
         let mut process = self.process.lock().await;
-        Self::ensure_started(&mut process, &self.workspace_dir, self.network_isolation).await?;
+        Self::ensure_started(
+            &mut process,
+            &self.workspace_dir,
+            self.network_isolation,
+            &self.startup_env_vars,
+        )
+        .await?;
 
         let proc = process.as_mut().unwrap();
         let marker = uuid::Uuid::new_v4().to_string().replace('-', "");
@@ -666,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_command_execution() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
         let result = session.execute("echo 'hello world'").await;
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -676,7 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_environment_persistence() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Set an env var
         let result = session.set_env("MY_TEST_VAR", "test_value_123").await;
@@ -691,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_working_directory_persistence() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Change to /tmp
         let result = session.cd("/tmp").await;
@@ -706,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_code_capture() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         let _result = session.execute("exit 42").await;
         // After `exit 42`, the shell process dies, but it should respawn
@@ -719,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_captured() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         let result = session.execute("echo 'error message' >&2").await;
         assert!(result.is_ok());
@@ -730,7 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_sequence() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Create a file, write to it, read it back
         session.execute("export MYVAR=hello").await.unwrap();
@@ -744,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_enforcement() {
-        let session = ShellSession::new(None, 1, 51200, false); // 1 second timeout
+        let session = ShellSession::with_secrets(None, 1, 51200, false, vec![]); // 1 second timeout
 
         let result = session.execute("sleep 10").await;
         assert!(result.is_err());
@@ -753,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_truncation() {
-        let session = ShellSession::new(None, 30, 100, false); // 100 byte limit
+        let session = ShellSession::with_secrets(None, 30, 100, false, vec![]); // 100 byte limit
 
         let result = session.execute("seq 1 1000").await;
         assert!(result.is_ok());
@@ -768,11 +811,12 @@ mod tests {
         let workspace = temp_dir.join(format!("chatty_shell_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let session = ShellSession::new(
+        let session = ShellSession::with_secrets(
             Some(workspace.to_str().unwrap().to_string()),
             30,
             51200,
             false,
+            vec![],
         );
 
         // Should be able to cd within workspace (start is in workspace)
@@ -786,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_env_var_name() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
         let result = session.set_env("INVALID-NAME", "value").await;
         assert!(result.is_err());
         assert!(
@@ -799,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_status() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Before any command, session is not started
         let status = session.status().await.unwrap();
@@ -817,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_respawn_after_death() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Start a session
         session.execute("echo 'first'").await.unwrap();
@@ -833,7 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
         session.execute("echo 'test'").await.unwrap();
         assert!(session.is_running().await);
 
@@ -843,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_special_characters_in_env_value() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Test value with special characters
         let result = session
@@ -857,7 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiline_output() {
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         let result = session
             .execute("echo 'line1'; echo 'line2'; echo 'line3'")
@@ -887,7 +931,7 @@ mod tests {
             return;
         }
 
-        let session = ShellSession::new(None, 30, 51200, false);
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
         // Set env var and verify it persists
         session
@@ -915,11 +959,12 @@ mod tests {
         let workspace = temp_dir.join(format!("chatty_sandbox_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let session = ShellSession::new(
+        let session = ShellSession::with_secrets(
             Some(workspace.to_str().unwrap().to_string()),
             30,
             51200,
             false,
+            vec![],
         );
 
         // Should be able to execute commands in workspace
@@ -946,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn test_network_isolation_flag() {
         // Just verify the session can be created with network_isolation=true
-        let session = ShellSession::new(None, 30, 51200, true);
+        let session = ShellSession::with_secrets(None, 30, 51200, true, vec![]);
         let result = session.execute("echo 'network test'").await;
         assert!(result.is_ok());
         assert!(result.unwrap().stdout.contains("network test"));
