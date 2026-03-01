@@ -135,35 +135,33 @@ impl Render for SettingsView {
                         SettingGroup::new()
                             .title("Models List")
                             .description("All configured AI models")
-                            .items(vec![SettingItem::new(
-                                "",
-                                SettingField::render(|_options, window, cx| {
-                                    // Get or create the global singleton view
-                                    let view = if let Some(existing_view) = cx.try_global::<GlobalModelsListView>() {
+                            .items(vec![SettingItem::render(|_options, window, cx| {
+                                // Get or create the global singleton view
+                                let view =
+                                    if let Some(existing_view) =
+                                        cx.try_global::<GlobalModelsListView>()
+                                    {
                                         if let Some(view) = existing_view.view.clone() {
                                             view
                                         } else {
-                                            let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                            let new_view =
+                                                cx.new(|cx| ModelsListView::new(window, cx));
                                             cx.set_global(GlobalModelsListView {
                                                 view: Some(new_view.clone()),
                                             });
                                             new_view
                                         }
                                     } else {
-                                        let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                        let new_view =
+                                            cx.new(|cx| ModelsListView::new(window, cx));
                                         cx.set_global(GlobalModelsListView {
                                             view: Some(new_view.clone()),
                                         });
                                         new_view
                                     };
 
-                                    div()
-                                        .size_full()
-                                        .min_h(px(400.))
-                                        .child(view)
-                                        .into_any_element()
-                                }),
-                            )]),
+                                div().w_full().min_h(px(400.)).child(view)
+                            })]),
                     ]),
                 providers_page(),
                 mcp_tools_page(),
