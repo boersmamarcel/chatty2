@@ -18,7 +18,7 @@ use settings::repositories::{
     ExecutionSettingsJsonRepository, ExecutionSettingsRepository, GeneralSettingsJsonRepository,
     GeneralSettingsRepository, JsonFileRepository, JsonMcpRepository, JsonModelsRepository,
     McpRepository, ModelsRepository, ProviderRepository, TrainingSettingsJsonRepository,
-    TrainingSettingsRepository,
+    TrainingSettingsRepository, UserSecretsJsonRepository, UserSecretsRepository,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -87,6 +87,12 @@ lazy_static::lazy_static! {
     static ref TRAINING_SETTINGS_REPOSITORY: Arc<dyn TrainingSettingsRepository> = {
         let repo = TrainingSettingsJsonRepository::new()
             .expect("Failed to initialize training settings repository");
+        Arc::new(repo)
+    };
+
+    static ref USER_SECRETS_REPOSITORY: Arc<dyn UserSecretsRepository> = {
+        let repo = UserSecretsJsonRepository::new()
+            .expect("Failed to initialize user secrets repository");
         Arc::new(repo)
     };
 
@@ -456,6 +462,9 @@ fn main() {
         // Initialize training settings with default - will be populated async
         cx.set_global(settings::models::TrainingSettingsModel::default());
 
+        // Initialize user secrets with empty state - will be populated async
+        cx.set_global(settings::models::UserSecretsModel::default());
+
         // Initialize execution approval store for tracking pending approvals
         cx.set_global(chatty::models::ExecutionApprovalStore::new());
 
@@ -484,12 +493,12 @@ fn main() {
                     });
 
                     if let Some(weak_notifier) = cx
-                        .try_global::<settings::models::GlobalMcpNotifier>()
+                        .try_global::<settings::models::GlobalAgentConfigNotifier>()
                         .and_then(|g| g.entity.clone())
                         && let Some(notifier) = weak_notifier.upgrade()
                     {
                         notifier.update(cx, |_notifier, cx| {
-                            cx.emit(settings::models::McpNotifierEvent::ServersUpdated);
+                            cx.emit(settings::models::AgentConfigEvent::RebuildRequired);
                         });
                     }
                 })
@@ -868,6 +877,26 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load training settings, using defaults");
+                }
+            }
+        })
+        .detach();
+
+        // Load user secrets asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = USER_SECRETS_REPOSITORY.clone();
+            match repo.load().await {
+                Ok(secrets) => {
+                    let count = secrets.secrets.len();
+                    cx.update(|cx| {
+                        info!(count, "User secrets loaded from disk");
+                        cx.set_global(secrets);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global user secrets"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load user secrets, using defaults");
                 }
             }
         })

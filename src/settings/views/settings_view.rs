@@ -6,6 +6,7 @@ use crate::settings::views::mcp_tools_page::mcp_tools_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
 use crate::settings::views::training_settings_page::training_settings_page;
+use crate::settings::views::user_secrets_page::user_secrets_page;
 
 use gpui::*;
 
@@ -28,6 +29,7 @@ impl Render for SettingsView {
             .child(Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
+            .sidebar_width(px(200.0))
             .pages(vec![
                 SettingPage::new("General")
                     .resettable(false)
@@ -135,40 +137,39 @@ impl Render for SettingsView {
                         SettingGroup::new()
                             .title("Models List")
                             .description("All configured AI models")
-                            .items(vec![SettingItem::new(
-                                "",
-                                SettingField::render(|_options, window, cx| {
-                                    // Get or create the global singleton view
-                                    let view = if let Some(existing_view) = cx.try_global::<GlobalModelsListView>() {
+                            .items(vec![SettingItem::render(|_options, window, cx| {
+                                // Get or create the global singleton view
+                                let view =
+                                    if let Some(existing_view) =
+                                        cx.try_global::<GlobalModelsListView>()
+                                    {
                                         if let Some(view) = existing_view.view.clone() {
                                             view
                                         } else {
-                                            let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                            let new_view =
+                                                cx.new(|cx| ModelsListView::new(window, cx));
                                             cx.set_global(GlobalModelsListView {
                                                 view: Some(new_view.clone()),
                                             });
                                             new_view
                                         }
                                     } else {
-                                        let new_view = cx.new(|cx| ModelsListView::new(window, cx));
+                                        let new_view =
+                                            cx.new(|cx| ModelsListView::new(window, cx));
                                         cx.set_global(GlobalModelsListView {
                                             view: Some(new_view.clone()),
                                         });
                                         new_view
                                     };
 
-                                    div()
-                                        .size_full()
-                                        .min_h(px(400.))
-                                        .child(view)
-                                        .into_any_element()
-                                }),
-                            )]),
+                                div().w_full().min_h(px(400.)).child(view)
+                            })]),
                     ]),
                 providers_page(),
                 mcp_tools_page(),
                 execution_settings_page(),
                 training_settings_page(),
+                user_secrets_page(),
             ]))
             .children(dialog_layer)
     }

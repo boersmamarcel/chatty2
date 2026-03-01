@@ -1,4 +1,4 @@
-use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
+use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use crate::settings::utils::get_all_base_theme_names;
 use gpui::*;
 use gpui_component::Root;
@@ -26,16 +26,17 @@ impl SettingsView {
         })
         .detach();
 
-        // Subscribe to MCP notifier so the settings page re-renders when a server is added
+        // Subscribe to agent config notifier so the settings page re-renders
+        // when MCP servers, secrets, or execution settings change.
         if let Some(weak_notifier) = cx
-            .try_global::<GlobalMcpNotifier>()
+            .try_global::<GlobalAgentConfigNotifier>()
             .and_then(|g| g.entity.clone())
             && let Some(notifier) = weak_notifier.upgrade()
         {
             cx.subscribe(
                 &notifier,
-                |_this, _notifier, event: &McpNotifierEvent, cx| {
-                    if matches!(event, McpNotifierEvent::ServersUpdated) {
+                |_this, _notifier, event: &AgentConfigEvent, cx| {
+                    if matches!(event, AgentConfigEvent::RebuildRequired) {
                         cx.notify();
                     }
                 },
@@ -81,9 +82,9 @@ impl SettingsView {
             window_decorations: None,
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: Point::default(),
-                size: size(px(850.0), px(600.0)),
+                size: size(px(1050.0), px(700.0)),
             })),
-            window_min_size: Some(size(px(700.0), px(400.0))),
+            window_min_size: Some(size(px(850.0), px(500.0))),
             ..Default::default()
         };
 

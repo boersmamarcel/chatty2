@@ -87,6 +87,10 @@ impl Tool for ShellExecuteTool {
                          runs each command in a fresh process, this tool maintains state across invocations: \
                          environment variables, working directory, and shell history persist between calls. \
                          \
+                         User-configured environment secrets are pre-loaded into the session. Scripts can \
+                         access them via standard environment variable lookups (e.g. os.environ in Python). \
+                         Use shell_status to see which secret variables are available (values are masked). \
+                         \
                          Use this when you need to:\n\
                          - Build up environment state across multiple commands\n\
                          - Run commands that depend on previous shell state\n\
@@ -351,6 +355,27 @@ impl Tool for ShellStatusTool {
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
         tracing::debug!("Querying shell session status");
         let status = self.session.status().await?;
-        Ok(status.into())
+        let secret_keys = self.session.secret_key_names();
+
+        // Mask user secret values so the LLM sees keys but not actual values
+        let env_vars = status
+            .env_vars
+            .into_iter()
+            .map(|(k, v)| {
+                if secret_keys.contains(&k) {
+                    (k, "****".to_string())
+                } else {
+                    (k, v)
+                }
+            })
+            .collect();
+
+        Ok(ShellStatusOutput {
+            running: status.running,
+            cwd: status.cwd,
+            env_vars,
+            pid: status.pid,
+            uptime_seconds: status.uptime_seconds,
+        })
     }
 }

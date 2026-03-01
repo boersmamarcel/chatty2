@@ -327,9 +327,14 @@ impl AgentClient {
         >,
         pending_artifacts: Option<PendingArtifacts>,
         shell_session: Option<std::sync::Arc<ShellSession>>,
+        user_secrets: Vec<(String, String)>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
+
+        // Extract secret key names before user_secrets is moved into ShellSession.
+        // Used to augment the preamble so the LLM knows which env vars are available.
+        let secret_key_names: Vec<String> = user_secrets.iter().map(|(k, _)| k.clone()).collect();
 
         // Ensure shell session exists when execution is enabled (factory-level fallback).
         // This guarantees shell tools are created regardless of how the caller constructed
@@ -343,11 +348,12 @@ impl AgentClient {
                         workspace = ?settings.workspace_dir,
                         "Creating shell session in factory (caller did not provide one)"
                     );
-                    Some(std::sync::Arc::new(ShellSession::new(
+                    Some(std::sync::Arc::new(ShellSession::with_secrets(
                         settings.workspace_dir.clone(),
                         settings.timeout_seconds,
                         settings.max_output_bytes,
                         settings.network_isolation,
+                        user_secrets,
                     )))
                 } else {
                     tracing::info!(
@@ -667,6 +673,21 @@ impl AgentClient {
             mcp_tool_info,
         );
 
+        // Augment preamble with available secret key names so the LLM knows
+        // which environment variables are pre-loaded and can use them directly.
+        let preamble = if secret_key_names.is_empty() {
+            model_config.preamble.clone()
+        } else {
+            format!(
+                "{}\n\nThe following environment variables with sensitive information are \
+                 pre-loaded in the shell session: {}. When generating code that needs \
+                 these values, access them directly (e.g., os.environ[\"KEY\"] in Python, \
+                 $KEY in bash). Do not ask the user to provide these values.",
+                model_config.preamble,
+                secret_key_names.join(", ")
+            )
+        };
+
         match &provider_config.provider_type {
             ProviderType::Anthropic => {
                 let key = api_key
@@ -675,7 +696,7 @@ impl AgentClient {
                 let client = rig::providers::anthropic::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
                 if let Some(max_tokens) = model_config.max_tokens {
@@ -705,7 +726,7 @@ impl AgentClient {
                 let client = rig::providers::openai::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble);
+                    .preamble(&preamble);
 
                 // Only set temperature if the model supports it (reasoning models don't)
                 if model_config.supports_temperature {
@@ -749,7 +770,7 @@ impl AgentClient {
                 let client = rig::providers::gemini::Client::new(&key)?;
                 let builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
                 // Build with all tools
@@ -775,7 +796,7 @@ impl AgentClient {
                 let client = rig::providers::mistral::Client::new(&key)?;
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
                 if let Some(max_tokens) = model_config.max_tokens {
@@ -808,7 +829,7 @@ impl AgentClient {
 
                 let builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble)
+                    .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
                 // Build with all tools
@@ -948,7 +969,7 @@ impl AgentClient {
 
                 let mut builder = client
                     .agent(&model_config.model_identifier)
-                    .preamble(&model_config.preamble);
+                    .preamble(&preamble);
 
                 if model_config.supports_temperature {
                     builder = builder.temperature(model_config.temperature as f64);

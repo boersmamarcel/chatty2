@@ -27,7 +27,7 @@ use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
-use crate::settings::models::{GlobalMcpNotifier, McpNotifier, McpNotifierEvent};
+use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
 
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
@@ -45,9 +45,9 @@ pub struct ChattyApp {
     /// Held while a conversation is being created; prevents concurrent creations.
     /// Automatically dropped (and thus "cleared") when the task completes.
     active_create_task: Option<Task<anyhow::Result<String>>>,
-    /// Keeps the McpNotifier entity alive for the app's lifetime so that
-    /// GlobalMcpNotifier's WeakEntity remains upgradeable.
-    _mcp_notifier: Entity<McpNotifier>,
+    /// Keeps the AgentConfigNotifier entity alive for the app's lifetime so that
+    /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
+    _mcp_notifier: Entity<AgentConfigNotifier>,
 }
 
 impl ChattyApp {
@@ -66,10 +66,10 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
-        // Create the MCP notifier and keep the strong entity alive in ChattyApp
-        // so GlobalMcpNotifier's WeakEntity remains upgradeable for the app's lifetime.
-        let mcp_notifier = cx.new(|_cx| McpNotifier::new());
-        cx.set_global(GlobalMcpNotifier {
+        // Create the agent config notifier and keep the strong entity alive in ChattyApp
+        // so GlobalAgentConfigNotifier's WeakEntity remains upgradeable for the app's lifetime.
+        let mcp_notifier = cx.new(|_cx| AgentConfigNotifier::new());
+        cx.set_global(GlobalAgentConfigNotifier {
             entity: Some(mcp_notifier.downgrade()),
         });
 
@@ -120,7 +120,7 @@ impl ChattyApp {
     /// All entity-to-entity communication uses EventEmitter/cx.subscribe():
     /// 1. SidebarView emits SidebarEvent → ChattyApp handles
     /// 2. ChatInputState emits ChatInputEvent → ChattyApp handles
-    /// 3. McpNotifier emits McpNotifierEvent → ChattyApp handles
+    /// 3. AgentConfigNotifier emits AgentConfigEvent → ChattyApp handles
     /// 4. StreamManager emits StreamManagerEvent → ChattyApp handles
     fn setup_callbacks(&self, cx: &mut Context<Self>) {
         // SUBSCRIPTION 1: SidebarView events
@@ -218,14 +218,14 @@ impl ChattyApp {
 
         // SUBSCRIPTION 3: McpNotifier events — rebuild agent when MCP servers change
         if let Some(weak_notifier) = cx
-            .try_global::<GlobalMcpNotifier>()
+            .try_global::<GlobalAgentConfigNotifier>()
             .and_then(|g| g.entity.clone())
             && let Some(notifier) = weak_notifier.upgrade()
         {
             cx.subscribe(
                 &notifier,
-                |this, _notifier, event: &McpNotifierEvent, cx| {
-                    if matches!(event, McpNotifierEvent::ServersUpdated) {
+                |this, _notifier, event: &AgentConfigEvent, cx| {
+                    if matches!(event, AgentConfigEvent::RebuildRequired) {
                         this.rebuild_active_agent(cx);
                     }
                 },
@@ -305,6 +305,7 @@ impl ChattyApp {
         exec_settings: &crate::settings::models::ExecutionSettingsModel,
         pending_approvals: crate::chatty::models::execution_approval_store::PendingApprovals,
         pending_write_approvals: crate::chatty::models::write_approval_store::PendingWriteApprovals,
+        user_secrets: Vec<(String, String)>,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
@@ -346,6 +347,7 @@ impl ChattyApp {
             Some(exec_settings.clone()),
             Some(pending_approvals),
             Some(pending_write_approvals),
+            user_secrets,
         )
         .await
     }
@@ -374,9 +376,12 @@ impl ChattyApp {
                         cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|store, _| store.get_pending_approvals());
                     let pending_write_approvals_result =
                         cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|store, _| store.get_pending_approvals());
+                    let user_secrets_result =
+                        cx.update_global::<crate::settings::models::UserSecretsModel, _>(|model, _| model.as_env_pairs());
 
                     match (models_result, providers_result, mcp_service_result, exec_settings_result, pending_approvals_result, pending_write_approvals_result) {
                         (Ok(models), Ok(providers), Ok(mcp_service), Ok(exec_settings), Ok(pending_approvals), Ok(pending_write_approvals)) => {
+                            let user_secrets = user_secrets_result.unwrap_or_default();
                             let mut restored_count = 0;
                             let mut failed_count = 0;
 
@@ -385,7 +390,7 @@ impl ChattyApp {
                                 let conv_id = data.id.clone();
 
                                 match Self::restore_conversation_from_data(
-                                    data, &models, &providers, &mcp_service, &exec_settings, pending_approvals.clone(), pending_write_approvals.clone(),
+                                    data, &models, &providers, &mcp_service, &exec_settings, pending_approvals.clone(), pending_write_approvals.clone(), user_secrets.clone(),
                                 )
                                 .await
                                 {
@@ -631,8 +636,8 @@ impl ChattyApp {
                         .ok()
                         .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
-                    // Get execution settings and approval stores for tools
-                    let (exec_settings, pending_approvals, pending_write_approvals) =
+                    // Get execution settings, approval stores, and user secrets for tools
+                    let (exec_settings, pending_approvals, pending_write_approvals, user_secrets) =
                         cx.update(|cx| {
                             let settings = cx
                                 .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -643,7 +648,15 @@ impl ChattyApp {
                             let write_approvals = cx
                                 .global::<crate::chatty::models::WriteApprovalStore>()
                                 .get_pending_approvals();
-                            (Some(settings), Some(approvals), Some(write_approvals))
+                            let secrets = cx
+                                .global::<crate::settings::models::UserSecretsModel>()
+                                .as_env_pairs();
+                            (
+                                Some(settings),
+                                Some(approvals),
+                                Some(write_approvals),
+                                secrets,
+                            )
                         })?;
 
                     let conversation = Conversation::new(
@@ -655,6 +668,7 @@ impl ChattyApp {
                         exec_settings,
                         pending_approvals,
                         pending_write_approvals,
+                        user_secrets,
                     )
                     .await?;
 
@@ -974,7 +988,7 @@ impl ChattyApp {
                 "Rebuilding agent with fresh MCP tools"
             );
 
-            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session) = cx
+            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets) = cx
                 .update(|cx| {
                     let settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -1004,7 +1018,10 @@ impl ChattyApp {
                             None
                         }
                     });
-                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session)
+                    let secrets = cx
+                        .global::<crate::settings::models::UserSecretsModel>()
+                        .as_env_pairs();
+                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session, secrets)
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -1018,6 +1035,7 @@ impl ChattyApp {
                 pending_write_approvals,
                 pending_artifacts,
                 shell_session,
+                user_secrets,
             )
             .await?;
 
@@ -1092,6 +1110,7 @@ impl ChattyApp {
                             pending_write_approvals,
                             pending_artifacts,
                             shell_session,
+                            user_secrets,
                         ) = cx
                             .update(|cx| {
                                 let settings = cx
@@ -1107,12 +1126,16 @@ impl ChattyApp {
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
                                 let artifacts = conv.map(|c| c.pending_artifacts());
                                 let session = conv.and_then(|c| c.shell_session());
+                                let secrets = cx
+                                    .global::<crate::settings::models::UserSecretsModel>()
+                                    .as_env_pairs();
                                 (
                                     Some(settings),
                                     Some(approvals),
                                     Some(write_approvals),
                                     artifacts,
                                     session,
+                                    secrets,
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1128,6 +1151,7 @@ impl ChattyApp {
                                 pending_write_approvals,
                                 pending_artifacts,
                                 shell_session,
+                                user_secrets,
                             )
                             .await?;
 

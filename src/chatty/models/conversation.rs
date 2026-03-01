@@ -87,6 +87,7 @@ impl Conversation {
         pending_write_approvals: Option<
             crate::chatty::models::write_approval_store::PendingWriteApprovals,
         >,
+        user_secrets: Vec<(String, String)>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -114,6 +115,7 @@ impl Conversation {
             pending_write_approvals,
             Some(pending_artifacts.clone()),
             None, // Factory creates session on-demand when execution is enabled
+            user_secrets,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -154,6 +156,7 @@ impl Conversation {
         pending_write_approvals: Option<
             crate::chatty::models::write_approval_store::PendingWriteApprovals,
         >,
+        user_secrets: Vec<(String, String)>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -179,6 +182,7 @@ impl Conversation {
             pending_write_approvals,
             Some(pending_artifacts.clone()),
             None, // Factory creates session on-demand
+            user_secrets,
         )
         .await
         .context("Failed to create agent from config")?;
