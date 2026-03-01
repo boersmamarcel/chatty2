@@ -28,6 +28,7 @@ impl Render for SettingsView {
             .child(Settings::new("app-settings")
             .with_size(Size::default())
             .with_group_variant(GroupBoxVariant::Outline)
+            .sidebar_width(px(200.0))
             .pages(vec![
                 SettingPage::new("General")
                     .resettable(false)
