@@ -9,26 +9,29 @@ use super::conversation_repository::{
 };
 use super::error::{RepositoryError, RepositoryResult};
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS conversations (
-    id                   TEXT    PRIMARY KEY,
-    title                TEXT    NOT NULL DEFAULT '',
-    model_id             TEXT    NOT NULL DEFAULT '',
-    message_history      TEXT    NOT NULL DEFAULT '[]',
-    system_traces        TEXT    NOT NULL DEFAULT '[]',
-    token_usage          TEXT    NOT NULL DEFAULT '{}',
-    attachment_paths     TEXT    NOT NULL DEFAULT '[]',
-    message_timestamps   TEXT    NOT NULL DEFAULT '[]',
-    message_feedback     TEXT    NOT NULL DEFAULT '[]',
-    regeneration_records TEXT    NOT NULL DEFAULT '[]',
-    total_cost           REAL    NOT NULL DEFAULT 0.0,
-    created_at           INTEGER NOT NULL DEFAULT 0,
-    updated_at           INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_conversations_updated_at
-    ON conversations (updated_at DESC);
-";
+/// Migrations applied in order. Each entry is (version, sql).
+/// To add a new migration: append a tuple with the next version number and its SQL.
+/// Never edit or remove existing entries — existing databases depend on them.
+const MIGRATIONS: &[(i64, &str)] = &[(
+    1,
+    "CREATE TABLE IF NOT EXISTS conversations (
+        id                   TEXT    PRIMARY KEY,
+        title                TEXT    NOT NULL DEFAULT '',
+        model_id             TEXT    NOT NULL DEFAULT '',
+        message_history      TEXT    NOT NULL DEFAULT '[]',
+        system_traces        TEXT    NOT NULL DEFAULT '[]',
+        token_usage          TEXT    NOT NULL DEFAULT '{}',
+        attachment_paths     TEXT    NOT NULL DEFAULT '[]',
+        message_timestamps   TEXT    NOT NULL DEFAULT '[]',
+        message_feedback     TEXT    NOT NULL DEFAULT '[]',
+        regeneration_records TEXT    NOT NULL DEFAULT '[]',
+        total_cost           REAL    NOT NULL DEFAULT 0.0,
+        created_at           INTEGER NOT NULL DEFAULT 0,
+        updated_at           INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversations_updated_at
+        ON conversations (updated_at DESC);",
+)];
 
 /// SQLite-backed repository for conversations.
 ///
@@ -57,12 +60,51 @@ impl ConversationSqliteRepository {
             .connect_with(options)
             .await?;
 
-        // Apply schema
-        sqlx::query(SCHEMA).execute(&pool).await?;
+        Self::run_migrations(&pool).await?;
 
         info!(path = %db_path.display(), "Opened SQLite conversation database");
 
         Ok(Self { pool })
+    }
+
+    /// Create the schema_version table if absent, then apply any pending migrations.
+    async fn run_migrations(pool: &SqlitePool) -> RepositoryResult<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await?;
+
+        // Seed version 0 if the table is empty (fresh database).
+        sqlx::query("INSERT INTO schema_version (version) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_version)")
+            .execute(pool)
+            .await?;
+
+        let current: i64 = sqlx::query_scalar("SELECT version FROM schema_version")
+            .fetch_one(pool)
+            .await?;
+
+        for (version, sql) in MIGRATIONS {
+            if *version > current {
+                info!(version, "Applying schema migration");
+                // sqlx doesn't support multiple statements in a single query call,
+                // so split on ';' and execute each statement individually.
+                for statement in sql.split(';') {
+                    let trimmed = statement.trim();
+                    if !trimmed.is_empty() {
+                        sqlx::query(trimmed).execute(pool).await?;
+                    }
+                }
+                sqlx::query("UPDATE schema_version SET version = ?")
+                    .bind(version)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 
     fn db_path() -> RepositoryResult<PathBuf> {
