@@ -152,12 +152,12 @@ impl RenderOnce for ProgressCircle {
         let prev_value = state.read(cx).value;
 
         // Persist new value so the next render has the correct baseline
-        if prev_value != value {
+        let has_changed = (prev_value - value).abs() > 0.01;
+        if has_changed {
             state.update(cx, |s, _| s.value = value);
         }
 
         let color = self.color.unwrap_or(cx.theme().progress_bar);
-        let has_changed = prev_value != value;
 
         div()
             .id(self.id.clone())
