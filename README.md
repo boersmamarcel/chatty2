@@ -175,6 +175,10 @@ Enable auto-export in **Settings > Training Data**.
 
 Background update checks against GitHub releases with one-click install. Downloads are verified with SHA-256 checksums before installation. On macOS, the update replaces the app bundle and relaunches automatically.
 
+### Environment Secrets
+
+Manage environment variables that are automatically injected into every shell session. Go to **Settings > Secrets** to add key-value pairs — the AI knows which variable names are available (e.g., `os.environ["API_KEY"]`) but never sees the actual values. Secrets are persisted locally and masked in tool output.
+
 ---
 
 ## Tools & MCP
@@ -283,6 +287,7 @@ Fetch and convert web pages to markdown for the LLM to read.
 ### Security
 
 - **API key masking** — MCP env vars containing keys, tokens, or secrets are shown to the LLM as `****`
+- **User secrets masking** — environment variables added in Settings > Secrets are injected into shell sessions but their values are never exposed to the LLM
 - **Workspace sandboxing** — filesystem and bash tools can only access the directory you configure
 - **Shell sandboxing** — on Linux, commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with full namespace isolation (process, network, mount). On macOS, `sandbox-exec` blocks access to `.ssh`, `.aws`, `.gnupg`, and other sensitive paths
 - **Optional network isolation** — block shell commands from making network requests entirely
