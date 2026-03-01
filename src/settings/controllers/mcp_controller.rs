@@ -57,15 +57,7 @@ pub fn toggle_server(server_name: String, cx: &mut App) {
             // (e.g. ChattyApp) rebuild the active conversation's agent with
             // the now-accurate tool set.
             cx.update(|cx| {
-                if let Some(weak_notifier) = cx
-                    .try_global::<GlobalMcpNotifier>()
-                    .and_then(|g| g.entity.clone())
-                    && let Some(notifier) = weak_notifier.upgrade()
-                {
-                    notifier.update(cx, |_notifier, cx| {
-                        cx.emit(McpNotifierEvent::ServersUpdated);
-                    });
-                }
+                emit_servers_updated(cx);
             })
             .map_err(|e| error!(error = ?e, "Failed to emit ServersUpdated after MCP toggle"))
             .ok();
@@ -75,6 +67,65 @@ pub fn toggle_server(server_name: String, cx: &mut App) {
 
     // 4. Save async to disk
     save_servers_async(updated_servers, cx);
+}
+
+/// Delete an MCP server by name, stop it if running, and persist to disk.
+pub fn delete_server(server_name: String, cx: &mut App) {
+    // 1. Remove from global state (optimistic update)
+    let (was_enabled, updated_servers) = {
+        let model = cx.global_mut::<McpServersModel>();
+        let was_enabled = model
+            .servers()
+            .iter()
+            .find(|s| s.name == server_name)
+            .map(|s| s.enabled)
+            .unwrap_or(false);
+
+        model.servers_mut().retain(|s| s.name != server_name);
+        (was_enabled, model.servers().to_vec())
+    };
+
+    // 2. Refresh UI immediately
+    cx.refresh_windows();
+
+    // 3. Stop the server process if it was enabled, then emit ServersUpdated
+    if was_enabled {
+        let service = cx.global::<McpService>().clone();
+        let name = server_name.clone();
+
+        cx.spawn(async move |cx| {
+            if let Err(e) = service.stop_server(&name).await {
+                error!(server = %name, error = ?e, "Failed to stop deleted MCP server");
+            }
+
+            cx.update(|cx| {
+                emit_servers_updated(cx);
+            })
+            .map_err(|e| error!(error = ?e, "Failed to emit ServersUpdated after MCP delete"))
+            .ok();
+        })
+        .detach();
+    } else {
+        emit_servers_updated(cx);
+    }
+
+    // 4. Save async to disk
+    save_servers_async(updated_servers, cx);
+
+    info!(server = %server_name, "Deleted MCP server from settings");
+}
+
+/// Emit the ServersUpdated event via the global MCP notifier.
+fn emit_servers_updated(cx: &mut App) {
+    if let Some(weak_notifier) = cx
+        .try_global::<GlobalMcpNotifier>()
+        .and_then(|g| g.entity.clone())
+        && let Some(notifier) = weak_notifier.upgrade()
+    {
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(McpNotifierEvent::ServersUpdated);
+        });
+    }
 }
 
 /// Save servers asynchronously to disk
