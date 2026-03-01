@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use tracing::info;
 
 use super::conversation_repository::{
@@ -72,7 +72,6 @@ impl ConversationSqliteRepository {
             })
             .map(|p| p.join("chatty").join("conversations.db"))
     }
-
 }
 
 impl Clone for ConversationSqliteRepository {
@@ -109,10 +108,7 @@ impl ConversationRepository for ConversationSqliteRepository {
         })
     }
 
-    fn load_one(
-        &self,
-        id: &str,
-    ) -> BoxFuture<'static, RepositoryResult<Option<ConversationData>>> {
+    fn load_one(&self, id: &str) -> BoxFuture<'static, RepositoryResult<Option<ConversationData>>> {
         let pool = self.pool.clone();
         let id = id.to_string();
         Box::pin(async move {

@@ -43,10 +43,7 @@ impl ConversationsStore {
     }
 
     /// Return up to `limit` conversations as sidebar tuples (id, title, cost).
-    pub fn list_recent_metadata(
-        &self,
-        limit: usize,
-    ) -> Vec<(String, String, Option<f64>)> {
+    pub fn list_recent_metadata(&self, limit: usize) -> Vec<(String, String, Option<f64>)> {
         self.metadata
             .iter()
             .take(limit)
@@ -74,7 +71,8 @@ impl ConversationsStore {
             });
         }
         // Keep sorted: most recently updated first
-        self.metadata.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        self.metadata
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     }
 
     /// Remove a conversation from the metadata list.

@@ -15,9 +15,7 @@ use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamChunk,
     StreamManagerEvent, StreamStatus,
 };
-use crate::chatty::repositories::{
-    ConversationData, ConversationRepository,
-};
+use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
@@ -51,7 +49,11 @@ pub struct ChattyApp {
 }
 
 impl ChattyApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, conversation_repo: Arc<dyn ConversationRepository>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        conversation_repo: Arc<dyn ConversationRepository>,
+    ) -> Self {
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
             cx.set_global(ConversationsStore::new());
@@ -698,13 +700,13 @@ impl ChattyApp {
                                     })
                                     .unwrap_or(false);
 
-                                if is_still_active {
-                                    if let Some(app) = weak.upgrade() {
-                                        app.update(cx, |app, cx| {
-                                            app.display_loaded_conversation(&conv_id, cx);
-                                        })
-                                        .ok();
-                                    }
+                                if is_still_active
+                                    && let Some(app) = weak.upgrade()
+                                {
+                                    app.update(cx, |app, cx| {
+                                        app.display_loaded_conversation(&conv_id, cx);
+                                    })
+                                    .ok();
                                 }
                             }
                             Err(e) => {
@@ -731,9 +733,15 @@ impl ChattyApp {
         let conv_id = id.to_string();
         let chat_view = self.chat_view.clone();
 
-        let minimal_data = cx.global::<ConversationsStore>()
+        let minimal_data = cx
+            .global::<ConversationsStore>()
             .get_conversation(id)
-            .map(|conv| (conv.model_id().to_string(), conv.streaming_message().cloned()));
+            .map(|conv| {
+                (
+                    conv.model_id().to_string(),
+                    conv.streaming_message().cloned(),
+                )
+            });
 
         if let Some((model_id, streaming_content)) = minimal_data {
             // Check if this conversation has an active stream via StreamManager
@@ -2180,7 +2188,12 @@ impl ChattyApp {
             // Update metadata so title and cost changes are reflected in the sidebar
             let total_cost = conv_data.total_cost();
             cx.update_global::<ConversationsStore, _>(|store, _| {
-                store.upsert_metadata(&conv_data.id, &conv_data.title, total_cost, conv_data.updated_at);
+                store.upsert_metadata(
+                    &conv_data.id,
+                    &conv_data.title,
+                    total_cost,
+                    conv_data.updated_at,
+                );
             });
 
             let conv_id_for_save = conv_id.clone();
@@ -2426,7 +2439,6 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
         updated_at: now,
     })
 }
-
 
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///

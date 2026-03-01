@@ -391,13 +391,19 @@ fn render_thinking_block(
         .border_color(border_color)
         .rounded_md()
         .child(
-            div().flex().items_center().gap_2().mb_2().child(
-                div()
-                    .text_xs()
-                    .text_color(muted_text)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("💭 Thinking"),
-            ),
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .mb_2()
+                .child(Icon::new(CustomIcon::Brain).size_3().text_color(muted_text))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Thinking"),
+                ),
         )
         .child(
             div()
@@ -457,8 +463,11 @@ fn render_attachments(attachments: &[PathBuf], id_prefix: &str, cx: &App) -> Div
                     .rounded_md()
                     .border_1()
                     .border_color(border_color)
-                    .text_sm()
-                    .child(format!("📎 {}", filename))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(CustomIcon::Paperclip).size_4())
+                    .child(div().text_sm().child(filename))
             }
         }))
 }
