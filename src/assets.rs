@@ -32,7 +32,6 @@ pub enum CustomIcon {
     // Auto-updater icons
     Refresh,       // refresh-ccw.svg - Idle state
     Loader,        // loader.svg - Checking/Installing
-    Download,      // download.svg - Downloading
     AlertCircle,   // alert-circle.svg - Errors
     CheckCircle,   // check-circle.svg - Update ready
     Copy,          // copy.svg - Copy button
@@ -51,7 +50,6 @@ impl IconNamed for CustomIcon {
             // Auto-updater icons
             CustomIcon::Refresh => "icons/refresh-ccw.svg",
             CustomIcon::Loader => "icons/loader.svg",
-            CustomIcon::Download => "icons/download.svg",
             CustomIcon::AlertCircle => "icons/alert-circle.svg",
             CustomIcon::CheckCircle => "icons/check-circle.svg",
             CustomIcon::Copy => "icons/copy.svg",
