@@ -92,7 +92,7 @@ See [Tools & MCP](#tools--mcp) below for details.
 
 **Multi-turn agents.** Your LLM can chain up to 10 tool calls per response — read files, run commands, analyze results, and iterate. It can generate plots, charts, and documents and display them inline in the chat. With multimodal models, you can ask follow-up questions that reference those generated files directly.
 
-**Privacy first.** Run fully local with Ollama — no data leaves your machine. No telemetry, no tracking. Conversations are stored as local JSON files, never uploaded anywhere.
+**Privacy first.** Run fully local with Ollama — no data leaves your machine. No telemetry, no tracking. Conversations are stored in a local SQLite database, never uploaded anywhere.
 
 ---
 
@@ -120,7 +120,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 
 ### Conversations & Cost Tracking
 
-- Persistent conversations saved locally as JSON — nothing is stored remotely
+- Persistent conversations saved locally in a SQLite database — nothing is stored remotely
 - Auto-generated conversation titles
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
@@ -347,7 +347,7 @@ You can also trigger a release manually from **Actions → Prepare Release → R
 - **Centralized stream lifecycle** via `StreamManager` entity with cancellation tokens and decoupled event-driven UI updates
 - **Streaming** LLM responses with interleaved tool calls
 - **Optimistic updates** for instant UI feedback with async persistence
-- **JSON-based** local storage for conversations, settings, and configuration
+- **SQLite** database for conversations; **JSON-based** local storage for settings and configuration
 - **LaTeX to SVG** pipeline with theme-aware caching
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation and coding patterns.
