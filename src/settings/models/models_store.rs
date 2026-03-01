@@ -39,6 +39,9 @@ pub struct ModelConfig {
     /// Some models (like OpenAI reasoning models) don't support temperature
     #[serde(default = "default_supports_temperature")]
     pub supports_temperature: bool,
+    /// Max context window in tokens (used for the footer fill indicator)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<i32>,
 }
 
 fn default_temperature() -> f32 {
@@ -71,6 +74,7 @@ impl ModelConfig {
             supports_images: false,
             supports_pdf: false,
             supports_temperature: true,
+            max_context_window: None,
         }
     }
 }

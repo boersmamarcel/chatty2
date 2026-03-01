@@ -409,6 +409,7 @@ mod tests {
             supports_images: true,
             supports_pdf: true,
             supports_temperature: true,
+            max_context_window: None,
         }
     }
 
