@@ -126,7 +126,7 @@ impl SecretsTableView {
             .bg(cx.theme().muted)
             .child(
                 div()
-                    .w(px(200.))
+                    .flex_1()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().muted_foreground)
@@ -183,7 +183,7 @@ impl SecretsTableView {
             .border_color(cx.theme().border)
             .child(
                 div()
-                    .w(px(200.))
+                    .flex_1()
                     .text_sm()
                     .text_color(cx.theme().foreground)
                     .child(key),
@@ -326,11 +326,7 @@ pub fn user_secrets_page() -> SettingPage {
                             new_view
                         };
 
-                        div()
-                            .size_full()
-                            .min_h(px(280.))
-                            .child(view)
-                            .into_any_element()
+                        div().size_full().child(view).into_any_element()
                     }),
                 )]),
         ])
