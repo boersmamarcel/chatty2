@@ -57,8 +57,15 @@ fn mcp_servers_list_group() -> SettingGroup {
                     .child(render_header(cx))
                     // Server rows
                     .children(servers.iter().enumerate().map(|(ix, server)| {
-                        render_server_row(ix, server.name.clone(), server.command.clone(), server.args.clone(), server.enabled, cx)
-                            .into_any_element()
+                        render_server_row(
+                            ix,
+                            server.name.clone(),
+                            server.command.clone(),
+                            server.args.clone(),
+                            server.enabled,
+                            cx,
+                        )
+                        .into_any_element()
                     }))
                     .into_any_element()
             }

@@ -27,7 +27,7 @@ use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
-use crate::settings::models::{GlobalMcpNotifier, McpNotifier, McpNotifierEvent};
+use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
 
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
@@ -45,9 +45,9 @@ pub struct ChattyApp {
     /// Held while a conversation is being created; prevents concurrent creations.
     /// Automatically dropped (and thus "cleared") when the task completes.
     active_create_task: Option<Task<anyhow::Result<String>>>,
-    /// Keeps the McpNotifier entity alive for the app's lifetime so that
-    /// GlobalMcpNotifier's WeakEntity remains upgradeable.
-    _mcp_notifier: Entity<McpNotifier>,
+    /// Keeps the AgentConfigNotifier entity alive for the app's lifetime so that
+    /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
+    _mcp_notifier: Entity<AgentConfigNotifier>,
 }
 
 impl ChattyApp {
@@ -66,10 +66,10 @@ impl ChattyApp {
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
         let sidebar_view = cx.new(|_cx| SidebarView::new());
 
-        // Create the MCP notifier and keep the strong entity alive in ChattyApp
-        // so GlobalMcpNotifier's WeakEntity remains upgradeable for the app's lifetime.
-        let mcp_notifier = cx.new(|_cx| McpNotifier::new());
-        cx.set_global(GlobalMcpNotifier {
+        // Create the agent config notifier and keep the strong entity alive in ChattyApp
+        // so GlobalAgentConfigNotifier's WeakEntity remains upgradeable for the app's lifetime.
+        let mcp_notifier = cx.new(|_cx| AgentConfigNotifier::new());
+        cx.set_global(GlobalAgentConfigNotifier {
             entity: Some(mcp_notifier.downgrade()),
         });
 
@@ -120,7 +120,7 @@ impl ChattyApp {
     /// All entity-to-entity communication uses EventEmitter/cx.subscribe():
     /// 1. SidebarView emits SidebarEvent → ChattyApp handles
     /// 2. ChatInputState emits ChatInputEvent → ChattyApp handles
-    /// 3. McpNotifier emits McpNotifierEvent → ChattyApp handles
+    /// 3. AgentConfigNotifier emits AgentConfigEvent → ChattyApp handles
     /// 4. StreamManager emits StreamManagerEvent → ChattyApp handles
     fn setup_callbacks(&self, cx: &mut Context<Self>) {
         // SUBSCRIPTION 1: SidebarView events
@@ -218,14 +218,14 @@ impl ChattyApp {
 
         // SUBSCRIPTION 3: McpNotifier events — rebuild agent when MCP servers change
         if let Some(weak_notifier) = cx
-            .try_global::<GlobalMcpNotifier>()
+            .try_global::<GlobalAgentConfigNotifier>()
             .and_then(|g| g.entity.clone())
             && let Some(notifier) = weak_notifier.upgrade()
         {
             cx.subscribe(
                 &notifier,
-                |this, _notifier, event: &McpNotifierEvent, cx| {
-                    if matches!(event, McpNotifierEvent::ServersUpdated) {
+                |this, _notifier, event: &AgentConfigEvent, cx| {
+                    if matches!(event, AgentConfigEvent::RebuildRequired) {
                         this.rebuild_active_agent(cx);
                     }
                 },

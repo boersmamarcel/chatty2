@@ -493,12 +493,12 @@ fn main() {
                     });
 
                     if let Some(weak_notifier) = cx
-                        .try_global::<settings::models::GlobalMcpNotifier>()
+                        .try_global::<settings::models::GlobalAgentConfigNotifier>()
                         .and_then(|g| g.entity.clone())
                         && let Some(notifier) = weak_notifier.upgrade()
                     {
                         notifier.update(cx, |_notifier, cx| {
-                            cx.emit(settings::models::McpNotifierEvent::ServersUpdated);
+                            cx.emit(settings::models::AgentConfigEvent::RebuildRequired);
                         });
                     }
                 })

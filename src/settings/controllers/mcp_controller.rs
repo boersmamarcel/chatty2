@@ -1,6 +1,6 @@
 use crate::chatty::services::mcp_service::McpService;
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
-use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
+use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp};
 use tracing::{error, info};
 
@@ -57,7 +57,7 @@ pub fn toggle_server(server_name: String, cx: &mut App) {
             // (e.g. ChattyApp) rebuild the active conversation's agent with
             // the now-accurate tool set.
             cx.update(|cx| {
-                emit_servers_updated(cx);
+                emit_rebuild_required(cx);
             })
             .map_err(|e| error!(error = ?e, "Failed to emit ServersUpdated after MCP toggle"))
             .ok();
@@ -99,14 +99,14 @@ pub fn delete_server(server_name: String, cx: &mut App) {
             }
 
             cx.update(|cx| {
-                emit_servers_updated(cx);
+                emit_rebuild_required(cx);
             })
             .map_err(|e| error!(error = ?e, "Failed to emit ServersUpdated after MCP delete"))
             .ok();
         })
         .detach();
     } else {
-        emit_servers_updated(cx);
+        emit_rebuild_required(cx);
     }
 
     // 4. Save async to disk
@@ -116,14 +116,14 @@ pub fn delete_server(server_name: String, cx: &mut App) {
 }
 
 /// Emit the ServersUpdated event via the global MCP notifier.
-fn emit_servers_updated(cx: &mut App) {
+fn emit_rebuild_required(cx: &mut App) {
     if let Some(weak_notifier) = cx
-        .try_global::<GlobalMcpNotifier>()
+        .try_global::<GlobalAgentConfigNotifier>()
         .and_then(|g| g.entity.clone())
         && let Some(notifier) = weak_notifier.upgrade()
     {
         notifier.update(cx, |_notifier, cx| {
-            cx.emit(McpNotifierEvent::ServersUpdated);
+            cx.emit(AgentConfigEvent::RebuildRequired);
         });
     }
 }

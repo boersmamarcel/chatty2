@@ -1,23 +1,25 @@
 use crate::USER_SECRETS_REPOSITORY;
 use crate::settings::models::user_secrets_store::{UserSecret, UserSecretsModel};
-use crate::settings::models::{GlobalMcpNotifier, McpNotifierEvent};
+use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp};
 use tracing::{error, info, warn};
 
-/// Emit `ServersUpdated` so the active conversation's agent is rebuilt
+/// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the updated user secrets injected into the shell session.
 fn notify_secrets_changed(cx: &mut App) {
     if let Some(weak_notifier) = cx
-        .try_global::<GlobalMcpNotifier>()
+        .try_global::<GlobalAgentConfigNotifier>()
         .and_then(|g| g.entity.clone())
         && let Some(notifier) = weak_notifier.upgrade()
     {
         info!("Notifying secrets changed — triggering agent rebuild");
         notifier.update(cx, |_notifier, cx| {
-            cx.emit(McpNotifierEvent::ServersUpdated);
+            cx.emit(AgentConfigEvent::RebuildRequired);
         });
     } else {
-        warn!("notify_secrets_changed: GlobalMcpNotifier not found — agent will not be rebuilt");
+        warn!(
+            "notify_secrets_changed: GlobalAgentConfigNotifier not found — agent will not be rebuilt"
+        );
     }
 }
 
