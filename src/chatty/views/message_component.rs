@@ -310,22 +310,27 @@ fn render_content_with_code_blocks(content: &str, base_index: usize, cx: &App) -
 }
 
 /// Parse content to extract thinking blocks and regular text segments
-/// Supports <think>...</think> and <thinking>...</thinking> patterns
+/// Supports <think>...</think>, <thinking>...</thinking>, and <thought>...</thought> patterns
 fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
     let mut segments = Vec::new();
     let mut remaining = content;
 
     while !remaining.is_empty() {
-        // Look for opening tag - support both <think> and <thinking>
-        let (start_idx, tag_len) = if let Some(idx) = remaining.find("<think>") {
-            // Check it's not actually <thinking>
-            if remaining[idx..].starts_with("<thinking>") {
-                (idx, 10) // "<thinking>" is 10 chars
-            } else {
-                (idx, 7) // "<think>" is 7 chars
-            }
-        } else if let Some(idx) = remaining.find("<thinking>") {
-            (idx, 10)
+        // Find the earliest opening tag among <thinking>, <thought>, <think>
+        let find_thinking = remaining.find("<thinking>").map(|i| (i, 10usize));
+        let find_thought = remaining.find("<thought>").map(|i| (i, 9usize));
+        // <think> must not be the start of <thinking> (different prefix check isn't needed
+        // since <thinking> starts with <think but is longer; find("<think>") won't match
+        // inside "<thinking>" because the 8th char is 'i' not '>')
+        let find_think = remaining.find("<think>").map(|i| (i, 7usize));
+
+        let result = [find_thinking, find_thought, find_think]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(idx, _)| *idx);
+
+        let (start_idx, tag_len) = if let Some(r) = result {
+            r
         } else {
             // No more thinking blocks, add remaining text
             let text = remaining.trim();
@@ -343,12 +348,13 @@ fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
             }
         }
 
-        // Find the closing tag - support </think> and </thinking>
+        // Find the closing tag - support </think>, </thinking>, and </thought>
         let after_open = &remaining[start_idx + tag_len..];
         let end_tag_and_len = after_open
             .find("</think>")
             .map(|idx| (idx, 8)) // "</think>" is 8 chars
-            .or_else(|| after_open.find("</thinking>").map(|idx| (idx, 11)));
+            .or_else(|| after_open.find("</thinking>").map(|idx| (idx, 11)))
+            .or_else(|| after_open.find("</thought>").map(|idx| (idx, 10)));
 
         if let Some((end_idx, close_tag_len)) = end_tag_and_len {
             let thinking_content = after_open[..end_idx].trim().to_string();

@@ -764,7 +764,7 @@ impl AgentClient {
              `\\begin{matrix}`, `\\begin{cases}`, and all standard starred variants\n\
              Math is compiled via MiTeX → Typst → SVG and cached; use standard LaTeX notation freely.\n\
              \n### Thinking / Reasoning\n\
-             Wrap internal reasoning in `<thinking>...</thinking>` or `<think>...</think>` tags. \
+             Wrap internal reasoning in `<thinking>...</thinking>`, `<think>...</think>`, or `<thought>...</thought>` tags. \
              The app renders these as a visually distinct, collapsible block so the user can inspect \
              your reasoning without it cluttering the main response. \
              Use thinking blocks for multi-step reasoning, planning, or working through a problem \
