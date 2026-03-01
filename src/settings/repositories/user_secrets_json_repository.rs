@@ -20,6 +20,12 @@ impl UserSecretsJsonRepository {
 
         Ok(Self { file_path })
     }
+
+    /// Create repository with a custom file path (for testing)
+    #[cfg(test)]
+    pub(crate) fn with_path(file_path: PathBuf) -> Self {
+        Self { file_path }
+    }
 }
 
 impl UserSecretsRepository for UserSecretsJsonRepository {
@@ -67,5 +73,47 @@ impl UserSecretsRepository for UserSecretsJsonRepository {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::models::user_secrets_store::{UserSecret, UserSecretsModel};
+    use crate::settings::repositories::user_secrets_repository::UserSecretsRepository;
+
+    #[tokio::test]
+    async fn test_repository_save_load_roundtrip() {
+        let dir =
+            std::env::temp_dir().join(format!("chatty_secrets_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("user_secrets.json");
+
+        let repo = UserSecretsJsonRepository::with_path(path);
+
+        let model = UserSecretsModel {
+            secrets: vec![
+                UserSecret {
+                    key: "KEY_A".into(),
+                    value: "value_a".into(),
+                },
+                UserSecret {
+                    key: "KEY_B".into(),
+                    value: "val with 'quotes'".into(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        repo.save(model.clone()).await.unwrap();
+        let loaded = repo.load().await.unwrap();
+
+        assert_eq!(loaded.secrets.len(), 2);
+        assert_eq!(loaded.secrets[0].key, "KEY_A");
+        assert_eq!(loaded.secrets[0].value, "value_a");
+        assert_eq!(loaded.secrets[1].key, "KEY_B");
+        assert_eq!(loaded.secrets[1].value, "val with 'quotes'");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

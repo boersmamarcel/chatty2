@@ -1000,4 +1000,93 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().stdout.contains("network test"));
     }
+
+    #[tokio::test]
+    async fn test_secret_injection_on_startup() {
+        let secrets = vec![
+            ("DB_PASSWORD".into(), "s3cret_123".into()),
+            ("API_KEY".into(), "key_xyz".into()),
+        ];
+        let session = ShellSession::with_secrets(None, 30, 51200, false, secrets);
+
+        let r = session.execute("echo $DB_PASSWORD").await.unwrap();
+        assert!(r.stdout.contains("s3cret_123"));
+
+        let r = session.execute("echo $API_KEY").await.unwrap();
+        assert!(r.stdout.contains("key_xyz"));
+    }
+
+    #[tokio::test]
+    async fn test_secrets_survive_shell_respawn() {
+        let secrets = vec![("PERSIST_KEY".into(), "persist_val".into())];
+        let session = ShellSession::with_secrets(None, 30, 51200, false, secrets);
+
+        // First life
+        let r = session.execute("echo $PERSIST_KEY").await.unwrap();
+        assert!(r.stdout.contains("persist_val"));
+
+        // Kill process
+        session.shutdown().await;
+        assert!(!session.is_running().await);
+
+        // Second life — secret must survive via re-injection in ensure_started()
+        let r = session.execute("echo $PERSIST_KEY").await.unwrap();
+        assert!(r.stdout.contains("persist_val"));
+    }
+
+    #[tokio::test]
+    async fn test_special_characters_in_startup_secret() {
+        // Value with single quotes — tests the ensure_started() escaping:
+        // value.replace('\'', "'\\''")
+        let tricky = "it's a 'quoted' value";
+        let secrets = vec![("TRICKY_SECRET".into(), tricky.into())];
+        let session = ShellSession::with_secrets(None, 30, 51200, false, secrets);
+
+        // Use env to print the raw value without shell interpretation
+        let r = session.execute("env | grep TRICKY_SECRET=").await.unwrap();
+        assert!(
+            r.stdout.contains(&format!("TRICKY_SECRET={}", tricky)),
+            "Expected secret with single quotes to round-trip, got: {:?}",
+            r.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_status_masks_secrets() {
+        let secrets = vec![("MY_SECRET".into(), "top_secret_value".into())];
+        let session = ShellSession::with_secrets(None, 30, 51200, false, secrets);
+
+        // Start the session
+        session.execute("echo init").await.unwrap();
+
+        // secret_key_names() should list our key
+        let key_names = session.secret_key_names();
+        assert!(key_names.contains(&"MY_SECRET".to_string()));
+
+        // Raw status contains the real value
+        let status = session.status().await.unwrap();
+        let secret_entry = status.env_vars.iter().find(|(k, _)| k == "MY_SECRET");
+        assert!(
+            secret_entry.is_some(),
+            "Secret key should appear in env_vars"
+        );
+        let (_, raw_value) = secret_entry.unwrap();
+        assert_eq!(raw_value, "top_secret_value");
+
+        // Apply the same masking logic used by ShellStatusTool
+        let masked: Vec<(String, String)> = status
+            .env_vars
+            .into_iter()
+            .map(|(k, v)| {
+                if key_names.contains(&k) {
+                    (k, "****".to_string())
+                } else {
+                    (k, v)
+                }
+            })
+            .collect();
+
+        let masked_entry = masked.iter().find(|(k, _)| k == "MY_SECRET").unwrap();
+        assert_eq!(masked_entry.1, "****", "Secret value should be masked");
+    }
 }
