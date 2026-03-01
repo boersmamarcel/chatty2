@@ -125,6 +125,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
+- **Context window fill bar** — a compact footer progress bar showing how full the active conversation's context window is, color-coded green/amber/red with a tooltip showing exact token counts. Enable it by setting **Max Context Window** (tokens) on a model via Settings → Models → Advanced tab
 - **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
 
 ### Training Data Export (ATIF)
@@ -163,7 +164,7 @@ Enable auto-export in **Settings > Training Data**.
 
 ### Thinking & Traces
 
-- **Extended thinking** blocks for Claude's chain-of-thought reasoning
+- **Extended thinking** blocks for models that emit chain-of-thought reasoning via `<thinking>`, `<think>`, or `<thought>` tags — rendered as collapsible blocks instead of raw text
 - **Tool call traces** showing input, output, duration, and status
 - Collapsible so they don't clutter the conversation
 
