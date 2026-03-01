@@ -73,16 +73,6 @@ impl ConversationSqliteRepository {
             .map(|p| p.join("chatty").join("conversations.db"))
     }
 
-    /// Extract total_cost from a JSON-serialized token_usage string.
-    fn extract_total_cost(token_usage_json: &str) -> f64 {
-        serde_json::from_str::<serde_json::Value>(token_usage_json)
-            .ok()
-            .and_then(|v| {
-                v.get("total_estimated_cost_usd")
-                    .and_then(|c| c.as_f64())
-            })
-            .unwrap_or(0.0)
-    }
 }
 
 impl Clone for ConversationSqliteRepository {
@@ -189,7 +179,7 @@ impl ConversationRepository for ConversationSqliteRepository {
 
     fn save(&self, _id: &str, data: ConversationData) -> BoxFuture<'static, RepositoryResult<()>> {
         let pool = self.pool.clone();
-        let total_cost = Self::extract_total_cost(&data.token_usage);
+        let total_cost = data.total_cost();
         Box::pin(async move {
             sqlx::query(
                 "INSERT INTO conversations

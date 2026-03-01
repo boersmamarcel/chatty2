@@ -121,12 +121,20 @@ impl ConversationsStore {
 
     // ── Active conversation ───────────────────────────────────────────────────
 
-    /// Set the active conversation ID (does not require it to be loaded).
+    /// Set the active conversation ID unconditionally (does not validate against metadata).
+    ///
+    /// Use this when the conversation is known to exist — e.g., immediately after creating
+    /// or lazy-loading it, before the metadata list has been updated. Prefer `set_active`
+    /// when you want existence validation.
     pub fn set_active_by_id(&mut self, id: String) {
         self.active_conversation_id = Some(id);
     }
 
-    /// Set active only if the conversation exists in the metadata list.
+    /// Set active only if the conversation exists in the metadata list; returns false otherwise.
+    ///
+    /// Prefer this over `set_active_by_id` when the ID comes from an external source and
+    /// you want to guard against setting a stale or invalid active conversation.
+    #[allow(dead_code)]
     pub fn set_active(&mut self, id: String) -> bool {
         if self.metadata.iter().any(|m| m.id == id) {
             self.active_conversation_id = Some(id);
@@ -142,6 +150,7 @@ impl ConversationsStore {
     }
 
     /// Clear the active conversation.
+    #[allow(dead_code)]
     pub fn clear_active(&mut self) {
         self.active_conversation_id = None;
     }

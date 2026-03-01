@@ -16,7 +16,7 @@ use crate::chatty::models::{
     StreamManagerEvent, StreamStatus,
 };
 use crate::chatty::repositories::{
-    ConversationData, ConversationRepository, ConversationSqliteRepository,
+    ConversationData, ConversationRepository,
 };
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
@@ -51,20 +51,11 @@ pub struct ChattyApp {
 }
 
 impl ChattyApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, conversation_repo: Arc<dyn ConversationRepository>) -> Self {
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
             cx.set_global(ConversationsStore::new());
         }
-
-        // Create repository — SQLite pool init is async, so block briefly on startup.
-        // This is safe because we are in GPUI's sync context with the Tokio runtime entered
-        // (but not inside an async task), so block_on will not deadlock.
-        let conversation_repo: Arc<dyn ConversationRepository> = Arc::new(
-            tokio::runtime::Handle::current()
-                .block_on(ConversationSqliteRepository::new())
-                .expect("Failed to create SQLite conversation repository"),
-        );
 
         // Create views
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
@@ -365,7 +356,7 @@ impl ChattyApp {
                     cx.update_global::<ConversationsStore, _>(|store, _| {
                         store.set_metadata(metadata);
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to store metadata"))
+                    .map_err(|e| debug!(error = ?e, "Failed to store metadata"))
                     .ok();
 
                     // Update sidebar immediately from metadata — no full conversation load needed
@@ -379,7 +370,7 @@ impl ChattyApp {
                             sidebar.set_total_count(total);
                             sidebar.set_active_conversation(None, cx);
                         })
-                        .map_err(|e| warn!(error = ?e, "Failed to update sidebar after metadata load"))
+                        .map_err(|e| debug!(error = ?e, "Failed to update sidebar after metadata load"))
                         .ok();
 
                     // Clear chat view so the first message creates a new conversation
@@ -389,7 +380,7 @@ impl ChattyApp {
                             view.clear_messages(cx);
                             cx.notify();
                         })
-                        .map_err(|e| warn!(error = ?e, "Failed to clear chat view on startup"))
+                        .map_err(|e| debug!(error = ?e, "Failed to clear chat view on startup"))
                         .ok();
 
                     if count == 0 {
@@ -406,7 +397,7 @@ impl ChattyApp {
                                 info!("App is now ready (initial conversation created)");
                                 cx.notify();
                             })
-                            .map_err(|e| warn!(error = ?e, "Failed to mark app ready after initial conversation"))
+                            .map_err(|e| debug!(error = ?e, "Failed to mark app ready after initial conversation"))
                             .ok();
                         }
                     } else {
@@ -434,7 +425,7 @@ impl ChattyApp {
                             info!("App is now ready (started after metadata load error)");
                             cx.notify();
                         })
-                        .map_err(|warn_e| warn!(error = ?warn_e, "Failed to mark app ready after load error"))
+                        .map_err(|warn_e| debug!(error = ?warn_e, "Failed to mark app ready after load error"))
                         .ok();
                     }
                 }
@@ -672,9 +663,7 @@ impl ChattyApp {
         // Mark as active in the store regardless of whether it is loaded
         cx.update_global::<ConversationsStore, _>(|store, _| {
             store.set_active_by_id(conv_id.clone());
-        })
-        .map_err(|e| warn!(error = ?e, "Failed to set active conversation"))
-        .ok();
+        });
 
         if cx.global::<ConversationsStore>().is_loaded(id) {
             // Fast path: full data already in memory
@@ -700,13 +689,11 @@ impl ChattyApp {
                         .await
                         {
                             Ok(conversation) => {
-                                cx.update_global::<ConversationsStore, _>(|store, _| {
-                                    store.insert_loaded(conversation);
-                                })?;
-
-                                // Only display if this is still the active conversation
+                                // Insert and check active state atomically to avoid a TOCTOU
+                                // where the user switches conversations between the insert and check.
                                 let is_still_active = cx
                                     .update_global::<ConversationsStore, _>(|store, _| {
+                                        store.insert_loaded(conversation);
                                         store.active_id().map(|id| id == &conv_id).unwrap_or(false)
                                     })
                                     .unwrap_or(false);
@@ -885,7 +872,7 @@ impl ChattyApp {
             let result = create_task.await;
             if let Some(app) = weak.upgrade() {
                 app.update(cx, |app, _cx| app.active_create_task = None)
-                    .map_err(|e| warn!(error = ?e, "Failed to clear active_create_task"))
+                    .map_err(|e| debug!(error = ?e, "Failed to clear active_create_task"))
                     .ok();
             }
             result
@@ -1366,7 +1353,7 @@ impl ChattyApp {
                                             mgr.set_pending_artifacts(&id, arts);
                                         }
                                     })
-                                    .map_err(|e| warn!(error = ?e, "Failed to promote pending stream"))
+                                    .map_err(|e| debug!(error = ?e, "Failed to promote pending stream"))
                                     .ok();
                                 }
                                 id
@@ -1379,7 +1366,7 @@ impl ChattyApp {
                                     sm.update(cx, |mgr, cx| {
                                         mgr.cancel_pending(cx);
                                     })
-                                    .map_err(|e| warn!(error = ?e, "Failed to cancel pending stream on error"))
+                                    .map_err(|e| debug!(error = ?e, "Failed to cancel pending stream on error"))
                                     .ok();
                                 }
 
@@ -1407,7 +1394,7 @@ impl ChattyApp {
                 // This ensures the new conversation appears immediately
                 sidebar.update(cx, |_sidebar, cx| {
                     cx.notify();
-                }).map_err(|e| warn!(error = ?e, "Failed to refresh sidebar after creating conversation"))
+                }).map_err(|e| debug!(error = ?e, "Failed to refresh sidebar after creating conversation"))
                 .ok();
 
                 // Extract agent, history, model_id, and capabilities synchronously
@@ -2191,7 +2178,7 @@ impl ChattyApp {
 
         if let Some(conv_data) = conv_data_opt {
             // Update metadata so title and cost changes are reflected in the sidebar
-            let total_cost = extract_total_cost_from_token_usage(&conv_data.token_usage);
+            let total_cost = conv_data.total_cost();
             cx.update_global::<ConversationsStore, _>(|store, _| {
                 store.upsert_metadata(&conv_data.id, &conv_data.title, total_cost, conv_data.updated_at);
             });
@@ -2440,16 +2427,6 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
     })
 }
 
-/// Extract the `total_estimated_cost_usd` field from a JSON-serialized token usage string.
-fn extract_total_cost_from_token_usage(token_usage_json: &str) -> f64 {
-    serde_json::from_str::<serde_json::Value>(token_usage_json)
-        .ok()
-        .and_then(|v| {
-            v.get("total_estimated_cost_usd")
-                .and_then(|c| c.as_f64())
-        })
-        .unwrap_or(0.0)
-}
 
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
