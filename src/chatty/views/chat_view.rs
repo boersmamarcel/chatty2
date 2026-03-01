@@ -855,16 +855,25 @@ impl ChatView {
                             .get(idx)
                             .and_then(|t| t.as_ref())
                             .and_then(|trace_json| {
-                                serde_json::from_value::<super::message_types::SystemTrace>(
+                                match serde_json::from_value::<super::message_types::SystemTrace>(
                                     trace_json.clone(),
-                                )
-                                .ok()
-                                .filter(|trace| trace.has_items())
-                                .map(|trace| {
-                                    cx.new(|_cx| {
-                                        super::trace_components::SystemTraceView::new(trace)
-                                    })
-                                })
+                                ) {
+                                    Ok(trace) if trace.has_items() => {
+                                        Some(cx.new(|_cx| {
+                                            super::trace_components::SystemTraceView::new(trace)
+                                        }))
+                                    }
+                                    Ok(_) => None, // trace exists but has no items
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            idx,
+                                            error = ?e,
+                                            json_preview = %format!("{:.200}", trace_json),
+                                            "Failed to deserialize SystemTrace in load_history"
+                                        );
+                                        None
+                                    }
+                                }
                             });
 
                     let attachments = attachment_paths.get(idx).cloned().unwrap_or_default();

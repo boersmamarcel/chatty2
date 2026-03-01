@@ -1747,7 +1747,13 @@ impl ChattyApp {
         // Extract trace before stopping (only if conversation is displayed)
         let trace_json = self.chat_view.update(cx, |view, _cx| {
             view.extract_current_trace()
-                .and_then(|trace| serde_json::to_value(&trace).ok())
+                .and_then(|trace| match serde_json::to_value(&trace) {
+                    Ok(val) => Some(val),
+                    Err(e) => {
+                        error!(error = ?e, "Failed to serialize trace in stop_stream");
+                        None
+                    }
+                })
         });
 
         // Set trace on StreamManager so it's included in the StreamEnded event
@@ -1810,13 +1816,14 @@ impl ChattyApp {
                         .streaming_message()
                         .cloned()
                         .unwrap_or_default();
-                    conv.finalize_response(response_text, artifact_paths);
-                    conv.add_trace(trace_json);
+                    let has_trace = trace_json.is_some();
+                    conv.finalize_response(response_text, artifact_paths, trace_json);
                     let msg_count = conv.message_count();
+                    let traces_len = conv.system_traces().len();
                     // The assistant message was just pushed; its index is msg_count - 1
                     let assistant_idx = msg_count.saturating_sub(1);
                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
-                    debug!(conv_id = %conv_id, msg_count, should_gen, "Response finalized in conversation");
+                    debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
                     (should_gen, Some(assistant_idx))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
@@ -1987,8 +1994,7 @@ impl ChattyApp {
         let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 let partial_text = conv.streaming_message().cloned().unwrap_or_default();
-                conv.finalize_response(partial_text, Vec::new());
-                conv.add_trace(trace_json);
+                conv.finalize_response(partial_text, Vec::new(), trace_json);
                 conv.set_streaming_message(None);
                 let idx = conv.message_count().saturating_sub(1);
                 debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
@@ -2196,6 +2202,13 @@ impl ChattyApp {
                 );
             });
 
+            debug!(
+                conv_id = %conv_id,
+                traces_json_len = conv_data.system_traces.len(),
+                history_json_len = conv_data.message_history.len(),
+                "Persisting conversation data"
+            );
+
             let conv_id_for_save = conv_id.clone();
             cx.spawn(async move |_, _cx| {
                 if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
@@ -2206,6 +2219,8 @@ impl ChattyApp {
                 Ok::<_, anyhow::Error>(())
             })
             .detach();
+        } else {
+            error!(conv_id = %conv_id, "Failed to build conversation data for persistence (serialization failed)");
         }
     }
 
@@ -2403,8 +2418,20 @@ impl ChattyApp {
 /// Sets `updated_at` to the current time; all other timestamps are taken from the
 /// conversation itself.
 fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
-    let history = conv.serialize_history().ok()?;
-    let traces = conv.serialize_traces().ok()?;
+    let history = match conv.serialize_history() {
+        Ok(h) => h,
+        Err(e) => {
+            error!(conv_id = %conv.id(), error = ?e, "Failed to serialize history in build_conversation_data");
+            return None;
+        }
+    };
+    let traces = match conv.serialize_traces() {
+        Ok(t) => t,
+        Err(e) => {
+            error!(conv_id = %conv.id(), error = ?e, "Failed to serialize traces in build_conversation_data");
+            return None;
+        }
+    };
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
@@ -2599,7 +2626,16 @@ async fn run_llm_stream(
     let trace_json = chat_view
         .update(cx, |view, _cx| view.extract_current_trace())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?
-        .and_then(|trace| serde_json::to_value(&trace).ok());
+        .and_then(|trace| match serde_json::to_value(&trace) {
+            Ok(val) => {
+                debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
+                Some(val)
+            }
+            Err(e) => {
+                error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
+                None
+            }
+        });
 
     if let Some(ref sm) = stream_manager {
         sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
