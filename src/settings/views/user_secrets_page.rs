@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
-    setting::{SettingField, SettingGroup, SettingItem, SettingPage},
+    setting::{SettingGroup, SettingItem, SettingPage},
     v_flex,
 };
 use gpui_component::{Icon, IconName};
@@ -304,30 +304,26 @@ pub fn user_secrets_page() -> SettingPage {
                  session. The AI can use the variable names in scripts but never sees the \
                  actual values.",
                 )
-                .items(vec![SettingItem::new(
-                    "",
-                    SettingField::render(|_options, window, cx| {
-                        let view = if let Some(existing) = cx.try_global::<GlobalSecretsTableView>()
-                        {
-                            if let Some(view) = existing.view.clone() {
-                                view
-                            } else {
-                                let new_view = cx.new(|cx| SecretsTableView::new(window, cx));
-                                cx.set_global(GlobalSecretsTableView {
-                                    view: Some(new_view.clone()),
-                                });
-                                new_view
-                            }
+                .items(vec![SettingItem::render(|_options, window, cx| {
+                    let view = if let Some(existing) = cx.try_global::<GlobalSecretsTableView>() {
+                        if let Some(view) = existing.view.clone() {
+                            view
                         } else {
                             let new_view = cx.new(|cx| SecretsTableView::new(window, cx));
                             cx.set_global(GlobalSecretsTableView {
                                 view: Some(new_view.clone()),
                             });
                             new_view
-                        };
+                        }
+                    } else {
+                        let new_view = cx.new(|cx| SecretsTableView::new(window, cx));
+                        cx.set_global(GlobalSecretsTableView {
+                            view: Some(new_view.clone()),
+                        });
+                        new_view
+                    };
 
-                        div().size_full().child(view).into_any_element()
-                    }),
-                )]),
+                    div().w_full().child(view)
+                })]),
         ])
 }
