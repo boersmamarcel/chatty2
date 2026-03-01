@@ -32,6 +32,16 @@ fn default_empty_regeneration_records() -> String {
     "[]".to_string()
 }
 
+/// Lightweight conversation metadata used for the sidebar.
+/// Loaded at startup without deserializing full message history.
+#[derive(Debug, Clone)]
+pub struct ConversationMetadata {
+    pub id: String,
+    pub title: String,
+    pub total_cost: f64,
+    pub updated_at: i64,
+}
+
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationData {
@@ -54,9 +64,26 @@ pub struct ConversationData {
     pub updated_at: i64, // Unix timestamp
 }
 
+impl ConversationData {
+    /// Extract `total_estimated_cost_usd` from the JSON-serialized `token_usage` field.
+    pub fn total_cost(&self) -> f64 {
+        serde_json::from_str::<serde_json::Value>(&self.token_usage)
+            .ok()
+            .and_then(|v| v.get("total_estimated_cost_usd").and_then(|c| c.as_f64()))
+            .unwrap_or(0.0)
+    }
+}
+
 /// Repository trait for conversation persistence
 pub trait ConversationRepository: Send + Sync + 'static {
-    /// Load all conversations from storage
+    /// Load lightweight metadata for all conversations (fast — no message deserialization)
+    fn load_metadata(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationMetadata>>>;
+
+    /// Load full data for a single conversation by ID
+    fn load_one(&self, id: &str) -> BoxFuture<'static, RepositoryResult<Option<ConversationData>>>;
+
+    /// Load all conversations from storage (kept for compatibility/export use cases)
+    #[allow(dead_code)]
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationData>>>;
 
     /// Save a conversation to storage

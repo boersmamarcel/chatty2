@@ -11,6 +11,9 @@ pub enum RepositoryError {
 
     #[error("Repository initialization failed: {message}")]
     InitializationError { message: String },
+
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] sqlx::Error),
 }
 
 pub type RepositoryResult<T> = Result<T, RepositoryError>;

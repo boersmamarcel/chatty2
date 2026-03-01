@@ -12,6 +12,7 @@ mod settings;
 
 use assets::ChattyAssets;
 use auto_updater::AutoUpdater;
+use chatty::repositories::{ConversationRepository, ConversationSqliteRepository};
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use settings::repositories::{
@@ -406,6 +407,14 @@ fn main() {
     // Enter the runtime context for the entire application
     // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
+
+    // Initialize the SQLite conversation repository here, where the Tokio runtime is
+    // explicitly set up, so the block_on call is clearly safe and in a known context.
+    let conversation_repo: Arc<dyn ConversationRepository> = Arc::new(
+        _tokio_runtime
+            .block_on(ConversationSqliteRepository::new())
+            .expect("Failed to create SQLite conversation repository"),
+    );
 
     let app = Application::new()
         .with_assets(gpui_component_assets::Assets)
@@ -911,8 +920,9 @@ fn main() {
         // Get platform-specific window options for main window
         let options = settings::utils::window_utils::get_main_window_options();
 
+        let repo = conversation_repo.clone();
         cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| ChattyApp::new(window, cx));
+            let view = cx.new(|cx| ChattyApp::new(window, cx, repo.clone()));
 
             cx.new(|cx| Root::new(view, window, cx))
         })

@@ -15,9 +15,7 @@ use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamChunk,
     StreamManagerEvent, StreamStatus,
 };
-use crate::chatty::repositories::{
-    ConversationData, ConversationJsonRepository, ConversationRepository,
-};
+use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
@@ -51,16 +49,15 @@ pub struct ChattyApp {
 }
 
 impl ChattyApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        conversation_repo: Arc<dyn ConversationRepository>,
+    ) -> Self {
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
             cx.set_global(ConversationsStore::new());
         }
-
-        // Create repository
-        let conversation_repo: Arc<dyn ConversationRepository> = Arc::new(
-            ConversationJsonRepository::new().expect("Failed to create conversation repository"),
-        );
 
         // Create views
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
@@ -151,17 +148,7 @@ impl ChattyApp {
                     sidebar.update(cx, |sidebar, cx| {
                         let store = cx.global::<ConversationsStore>();
                         let total = store.count();
-                        let convs = store
-                            .list_recent(sidebar.visible_limit())
-                            .iter()
-                            .map(|c| {
-                                (
-                                    c.id().to_string(),
-                                    c.title().to_string(),
-                                    Some(c.token_usage().total_estimated_cost_usd),
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        let convs = store.list_recent_metadata(sidebar.visible_limit());
                         debug!(
                             conv_count = convs.len(),
                             total = total,
@@ -352,148 +339,82 @@ impl ChattyApp {
         .await
     }
 
-    /// Load all conversations from disk
+    /// Load conversation metadata at startup (fast — no message deserialization).
+    ///
+    /// Only loads lightweight id/title/cost metadata for the sidebar. Full conversation
+    /// data is loaded lazily when the user selects a conversation.
     fn load_conversations(&self, cx: &mut Context<Self>) {
         let repo = self.conversation_repo.clone();
         let sidebar = self.sidebar_view.clone();
         let chat_view = self.chat_view.clone();
 
         cx.spawn(async move |weak, cx| {
-            match repo.load_all().await {
-                Ok(conversation_data) => {
-                    info!(count = conversation_data.len(), "Loaded conversation files");
+            match repo.load_metadata().await {
+                Ok(metadata) => {
+                    let count = metadata.len();
+                    info!(count = count, "Loaded conversation metadata");
 
-                    // Get global stores (need to access them in async context)
-                    let models_result =
-                        cx.update_global::<ModelsModel, _>(|models, _| models.clone());
-                    let providers_result =
-                        cx.update_global::<ProviderModel, _>(|providers, _| providers.clone());
-                    let mcp_service_result =
-                        cx.update_global::<crate::chatty::services::McpService, _>(|svc, _| svc.clone());
-                    let exec_settings_result =
-                        cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|settings, _| settings.clone());
-                    let pending_approvals_result =
-                        cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|store, _| store.get_pending_approvals());
-                    let pending_write_approvals_result =
-                        cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|store, _| store.get_pending_approvals());
-                    let user_secrets_result =
-                        cx.update_global::<crate::settings::models::UserSecretsModel, _>(|model, _| model.as_env_pairs());
+                    // Store metadata in the global store
+                    cx.update_global::<ConversationsStore, _>(|store, _| {
+                        store.set_metadata(metadata);
+                    })
+                    .map_err(|e| debug!(error = ?e, "Failed to store metadata"))
+                    .ok();
 
-                    match (models_result, providers_result, mcp_service_result, exec_settings_result, pending_approvals_result, pending_write_approvals_result) {
-                        (Ok(models), Ok(providers), Ok(mcp_service), Ok(exec_settings), Ok(pending_approvals), Ok(pending_write_approvals)) => {
-                            let user_secrets = user_secrets_result.unwrap_or_default();
-                            let mut restored_count = 0;
-                            let mut failed_count = 0;
+                    // Update sidebar immediately from metadata — no full conversation load needed
+                    sidebar
+                        .update(cx, |sidebar, cx| {
+                            let store = cx.global::<ConversationsStore>();
+                            let total = store.count();
+                            let convs = store.list_recent_metadata(sidebar.visible_limit());
+                            debug!(conv_count = convs.len(), total = total, "Metadata loaded, updating sidebar");
+                            sidebar.set_conversations(convs, cx);
+                            sidebar.set_total_count(total);
+                            sidebar.set_active_conversation(None, cx);
+                        })
+                        .map_err(|e| debug!(error = ?e, "Failed to update sidebar after metadata load"))
+                        .ok();
 
-                            // Reconstruct each conversation
-                            for data in conversation_data {
-                                let conv_id = data.id.clone();
+                    // Clear chat view so the first message creates a new conversation
+                    chat_view
+                        .update(cx, |view, cx| {
+                            view.set_conversation_id(String::new(), cx);
+                            view.clear_messages(cx);
+                            cx.notify();
+                        })
+                        .map_err(|e| debug!(error = ?e, "Failed to clear chat view on startup"))
+                        .ok();
 
-                                match Self::restore_conversation_from_data(
-                                    data, &models, &providers, &mcp_service, &exec_settings, pending_approvals.clone(), pending_write_approvals.clone(), user_secrets.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(conversation) => {
-                                        // Add to global store
-                                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                            store.add_conversation(conversation);
-                                        })
-                                        .map_err(|e| warn!(error = ?e, "Failed to add restored conversation to store"))
-                                        .ok();
-
-                                        restored_count += 1;
-                                        info!(conv_id = %conv_id, "Restored conversation");
-                                    }
-                                    Err(e) => {
-                                        failed_count += 1;
-                                        warn!(conv_id = %conv_id, error = ?e, "Failed to restore conversation");
-                                    }
-                                }
+                    if count == 0 {
+                        // No conversations yet — create the first one
+                        info!("No conversations on disk, creating initial conversation");
+                        if let Some(app) = weak.upgrade() {
+                            let task_result =
+                                app.update(cx, |app, cx| app.create_new_conversation(cx));
+                            if let Ok(task) = task_result {
+                                let _ = task.await;
                             }
-
-                            info!(restored = restored_count, failed = failed_count, "Conversation load summary");
-
-                            // Clear the active conversation in the store
-                            // This is necessary because add_conversation() auto-sets the first one as active
-                            // We want no active conversation so the first message creates a NEW conversation
-                            cx.update_global::<ConversationsStore, _>(|store, _| {
-                                debug!(active_before = ?store.active_id(), "Clearing active conversation after load");
-                                store.clear_active();
-                                debug!("Active conversation cleared");
-                            }).map_err(|e| warn!(error = ?e, "Failed to clear active conversation"))
+                            app.update(cx, |app, cx| {
+                                app.is_ready = true;
+                                info!("App is now ready (initial conversation created)");
+                                cx.notify();
+                            })
+                            .map_err(|e| debug!(error = ?e, "Failed to mark app ready after initial conversation"))
                             .ok();
-
-                            // Update sidebar with recent conversations (OPTIMIZATION: only top N)
-                            sidebar
-                                .update(cx, |sidebar, cx| {
-                                    let store = cx.global::<ConversationsStore>();
-                                    let total = store.count();
-                                    let convs = store
-                                        .list_recent(sidebar.visible_limit())
-                                        .iter()
-                                        .map(|c| (c.id().to_string(), c.title().to_string(), Some(c.token_usage().total_estimated_cost_usd)))
-                                        .collect::<Vec<_>>();
-                                    debug!(conv_count = convs.len(), total = total, "Loaded conversations, updating sidebar");
-                                    sidebar.set_conversations(convs, cx);
-                                    sidebar.set_total_count(total);
-
-                                    // Don't set any conversation as active on startup
-                                    // This ensures the first message creates a NEW conversation
-                                    sidebar.set_active_conversation(None, cx);
-                                })
-                                .map_err(|e| warn!(error = ?e, "Failed to update sidebar after load"))
-                                .ok();
-
-                            // Don't set any conversation as active in the store or chat view
-                            // This ensures when the user sends the first message, a new conversation is created
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    view.set_conversation_id(String::new(), cx);
-                                    view.clear_messages(cx);
-                                    cx.notify();
-                                })
-                                .map_err(|e| warn!(error = ?e, "Failed to clear chat view on startup"))
-                                .ok();
-
-                            // If no conversations existed on disk, create the first one now.
-                            // This is the only place where an initial conversation should be
-                            // created — after we've confirmed disk has nothing, not before.
-                            if restored_count == 0 {
-                                info!("No conversations on disk, creating initial conversation");
-                                if let Some(app) = weak.upgrade() {
-                                    let task_result =
-                                        app.update(cx, |app, cx| app.create_new_conversation(cx));
-                                    if let Ok(task) = task_result {
-                                        let _ = task.await;
-                                    }
-                                    // Mark app as ready after initial conversation is created
-                                    app.update(cx, |app, cx| {
-                                        app.is_ready = true;
-                                        info!("App is now ready (initial conversation created)");
-                                        cx.notify();
-                                    })
-                                    .map_err(|e| warn!(error = ?e, "Failed to mark app ready after initial conversation"))
-                                    .ok();
-                                }
-                            } else {
-                                // Mark app as ready
-                                if let Some(app) = weak.upgrade() {
-                                    let _: Result<(), _> = app.update(cx, |app, cx| {
-                                        app.is_ready = true;
-                                        info!("App is now ready (conversations loaded)");
-                                        cx.notify();
-                                    });
-                                }
-                            }
                         }
-                        _ => {
-                            error!("Failed to access global stores");
+                    } else {
+                        // Conversations exist — app is ready; full data loaded on demand
+                        if let Some(app) = weak.upgrade() {
+                            let _: Result<(), _> = app.update(cx, |app, cx| {
+                                app.is_ready = true;
+                                info!("App is now ready (metadata loaded, conversations loaded on demand)");
+                                cx.notify();
+                            });
                         }
                     }
                 }
                 Err(e) => {
-                    error!(error = ?e, "Failed to load conversation files");
+                    error!(error = ?e, "Failed to load conversation metadata");
                     // Still create an initial conversation so the app is usable
                     if let Some(app) = weak.upgrade() {
                         let task_result =
@@ -501,13 +422,12 @@ impl ChattyApp {
                         if let Ok(task) = task_result {
                             let _ = task.await;
                         }
-                        // Mark app as ready so messages can be sent despite load error
                         app.update(cx, |app, cx| {
                             app.is_ready = true;
-                            info!("App is now ready (started after load error)");
+                            info!("App is now ready (started after metadata load error)");
                             cx.notify();
                         })
-                        .map_err(|warn_e| warn!(error = ?warn_e, "Failed to mark app ready after load error"))
+                        .map_err(|warn_e| debug!(error = ?warn_e, "Failed to mark app ready after load error"))
                         .ok();
                     }
                 }
@@ -595,24 +515,21 @@ impl ChattyApp {
                     });
                 });
 
-                // Update sidebar immediately with the new conversation entry
+                // Update sidebar immediately with the new conversation entry (placeholder)
+                // Also insert a metadata entry so the count and list are correct
+                let now_ts = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                cx.update_global::<ConversationsStore, _>(|store, _| {
+                    store.upsert_metadata(&conv_id, &title, 0.0, now_ts);
+                    store.set_active_by_id(conv_id.clone());
+                });
                 sidebar.update(cx, |sidebar, cx| {
                     let store = cx.global::<ConversationsStore>();
                     let total = store.count();
-                    let mut convs: Vec<(String, String, Option<f64>)> = store
-                        .list_recent(sidebar.visible_limit())
-                        .iter()
-                        .map(|c| {
-                            (
-                                c.id().to_string(),
-                                c.title().to_string(),
-                                Some(c.token_usage().total_estimated_cost_usd),
-                            )
-                        })
-                        .collect();
+                    let convs = store.list_recent_metadata(sidebar.visible_limit());
                     sidebar.set_total_count(total);
-                    // Prepend the new conversation so it appears at the top
-                    convs.insert(0, (conv_id.clone(), title.clone(), Some(0.0)));
                     sidebar.set_conversations(convs, cx);
                     sidebar.set_active_conversation(Some(conv_id.clone()), cx);
                     debug!("Sidebar updated immediately with new conversation placeholder");
@@ -674,25 +591,15 @@ impl ChattyApp {
 
                     // PHASE 3: Add to global store and refresh sidebar with real data
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        store.add_conversation(conversation);
-                        store.set_active(conv_id.clone());
+                        store.insert_loaded(conversation);
+                        store.set_active_by_id(conv_id.clone());
                     })?;
 
-                    // Refresh sidebar with actual store data (replaces the placeholder)
+                    // Refresh sidebar — metadata was already inserted in PHASE 1 placeholder
                     sidebar.update(cx, |sidebar, cx| {
                         let store = cx.global::<ConversationsStore>();
                         let total = store.count();
-                        let convs = store
-                            .list_recent(sidebar.visible_limit())
-                            .iter()
-                            .map(|c| {
-                                (
-                                    c.id().to_string(),
-                                    c.title().to_string(),
-                                    Some(c.token_usage().total_estimated_cost_usd),
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        let convs = store.list_recent_metadata(sidebar.visible_limit());
                         sidebar.set_total_count(total);
                         debug!(
                             conv_count = convs.len(),
@@ -742,31 +649,99 @@ impl ChattyApp {
         }
     }
 
-    /// Load a conversation by ID
+    /// Load a conversation by ID.
+    ///
+    /// Fast path: if the conversation is already in memory, display it immediately.
+    /// Slow path: load full data from SQLite, restore it, then display.
     fn load_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
-        // No need to manually save streaming content - it's already in the Conversation model
-
-        // Set active in store
         let conv_id = id.to_string();
-        let chat_view = self.chat_view.clone();
         let sidebar = self.sidebar_view.clone();
 
-        // Update sidebar active state
+        // Update sidebar active state immediately
         sidebar.update(cx, |sidebar, cx| {
             sidebar.set_active_conversation(Some(conv_id.clone()), cx);
         });
 
-        // OPTIMIZATION: Set active and extract only minimal data (model_id, streaming_content)
-        // We'll access history/traces/attachments by reference later to avoid cloning
-        let minimal_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store.set_active(id.to_string());
-            store.get_conversation(id).map(|conv| {
+        // Mark as active in the store regardless of whether it is loaded
+        cx.update_global::<ConversationsStore, _>(|store, _| {
+            store.set_active_by_id(conv_id.clone());
+        });
+
+        if cx.global::<ConversationsStore>().is_loaded(id) {
+            // Fast path: full data already in memory
+            self.display_loaded_conversation(id, cx);
+        } else {
+            // Slow path: fetch from SQLite, restore, then display
+            let repo = self.conversation_repo.clone();
+            cx.spawn(async move |weak, cx| {
+                let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
+                let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
+                let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|s, _| s.clone())?;
+                let exec_settings = cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|s, _| s.clone())?;
+                let pending_approvals = cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|s, _| s.get_pending_approvals())?;
+                let pending_write_approvals = cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|s, _| s.get_pending_approvals())?;
+                let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
+
+                match repo.load_one(&conv_id).await {
+                    Ok(Some(data)) => {
+                        match Self::restore_conversation_from_data(
+                            data, &models, &providers, &mcp_service, &exec_settings,
+                            pending_approvals, pending_write_approvals, user_secrets,
+                        )
+                        .await
+                        {
+                            Ok(conversation) => {
+                                // Insert and check active state atomically to avoid a TOCTOU
+                                // where the user switches conversations between the insert and check.
+                                let is_still_active = cx
+                                    .update_global::<ConversationsStore, _>(|store, _| {
+                                        store.insert_loaded(conversation);
+                                        store.active_id().map(|id| id == &conv_id).unwrap_or(false)
+                                    })
+                                    .unwrap_or(false);
+
+                                if is_still_active
+                                    && let Some(app) = weak.upgrade()
+                                {
+                                    app.update(cx, |app, cx| {
+                                        app.display_loaded_conversation(&conv_id, cx);
+                                    })
+                                    .ok();
+                                }
+                            }
+                            Err(e) => {
+                                warn!(conv_id = %conv_id, error = ?e, "Failed to restore lazy-loaded conversation");
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        warn!(conv_id = %conv_id, "Conversation not found in DB during lazy load");
+                    }
+                    Err(e) => {
+                        warn!(conv_id = %conv_id, error = ?e, "Failed to load conversation from DB");
+                    }
+                }
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        }
+    }
+
+    /// Display a conversation that is already loaded in the ConversationsStore.
+    fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+        let chat_view = self.chat_view.clone();
+
+        let minimal_data = cx
+            .global::<ConversationsStore>()
+            .get_conversation(id)
+            .map(|conv| {
                 (
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                 )
-            })
-        });
+            });
 
         if let Some((model_id, streaming_content)) = minimal_data {
             // Check if this conversation has an active stream via StreamManager
@@ -799,7 +774,7 @@ impl ChattyApp {
                     .map(|conv| {
                         (
                             conv.history().to_vec(),
-                            conv.system_traces().to_vec(),  // Clones JSON values, not deserialized traces
+                            conv.system_traces().to_vec(),
                             conv.attachment_paths().to_vec(),
                             conv.message_feedback().to_vec(),
                         )
@@ -825,7 +800,6 @@ impl ChattyApp {
                     if let Some(content) = streaming_content {
                         debug!(conv_id = %conv_id, content_len = content.len(),
                                "Restoring streaming message content from Conversation model");
-                        // Start a new streaming message and populate it with content from model
                         view.start_assistant_message(cx);
                         view.append_assistant_text(&content, cx);
                     } else {
@@ -845,13 +819,11 @@ impl ChattyApp {
     pub fn navigate_conversation(&mut self, direction: i32, cx: &mut Context<Self>) {
         let store = cx.global::<ConversationsStore>();
         let current_id = store.active_id().cloned();
-        let conversations = store.list_recent(usize::MAX);
+        let conv_ids = store.all_metadata_ids();
 
-        if conversations.is_empty() {
+        if conv_ids.is_empty() {
             return;
         }
-
-        let conv_ids: Vec<String> = conversations.iter().map(|c| c.id().to_string()).collect();
 
         let target_id = if let Some(ref current) = current_id {
             if let Some(pos) = conv_ids.iter().position(|id| id == current) {
@@ -908,7 +880,7 @@ impl ChattyApp {
             let result = create_task.await;
             if let Some(app) = weak.upgrade() {
                 app.update(cx, |app, _cx| app.active_create_task = None)
-                    .map_err(|e| warn!(error = ?e, "Failed to clear active_create_task"))
+                    .map_err(|e| debug!(error = ?e, "Failed to clear active_create_task"))
                     .ok();
             }
             result
@@ -1255,17 +1227,7 @@ impl ChattyApp {
         sidebar.update(cx, |sidebar, cx| {
             let store = cx.global::<ConversationsStore>();
             let total = store.count();
-            let convs = store
-                .list_recent(sidebar.visible_limit())
-                .iter()
-                .map(|c| {
-                    (
-                        c.id().to_string(),
-                        c.title().to_string(),
-                        Some(c.token_usage().total_estimated_cost_usd),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let convs = store.list_recent_metadata(sidebar.visible_limit());
             sidebar.set_total_count(total);
 
             let active_id = cx
@@ -1399,7 +1361,7 @@ impl ChattyApp {
                                             mgr.set_pending_artifacts(&id, arts);
                                         }
                                     })
-                                    .map_err(|e| warn!(error = ?e, "Failed to promote pending stream"))
+                                    .map_err(|e| debug!(error = ?e, "Failed to promote pending stream"))
                                     .ok();
                                 }
                                 id
@@ -1412,7 +1374,7 @@ impl ChattyApp {
                                     sm.update(cx, |mgr, cx| {
                                         mgr.cancel_pending(cx);
                                     })
-                                    .map_err(|e| warn!(error = ?e, "Failed to cancel pending stream on error"))
+                                    .map_err(|e| debug!(error = ?e, "Failed to cancel pending stream on error"))
                                     .ok();
                                 }
 
@@ -1440,7 +1402,7 @@ impl ChattyApp {
                 // This ensures the new conversation appears immediately
                 sidebar.update(cx, |_sidebar, cx| {
                     cx.notify();
-                }).map_err(|e| warn!(error = ?e, "Failed to refresh sidebar after creating conversation"))
+                }).map_err(|e| debug!(error = ?e, "Failed to refresh sidebar after creating conversation"))
                 .ok();
 
                 // Extract agent, history, model_id, and capabilities synchronously
@@ -1935,31 +1897,29 @@ impl ChattyApp {
 
                             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 if let Some(conv) = store.get_conversation_mut(&conv_id_for_title) {
-                                    conv.set_title(new_title);
+                                    conv.set_title(new_title.clone());
                                 }
+                                // Compute cost separately to avoid simultaneous borrow
+                                let cost = store
+                                    .get_conversation(&conv_id_for_title)
+                                    .map(|c| c.token_usage().total_estimated_cost_usd)
+                                    .unwrap_or(0.0);
+                                let now_ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64;
+                                // Also update metadata so sidebar reflects the new title
+                                store.upsert_metadata(&conv_id_for_title, &new_title, cost, now_ts);
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
                             .ok();
 
-                            // Update sidebar with new title
+                            // Update sidebar with new title from metadata
                             sidebar_for_title
                                 .update(cx, |sidebar, cx| {
                                     let store = cx.global::<ConversationsStore>();
                                     let total = store.count();
-                                    let convs = store
-                                        .list_recent(sidebar.visible_limit())
-                                        .iter()
-                                        .map(|c| {
-                                            (
-                                                c.id().to_string(),
-                                                c.title().to_string(),
-                                                Some(
-                                                    c.token_usage()
-                                                        .total_estimated_cost_usd,
-                                                ),
-                                            )
-                                        })
-                                        .collect::<Vec<_>>();
+                                    let convs = store.list_recent_metadata(sidebar.visible_limit());
                                     sidebar.set_conversations(convs, cx);
                                     sidebar.set_total_count(total);
                                 })
@@ -2051,22 +2011,12 @@ impl ChattyApp {
         self.persist_conversation(&conv_id, cx);
     }
 
-    /// Refresh the sidebar with the latest conversation list from the store
+    /// Refresh the sidebar with the latest conversation list from the metadata store
     fn refresh_sidebar(&self, cx: &mut Context<Self>) {
         self.sidebar_view.update(cx, |sidebar, cx| {
             let store = cx.global::<ConversationsStore>();
             let total = store.count();
-            let convs = store
-                .list_recent(sidebar.visible_limit())
-                .iter()
-                .map(|c| {
-                    (
-                        c.id().to_string(),
-                        c.title().to_string(),
-                        Some(c.token_usage().total_estimated_cost_usd),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let convs = store.list_recent_metadata(sidebar.visible_limit());
             sidebar.set_conversations(convs, cx);
             sidebar.set_total_count(total);
         });
@@ -2222,7 +2172,8 @@ impl ChattyApp {
         }
     }
 
-    /// Persist a conversation to disk asynchronously
+    /// Persist a conversation to disk asynchronously.
+    /// Also updates the metadata store so the sidebar reflects the latest title and cost.
     fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
         let conv_id = conv_id.to_string();
         let repo = self.conversation_repo.clone();
@@ -2234,6 +2185,17 @@ impl ChattyApp {
         });
 
         if let Some(conv_data) = conv_data_opt {
+            // Update metadata so title and cost changes are reflected in the sidebar
+            let total_cost = conv_data.total_cost();
+            cx.update_global::<ConversationsStore, _>(|store, _| {
+                store.upsert_metadata(
+                    &conv_data.id,
+                    &conv_data.title,
+                    total_cost,
+                    conv_data.updated_at,
+                );
+            });
+
             let conv_id_for_save = conv_id.clone();
             cx.spawn(async move |_, _cx| {
                 if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {

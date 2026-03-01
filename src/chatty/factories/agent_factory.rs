@@ -673,19 +673,118 @@ impl AgentClient {
             mcp_tool_info,
         );
 
-        // Augment preamble with available secret key names so the LLM knows
-        // which environment variables are pre-loaded and can use them directly.
-        let preamble = if secret_key_names.is_empty() {
-            model_config.preamble.clone()
+        // Build a compact tool capability summary so the LLM knows what it can do
+        // from the very first turn — without requiring the user to ask or the model
+        // to call list_tools first.
+        let mut tool_sections: Vec<String> = Vec::new();
+
+        if fetch_tool.is_some() {
+            tool_sections
+                .push("- **fetch**: Fetch web URLs and return readable text content".to_string());
+        }
+        if shell_tools.is_some() {
+            tool_sections.push(
+                "- **shell_execute / shell_cd / shell_set_env / shell_status**: \
+                 Run any shell/terminal command in a persistent session that preserves \
+                 working directory and environment variables across calls. \
+                 Prefer this over asking the user to run commands manually."
+                    .to_string(),
+            );
+        }
+        if fs_read_tools.is_some() {
+            tool_sections.push(
+                "- **read_file / read_binary / list_directory / glob_search**: \
+                 Read files and explore the workspace directory."
+                    .to_string(),
+            );
+        }
+        if fs_write_tools.is_some() {
+            tool_sections.push(
+                "- **write_file / apply_diff / create_directory / delete_file / move_file**: \
+                 Create, edit, and manage files in the workspace. \
+                 Use apply_diff for targeted edits to existing files."
+                    .to_string(),
+            );
+        }
+        if search_tools.is_some() {
+            tool_sections.push(
+                "- **search_code / find_files / find_definition**: \
+                 Search for patterns, files, and symbol definitions in the workspace."
+                    .to_string(),
+            );
+        }
+        if git_tools.is_some() {
+            tool_sections.push(
+                "- **git_status / git_diff / git_log / git_add / git_commit / \
+                 git_create_branch / git_switch_branch**: \
+                 Inspect and manage git history and branches."
+                    .to_string(),
+            );
+        }
+        if add_attachment_tool.is_some() {
+            tool_sections.push(
+                "- **add_attachment**: Display an image or PDF inline in the chat response. \
+                 Useful for showing generated plots, screenshots, or documents."
+                    .to_string(),
+            );
+        }
+        if mcp_mgmt_tools.is_enabled() {
+            tool_sections.push(
+                "- **list_mcp_services / add_mcp_service / edit_mcp_service / delete_mcp_service**: \
+                 Manage MCP server configurations."
+                    .to_string(),
+            );
+        }
+        // Always present
+        tool_sections.push(
+            "- **list_tools**: Call this at any time to get the full, up-to-date list of \
+             available tools with their exact names and descriptions."
+                .to_string(),
+        );
+
+        let tool_summary = if tool_sections.is_empty() {
+            String::new()
         } else {
             format!(
-                "{}\n\nThe following environment variables with sensitive information are \
-                 pre-loaded in the shell session: {}. When generating code that needs \
-                 these values, access them directly (e.g., os.environ[\"KEY\"] in Python, \
-                 $KEY in bash). Do not ask the user to provide these values.",
-                model_config.preamble,
-                secret_key_names.join(", ")
+                "\n\n## Available Tools\n\
+                 You have access to the following tools. Use them proactively to help the user \
+                 instead of asking them to do things manually:\n\n{}",
+                tool_sections.join("\n")
             )
+        };
+
+        // Formatting capabilities the app always renders, regardless of tool settings.
+        let formatting_guide = "\n\n## Formatting Capabilities\n\
+             \n### Math (Typst/LaTeX)\n\
+             The app renders math expressions natively. Use any of these delimiters:\n\
+             - Inline math: `$...$` or `\\(...\\)` — e.g. `$E = mc^2$`\n\
+             - Block (display) math: `$$...$$` on its own line, `\\[...\\]`, or fenced blocks \
+             with ` ```math ` or ` ```latex `\n\
+             - LaTeX environments: `\\begin{equation}`, `\\begin{align}`, `\\begin{gather}`, \
+             `\\begin{matrix}`, `\\begin{cases}`, and all standard starred variants\n\
+             Math is compiled via MiTeX → Typst → SVG and cached; use standard LaTeX notation freely.\n\
+             \n### Thinking / Reasoning\n\
+             Wrap internal reasoning in `<thinking>...</thinking>` or `<think>...</think>` tags. \
+             The app renders these as a visually distinct, collapsible block so the user can inspect \
+             your reasoning without it cluttering the main response. \
+             Use thinking blocks for multi-step reasoning, planning, or working through a problem \
+             before giving a final answer.";
+
+        // Augment preamble with tool summary, formatting guide, and available secret key names.
+        let preamble = {
+            let mut p = model_config.preamble.clone();
+            p.push_str(&tool_summary);
+            p.push_str(formatting_guide);
+            if !secret_key_names.is_empty() {
+                p.push_str(&format!(
+                    "\n\nThe following environment variables with sensitive information are \
+                     pre-loaded in the shell session: {}. When generating code that needs \
+                     these values, access them directly (e.g., os.environ[\"KEY\"] in Python, \
+                     $KEY in bash). Do not ask the user to provide these values.",
+                    secret_key_names.join(", ")
+                ));
+            }
+            p
         };
 
         match &provider_config.provider_type {

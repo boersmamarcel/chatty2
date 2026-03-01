@@ -42,6 +42,8 @@ pub enum CustomIcon {
     Wrench,        // wrench.svg - Filesystem tools indicator
     Earth,         // earth.svg - Fetch tool online/offline toggle
     Codesandbox,   // codesandbox.svg - Network isolation (sandbox) toggle
+    Brain,         // brain.svg - Thinking block header
+    Paperclip,     // paperclip.svg - Non-image attachment
 }
 
 impl IconNamed for CustomIcon {
@@ -60,6 +62,8 @@ impl IconNamed for CustomIcon {
             CustomIcon::Wrench => "icons/wrench.svg",
             CustomIcon::Earth => "icons/earth.svg",
             CustomIcon::Codesandbox => "icons/codesandbox.svg",
+            CustomIcon::Brain => "icons/brain.svg",
+            CustomIcon::Paperclip => "icons/paperclip.svg",
         }
         .into()
     }

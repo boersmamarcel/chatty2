@@ -3,7 +3,7 @@ use crate::settings::models::GeneralSettingsModel;
 use crate::settings::utils::find_theme_variant;
 use gpui::{App, AsyncApp, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeRegistry};
-use tracing::{error, warn};
+use tracing::{error, info};
 
 /// Update font size and persist to disk
 pub fn update_font_size(cx: &mut App, font_size: f32) {
@@ -41,6 +41,6 @@ pub fn update_theme(cx: &mut App, base_theme_name: SharedString) {
         Theme::global_mut(cx).apply_config(&theme);
         cx.refresh_windows();
     } else {
-        warn!(theme_name = %full_theme_name, "Theme not found");
+        info!(theme_name = %full_theme_name, "Theme not found, keeping current theme");
     }
 }

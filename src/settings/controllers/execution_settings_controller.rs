@@ -2,7 +2,7 @@ use crate::EXECUTION_SETTINGS_REPOSITORY;
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info};
 
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the current execution tool settings (bash, filesystem, MCP management).
@@ -17,7 +17,7 @@ fn notify_tool_set_changed(cx: &mut App) {
             cx.emit(AgentConfigEvent::RebuildRequired);
         });
     } else {
-        warn!(
+        debug!(
             "notify_tool_set_changed: GlobalAgentConfigNotifier not found — agent will not be rebuilt"
         );
     }
