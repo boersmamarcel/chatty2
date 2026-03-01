@@ -487,6 +487,46 @@ fn extract_attachment_path(tool_call: &super::message_types::ToolCallBlock) -> O
     Some(PathBuf::from(path_str))
 }
 
+/// Render a text segment, handling any embedded `<thinking>` blocks within it.
+///
+/// Used by `render_interleaved_content` so that thinking tags are displayed
+/// correctly even when tool calls are also present (i.e. `should_interleave = true`).
+fn render_text_segment_with_thinking(
+    text: &str,
+    is_markdown: bool,
+    is_streaming: bool,
+    index: usize,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let segments = parse_content_segments(text);
+    let has_thinking = segments
+        .iter()
+        .any(|s| matches!(s, ContentSegment::Thinking(_)));
+
+    if has_thinking {
+        segments
+            .iter()
+            .enumerate()
+            .flat_map(|(seg_idx, segment)| match segment {
+                ContentSegment::Thinking(content) => {
+                    vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
+                }
+                ContentSegment::Text(text) => {
+                    if is_markdown && !is_streaming {
+                        render_content_with_code_blocks(text, index * 100 + seg_idx, cx)
+                    } else {
+                        vec![div().child(text.clone()).into_any_element()]
+                    }
+                }
+            })
+            .collect()
+    } else if is_markdown && !is_streaming {
+        render_content_with_code_blocks(text, index, cx)
+    } else {
+        vec![div().child(text.to_string()).into_any_element()]
+    }
+}
+
 /// Render interleaved content: text segments mixed with tool calls
 fn render_interleaved_content<F>(
     msg: &DisplayMessage,
@@ -509,13 +549,15 @@ where
         .unwrap_or_default();
 
     if trace_items.is_empty() {
-        // No tool calls, just render content normally
-        if msg.is_markdown && !msg.is_streaming {
-            let content_elements = render_content_with_code_blocks(&msg.content, index, cx);
-            return container.children(content_elements);
-        } else {
-            return container.child(msg.content.clone());
-        }
+        // No tool calls, but still handle any thinking blocks in the content
+        let elements = render_text_segment_with_thinking(
+            &msg.content,
+            msg.is_markdown,
+            msg.is_streaming,
+            index,
+            cx,
+        );
+        return container.children(elements);
     }
 
     // Track position in message content
@@ -540,16 +582,14 @@ where
             if text_before.len() > last_text_end {
                 let text_segment = &text_before[last_text_end..];
                 if !text_segment.is_empty() {
-                    if msg.is_markdown && !msg.is_streaming {
-                        let text_elements = render_content_with_code_blocks(
-                            text_segment,
-                            index * 100 + tool_idx,
-                            cx,
-                        );
-                        container = container.children(text_elements);
-                    } else {
-                        container = container.child(div().child(text_segment.to_string()));
-                    }
+                    let elements = render_text_segment_with_thinking(
+                        text_segment,
+                        msg.is_markdown,
+                        msg.is_streaming,
+                        index * 100 + tool_idx,
+                        cx,
+                    );
+                    container = container.children(elements);
                 }
                 last_text_end = text_before.len();
             }
@@ -599,13 +639,14 @@ where
     if last_text_end < full_content.len() {
         let remaining_text = &full_content[last_text_end..];
         if !remaining_text.is_empty() {
-            if msg.is_markdown && !msg.is_streaming {
-                let text_elements =
-                    render_content_with_code_blocks(remaining_text, index * 1000, cx);
-                container = container.children(text_elements);
-            } else {
-                container = container.child(div().child(remaining_text.to_string()));
-            }
+            let elements = render_text_segment_with_thinking(
+                remaining_text,
+                msg.is_markdown,
+                msg.is_streaming,
+                index * 1000,
+                cx,
+            );
+            container = container.children(elements);
         }
     }
 
