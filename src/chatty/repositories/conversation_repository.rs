@@ -32,6 +32,16 @@ fn default_empty_regeneration_records() -> String {
     "[]".to_string()
 }
 
+/// Lightweight conversation metadata used for the sidebar.
+/// Loaded at startup without deserializing full message history.
+#[derive(Debug, Clone)]
+pub struct ConversationMetadata {
+    pub id: String,
+    pub title: String,
+    pub total_cost: f64,
+    pub updated_at: i64,
+}
+
 /// Serializable conversation data for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationData {
@@ -56,7 +66,13 @@ pub struct ConversationData {
 
 /// Repository trait for conversation persistence
 pub trait ConversationRepository: Send + Sync + 'static {
-    /// Load all conversations from storage
+    /// Load lightweight metadata for all conversations (fast — no message deserialization)
+    fn load_metadata(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationMetadata>>>;
+
+    /// Load full data for a single conversation by ID
+    fn load_one(&self, id: &str) -> BoxFuture<'static, RepositoryResult<Option<ConversationData>>>;
+
+    /// Load all conversations from storage (kept for compatibility/export use cases)
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationData>>>;
 
     /// Save a conversation to storage
