@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 
 use super::math_parser::MathSegment;
 use super::syntax_highlighter::HighlightedSpan;
@@ -40,6 +41,12 @@ pub enum CachedMarkdownSegment {
     IncompleteCodeBlock {
         language: Option<String>,
         code: String,
+    },
+    /// Rendered Mermaid diagram with pre-computed SVG path.
+    /// `svg_path` is None if rendering failed (falls back to raw source display).
+    MermaidDiagram {
+        source: String,
+        svg_path: Option<PathBuf>,
     },
 }
 

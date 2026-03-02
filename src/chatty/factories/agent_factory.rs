@@ -763,6 +763,12 @@ impl AgentClient {
              - LaTeX environments: `\\begin{equation}`, `\\begin{align}`, `\\begin{gather}`, \
              `\\begin{matrix}`, `\\begin{cases}`, and all standard starred variants\n\
              Math is compiled via MiTeX → Typst → SVG and cached; use standard LaTeX notation freely.\n\
+             \n### Mermaid Diagrams\n\
+             The app renders Mermaid diagrams natively in ` ```mermaid ` fenced code blocks.\n\
+             Supported diagram types: flowchart, sequence, class, state, ER, gantt, pie, mindmap, \
+             timeline, git graph, C4, architecture, and more.\n\
+             Use mermaid diagrams to visualize workflows, architectures, relationships, and processes.\n\
+             Example: ` ```mermaid\\nflowchart TD\\n  A[Start] --> B{Decision}\\n  B -->|Yes| C[OK]\\n  B -->|No| D[Cancel]\\n``` `\n\
              \n### Thinking / Reasoning\n\
              Wrap internal reasoning in `<thinking>...</thinking>`, `<think>...</think>`, or `<thought>...</thought>` tags. \
              The app renders these as a visually distinct, collapsible block so the user can inspect \

@@ -1,6 +1,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
+use crate::chatty::services::MermaidRendererService;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -13,6 +14,7 @@ use tracing::{debug, warn};
 use super::code_block_component::CodeBlockComponent;
 use super::math_parser::{MathSegment, parse_math_segments};
 use super::math_renderer::MathComponent;
+use super::mermaid_component::MermaidComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::parsed_cache::{
     CachedCodeBlock, CachedContentSegment, CachedMarkdownSegment, CachedParseResult,
@@ -362,6 +364,18 @@ fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
                 let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
                     .into_iter()
                     .map(|ms| match ms {
+                        MarkdownSegment::CodeBlock { language, code }
+                            if language.as_deref() == Some("mermaid") =>
+                        {
+                            let is_dark = cx.theme().mode.is_dark();
+                            let svg_path = cx
+                                .try_global::<MermaidRendererService>()
+                                .and_then(|svc| svc.render_to_svg_file(&code, is_dark).ok());
+                            CachedMarkdownSegment::MermaidDiagram {
+                                source: code,
+                                svg_path,
+                            }
+                        }
                         MarkdownSegment::CodeBlock { language, code } => {
                             let spans =
                                 syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
@@ -547,6 +561,16 @@ fn parse_markdown_segment_streaming(
     cx: &App,
 ) -> CachedMarkdownSegment {
     match segment {
+        MarkdownSegment::CodeBlock { language, code } if language.as_deref() == Some("mermaid") => {
+            let is_dark = cx.theme().mode.is_dark();
+            let svg_path = cx
+                .try_global::<MermaidRendererService>()
+                .and_then(|svc| svc.render_to_svg_file(&code, is_dark).ok());
+            CachedMarkdownSegment::MermaidDiagram {
+                source: code,
+                svg_path,
+            }
+        }
         MarkdownSegment::CodeBlock { language, code } => {
             // Try to reuse highlighted spans from previous render
             if let Some(reused) = try_reuse_code_block(prev_mds, &language, &code) {
@@ -649,6 +673,18 @@ fn render_cached_markdown_segments(
                     base_index * 100 + code_block_index,
                 );
                 elements.push(block.into_any_element());
+                code_block_index += 1;
+            }
+            CachedMarkdownSegment::MermaidDiagram { source, svg_path } => {
+                let element_id =
+                    ElementId::Name(format!("mermaid-{}-{}", base_index, code_block_index).into());
+                let mermaid_elem = match svg_path {
+                    Some(path) => {
+                        MermaidComponent::with_svg_path(source.clone(), element_id, path.clone())
+                    }
+                    None => MermaidComponent::new(source.clone(), element_id),
+                };
+                elements.push(mermaid_elem.into_any_element());
                 code_block_index += 1;
             }
         }
