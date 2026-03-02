@@ -93,7 +93,6 @@ impl ModelsListView {
         let providers: Vec<String> = cx
             .global::<ProviderModel>()
             .configured_providers()
-            .iter()
             .map(|p| p.provider_type.display_name().to_string())
             .collect();
 
@@ -113,7 +112,7 @@ impl ModelsListView {
         let initial_is_azure = cx
             .global::<ProviderModel>()
             .configured_providers()
-            .first()
+            .next()
             .map(|p| p.provider_type == ProviderType::AzureOpenAI)
             .unwrap_or(false);
         let is_azure_cell = std::rc::Rc::new(std::cell::Cell::new(initial_is_azure));
@@ -124,7 +123,10 @@ impl ModelsListView {
             let provider_select = provider_select.clone();
             move |_this, _entity, event: &SelectEvent<Vec<String>>, cx| {
                 if matches!(event, SelectEvent::Confirm(_)) {
-                    let providers = cx.global::<ProviderModel>().configured_providers();
+                    let providers: Vec<_> = cx
+                        .global::<ProviderModel>()
+                        .configured_providers()
+                        .collect();
                     let selected = provider_select.read(cx).selected_index(cx);
                     let is_azure = selected
                         .and_then(|idx| providers.get(idx.row))
@@ -395,7 +397,6 @@ impl ModelsListView {
                                                     let all_providers: Vec<&str> = cx
                                                         .global::<ProviderModel>()
                                                         .configured_providers()
-                                                        .iter()
                                                         .map(|p| p.provider_type.display_name())
                                                         .collect();
                                                     let provider_str = provider_index
@@ -546,8 +547,12 @@ impl ModelsListView {
             state
         });
 
-        // Get configured providers and find the index of the current provider
-        let configured_providers = cx.global::<ProviderModel>().configured_providers();
+        // Get configured providers and find the index of the current provider.
+        // Collect once since the result is used twice (provider names + position lookup).
+        let configured_providers: Vec<_> = cx
+            .global::<ProviderModel>()
+            .configured_providers()
+            .collect();
         let providers: Vec<String> = configured_providers
             .iter()
             .map(|p| p.provider_type.display_name().to_string())
@@ -822,7 +827,6 @@ impl ModelsListView {
                                                     let all_providers: Vec<&str> = cx
                                                         .global::<ProviderModel>()
                                                         .configured_providers()
-                                                        .iter()
                                                         .map(|p| p.provider_type.display_name())
                                                         .collect();
                                                     let provider_str = provider_index
