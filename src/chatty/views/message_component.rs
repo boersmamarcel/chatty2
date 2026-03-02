@@ -328,6 +328,84 @@ fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
     }
 }
 
+/// Build a CachedParseResult for streaming content, reusing syntax highlighting
+/// from the previous result for code blocks that haven't changed.
+///
+/// Completed code blocks (those with a closing ```) will not change as more text
+/// streams in, so their expensive `highlight_code()` results can be safely reused.
+fn build_streaming_parse_result(
+    content: &str,
+    prev: Option<&CachedParseResult>,
+    cx: &App,
+) -> CachedParseResult {
+    let content_segments = parse_content_segments(content);
+
+    let cached_segments: Vec<CachedContentSegment> = content_segments
+        .into_iter()
+        .map(|segment| match segment {
+            ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+            ContentSegment::Text(text) => {
+                let markdown_segs = parse_markdown_segments(&text);
+                let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
+                    .into_iter()
+                    .map(|ms| match ms {
+                        MarkdownSegment::CodeBlock { language, code } => {
+                            // Try to reuse highlighting from the previous render
+                            if let Some(reused) = try_reuse_code_block(prev, &language, &code) {
+                                CachedMarkdownSegment::CodeBlock(reused)
+                            } else {
+                                let spans = syntax_highlighter::highlight_code(
+                                    &code,
+                                    language.as_deref(),
+                                    cx,
+                                );
+                                CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
+                                    language,
+                                    code,
+                                    highlighted_spans: spans,
+                                })
+                            }
+                        }
+                        MarkdownSegment::Text(t) => {
+                            let math_segs = parse_math_segments(&t);
+                            CachedMarkdownSegment::TextWithMath(math_segs)
+                        }
+                    })
+                    .collect();
+                CachedContentSegment::Text(cached_md)
+            }
+        })
+        .collect();
+
+    CachedParseResult {
+        segments: cached_segments,
+    }
+}
+
+/// Search a previous `CachedParseResult` for a code block with matching
+/// language and code content. Returns a clone of the `CachedCodeBlock`
+/// (with its pre-computed highlighted spans) if found.
+fn try_reuse_code_block(
+    prev: Option<&CachedParseResult>,
+    language: &Option<String>,
+    code: &str,
+) -> Option<CachedCodeBlock> {
+    let prev = prev?;
+    for segment in &prev.segments {
+        if let CachedContentSegment::Text(md_segments) = segment {
+            for md_seg in md_segments {
+                if let CachedMarkdownSegment::CodeBlock(cb) = md_seg
+                    && &cb.language == language
+                    && cb.code == code
+                {
+                    return Some(cb.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Build GPUI elements from pre-parsed cached content.
 ///
 /// Mirrors the logic of the thinking-block + code-block + math rendering paths
@@ -560,9 +638,10 @@ fn extract_attachment_path(tool_call: &super::message_types::ToolCallBlock) -> O
 
 /// Render a text segment using the cache, handling embedded `<thinking>` blocks.
 ///
-/// For finalized markdown content, uses the cache to avoid re-parsing.
-/// For streaming markdown, renders through the full pipeline without caching
-/// (content changes every chunk so caching would be wasteful).
+/// For finalized markdown content, uses the persistent cache to avoid re-parsing.
+/// For streaming markdown, uses `build_streaming_parse_result` which reuses
+/// code block highlighting from the previous render to avoid O(n²) re-highlighting.
+#[allow(clippy::too_many_arguments)]
 fn render_text_segment_cached(
     text_segment: &str,
     base_index: usize,
@@ -570,6 +649,7 @@ fn render_text_segment_cached(
     is_streaming: bool,
     is_dark: bool,
     parsed_cache: &mut ParsedContentCache,
+    streaming_cache: &mut Option<CachedParseResult>,
     cx: &App,
 ) -> Vec<AnyElement> {
     if is_markdown && !is_streaming {
@@ -582,21 +662,25 @@ fn render_text_segment_cached(
         let cached = parsed_cache.get(&cache_key).unwrap();
         render_from_cached(cached, base_index, cx)
     } else if is_markdown {
-        // Streaming markdown: render through the full pipeline without caching
-        let result = build_cached_parse_result(text_segment, cx);
-        render_from_cached(&result, base_index, cx)
+        // Streaming: reuse code block highlights from previous render
+        let result = build_streaming_parse_result(text_segment, streaming_cache.as_ref(), cx);
+        let elements = render_from_cached(&result, base_index, cx);
+        *streaming_cache = Some(result);
+        elements
     } else {
         vec![div().child(text_segment.to_string()).into_any_element()]
     }
 }
 
 /// Render interleaved content: text segments mixed with tool calls
+#[allow(clippy::too_many_arguments)]
 fn render_interleaved_content<F>(
     msg: &DisplayMessage,
     index: usize,
     mut container: Div,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     parsed_cache: &mut ParsedContentCache,
+    streaming_cache: &mut Option<CachedParseResult>,
     on_toggle_tool: F,
     cx: &App,
 ) -> Div
@@ -623,6 +707,7 @@ where
             msg.is_streaming,
             is_dark,
             parsed_cache,
+            streaming_cache,
             cx,
         );
         return container.children(elements);
@@ -657,6 +742,7 @@ where
                         msg.is_streaming,
                         is_dark,
                         parsed_cache,
+                        streaming_cache,
                         cx,
                     );
                     container = container.children(elements);
@@ -716,6 +802,7 @@ where
                 msg.is_streaming,
                 is_dark,
                 parsed_cache,
+                streaming_cache,
                 cx,
             );
             container = container.children(elements);
@@ -834,6 +921,7 @@ pub fn render_message<F, G, R>(
     is_last_message: bool,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     parsed_cache: &mut ParsedContentCache,
+    streaming_cache: &mut Option<CachedParseResult>,
     on_toggle_tool: F,
     on_feedback: G,
     on_regenerate: R,
@@ -876,7 +964,7 @@ where
 
     // For non-interleaved assistant messages with markdown, use optimized render paths:
     // - Finalized: cache the parse result to avoid re-parsing on every render
-    // - Streaming: render through full pipeline without caching (content changes each chunk)
+    // - Streaming: reuse code block highlights from the previous render
     if matches!(msg.role, MessageRole::Assistant) && !should_interleave && msg.is_markdown {
         let children = if !msg.is_streaming {
             // Finalized: use cached parse result
@@ -888,9 +976,11 @@ where
             let cached = parsed_cache.get(&cache_key).unwrap();
             render_from_cached(cached, index, cx)
         } else {
-            // Streaming: full pipeline without caching
-            let result = build_cached_parse_result(&msg.content, cx);
-            render_from_cached(&result, index, cx)
+            // Streaming: reuse code block highlights from previous render
+            let result = build_streaming_parse_result(&msg.content, streaming_cache.as_ref(), cx);
+            let elements = render_from_cached(&result, index, cx);
+            *streaming_cache = Some(result);
+            elements
         };
 
         let message_with_content = container.children(children);
@@ -935,11 +1025,12 @@ where
             container,
             collapsed_tool_calls,
             parsed_cache,
+            streaming_cache,
             on_toggle_tool,
             cx,
         )
     } else if msg.is_markdown {
-        // Markdown content — use cache for finalized, full pipeline for streaming
+        // Markdown content — use cache for finalized, streaming parse for streaming
         let content_elements = render_text_segment_cached(
             &msg.content,
             index,
@@ -947,6 +1038,7 @@ where
             msg.is_streaming,
             is_dark,
             parsed_cache,
+            streaming_cache,
             cx,
         );
         container.children(content_elements)

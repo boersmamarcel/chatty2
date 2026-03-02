@@ -16,7 +16,7 @@ use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
     ToolCallState, TraceItem, UserMessage,
 };
-use super::parsed_cache::ParsedContentCache;
+use super::parsed_cache::{CachedParseResult, ParsedContentCache};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::models_store::ModelsModel;
@@ -41,6 +41,9 @@ pub struct ChatView {
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
     /// Cache for parsed message content (markdown, math, code highlighting)
     parsed_cache: ParsedContentCache,
+    /// Cache of the last streaming parse result, to reuse code block highlighting
+    /// across streaming renders. Cleared on stream finalization or conversation switch.
+    streaming_parse_cache: Option<CachedParseResult>,
     /// When true, every render re-asserts scroll_to_bottom so that async
     /// layout changes (image loading, SVG math, code blocks) never leave
     /// the view stuck above the true bottom. Disabled when user scrolls up.
@@ -104,6 +107,7 @@ impl ChatView {
             pending_approval: None,
             collapsed_tool_calls: HashMap::new(),
             parsed_cache: ParsedContentCache::new(),
+            streaming_parse_cache: None,
             stick_to_bottom: true,
         }
     }
@@ -220,6 +224,10 @@ impl ChatView {
             // Clear live trace (it's now frozen in the view entity)
             last.live_trace = None;
 
+            // Clear the streaming parse cache — finalized content uses the
+            // persistent ParsedContentCache instead.
+            self.streaming_parse_cache = None;
+
             // Scroll to bottom after finalization. The cached render may produce
             // different-height content (e.g. code blocks, math) compared to the
             // streaming render, so the scroll position needs to be updated.
@@ -274,6 +282,9 @@ impl ChatView {
                 }
                 last.content.push_str("*[Response cancelled by user]*");
                 last.is_streaming = false;
+
+                // Clear streaming parse cache
+                self.streaming_parse_cache = None;
 
                 // Finalize trace if present
                 if let Some(ref mut trace) = last.live_trace {
@@ -817,6 +828,7 @@ impl ChatView {
     pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         self.parsed_cache.clear();
+        self.streaming_parse_cache = None;
         cx.notify();
     }
 
@@ -1181,10 +1193,12 @@ impl Render for ChatView {
                                             self.collapsed_tool_calls.clone();
                                         let chat_view_entity = cx.entity();
 
-                                        // Temporarily move the cache out to avoid split borrow
+                                        // Temporarily move caches out to avoid split borrow
                                         // (self.messages is borrowed immutably below)
                                         let mut parsed_cache =
                                             std::mem::take(&mut self.parsed_cache);
+                                        let mut streaming_cache =
+                                            self.streaming_parse_cache.take();
 
                                         // Compute visible messages and find the last visible assistant index
                                         let visible_messages: Vec<(usize, &DisplayMessage)> =
@@ -1223,12 +1237,22 @@ impl Render for ChatView {
                                                 let entity_for_regenerate = chat_view_entity.clone();
                                                 let history_index = msg.history_index;
                                                 let is_last_message = last_visible_assistant_idx == Some(index);
+                                                // Only pass the streaming cache for the
+                                                // active streaming message; non-streaming
+                                                // messages use the persistent parsed_cache.
+                                                let mut no_cache: Option<CachedParseResult> = None;
+                                                let sc = if msg.is_streaming {
+                                                    &mut streaming_cache
+                                                } else {
+                                                    &mut no_cache
+                                                };
                                                 render_message(
                                                     msg,
                                                     index,
                                                     is_last_message,
                                                     &collapsed_tool_calls,
                                                     &mut parsed_cache,
+                                                    sc,
                                                     move |msg_idx, tool_idx, cx| {
                                                         entity_clone.update(cx, |chat_view, cx| {
                                                             let key = (msg_idx, tool_idx);
@@ -1274,8 +1298,9 @@ impl Render for ChatView {
                                             })
                                             .collect();
 
-                                        // Move cache back
+                                        // Move caches back
                                         self.parsed_cache = parsed_cache;
+                                        self.streaming_parse_cache = streaming_cache;
 
                                         rendered
                                     })
