@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use gpui::{Entity, EventEmitter, Global, Task};
 use tracing::{debug, warn};
 
-/// Minimum interval between batched TextChunk events (~120fps).
+/// Minimum interval between batched TextChunk events (~250fps).
 /// Keeps text visually smooth while reducing per-token event overhead.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(8);
+const FLUSH_INTERVAL: Duration = Duration::from_millis(4);
 
 use crate::chatty::services::StreamChunk;
 use crate::chatty::tools::PendingArtifacts;
