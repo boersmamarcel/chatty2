@@ -237,7 +237,7 @@ impl StreamManager {
     /// Process a stream chunk: update internal state and emit the corresponding event.
     ///
     /// Text chunks are batched: text is accumulated in `pending_text` and emitted as a
-    /// single `TextChunk` event only when `FLUSH_INTERVAL` (8ms, ~120fps) has elapsed.
+    /// single `TextChunk` event only when `FLUSH_INTERVAL` (4ms, ~250fps) has elapsed.
     /// All other chunk types are forwarded immediately without delay.
     pub fn handle_chunk(
         &mut self,
