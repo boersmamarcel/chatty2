@@ -607,46 +607,19 @@ fn main() {
         cx.set_global(mcp_service);
         info!("MCP service initialized");
 
-        // Use Arc<AtomicBool> to track when providers, models, and execution settings are loaded
-
-        let providers_loaded = Arc::new(AtomicBool::new(false));
-        let models_loaded = Arc::new(AtomicBool::new(false));
-        let exec_settings_loaded = Arc::new(AtomicBool::new(false));
-
-        // Helper function to check if all three are loaded and trigger conversation loading.
-        // Execution settings must be loaded before conversations are created so that the
-        // factory sees the real `enabled` flag (not the default `false`).
-        let check_and_load_conversations = {
-            let providers_loaded = providers_loaded.clone();
-            let models_loaded = models_loaded.clone();
-            let exec_settings_loaded = exec_settings_loaded.clone();
-            move |cx: &mut App| {
-                if providers_loaded.load(Ordering::SeqCst)
-                    && models_loaded.load(Ordering::SeqCst)
-                    && exec_settings_loaded.load(Ordering::SeqCst)
-                {
-                    info!("Models, providers, and execution settings loaded, triggering conversation load");
-
-                    // Get the ChattyApp entity and call load_conversations_after_models_ready
-                    if let Some(weak_entity) = cx
-                        .try_global::<GlobalChattyApp>()
-                        .and_then(|global| global.entity.clone())
-                        && let Some(entity) = weak_entity.upgrade()
-                    {
-                        entity.update(cx, |app, cx| {
-                            app.load_conversations_after_models_ready(cx);
-                        });
-                    }
-                }
-            }
-        };
-
-        // Load providers asynchronously without blocking startup
-        let check_fn_1 = check_and_load_conversations.clone();
-        let providers_loaded_clone = providers_loaded.clone();
+        // Load providers, models, and execution settings concurrently (dependency tier 1).
+        // Conversations depend on all three being loaded (dependency tier 2).
+        // Using tokio::join! makes the dependency graph explicit and eliminates AtomicBool polling.
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = PROVIDER_REPOSITORY.clone();
-            match repo.load_all().await {
+            // Run all three I/O operations in parallel before touching global state
+            let (providers_result, models_result, exec_settings_result) = tokio::join!(
+                PROVIDER_REPOSITORY.clone().load_all(),
+                MODELS_REPOSITORY.clone().load_all(),
+                EXECUTION_SETTINGS_REPOSITORY.clone().load(),
+            );
+
+            // Apply providers result
+            match providers_result {
                 Ok(providers) => {
                     cx.update(|cx| {
                         cx.update_global::<settings::models::ProviderModel, _>(|model, _cx| {
@@ -662,7 +635,7 @@ fn main() {
                                 .global::<settings::models::ProviderModel>()
                                 .providers()
                                 .to_vec();
-                            let repo_for_save = repo.clone();
+                            let repo_for_save = PROVIDER_REPOSITORY.clone();
                             cx.spawn(|_cx: &mut AsyncApp| async move {
                                 if let Err(e) = repo_for_save.save_all(providers_to_save).await {
                                     warn!(error = ?e, "Failed to persist default Ollama provider");
@@ -671,7 +644,6 @@ fn main() {
                             .detach();
                         }
 
-                        providers_loaded_clone.store(true, Ordering::SeqCst);
                         info!("Providers loaded");
 
                         // Initialize Azure token cache if any providers use Entra ID
@@ -701,8 +673,6 @@ fn main() {
                             })
                             .detach();
                         }
-
-                        check_fn_1(cx);
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to update global providers after load"))
                     .ok();
@@ -711,16 +681,9 @@ fn main() {
                     error!(error = ?e, "Failed to load providers");
                 }
             }
-        })
-        .detach();
 
-        // Load models asynchronously without blocking startup
-        let check_fn_2 = check_and_load_conversations.clone();
-        let check_fn_3 = check_and_load_conversations;
-        let models_loaded_clone = models_loaded.clone();
-        cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = MODELS_REPOSITORY.clone();
-            match repo.load_all().await {
+            // Apply models result (providers are now applied, so ProviderModel is up to date for Ollama URL)
+            match models_result {
                 Ok(models) => {
                     cx.update(|cx| {
                         cx.update_global::<settings::models::ModelsModel, _>(|model, _cx| {
@@ -738,8 +701,6 @@ fn main() {
                                 .collect();
                             model.replace_all(models);
                         });
-
-                        models_loaded_clone.store(true, Ordering::SeqCst);
 
                         // Emit ModelsReady event for subscribers
                         if let Some(weak_notifier) = cx
@@ -780,8 +741,6 @@ fn main() {
 
                         // Refresh all chat inputs with newly loaded models
                         cx.refresh_windows();
-
-                        check_fn_2(cx);
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to update models after load"))
                     .ok();
@@ -790,6 +749,44 @@ fn main() {
                     error!(error = ?e, "Failed to load models");
                 }
             }
+
+            // Apply execution settings result
+            match exec_settings_result {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        info!(
+                            enabled = settings.enabled,
+                            workspace = ?settings.workspace_dir,
+                            approval_mode = ?settings.approval_mode,
+                            network_isolation = settings.network_isolation,
+                            "Execution settings loaded from disk"
+                        );
+                        cx.set_global(settings);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global execution settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load execution settings, using defaults");
+                    // Defaults will be used (enabled=false); conversations will still load
+                }
+            }
+
+            // All tier-1 loads complete; trigger conversation loading
+            info!("Models, providers, and execution settings loaded, triggering conversation load");
+            cx.update(|cx| {
+                if let Some(weak_entity) = cx
+                    .try_global::<GlobalChattyApp>()
+                    .and_then(|global| global.entity.clone())
+                    && let Some(entity) = weak_entity.upgrade()
+                {
+                    entity.update(cx, |app, cx| {
+                        app.load_conversations_after_models_ready(cx);
+                    });
+                }
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to trigger conversation load"))
+            .ok();
         })
         .detach();
 
@@ -821,49 +818,6 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load MCP server configurations");
-                }
-            }
-        })
-        .detach();
-
-        // Load execution settings asynchronously without blocking startup.
-        // Must complete before conversations are loaded so the factory sees the
-        // real `enabled` flag instead of the default `false`.
-        let exec_settings_loaded_clone = exec_settings_loaded.clone();
-        cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
-            match repo.load().await {
-                Ok(settings) => {
-                    cx.update(|cx| {
-                        info!(
-                            enabled = settings.enabled,
-                            workspace = ?settings.workspace_dir,
-                            approval_mode = ?settings.approval_mode,
-                            network_isolation = settings.network_isolation,
-                            "Execution settings loaded from disk"
-                        );
-                        cx.set_global(settings);
-                        exec_settings_loaded_clone.store(true, Ordering::SeqCst);
-                        check_fn_3(cx);
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to update global execution settings"))
-                    .ok();
-                }
-                Err(e) => {
-                    warn!(error = ?e, "Failed to load execution settings, using defaults");
-                    // Still mark as loaded so conversations aren't blocked forever
-                    // (defaults will be used: enabled=false)
-                    cx.update(|cx| {
-                        exec_settings_loaded_clone.store(true, Ordering::SeqCst);
-                        check_fn_3(cx);
-                    })
-                    .map_err(|e| {
-                        warn!(
-                            error = ?e,
-                            "Failed to trigger conversation load after exec settings error"
-                        )
-                    })
-                    .ok();
                 }
             }
         })
