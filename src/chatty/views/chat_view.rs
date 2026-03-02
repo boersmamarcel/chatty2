@@ -16,7 +16,7 @@ use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
     ToolCallState, TraceItem, UserMessage,
 };
-use super::parsed_cache::{CachedParseResult, ParsedContentCache};
+use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::models_store::ModelsModel;
@@ -41,9 +41,9 @@ pub struct ChatView {
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
     /// Cache for parsed message content (markdown, math, code highlighting)
     parsed_cache: ParsedContentCache,
-    /// Cache of the last streaming parse result, to reuse code block highlighting
+    /// Incremental streaming parse state, reusing stable content/markdown segments
     /// across streaming renders. Cleared on stream finalization or conversation switch.
-    streaming_parse_cache: Option<CachedParseResult>,
+    streaming_parse_cache: Option<StreamingParseState>,
     /// When true, every render re-asserts scroll_to_bottom so that async
     /// layout changes (image loading, SVG math, code blocks) never leave
     /// the view stuck above the true bottom. Disabled when user scrolls up.
@@ -1240,7 +1240,7 @@ impl Render for ChatView {
                                                 // Only pass the streaming cache for the
                                                 // active streaming message; non-streaming
                                                 // messages use the persistent parsed_cache.
-                                                let mut no_cache: Option<CachedParseResult> = None;
+                                                let mut no_cache: Option<StreamingParseState> = None;
                                                 let sc = if msg.is_streaming {
                                                     &mut streaming_cache
                                                 } else {

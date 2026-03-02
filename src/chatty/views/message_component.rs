@@ -16,7 +16,7 @@ use super::math_renderer::MathComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
 use super::parsed_cache::{
     CachedCodeBlock, CachedContentSegment, CachedMarkdownSegment, CachedParseResult,
-    ContentCacheKey, ParsedContentCache,
+    ContentCacheKey, ParsedContentCache, StreamingParseState,
 };
 use super::syntax_highlighter;
 use super::trace_components::SystemTraceView;
@@ -39,6 +39,11 @@ enum MarkdownSegment {
         language: Option<String>,
         code: String,
     },
+    /// Incomplete code block (opening ``` without closing ```) detected during streaming.
+    IncompleteCodeBlock {
+        language: Option<String>,
+        code: String,
+    },
 }
 
 lazy_static! {
@@ -50,8 +55,13 @@ lazy_static! {
     ).expect("CODE_BLOCK_REGEX pattern is valid");
 }
 
-/// Parse markdown content into segments of text and code blocks
-fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
+/// Parse markdown content into segments of text and code blocks.
+///
+/// When `streaming` is true, also detects trailing incomplete code blocks
+/// (opening ``` without closing ```) and emits them as `IncompleteCodeBlock`
+/// segments so they can be rendered during streaming without waiting for
+/// the closing delimiter.
+fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegment> {
     let mut segments = Vec::new();
     let mut last_end = 0;
 
@@ -86,11 +96,27 @@ fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
         last_end = match_end;
     }
 
-    // Add remaining text after last code block
+    // Check remaining text for incomplete code blocks (streaming only)
     if last_end < content.len() {
-        let text = content[last_end..].to_string();
-        if !text.trim().is_empty() {
-            segments.push(MarkdownSegment::Text(text));
+        let remaining = &content[last_end..];
+
+        if streaming {
+            if let Some(incomplete) = detect_incomplete_code_block(remaining) {
+                // Add text before the incomplete code block
+                let text_before = &remaining[..incomplete.0];
+                if !text_before.trim().is_empty() {
+                    segments.push(MarkdownSegment::Text(text_before.to_string()));
+                }
+                // Add the incomplete code block
+                segments.push(MarkdownSegment::IncompleteCodeBlock {
+                    language: incomplete.1,
+                    code: incomplete.2,
+                });
+            } else if !remaining.trim().is_empty() {
+                segments.push(MarkdownSegment::Text(remaining.to_string()));
+            }
+        } else if !remaining.trim().is_empty() {
+            segments.push(MarkdownSegment::Text(remaining.to_string()));
         }
     }
 
@@ -100,6 +126,39 @@ fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
     }
 
     segments
+}
+
+/// Detect an incomplete (unclosed) code block in the given text.
+///
+/// Returns `Some((offset, language, code))` where `offset` is the byte
+/// position of the opening ``` within `text`.
+fn detect_incomplete_code_block(text: &str) -> Option<(usize, Option<String>, String)> {
+    // Find the last occurrence of ``` that could be an opening fence
+    let backtick_pos = text.rfind("```")?;
+    let after_backticks = &text[backtick_pos + 3..];
+
+    // Must have a newline after the language tag to be an opening fence
+    let newline_pos = after_backticks.find('\n')?;
+
+    let language_str = after_backticks[..newline_pos].trim();
+    // Validate language tag (only alphanumeric, _, +, -)
+    if !language_str.is_empty()
+        && !language_str
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '+' || c == '-')
+    {
+        return None;
+    }
+
+    let language = if language_str.is_empty() {
+        None
+    } else {
+        Some(language_str.to_string())
+    };
+
+    let code = after_backticks[newline_pos + 1..].to_string();
+
+    Some((backtick_pos, language, code))
 }
 
 /// Represents a parsed segment of message content
@@ -299,7 +358,7 @@ fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
         .map(|segment| match segment {
             ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
             ContentSegment::Text(text) => {
-                let markdown_segs = parse_markdown_segments(&text);
+                let markdown_segs = parse_markdown_segments(&text, false);
                 let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
                     .into_iter()
                     .map(|ms| match ms {
@@ -316,6 +375,11 @@ fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
                             let math_segs = parse_math_segments(&t);
                             CachedMarkdownSegment::TextWithMath(math_segs)
                         }
+                        MarkdownSegment::IncompleteCodeBlock { .. } => {
+                            unreachable!(
+                                "IncompleteCodeBlock should not appear in non-streaming parse"
+                            )
+                        }
                     })
                     .collect();
                 CachedContentSegment::Text(cached_md)
@@ -328,79 +392,198 @@ fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
     }
 }
 
-/// Build a CachedParseResult for streaming content, reusing syntax highlighting
-/// from the previous result for code blocks that haven't changed.
+/// Build a streaming parse result with incremental segment reuse.
 ///
-/// Completed code blocks (those with a closing ```) will not change as more text
-/// streams in, so their expensive `highlight_code()` results can be safely reused.
+/// During streaming, content only grows at the end. This function exploits that
+/// property to avoid re-parsing stable content:
+///
+/// 1. Always run `parse_content_segments()` (cheap — just string::find for think tags)
+/// 2. **Content segment level**: If segment count is unchanged and content only grew,
+///    reuse all content segments except the last (they're stable).
+/// 3. **Markdown segment level**: Within the last text segment, if md segment count
+///    is unchanged, reuse all md segments except the last.
+/// 4. Only the last (growing) markdown segment is re-parsed through math/highlighting.
+///
+/// When segment counts change (think block closed, code block completed), the
+/// affected segment is fully re-parsed (one-time transition cost).
 fn build_streaming_parse_result(
     content: &str,
-    prev: Option<&CachedParseResult>,
+    prev: Option<&StreamingParseState>,
     cx: &App,
-) -> CachedParseResult {
+) -> StreamingParseState {
     let content_segments = parse_content_segments(content);
+    let content_segment_count = content_segments.len();
 
-    let cached_segments: Vec<CachedContentSegment> = content_segments
-        .into_iter()
-        .map(|segment| match segment {
-            ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
-            ContentSegment::Text(text) => {
-                let markdown_segs = parse_markdown_segments(&text);
-                let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
-                    .into_iter()
-                    .map(|ms| match ms {
-                        MarkdownSegment::CodeBlock { language, code } => {
-                            // Try to reuse highlighting from the previous render
-                            if let Some(reused) = try_reuse_code_block(prev, &language, &code) {
-                                CachedMarkdownSegment::CodeBlock(reused)
-                            } else {
-                                let spans = syntax_highlighter::highlight_code(
-                                    &code,
-                                    language.as_deref(),
-                                    cx,
-                                );
-                                CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
-                                    language,
-                                    code,
-                                    highlighted_spans: spans,
-                                })
-                            }
-                        }
-                        MarkdownSegment::Text(t) => {
-                            let math_segs = parse_math_segments(&t);
-                            CachedMarkdownSegment::TextWithMath(math_segs)
-                        }
-                    })
-                    .collect();
-                CachedContentSegment::Text(cached_md)
+    // Check if we can reuse the stable prefix from the previous render
+    let can_reuse_prefix = prev.is_some_and(|p| {
+        content.len() >= p.content_len && content_segment_count == p.content_segment_count
+    });
+
+    let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
+        let prev_state = prev.unwrap();
+        let prev_segments = &prev_state.result.segments;
+        let mut segments = Vec::with_capacity(content_segment_count);
+
+        // Reuse all content segments except the last
+        for seg in &prev_segments[..prev_segments.len() - 1] {
+            segments.push(seg.clone());
+        }
+
+        // Re-parse only the last content segment
+        let last = content_segments.into_iter().last().unwrap();
+        segments.push(parse_content_segment_streaming(last, prev_state, cx));
+
+        segments
+    } else {
+        // Full parse (first render or segment count changed)
+        content_segments
+            .into_iter()
+            .map(|seg| parse_content_segment_streaming_fresh(seg, cx))
+            .collect()
+    };
+
+    // Count md segments in last text segment (for next render's reuse check)
+    let last_text_md_count = cached_segments
+        .last()
+        .map(|s| {
+            if let CachedContentSegment::Text(mds) = s {
+                mds.len()
+            } else {
+                0
             }
         })
-        .collect();
+        .unwrap_or(0);
 
-    CachedParseResult {
-        segments: cached_segments,
+    StreamingParseState {
+        result: CachedParseResult {
+            segments: cached_segments,
+        },
+        content_len: content.len(),
+        content_segment_count,
+        last_text_md_count,
     }
 }
 
-/// Search a previous `CachedParseResult` for a code block with matching
+/// Parse the last content segment with markdown-level incremental reuse.
+///
+/// If the previous render had the same number of markdown segments within this
+/// text block, reuse all but the last markdown segment (they're stable).
+fn parse_content_segment_streaming(
+    segment: ContentSegment,
+    prev: &StreamingParseState,
+    cx: &App,
+) -> CachedContentSegment {
+    match segment {
+        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Text(text) => {
+            let markdown_segs = parse_markdown_segments(&text, true);
+            let md_count = markdown_segs.len();
+
+            // Try markdown-level reuse: same count → reuse all but last
+            let prev_md = prev
+                .result
+                .segments
+                .last()
+                .and_then(|s| {
+                    if let CachedContentSegment::Text(mds) = s {
+                        Some(mds)
+                    } else {
+                        None
+                    }
+                })
+                .filter(|_| md_count == prev.last_text_md_count && md_count > 0);
+
+            let cached_md = if let Some(prev_mds) = prev_md {
+                let mut result = Vec::with_capacity(md_count);
+
+                // Reuse all md segments except the last
+                for seg in &prev_mds[..prev_mds.len().min(md_count - 1)] {
+                    result.push(seg.clone());
+                }
+
+                // Parse only the last md segment
+                let last = markdown_segs.into_iter().last().unwrap();
+                result.push(parse_markdown_segment_streaming(last, prev_mds, cx));
+
+                result
+            } else {
+                // Full parse of all md segments (count changed or no prev)
+                markdown_segs
+                    .into_iter()
+                    .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
+                    .collect()
+            };
+
+            CachedContentSegment::Text(cached_md)
+        }
+    }
+}
+
+/// Parse a content segment without incremental reuse (first render or segment count changed).
+fn parse_content_segment_streaming_fresh(
+    segment: ContentSegment,
+    cx: &App,
+) -> CachedContentSegment {
+    match segment {
+        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Text(text) => {
+            let markdown_segs = parse_markdown_segments(&text, true);
+            let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
+                .into_iter()
+                .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
+                .collect();
+            CachedContentSegment::Text(cached_md)
+        }
+    }
+}
+
+/// Convert a single `MarkdownSegment` into a `CachedMarkdownSegment`.
+///
+/// For complete code blocks, tries to reuse highlighting from `prev_mds`.
+/// For incomplete code blocks, stores plain text (no highlighting).
+fn parse_markdown_segment_streaming(
+    segment: MarkdownSegment,
+    prev_mds: &[CachedMarkdownSegment],
+    cx: &App,
+) -> CachedMarkdownSegment {
+    match segment {
+        MarkdownSegment::CodeBlock { language, code } => {
+            // Try to reuse highlighted spans from previous render
+            if let Some(reused) = try_reuse_code_block(prev_mds, &language, &code) {
+                CachedMarkdownSegment::CodeBlock(reused)
+            } else {
+                let spans = syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
+                CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
+                    language,
+                    code,
+                    highlighted_spans: spans,
+                })
+            }
+        }
+        MarkdownSegment::IncompleteCodeBlock { language, code } => {
+            CachedMarkdownSegment::IncompleteCodeBlock { language, code }
+        }
+        MarkdownSegment::Text(t) => {
+            let math_segs = parse_math_segments(&t);
+            CachedMarkdownSegment::TextWithMath(math_segs)
+        }
+    }
+}
+
+/// Search previous markdown segments for a code block with matching
 /// language and code content. Returns a clone of the `CachedCodeBlock`
 /// (with its pre-computed highlighted spans) if found.
 fn try_reuse_code_block(
-    prev: Option<&CachedParseResult>,
+    prev_mds: &[CachedMarkdownSegment],
     language: &Option<String>,
     code: &str,
 ) -> Option<CachedCodeBlock> {
-    let prev = prev?;
-    for segment in &prev.segments {
-        if let CachedContentSegment::Text(md_segments) = segment {
-            for md_seg in md_segments {
-                if let CachedMarkdownSegment::CodeBlock(cb) = md_seg
-                    && &cb.language == language
-                    && cb.code == code
-                {
-                    return Some(cb.clone());
-                }
-            }
+    for md_seg in prev_mds {
+        if let CachedMarkdownSegment::CodeBlock(cb) = md_seg
+            && &cb.language == language
+            && cb.code == code
+        {
+            return Some(cb.clone());
         }
     }
     None
@@ -451,6 +634,22 @@ fn render_cached_markdown_segments(
             CachedMarkdownSegment::TextWithMath(math_segments) => {
                 let math_elements = render_math_segments(math_segments, base_index, cx);
                 elements.extend(math_elements);
+            }
+            CachedMarkdownSegment::IncompleteCodeBlock { language, code } => {
+                // Render as a code block with plain foreground text (no syntax highlighting)
+                let foreground = cx.theme().foreground;
+                let spans = vec![syntax_highlighter::HighlightedSpan {
+                    text: code.clone(),
+                    color: foreground,
+                }];
+                let block = CodeBlockComponent::with_highlighted_spans(
+                    language.clone(),
+                    code.clone(),
+                    spans,
+                    base_index * 100 + code_block_index,
+                );
+                elements.push(block.into_any_element());
+                code_block_index += 1;
             }
         }
     }
@@ -649,7 +848,7 @@ fn render_text_segment_cached(
     is_streaming: bool,
     is_dark: bool,
     parsed_cache: &mut ParsedContentCache,
-    streaming_cache: &mut Option<CachedParseResult>,
+    streaming_cache: &mut Option<StreamingParseState>,
     cx: &App,
 ) -> Vec<AnyElement> {
     if is_markdown && !is_streaming {
@@ -662,10 +861,10 @@ fn render_text_segment_cached(
         let cached = parsed_cache.get(&cache_key).unwrap();
         render_from_cached(cached, base_index, cx)
     } else if is_markdown {
-        // Streaming: reuse code block highlights from previous render
-        let result = build_streaming_parse_result(text_segment, streaming_cache.as_ref(), cx);
-        let elements = render_from_cached(&result, base_index, cx);
-        *streaming_cache = Some(result);
+        // Streaming: incremental parse with stable prefix reuse
+        let state = build_streaming_parse_result(text_segment, streaming_cache.as_ref(), cx);
+        let elements = render_from_cached(&state.result, base_index, cx);
+        *streaming_cache = Some(state);
         elements
     } else {
         vec![div().child(text_segment.to_string()).into_any_element()]
@@ -680,7 +879,7 @@ fn render_interleaved_content<F>(
     mut container: Div,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     parsed_cache: &mut ParsedContentCache,
-    streaming_cache: &mut Option<CachedParseResult>,
+    streaming_cache: &mut Option<StreamingParseState>,
     on_toggle_tool: F,
     cx: &App,
 ) -> Div
@@ -921,7 +1120,7 @@ pub fn render_message<F, G, R>(
     is_last_message: bool,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     parsed_cache: &mut ParsedContentCache,
-    streaming_cache: &mut Option<CachedParseResult>,
+    streaming_cache: &mut Option<StreamingParseState>,
     on_toggle_tool: F,
     on_feedback: G,
     on_regenerate: R,
@@ -976,10 +1175,10 @@ where
             let cached = parsed_cache.get(&cache_key).unwrap();
             render_from_cached(cached, index, cx)
         } else {
-            // Streaming: reuse code block highlights from previous render
-            let result = build_streaming_parse_result(&msg.content, streaming_cache.as_ref(), cx);
-            let elements = render_from_cached(&result, index, cx);
-            *streaming_cache = Some(result);
+            // Streaming: incremental parse with stable prefix reuse
+            let state = build_streaming_parse_result(&msg.content, streaming_cache.as_ref(), cx);
+            let elements = render_from_cached(&state.result, index, cx);
+            *streaming_cache = Some(state);
             elements
         };
 

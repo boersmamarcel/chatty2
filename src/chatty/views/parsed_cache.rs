@@ -35,6 +35,12 @@ pub enum CachedMarkdownSegment {
     TextWithMath(Vec<MathSegment>),
     /// Code block with pre-computed syntax highlighting
     CodeBlock(CachedCodeBlock),
+    /// Incomplete code block (opening ``` without closing ```) during streaming.
+    /// Rendered as plain monospace text without syntax highlighting.
+    IncompleteCodeBlock {
+        language: Option<String>,
+        code: String,
+    },
 }
 
 /// Cached result for a single content segment (after think-block extraction)
@@ -50,6 +56,23 @@ pub enum CachedContentSegment {
 #[derive(Clone, Debug)]
 pub struct CachedParseResult {
     pub segments: Vec<CachedContentSegment>,
+}
+
+/// State for incremental streaming parse, tracking metadata to enable
+/// stable-prefix reuse across renders.
+///
+/// During streaming, content only grows at the end. By comparing segment
+/// counts with the previous render, we can reuse all stable segments and
+/// only re-parse the growing tail.
+#[derive(Clone, Debug)]
+pub struct StreamingParseState {
+    pub result: CachedParseResult,
+    /// Total byte length of content that produced this result.
+    pub content_len: usize,
+    /// Number of content segments (from `parse_content_segments`).
+    pub content_segment_count: usize,
+    /// Markdown segment count in the last Text content segment.
+    pub last_text_md_count: usize,
 }
 
 /// Bounded cache for parsed message content, keyed by content hash + theme.
