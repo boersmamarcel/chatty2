@@ -46,422 +46,417 @@ const LATEX_ENVIRONMENTS: &[&str] = &[
     "alignedat",
 ];
 
-/// Check if $$ at position i should be treated as block math start
-fn is_block_math_delimiter(chars: &[char], pos: usize) -> bool {
-    // Check if there's only whitespace/newlines before this on the current line
-    let mut i = pos;
-    while i > 0 {
-        i -= 1;
-        if chars[i] == '\n' || chars[i] == '\r' {
-            // Found newline, so $$ is at start of line (possibly with whitespace)
-            return true;
-        }
-        if !chars[i].is_whitespace() {
-            // Found non-whitespace, so this is inline
-            return false;
-        }
-    }
-    // Reached start of string
-    true
+/// Internal parser struct that provides efficient char-indexed access
+/// with zero-copy string extraction via byte offsets.
+struct MathParser<'a> {
+    content: &'a str,
+    chars: Vec<char>,
+    /// byte_offsets[i] = byte index of chars[i]; byte_offsets[chars.len()] = content.len()
+    byte_offsets: Vec<usize>,
 }
 
-/// Helper function to parse math code blocks (```math or ```latex)
-fn parse_math_code_block(
-    chars: &[char],
-    start_pos: usize,
-    language: &str,
-) -> Option<(String, usize)> {
-    let lang_chars: Vec<char> = language.chars().collect();
-    let lang_len = lang_chars.len();
-
-    // Check if it matches the expected language
-    if start_pos + 3 + lang_len >= chars.len() {
-        return None;
+impl<'a> MathParser<'a> {
+    fn new(content: &'a str) -> Self {
+        let chars: Vec<char> = content.chars().collect();
+        let byte_offsets: Vec<usize> = content
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .chain(std::iter::once(content.len()))
+            .collect();
+        Self {
+            content,
+            chars,
+            byte_offsets,
+        }
     }
 
-    if chars[start_pos..start_pos + 3] != ['`', '`', '`'] {
-        return None;
+    /// Get a &str slice from char index `start` to char index `end`.
+    fn slice(&self, start: usize, end: usize) -> &str {
+        &self.content[self.byte_offsets[start]..self.byte_offsets[end]]
     }
 
-    if chars[start_pos + 3..start_pos + 3 + lang_len] != lang_chars[..] {
-        return None;
-    }
-
-    // Check if it's actually ```<lang> (not ```<lang>something or similar)
-    if start_pos + 3 + lang_len < chars.len()
-        && !(chars[start_pos + 3 + lang_len] == '\n' || chars[start_pos + 3 + lang_len] == '\r')
-    {
-        return None;
-    }
-
-    // Find the closing ```
-    let mut i = start_pos + 3 + lang_len;
-    while i < chars.len() && (chars[i] == '\n' || chars[i] == '\r') {
-        i += 1; // Skip newlines after ```<lang>
-    }
-
-    let math_start = i;
-    while i + 2 < chars.len() {
-        if chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            // Found closing ```
-            let math_content: String = chars[math_start..i].iter().collect();
-            i += 3; // Skip closing ```
-
-            if !math_content.trim().is_empty() {
-                return Some((math_content.trim().to_string(), i));
+    /// Check if $$ at position `pos` should be treated as block math start
+    fn is_block_math_delimiter(&self, pos: usize) -> bool {
+        let mut i = pos;
+        while i > 0 {
+            i -= 1;
+            if self.chars[i] == '\n' || self.chars[i] == '\r' {
+                return true;
             }
+            if !self.chars[i].is_whitespace() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Parse math code blocks (```math or ```latex)
+    fn parse_math_code_block(&self, start_pos: usize, language: &str) -> Option<(String, usize)> {
+        let lang_chars: Vec<char> = language.chars().collect();
+        let lang_len = lang_chars.len();
+
+        if start_pos + 3 + lang_len >= self.chars.len() {
             return None;
         }
+
+        if self.chars[start_pos..start_pos + 3] != ['`', '`', '`'] {
+            return None;
+        }
+
+        if self.chars[start_pos + 3..start_pos + 3 + lang_len] != lang_chars[..] {
+            return None;
+        }
+
+        if start_pos + 3 + lang_len < self.chars.len()
+            && !(self.chars[start_pos + 3 + lang_len] == '\n'
+                || self.chars[start_pos + 3 + lang_len] == '\r')
+        {
+            return None;
+        }
+
+        let mut i = start_pos + 3 + lang_len;
+        while i < self.chars.len() && (self.chars[i] == '\n' || self.chars[i] == '\r') {
+            i += 1;
+        }
+
+        let math_start = i;
+        while i + 2 < self.chars.len() {
+            if self.chars[i] == '`' && self.chars[i + 1] == '`' && self.chars[i + 2] == '`' {
+                let math_content = self.slice(math_start, i);
+                i += 3;
+
+                if !math_content.trim().is_empty() {
+                    return Some((math_content.trim().to_string(), i));
+                }
+                return None;
+            }
+            i += 1;
+        }
+
+        None
+    }
+
+    /// Extract environment name from \begin{...}
+    fn extract_environment_name(&self, start_pos: usize) -> Option<(String, usize)> {
+        let mut i = start_pos;
+        if i >= self.chars.len() || self.chars[i] != '{' {
+            return None;
+        }
+
         i += 1;
-    }
+        let name_start = i;
 
-    // No closing ``` found
-    None
-}
+        while i < self.chars.len() && self.chars[i] != '}' {
+            i += 1;
+        }
 
-/// Helper function to extract environment name from \begin{...}
-fn extract_environment_name(chars: &[char], start_pos: usize) -> Option<(String, usize)> {
-    // start_pos should point to the '{' after \begin
-    let mut i = start_pos;
-    if i >= chars.len() || chars[i] != '{' {
-        return None;
-    }
+        if i >= self.chars.len() {
+            return None;
+        }
 
-    i += 1; // Skip '{'
-    let name_start = i;
-
-    // Find closing '}'
-    while i < chars.len() && chars[i] != '}' {
+        let name = self.slice(name_start, i).to_string();
         i += 1;
+
+        Some((name, i))
     }
 
-    if i >= chars.len() {
-        return None;
-    }
+    /// Parse LaTeX environment: \begin{env}...\end{env}
+    fn parse_latex_environment(&self, start_pos: usize) -> Option<(String, usize)> {
+        if start_pos + 7 >= self.chars.len() {
+            return None;
+        }
 
-    let name: String = chars[name_start..i].iter().collect();
-    i += 1; // Skip '}'
+        if self.chars[start_pos..start_pos + 7] != ['\\', 'b', 'e', 'g', 'i', 'n', '{'] {
+            return None;
+        }
 
-    Some((name, i))
-}
+        let (env_name, pos_after_name) = self.extract_environment_name(start_pos + 6)?;
 
-/// Parse LaTeX environment: \begin{env}...\end{env}
-fn parse_latex_environment(chars: &[char], start_pos: usize) -> Option<(String, usize)> {
-    // start_pos should point to '\' in \begin
-    if start_pos + 7 >= chars.len() {
-        return None;
-    }
+        if !LATEX_ENVIRONMENTS.contains(&env_name.as_str()) {
+            return None;
+        }
 
-    // Check for \begin{
-    if chars[start_pos..start_pos + 7] != ['\\', 'b', 'e', 'g', 'i', 'n', '{'] {
-        return None;
-    }
+        let end_pattern = format!("\\end{{{}}}", env_name);
+        let end_chars: Vec<char> = end_pattern.chars().collect();
 
-    // Extract environment name
-    let (env_name, pos_after_name) = extract_environment_name(chars, start_pos + 6)?;
+        let mut i = pos_after_name;
+        let mut depth = 1;
 
-    // Check if it's a recognized environment
-    if !LATEX_ENVIRONMENTS.contains(&env_name.as_str()) {
-        return None;
-    }
+        while i < self.chars.len() {
+            if i + 7 + env_name.len() < self.chars.len() {
+                let potential_begin = format!("\\begin{{{}}}", env_name);
+                let begin_chars: Vec<char> = potential_begin.chars().collect();
+                if i + begin_chars.len() <= self.chars.len()
+                    && self.chars[i..i + begin_chars.len()] == begin_chars[..]
+                {
+                    depth += 1;
+                    i += begin_chars.len();
+                    continue;
+                }
+            }
 
-    // Find matching \end{env_name}
-    let end_pattern = format!("\\end{{{}}}", env_name);
-    let end_chars: Vec<char> = end_pattern.chars().collect();
-
-    let mut i = pos_after_name;
-    let mut depth = 1; // Track nesting depth
-
-    while i < chars.len() {
-        // Check for nested \begin{env_name}
-        if i + 7 + env_name.len() < chars.len() {
-            let potential_begin = format!("\\begin{{{}}}", env_name);
-            let begin_chars: Vec<char> = potential_begin.chars().collect();
-            if i + begin_chars.len() <= chars.len()
-                && chars[i..i + begin_chars.len()] == begin_chars[..]
+            if i + end_chars.len() <= self.chars.len()
+                && self.chars[i..i + end_chars.len()] == end_chars[..]
             {
-                depth += 1;
-                i += begin_chars.len();
+                depth -= 1;
+                if depth == 0 {
+                    let content = self.slice(start_pos, i + end_chars.len()).to_string();
+                    return Some((content, i + end_chars.len()));
+                }
+                i += end_chars.len();
                 continue;
             }
+
+            i += 1;
         }
 
-        // Check for \end{env_name}
-        if i + end_chars.len() <= chars.len() && chars[i..i + end_chars.len()] == end_chars[..] {
-            depth -= 1;
-            if depth == 0 {
-                // Found matching \end
-                let content: String = chars[start_pos..i + end_chars.len()].iter().collect();
-                return Some((content, i + end_chars.len()));
-            }
-            i += end_chars.len();
-            continue;
-        }
-
-        i += 1;
+        None
     }
 
-    None
+    /// Run the full parse and return segments
+    fn parse(self) -> Vec<MathSegment> {
+        let mut segments = Vec::new();
+        let mut i = 0;
+        let mut current_text = String::new();
+
+        while i < self.chars.len() {
+            // Check for LaTeX environments: \begin{...}
+            if i + 7 < self.chars.len()
+                && self.chars[i] == '\\'
+                && self.chars[i + 1..i + 6] == ['b', 'e', 'g', 'i', 'n']
+                && self.chars[i + 6] == '{'
+                && let Some((env_content, new_pos)) = self.parse_latex_environment(i)
+            {
+                if !current_text.is_empty() {
+                    segments.push(MathSegment::Text(current_text.clone()));
+                    current_text.clear();
+                }
+
+                segments.push(MathSegment::BlockMath(env_content));
+                i = new_pos;
+                continue;
+            }
+
+            // Check for LaTeX display math: \[
+            if i + 1 < self.chars.len() && self.chars[i] == '\\' && self.chars[i + 1] == '[' {
+                if !current_text.is_empty() {
+                    segments.push(MathSegment::Text(current_text.clone()));
+                    current_text.clear();
+                }
+
+                i += 2;
+                let math_start = i;
+                let mut found_close = false;
+
+                while i + 1 < self.chars.len() {
+                    if self.chars[i] == '\\' && self.chars[i + 1] == ']' {
+                        let math_content = self.slice(math_start, i);
+                        found_close = true;
+                        i += 2;
+
+                        if !math_content.trim().is_empty() {
+                            segments.push(MathSegment::BlockMath(math_content.trim().to_string()));
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+
+                if !found_close {
+                    current_text.push_str("\\[");
+                    current_text.push_str(self.slice(math_start, i));
+                }
+
+                continue;
+            }
+
+            // Check for LaTeX inline math: \(
+            if i + 1 < self.chars.len() && self.chars[i] == '\\' && self.chars[i + 1] == '(' {
+                i += 2;
+                let math_start = i;
+                let mut found_close = false;
+
+                while i + 1 < self.chars.len() {
+                    if self.chars[i] == '\\' && self.chars[i + 1] == ')' {
+                        let math_content = self.slice(math_start, i);
+                        found_close = true;
+                        i += 2;
+
+                        if !math_content.trim().is_empty() {
+                            if !current_text.is_empty() {
+                                segments.push(MathSegment::Text(current_text.clone()));
+                                current_text.clear();
+                            }
+                            segments.push(MathSegment::InlineMath(math_content.trim().to_string()));
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+
+                if !found_close {
+                    current_text.push_str("\\(");
+                    current_text.push_str(self.slice(math_start, i));
+                }
+
+                continue;
+            }
+
+            // Check for block math: ```math or ```latex
+            if i + 7 < self.chars.len()
+                && self.chars[i] == '`'
+                && self.chars[i + 1] == '`'
+                && self.chars[i + 2] == '`'
+            {
+                if let Some((math_content, new_pos)) = self.parse_math_code_block(i, "math") {
+                    if !current_text.is_empty() {
+                        segments.push(MathSegment::Text(current_text.clone()));
+                        current_text.clear();
+                    }
+
+                    segments.push(MathSegment::BlockMath(math_content));
+                    i = new_pos;
+                    continue;
+                }
+
+                if let Some((math_content, new_pos)) = self.parse_math_code_block(i, "latex") {
+                    if !current_text.is_empty() {
+                        segments.push(MathSegment::Text(current_text.clone()));
+                        current_text.clear();
+                    }
+
+                    segments.push(MathSegment::BlockMath(math_content));
+                    i = new_pos;
+                    continue;
+                }
+            }
+
+            // Check for $$ (could be block or inline depending on context)
+            if i + 1 < self.chars.len()
+                && self.chars[i] == '$'
+                && self.chars[i + 1] == '$'
+                && (i == 0 || self.chars[i - 1] != '\\')
+            {
+                let is_block_start = self.is_block_math_delimiter(i);
+
+                let mut j = i + 2;
+                let mut found_close = false;
+                let mut has_newlines = false;
+
+                while j + 1 < self.chars.len() {
+                    if self.chars[j] == '\n' || self.chars[j] == '\r' {
+                        has_newlines = true;
+                    }
+
+                    if self.chars[j] == '$' && self.chars[j + 1] == '$' {
+                        if j > 0 && self.chars[j - 1] == '\\' {
+                            j += 2;
+                            continue;
+                        }
+
+                        let math_content = self.slice(i + 2, j);
+                        found_close = true;
+
+                        let mut is_block_end = false;
+                        let mut end_pos = j + 2;
+                        while end_pos < self.chars.len() {
+                            if self.chars[end_pos] == '\n' || self.chars[end_pos] == '\r' {
+                                is_block_end = true;
+                                break;
+                            }
+                            if !self.chars[end_pos].is_whitespace() {
+                                break;
+                            }
+                            end_pos += 1;
+                        }
+                        if end_pos >= self.chars.len() {
+                            is_block_end = true;
+                        }
+
+                        if !math_content.trim().is_empty() {
+                            if !current_text.is_empty() {
+                                segments.push(MathSegment::Text(current_text.clone()));
+                                current_text.clear();
+                            }
+
+                            if (is_block_start && is_block_end) || has_newlines {
+                                segments
+                                    .push(MathSegment::BlockMath(math_content.trim().to_string()));
+                            } else {
+                                segments
+                                    .push(MathSegment::InlineMath(math_content.trim().to_string()));
+                            }
+                        }
+
+                        i = j + 2;
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if !found_close {
+                    current_text.push('$');
+                    i += 1;
+                    continue;
+                }
+
+                continue;
+            }
+
+            // Check for single $ (inline math)
+            if self.chars[i] == '$' && (i == 0 || self.chars[i - 1] != '\\') {
+                let mut j = i + 1;
+                let mut found_close = false;
+
+                while j < self.chars.len() {
+                    if self.chars[j] == '$' {
+                        if j > 0 && self.chars[j - 1] == '\\' {
+                            j += 1;
+                            continue;
+                        }
+
+                        found_close = true;
+                        let math_content = self.slice(i + 1, j);
+
+                        if !math_content.trim().is_empty() {
+                            if !current_text.is_empty() {
+                                segments.push(MathSegment::Text(current_text.clone()));
+                                current_text.clear();
+                            }
+
+                            segments.push(MathSegment::InlineMath(math_content.trim().to_string()));
+                        }
+
+                        i = j + 1;
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if !found_close {
+                    current_text.push(self.chars[i]);
+                    i += 1;
+                }
+
+                continue;
+            }
+
+            // Regular character
+            current_text.push(self.chars[i]);
+            i += 1;
+        }
+
+        if !current_text.is_empty() {
+            segments.push(MathSegment::Text(current_text));
+        }
+
+        segments
+    }
 }
 
 /// Parse content into segments of text and math expressions
 pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
-    let mut segments = Vec::new();
-    let chars: Vec<char> = content.chars().collect();
-    let mut i = 0;
-    let mut current_text = String::new();
-
-    while i < chars.len() {
-        // Check for LaTeX environments: \begin{...}
-        if i + 7 < chars.len()
-            && chars[i] == '\\'
-            && chars[i + 1..i + 6] == ['b', 'e', 'g', 'i', 'n']
-            && chars[i + 6] == '{'
-            && let Some((env_content, new_pos)) = parse_latex_environment(&chars, i)
-        {
-            // Save any accumulated text
-            if !current_text.is_empty() {
-                segments.push(MathSegment::Text(current_text.clone()));
-                current_text.clear();
-            }
-
-            segments.push(MathSegment::BlockMath(env_content));
-            i = new_pos;
-            continue;
-        }
-
-        // Check for LaTeX display math: \[
-        if i + 1 < chars.len() && chars[i] == '\\' && chars[i + 1] == '[' {
-            // Save any accumulated text
-            if !current_text.is_empty() {
-                segments.push(MathSegment::Text(current_text.clone()));
-                current_text.clear();
-            }
-
-            // Find closing \]
-            i += 2; // Skip \[
-            let math_start = i;
-            let mut found_close = false;
-
-            while i + 1 < chars.len() {
-                if chars[i] == '\\' && chars[i + 1] == ']' {
-                    let math_content: String = chars[math_start..i].iter().collect();
-                    found_close = true;
-                    i += 2; // Skip \]
-
-                    if !math_content.trim().is_empty() {
-                        segments.push(MathSegment::BlockMath(math_content.trim().to_string()));
-                    }
-                    break;
-                }
-                i += 1;
-            }
-
-            if !found_close {
-                // Unclosed \[ - treat as literal
-                current_text.push_str("\\[");
-                current_text.push_str(&chars[math_start..i].iter().collect::<String>());
-            }
-
-            continue;
-        }
-
-        // Check for LaTeX inline math: \(
-        if i + 1 < chars.len() && chars[i] == '\\' && chars[i + 1] == '(' {
-            // Find closing \)
-            i += 2; // Skip \(
-            let math_start = i;
-            let mut found_close = false;
-
-            while i + 1 < chars.len() {
-                if chars[i] == '\\' && chars[i + 1] == ')' {
-                    let math_content: String = chars[math_start..i].iter().collect();
-                    found_close = true;
-                    i += 2; // Skip \)
-
-                    if !math_content.trim().is_empty() {
-                        // Save any accumulated text
-                        if !current_text.is_empty() {
-                            segments.push(MathSegment::Text(current_text.clone()));
-                            current_text.clear();
-                        }
-                        segments.push(MathSegment::InlineMath(math_content.trim().to_string()));
-                    }
-                    break;
-                }
-                i += 1;
-            }
-
-            if !found_close {
-                // Unclosed \( - treat as literal
-                current_text.push_str("\\(");
-                current_text.push_str(&chars[math_start..i].iter().collect::<String>());
-            }
-
-            continue;
-        }
-
-        // Check for block math: ```math or ```latex
-        if i + 7 < chars.len() && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            // Try ```math first
-            if let Some((math_content, new_pos)) = parse_math_code_block(&chars, i, "math") {
-                // Save any accumulated text
-                if !current_text.is_empty() {
-                    segments.push(MathSegment::Text(current_text.clone()));
-                    current_text.clear();
-                }
-
-                segments.push(MathSegment::BlockMath(math_content));
-                i = new_pos;
-                continue;
-            }
-
-            // Try ```latex
-            if let Some((math_content, new_pos)) = parse_math_code_block(&chars, i, "latex") {
-                // Save any accumulated text
-                if !current_text.is_empty() {
-                    segments.push(MathSegment::Text(current_text.clone()));
-                    current_text.clear();
-                }
-
-                segments.push(MathSegment::BlockMath(math_content));
-                i = new_pos;
-                continue;
-            }
-        }
-
-        // Check for $$ (could be block or inline depending on context)
-        if i + 1 < chars.len()
-            && chars[i] == '$'
-            && chars[i + 1] == '$'
-            && (i == 0 || chars[i - 1] != '\\')
-        {
-            // Check if $$ is on its own line (block math)
-            let is_block_start = is_block_math_delimiter(&chars, i);
-
-            // Look for closing $$
-            let mut j = i + 2;
-            let mut found_close = false;
-            let mut has_newlines = false;
-
-            while j + 1 < chars.len() {
-                if chars[j] == '\n' || chars[j] == '\r' {
-                    has_newlines = true;
-                }
-
-                if chars[j] == '$' && chars[j + 1] == '$' {
-                    // Check for escaped $$
-                    if j > 0 && chars[j - 1] == '\\' {
-                        j += 2;
-                        continue;
-                    }
-
-                    let math_content: String = chars[i + 2..j].iter().collect();
-                    found_close = true;
-
-                    // Check if closing $$ is followed by newline or end (confirms block)
-                    let mut is_block_end = false;
-                    let mut end_pos = j + 2;
-                    while end_pos < chars.len() {
-                        if chars[end_pos] == '\n' || chars[end_pos] == '\r' {
-                            is_block_end = true;
-                            break;
-                        }
-                        if !chars[end_pos].is_whitespace() {
-                            break;
-                        }
-                        end_pos += 1;
-                    }
-                    if end_pos >= chars.len() {
-                        is_block_end = true;
-                    }
-
-                    if !math_content.trim().is_empty() {
-                        // Save any accumulated text
-                        if !current_text.is_empty() {
-                            segments.push(MathSegment::Text(current_text.clone()));
-                            current_text.clear();
-                        }
-
-                        // Decide if it's block or inline based on position and content
-                        // If content has newlines, bias towards block math
-                        if (is_block_start && is_block_end) || has_newlines {
-                            segments.push(MathSegment::BlockMath(math_content.trim().to_string()));
-                        } else {
-                            segments.push(MathSegment::InlineMath(math_content.trim().to_string()));
-                        }
-                    }
-
-                    i = j + 2; // Skip closing $$
-                    break;
-                }
-                j += 1;
-            }
-
-            if !found_close {
-                // No closing $$ found - treat as literal text
-                current_text.push('$');
-                i += 1;
-                continue;
-            }
-
-            continue;
-        }
-
-        // Check for single $ (inline math)
-        if chars[i] == '$' && (i == 0 || chars[i - 1] != '\\') {
-            // Look for closing $
-            let mut j = i + 1;
-            let mut found_close = false;
-
-            while j < chars.len() {
-                if chars[j] == '$' {
-                    // Check for escaped $
-                    if j > 0 && chars[j - 1] == '\\' {
-                        j += 1;
-                        continue;
-                    }
-
-                    // Found closing $
-                    found_close = true;
-                    let math_content: String = chars[i + 1..j].iter().collect();
-
-                    if !math_content.trim().is_empty() {
-                        // Save any accumulated text
-                        if !current_text.is_empty() {
-                            segments.push(MathSegment::Text(current_text.clone()));
-                            current_text.clear();
-                        }
-
-                        segments.push(MathSegment::InlineMath(math_content.trim().to_string()));
-                    }
-
-                    i = j + 1; // Skip closing $
-                    break;
-                }
-                j += 1;
-            }
-
-            if !found_close {
-                // No closing delimiter found - treat as literal text
-                current_text.push(chars[i]);
-                i += 1;
-            }
-
-            continue;
-        }
-
-        // Regular character - add to current text
-        current_text.push(chars[i]);
-        i += 1;
-    }
-
-    // Add any remaining text
-    if !current_text.is_empty() {
-        segments.push(MathSegment::Text(current_text));
-    }
-
-    segments
+    MathParser::new(content).parse()
 }
 
 #[cfg(test)]

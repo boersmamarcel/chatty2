@@ -16,6 +16,7 @@ use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
     ToolCallState, TraceItem, UserMessage,
 };
+use super::parsed_cache::{CachedParseResult, ParsedContentCache};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::models_store::ModelsModel;
@@ -38,6 +39,15 @@ pub struct ChatView {
     pending_approval: Option<PendingApprovalInfo>,
     /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
+    /// Cache for parsed message content (markdown, math, code highlighting)
+    parsed_cache: ParsedContentCache,
+    /// Cache of the last streaming parse result, to reuse code block highlighting
+    /// across streaming renders. Cleared on stream finalization or conversation switch.
+    streaming_parse_cache: Option<CachedParseResult>,
+    /// When true, every render re-asserts scroll_to_bottom so that async
+    /// layout changes (image loading, SVG math, code blocks) never leave
+    /// the view stuck above the true bottom. Disabled when user scrolls up.
+    stick_to_bottom: bool,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -96,6 +106,9 @@ impl ChatView {
             scroll_handle,
             pending_approval: None,
             collapsed_tool_calls: HashMap::new(),
+            parsed_cache: ParsedContentCache::new(),
+            streaming_parse_cache: None,
+            stick_to_bottom: true,
         }
     }
 
@@ -138,7 +151,7 @@ impl ChatView {
 
         debug!(total_messages = self.messages.len(), "User message added");
         cx.notify();
-        self.scroll_to_bottom();
+        self.activate_sticky_scroll();
     }
 
     /// Start an assistant message (for streaming)
@@ -162,7 +175,7 @@ impl ChatView {
             "Assistant message started"
         );
         cx.notify();
-        self.scroll_to_bottom();
+        self.activate_sticky_scroll();
     }
 
     /// Append text to the current streaming assistant message
@@ -182,7 +195,7 @@ impl ChatView {
                 last.content.push_str(text);
                 debug!(new_content_len = last.content.len(), "Text appended");
                 cx.notify();
-                self.scroll_to_bottom();
+                self.scroll_if_sticky();
             } else {
                 warn!("Last message NOT streaming, text dropped");
             }
@@ -210,6 +223,15 @@ impl ChatView {
 
             // Clear live trace (it's now frozen in the view entity)
             last.live_trace = None;
+
+            // Clear the streaming parse cache — finalized content uses the
+            // persistent ParsedContentCache instead.
+            self.streaming_parse_cache = None;
+
+            // Scroll to bottom after finalization. The cached render may produce
+            // different-height content (e.g. code blocks, math) compared to the
+            // streaming render, so the scroll position needs to be updated.
+            self.activate_sticky_scroll();
 
             cx.notify();
         }
@@ -260,6 +282,9 @@ impl ChatView {
                 }
                 last.content.push_str("*[Response cancelled by user]*");
                 last.is_streaming = false;
+
+                // Clear streaming parse cache
+                self.streaming_parse_cache = None;
 
                 // Finalize trace if present
                 if let Some(ref mut trace) = last.live_trace {
@@ -371,7 +396,7 @@ impl ChatView {
         }
 
         cx.notify();
-        self.scroll_to_bottom();
+        self.activate_sticky_scroll();
     }
 
     /// Helper method to update a tool call by ID in the live trace.
@@ -627,7 +652,7 @@ impl ChatView {
         }
 
         cx.notify();
-        self.scroll_to_bottom();
+        self.activate_sticky_scroll();
     }
 
     /// Handle approval resolved event
@@ -703,7 +728,7 @@ impl ChatView {
         }
 
         cx.notify();
-        self.scroll_to_bottom();
+        self.activate_sticky_scroll();
     }
 
     /// Helper method to update the active thinking block in the live trace
@@ -752,7 +777,7 @@ impl ChatView {
         });
 
         cx.notify();
-        self.scroll_to_bottom();
+        self.scroll_if_sticky();
     }
 
     /// Handle thinking block ended event
@@ -802,6 +827,8 @@ impl ChatView {
     /// Clear all messages from the chat view
     pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
+        self.parsed_cache.clear();
+        self.streaming_parse_cache = None;
         cx.notify();
     }
 
@@ -821,6 +848,9 @@ impl ChatView {
 
         // Clear collapsed tool calls state from previous conversation
         self.collapsed_tool_calls.clear();
+
+        // Clear parsed content cache from previous conversation
+        self.parsed_cache.clear();
 
         self.messages.clear();
 
@@ -858,11 +888,9 @@ impl ChatView {
                                 match serde_json::from_value::<super::message_types::SystemTrace>(
                                     trace_json.clone(),
                                 ) {
-                                    Ok(trace) if trace.has_items() => {
-                                        Some(cx.new(|_cx| {
-                                            super::trace_components::SystemTraceView::new(trace)
-                                        }))
-                                    }
+                                    Ok(trace) if trace.has_items() => Some(cx.new(|_cx| {
+                                        super::trace_components::SystemTraceView::new(trace)
+                                    })),
                                     Ok(_) => None, // trace exists but has no items
                                     Err(e) => {
                                         tracing::warn!(
@@ -894,13 +922,28 @@ impl ChatView {
             }
         }
 
-        self.scroll_to_bottom();
+        self.activate_sticky_scroll();
         cx.notify();
     }
 
-    /// Scroll to the bottom of the message list
-    fn scroll_to_bottom(&mut self) {
-        self.scroll_handle.set_offset(point(px(0.0), px(-f32::MAX)));
+    /// Activate sticky-scroll mode. While active, every render pass will
+    /// re-assert scroll_to_bottom so that async content changes (image
+    /// loading, SVG math rendering, code block expansion) never leave
+    /// the view stuck above the true bottom.
+    ///
+    /// Sticky mode is automatically disabled when the user scrolls up.
+    fn activate_sticky_scroll(&mut self) {
+        self.stick_to_bottom = true;
+        self.scroll_handle.scroll_to_bottom();
+    }
+
+    /// If sticky-scroll is active, re-assert scroll_to_bottom for this frame.
+    /// Used for incremental streaming updates — respects the user's decision
+    /// to scroll up by not re-enabling sticky mode.
+    fn scroll_if_sticky(&mut self) {
+        if self.stick_to_bottom {
+            self.scroll_handle.scroll_to_bottom();
+        }
     }
 
     /// Handle approval decision from floating bar
@@ -953,7 +996,7 @@ impl ChatView {
                     cx.notify();
                 });
 
-                self.scroll_to_bottom();
+                self.activate_sticky_scroll();
                 trace!("Trace expanded and scrolled");
             } else {
                 trace!("No system_trace_view found - trace not created yet");
@@ -989,6 +1032,32 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Sticky-scroll: re-assert scroll_to_bottom on every render so that
+        // async layout changes (image loading, SVG math, code blocks) always
+        // converge to the true bottom. Detect user scroll-away to disable.
+        if self.stick_to_bottom {
+            // offset() and max_offset() both reflect the last prepaint, so
+            // they are consistent. Content growth doesn't cause a false
+            // positive because offset was set to -max_offset in that same
+            // prepaint; only a user scroll event can move offset away.
+            let offset = self.scroll_handle.offset();
+            let max_offset = self.scroll_handle.max_offset();
+            let distance_from_bottom = max_offset.height + offset.y;
+
+            if distance_from_bottom > px(10.0) && max_offset.height > px(0.0) {
+                // User scrolled away from bottom — disable sticky mode
+                self.stick_to_bottom = false;
+                trace!(
+                    distance = %distance_from_bottom,
+                    "Sticky scroll disabled: user scrolled up"
+                );
+            } else {
+                // Still at bottom. Re-assert so THIS frame's (possibly larger)
+                // content_size will be used by clamp_scroll_position.
+                self.scroll_handle.scroll_to_bottom();
+            }
+        }
+
         // Clear the input if a message was sent
         self.chat_input_state.update(cx, |state, cx| {
             state.clear_if_needed(window, cx);
@@ -1124,6 +1193,13 @@ impl Render for ChatView {
                                             self.collapsed_tool_calls.clone();
                                         let chat_view_entity = cx.entity();
 
+                                        // Temporarily move caches out to avoid split borrow
+                                        // (self.messages is borrowed immutably below)
+                                        let mut parsed_cache =
+                                            std::mem::take(&mut self.parsed_cache);
+                                        let mut streaming_cache =
+                                            self.streaming_parse_cache.take();
+
                                         // Compute visible messages and find the last visible assistant index
                                         let visible_messages: Vec<(usize, &DisplayMessage)> =
                                             self.messages
@@ -1153,7 +1229,7 @@ impl Render for ChatView {
                                             })
                                             .map(|(idx, _)| *idx);
 
-                                        visible_messages
+                                        let rendered: Vec<_> = visible_messages
                                             .into_iter()
                                             .map(|(index, msg)| {
                                                 let entity_clone = chat_view_entity.clone();
@@ -1161,11 +1237,22 @@ impl Render for ChatView {
                                                 let entity_for_regenerate = chat_view_entity.clone();
                                                 let history_index = msg.history_index;
                                                 let is_last_message = last_visible_assistant_idx == Some(index);
+                                                // Only pass the streaming cache for the
+                                                // active streaming message; non-streaming
+                                                // messages use the persistent parsed_cache.
+                                                let mut no_cache: Option<CachedParseResult> = None;
+                                                let sc = if msg.is_streaming {
+                                                    &mut streaming_cache
+                                                } else {
+                                                    &mut no_cache
+                                                };
                                                 render_message(
                                                     msg,
                                                     index,
                                                     is_last_message,
                                                     &collapsed_tool_calls,
+                                                    &mut parsed_cache,
+                                                    sc,
                                                     move |msg_idx, tool_idx, cx| {
                                                         entity_clone.update(cx, |chat_view, cx| {
                                                             let key = (msg_idx, tool_idx);
@@ -1209,7 +1296,13 @@ impl Render for ChatView {
                                                     cx,
                                                 )
                                             })
-                                            .collect::<Vec<_>>()
+                                            .collect();
+
+                                        // Move caches back
+                                        self.parsed_cache = parsed_cache;
+                                        self.streaming_parse_cache = streaming_cache;
+
+                                        rendered
                                     })
                                     .when(is_awaiting, |this| {
                                         this.child(self.render_loading_skeleton())
