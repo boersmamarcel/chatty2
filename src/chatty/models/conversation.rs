@@ -295,9 +295,21 @@ impl Conversation {
     fn debug_assert_parallel_arrays_aligned(&self) {
         let len = self.history.len();
         debug_assert_eq!(self.system_traces.len(), len, "system_traces misaligned");
-        debug_assert_eq!(self.attachment_paths.len(), len, "attachment_paths misaligned");
-        debug_assert_eq!(self.message_timestamps.len(), len, "message_timestamps misaligned");
-        debug_assert_eq!(self.message_feedback.len(), len, "message_feedback misaligned");
+        debug_assert_eq!(
+            self.attachment_paths.len(),
+            len,
+            "attachment_paths misaligned"
+        );
+        debug_assert_eq!(
+            self.message_timestamps.len(),
+            len,
+            "message_timestamps misaligned"
+        );
+        debug_assert_eq!(
+            self.message_feedback.len(),
+            len,
+            "message_feedback misaligned"
+        );
     }
 
     /// Get conversation ID

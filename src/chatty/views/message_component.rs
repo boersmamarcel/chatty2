@@ -14,6 +14,11 @@ use super::code_block_component::CodeBlockComponent;
 use super::math_parser::{MathSegment, parse_math_segments};
 use super::math_renderer::MathComponent;
 use super::message_types::{AssistantMessage, SystemTrace};
+use super::parsed_cache::{
+    CachedCodeBlock, CachedContentSegment, CachedMarkdownSegment, CachedParseResult,
+    ContentCacheKey, ParsedContentCache, StreamingParseState,
+};
+use super::syntax_highlighter;
 use super::trace_components::SystemTraceView;
 
 /// Message role indicator
@@ -34,6 +39,11 @@ enum MarkdownSegment {
         language: Option<String>,
         code: String,
     },
+    /// Incomplete code block (opening ``` without closing ```) detected during streaming.
+    IncompleteCodeBlock {
+        language: Option<String>,
+        code: String,
+    },
 }
 
 lazy_static! {
@@ -45,8 +55,13 @@ lazy_static! {
     ).expect("CODE_BLOCK_REGEX pattern is valid");
 }
 
-/// Parse markdown content into segments of text and code blocks
-fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
+/// Parse markdown content into segments of text and code blocks.
+///
+/// When `streaming` is true, also detects trailing incomplete code blocks
+/// (opening ``` without closing ```) and emits them as `IncompleteCodeBlock`
+/// segments so they can be rendered during streaming without waiting for
+/// the closing delimiter.
+fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegment> {
     let mut segments = Vec::new();
     let mut last_end = 0;
 
@@ -81,11 +96,27 @@ fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
         last_end = match_end;
     }
 
-    // Add remaining text after last code block
+    // Check remaining text for incomplete code blocks (streaming only)
     if last_end < content.len() {
-        let text = content[last_end..].to_string();
-        if !text.trim().is_empty() {
-            segments.push(MarkdownSegment::Text(text));
+        let remaining = &content[last_end..];
+
+        if streaming {
+            if let Some(incomplete) = detect_incomplete_code_block(remaining) {
+                // Add text before the incomplete code block
+                let text_before = &remaining[..incomplete.0];
+                if !text_before.trim().is_empty() {
+                    segments.push(MarkdownSegment::Text(text_before.to_string()));
+                }
+                // Add the incomplete code block
+                segments.push(MarkdownSegment::IncompleteCodeBlock {
+                    language: incomplete.1,
+                    code: incomplete.2,
+                });
+            } else if !remaining.trim().is_empty() {
+                segments.push(MarkdownSegment::Text(remaining.to_string()));
+            }
+        } else if !remaining.trim().is_empty() {
+            segments.push(MarkdownSegment::Text(remaining.to_string()));
         }
     }
 
@@ -95,6 +126,39 @@ fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
     }
 
     segments
+}
+
+/// Detect an incomplete (unclosed) code block in the given text.
+///
+/// Returns `Some((offset, language, code))` where `offset` is the byte
+/// position of the opening ``` within `text`.
+fn detect_incomplete_code_block(text: &str) -> Option<(usize, Option<String>, String)> {
+    // Find the last occurrence of ``` that could be an opening fence
+    let backtick_pos = text.rfind("```")?;
+    let after_backticks = &text[backtick_pos + 3..];
+
+    // Must have a newline after the language tag to be an opening fence
+    let newline_pos = after_backticks.find('\n')?;
+
+    let language_str = after_backticks[..newline_pos].trim();
+    // Validate language tag (only alphanumeric, _, +, -)
+    if !language_str.is_empty()
+        && !language_str
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '+' || c == '-')
+    {
+        return None;
+    }
+
+    let language = if language_str.is_empty() {
+        None
+    } else {
+        Some(language_str.to_string())
+    };
+
+    let code = after_backticks[newline_pos + 1..].to_string();
+
+    Some((backtick_pos, language, code))
 }
 
 /// Represents a parsed segment of message content
@@ -170,14 +234,15 @@ impl RenderOnce for MarkdownContent {
     }
 }
 
-/// Render content with math awareness
+/// Render pre-parsed math segments to GPUI elements.
 ///
-/// This function parses content for math expressions and renders them appropriately.
-/// Math expressions are rendered using MathComponent while regular text uses MarkdownContent.
-fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
-    // Parse for math segments
-    let math_segments = parse_math_segments(content);
-
+/// Accepts `&[MathSegment]` so it can be used both from the live parsing path
+/// (`render_math_aware_content`) and from the cached path (`render_from_cached`).
+fn render_math_segments(
+    math_segments: &[MathSegment],
+    base_index: usize,
+    cx: &App,
+) -> Vec<AnyElement> {
     let mut elements = Vec::new();
     let mut inline_row: Vec<AnyElement> = Vec::new();
     for (seg_idx, segment) in math_segments.iter().enumerate() {
@@ -278,30 +343,313 @@ fn render_math_aware_content(content: &str, base_index: usize, cx: &App) -> Vec<
     elements
 }
 
-/// Render content with code block awareness, then math awareness
+/// Run the full three-stage parsing pipeline and return a cacheable result.
 ///
-/// This function:
-/// 1. First parses for fenced code blocks (```)
-/// 2. Renders code blocks with copy buttons
-/// 3. For text segments, parses for math expressions
-fn render_content_with_code_blocks(content: &str, base_index: usize, cx: &App) -> Vec<AnyElement> {
-    let markdown_segments = parse_markdown_segments(content);
+/// Phases:
+/// 1. parse_content_segments: extract `<think>` blocks
+/// 2. parse_markdown_segments: extract fenced code blocks from text segments
+/// 3. parse_math_segments: extract math expressions from non-code text
+/// 4. highlight_code: syntax-highlight each code block
+fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
+    let content_segments = parse_content_segments(content);
+
+    let cached_segments: Vec<CachedContentSegment> = content_segments
+        .into_iter()
+        .map(|segment| match segment {
+            ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+            ContentSegment::Text(text) => {
+                let markdown_segs = parse_markdown_segments(&text, false);
+                let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
+                    .into_iter()
+                    .map(|ms| match ms {
+                        MarkdownSegment::CodeBlock { language, code } => {
+                            let spans =
+                                syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
+                            CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
+                                language,
+                                code,
+                                highlighted_spans: spans,
+                            })
+                        }
+                        MarkdownSegment::Text(t) => {
+                            let math_segs = parse_math_segments(&t);
+                            CachedMarkdownSegment::TextWithMath(math_segs)
+                        }
+                        MarkdownSegment::IncompleteCodeBlock { .. } => {
+                            unreachable!(
+                                "IncompleteCodeBlock should not appear in non-streaming parse"
+                            )
+                        }
+                    })
+                    .collect();
+                CachedContentSegment::Text(cached_md)
+            }
+        })
+        .collect();
+
+    CachedParseResult {
+        segments: cached_segments,
+    }
+}
+
+/// Build a streaming parse result with incremental segment reuse.
+///
+/// During streaming, content only grows at the end. This function exploits that
+/// property to avoid re-parsing stable content:
+///
+/// 1. Always run `parse_content_segments()` (cheap — just string::find for think tags)
+/// 2. **Content segment level**: If segment count is unchanged and content only grew,
+///    reuse all content segments except the last (they're stable).
+/// 3. **Markdown segment level**: Within the last text segment, if md segment count
+///    is unchanged, reuse all md segments except the last.
+/// 4. Only the last (growing) markdown segment is re-parsed through math/highlighting.
+///
+/// When segment counts change (think block closed, code block completed), the
+/// affected segment is fully re-parsed (one-time transition cost).
+fn build_streaming_parse_result(
+    content: &str,
+    prev: Option<&StreamingParseState>,
+    cx: &App,
+) -> StreamingParseState {
+    let content_segments = parse_content_segments(content);
+    let content_segment_count = content_segments.len();
+
+    // Check if we can reuse the stable prefix from the previous render
+    let can_reuse_prefix = prev.is_some_and(|p| {
+        content.len() >= p.content_len && content_segment_count == p.content_segment_count
+    });
+
+    let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
+        let prev_state = prev.unwrap();
+        let prev_segments = &prev_state.result.segments;
+        let mut segments = Vec::with_capacity(content_segment_count);
+
+        // Reuse all content segments except the last
+        for seg in &prev_segments[..prev_segments.len() - 1] {
+            segments.push(seg.clone());
+        }
+
+        // Re-parse only the last content segment
+        let last = content_segments.into_iter().last().unwrap();
+        segments.push(parse_content_segment_streaming(last, prev_state, cx));
+
+        segments
+    } else {
+        // Full parse (first render or segment count changed)
+        content_segments
+            .into_iter()
+            .map(|seg| parse_content_segment_streaming_fresh(seg, cx))
+            .collect()
+    };
+
+    // Count md segments in last text segment (for next render's reuse check)
+    let last_text_md_count = cached_segments
+        .last()
+        .map(|s| {
+            if let CachedContentSegment::Text(mds) = s {
+                mds.len()
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0);
+
+    StreamingParseState {
+        result: CachedParseResult {
+            segments: cached_segments,
+        },
+        content_len: content.len(),
+        content_segment_count,
+        last_text_md_count,
+    }
+}
+
+/// Parse the last content segment with markdown-level incremental reuse.
+///
+/// If the previous render had the same number of markdown segments within this
+/// text block, reuse all but the last markdown segment (they're stable).
+fn parse_content_segment_streaming(
+    segment: ContentSegment,
+    prev: &StreamingParseState,
+    cx: &App,
+) -> CachedContentSegment {
+    match segment {
+        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Text(text) => {
+            let markdown_segs = parse_markdown_segments(&text, true);
+            let md_count = markdown_segs.len();
+
+            // Try markdown-level reuse: same count → reuse all but last
+            let prev_md = prev
+                .result
+                .segments
+                .last()
+                .and_then(|s| {
+                    if let CachedContentSegment::Text(mds) = s {
+                        Some(mds)
+                    } else {
+                        None
+                    }
+                })
+                .filter(|_| md_count == prev.last_text_md_count && md_count > 0);
+
+            let cached_md = if let Some(prev_mds) = prev_md {
+                let mut result = Vec::with_capacity(md_count);
+
+                // Reuse all md segments except the last
+                for seg in &prev_mds[..prev_mds.len().min(md_count - 1)] {
+                    result.push(seg.clone());
+                }
+
+                // Parse only the last md segment
+                let last = markdown_segs.into_iter().last().unwrap();
+                result.push(parse_markdown_segment_streaming(last, prev_mds, cx));
+
+                result
+            } else {
+                // Full parse of all md segments (count changed or no prev)
+                markdown_segs
+                    .into_iter()
+                    .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
+                    .collect()
+            };
+
+            CachedContentSegment::Text(cached_md)
+        }
+    }
+}
+
+/// Parse a content segment without incremental reuse (first render or segment count changed).
+fn parse_content_segment_streaming_fresh(
+    segment: ContentSegment,
+    cx: &App,
+) -> CachedContentSegment {
+    match segment {
+        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Text(text) => {
+            let markdown_segs = parse_markdown_segments(&text, true);
+            let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
+                .into_iter()
+                .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
+                .collect();
+            CachedContentSegment::Text(cached_md)
+        }
+    }
+}
+
+/// Convert a single `MarkdownSegment` into a `CachedMarkdownSegment`.
+///
+/// For complete code blocks, tries to reuse highlighting from `prev_mds`.
+/// For incomplete code blocks, stores plain text (no highlighting).
+fn parse_markdown_segment_streaming(
+    segment: MarkdownSegment,
+    prev_mds: &[CachedMarkdownSegment],
+    cx: &App,
+) -> CachedMarkdownSegment {
+    match segment {
+        MarkdownSegment::CodeBlock { language, code } => {
+            // Try to reuse highlighted spans from previous render
+            if let Some(reused) = try_reuse_code_block(prev_mds, &language, &code) {
+                CachedMarkdownSegment::CodeBlock(reused)
+            } else {
+                let spans = syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
+                CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
+                    language,
+                    code,
+                    highlighted_spans: spans,
+                })
+            }
+        }
+        MarkdownSegment::IncompleteCodeBlock { language, code } => {
+            CachedMarkdownSegment::IncompleteCodeBlock { language, code }
+        }
+        MarkdownSegment::Text(t) => {
+            let math_segs = parse_math_segments(&t);
+            CachedMarkdownSegment::TextWithMath(math_segs)
+        }
+    }
+}
+
+/// Search previous markdown segments for a code block with matching
+/// language and code content. Returns a clone of the `CachedCodeBlock`
+/// (with its pre-computed highlighted spans) if found.
+fn try_reuse_code_block(
+    prev_mds: &[CachedMarkdownSegment],
+    language: &Option<String>,
+    code: &str,
+) -> Option<CachedCodeBlock> {
+    for md_seg in prev_mds {
+        if let CachedMarkdownSegment::CodeBlock(cb) = md_seg
+            && &cb.language == language
+            && cb.code == code
+        {
+            return Some(cb.clone());
+        }
+    }
+    None
+}
+
+/// Build GPUI elements from pre-parsed cached content.
+///
+/// Mirrors the logic of the thinking-block + code-block + math rendering paths
+/// but reads from the cache instead of re-parsing.
+fn render_from_cached(cached: &CachedParseResult, index: usize, cx: &App) -> Vec<AnyElement> {
+    cached
+        .segments
+        .iter()
+        .enumerate()
+        .flat_map(|(seg_idx, segment)| match segment {
+            CachedContentSegment::Thinking(content) => {
+                vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
+            }
+            CachedContentSegment::Text(md_segments) => {
+                render_cached_markdown_segments(md_segments, index * 100 + seg_idx, cx)
+            }
+        })
+        .collect()
+}
+
+/// Render cached markdown segments (code blocks with pre-highlighted spans,
+/// text with pre-parsed math segments).
+fn render_cached_markdown_segments(
+    segments: &[CachedMarkdownSegment],
+    base_index: usize,
+    cx: &App,
+) -> Vec<AnyElement> {
     let mut elements = Vec::new();
     let mut code_block_index = 0;
 
-    for segment in markdown_segments {
+    for segment in segments {
         match segment {
-            MarkdownSegment::CodeBlock { language, code } => {
-                // Render code block with copy button
-                let code_block =
-                    CodeBlockComponent::new(language, code, base_index * 100 + code_block_index);
-                elements.push(code_block.into_any_element());
+            CachedMarkdownSegment::CodeBlock(cached_cb) => {
+                let block = CodeBlockComponent::with_highlighted_spans(
+                    cached_cb.language.clone(),
+                    cached_cb.code.clone(),
+                    cached_cb.highlighted_spans.clone(),
+                    base_index * 100 + code_block_index,
+                );
+                elements.push(block.into_any_element());
                 code_block_index += 1;
             }
-            MarkdownSegment::Text(text) => {
-                // Parse text for math expressions
-                let math_elements = render_math_aware_content(&text, base_index, cx);
+            CachedMarkdownSegment::TextWithMath(math_segments) => {
+                let math_elements = render_math_segments(math_segments, base_index, cx);
                 elements.extend(math_elements);
+            }
+            CachedMarkdownSegment::IncompleteCodeBlock { language, code } => {
+                // Render as a code block with plain foreground text (no syntax highlighting)
+                let foreground = cx.theme().foreground;
+                let spans = vec![syntax_highlighter::HighlightedSpan {
+                    text: code.clone(),
+                    color: foreground,
+                }];
+                let block = CodeBlockComponent::with_highlighted_spans(
+                    language.clone(),
+                    code.clone(),
+                    spans,
+                    base_index * 100 + code_block_index,
+                );
+                elements.push(block.into_any_element());
+                code_block_index += 1;
             }
         }
     }
@@ -487,52 +835,51 @@ fn extract_attachment_path(tool_call: &super::message_types::ToolCallBlock) -> O
     Some(PathBuf::from(path_str))
 }
 
-/// Render a text segment, handling any embedded `<thinking>` blocks within it.
+/// Render a text segment using the cache, handling embedded `<thinking>` blocks.
 ///
-/// Used by `render_interleaved_content` so that thinking tags are displayed
-/// correctly even when tool calls are also present (i.e. `should_interleave = true`).
-fn render_text_segment_with_thinking(
-    text: &str,
+/// For finalized markdown content, uses the persistent cache to avoid re-parsing.
+/// For streaming markdown, uses `build_streaming_parse_result` which reuses
+/// code block highlighting from the previous render to avoid O(n²) re-highlighting.
+#[allow(clippy::too_many_arguments)]
+fn render_text_segment_cached(
+    text_segment: &str,
+    base_index: usize,
     is_markdown: bool,
     is_streaming: bool,
-    index: usize,
+    is_dark: bool,
+    parsed_cache: &mut ParsedContentCache,
+    streaming_cache: &mut Option<StreamingParseState>,
     cx: &App,
 ) -> Vec<AnyElement> {
-    let segments = parse_content_segments(text);
-    let has_thinking = segments
-        .iter()
-        .any(|s| matches!(s, ContentSegment::Thinking(_)));
-
-    if has_thinking {
-        segments
-            .iter()
-            .enumerate()
-            .flat_map(|(seg_idx, segment)| match segment {
-                ContentSegment::Thinking(content) => {
-                    vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
-                }
-                ContentSegment::Text(text) => {
-                    if is_markdown && !is_streaming {
-                        render_content_with_code_blocks(text, index * 100 + seg_idx, cx)
-                    } else {
-                        vec![div().child(text.clone()).into_any_element()]
-                    }
-                }
-            })
-            .collect()
-    } else if is_markdown && !is_streaming {
-        render_content_with_code_blocks(text, index, cx)
+    if is_markdown && !is_streaming {
+        // Finalized: use cache to avoid re-parsing on every render
+        let cache_key = ContentCacheKey::new(text_segment, is_dark);
+        if parsed_cache.get(&cache_key).is_none() {
+            let result = build_cached_parse_result(text_segment, cx);
+            parsed_cache.insert(cache_key, result);
+        }
+        let cached = parsed_cache.get(&cache_key).unwrap();
+        render_from_cached(cached, base_index, cx)
+    } else if is_markdown {
+        // Streaming: incremental parse with stable prefix reuse
+        let state = build_streaming_parse_result(text_segment, streaming_cache.as_ref(), cx);
+        let elements = render_from_cached(&state.result, base_index, cx);
+        *streaming_cache = Some(state);
+        elements
     } else {
-        vec![div().child(text.to_string()).into_any_element()]
+        vec![div().child(text_segment.to_string()).into_any_element()]
     }
 }
 
 /// Render interleaved content: text segments mixed with tool calls
+#[allow(clippy::too_many_arguments)]
 fn render_interleaved_content<F>(
     msg: &DisplayMessage,
     index: usize,
     mut container: Div,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
+    parsed_cache: &mut ParsedContentCache,
+    streaming_cache: &mut Option<StreamingParseState>,
     on_toggle_tool: F,
     cx: &App,
 ) -> Div
@@ -540,6 +887,8 @@ where
     F: Fn(usize, usize, &mut App) + 'static + Clone,
 {
     use super::message_types::TraceItem;
+
+    let is_dark = cx.theme().mode.is_dark();
 
     // Get the trace items from the trace view
     let trace_items = msg
@@ -550,11 +899,14 @@ where
 
     if trace_items.is_empty() {
         // No tool calls, but still handle any thinking blocks in the content
-        let elements = render_text_segment_with_thinking(
+        let elements = render_text_segment_cached(
             &msg.content,
+            index,
             msg.is_markdown,
             msg.is_streaming,
-            index,
+            is_dark,
+            parsed_cache,
+            streaming_cache,
             cx,
         );
         return container.children(elements);
@@ -582,11 +934,14 @@ where
             if text_before.len() > last_text_end {
                 let text_segment = &text_before[last_text_end..];
                 if !text_segment.is_empty() {
-                    let elements = render_text_segment_with_thinking(
+                    let elements = render_text_segment_cached(
                         text_segment,
+                        index * 100 + tool_idx,
                         msg.is_markdown,
                         msg.is_streaming,
-                        index * 100 + tool_idx,
+                        is_dark,
+                        parsed_cache,
+                        streaming_cache,
                         cx,
                     );
                     container = container.children(elements);
@@ -639,11 +994,14 @@ where
     if last_text_end < full_content.len() {
         let remaining_text = &full_content[last_text_end..];
         if !remaining_text.is_empty() {
-            let elements = render_text_segment_with_thinking(
+            let elements = render_text_segment_cached(
                 remaining_text,
+                index * 1000,
                 msg.is_markdown,
                 msg.is_streaming,
-                index * 1000,
+                is_dark,
+                parsed_cache,
+                streaming_cache,
                 cx,
             );
             container = container.children(elements);
@@ -761,6 +1119,8 @@ pub fn render_message<F, G, R>(
     index: usize,
     is_last_message: bool,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
+    parsed_cache: &mut ParsedContentCache,
+    streaming_cache: &mut Option<StreamingParseState>,
     on_toggle_tool: F,
     on_feedback: G,
     on_regenerate: R,
@@ -771,7 +1131,8 @@ where
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
     R: Fn(usize, &mut App) + 'static + Clone,
 {
-    // If not in viewport window, render lightweight placeholder
+    let is_dark = cx.theme().mode.is_dark();
+
     // Full render for messages in viewport
     let mut container = div()
         .max_w(relative(1.)) // Max 100% of container width
@@ -800,67 +1161,51 @@ where
         ));
     }
 
-    // Parse content for thinking blocks (for assistant messages)
-    // But skip this if we should render interleaved content instead
-    if matches!(msg.role, MessageRole::Assistant) && !should_interleave {
-        let segments = parse_content_segments(&msg.content);
+    // For non-interleaved assistant messages with markdown, use optimized render paths:
+    // - Finalized: cache the parse result to avoid re-parsing on every render
+    // - Streaming: reuse code block highlights from the previous render
+    if matches!(msg.role, MessageRole::Assistant) && !should_interleave && msg.is_markdown {
+        let children = if !msg.is_streaming {
+            // Finalized: use cached parse result
+            let cache_key = ContentCacheKey::new(&msg.content, is_dark);
+            if parsed_cache.get(&cache_key).is_none() {
+                let result = build_cached_parse_result(&msg.content, cx);
+                parsed_cache.insert(cache_key, result);
+            }
+            let cached = parsed_cache.get(&cache_key).unwrap();
+            render_from_cached(cached, index, cx)
+        } else {
+            // Streaming: incremental parse with stable prefix reuse
+            let state = build_streaming_parse_result(&msg.content, streaming_cache.as_ref(), cx);
+            let elements = render_from_cached(&state.result, index, cx);
+            *streaming_cache = Some(state);
+            elements
+        };
 
-        debug!(
-            content_len = msg.content.len(),
-            segments_count = segments.len(),
-            has_thinking = segments.iter().any(|s| matches!(s, ContentSegment::Thinking(_))),
-            content_preview = %msg.content.chars().take(100).collect::<String>(),
-            "Parsing message for thinking blocks"
-        );
+        let message_with_content = container.children(children);
 
-        // If we have segments with thinking blocks, render them specially
-        if segments
-            .iter()
-            .any(|s| matches!(s, ContentSegment::Thinking(_)))
-        {
-            let children: Vec<AnyElement> = segments
-                .iter()
-                .enumerate()
-                .flat_map(|(seg_idx, segment)| match segment {
-                    ContentSegment::Thinking(content) => {
-                        vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
-                    }
-                    ContentSegment::Text(text) => {
-                        if msg.is_markdown && !msg.is_streaming {
-                            // Parse this text segment for math
-                            render_content_with_code_blocks(text, index * 100 + seg_idx, cx)
-                        } else {
-                            vec![div().child(text.clone()).into_any_element()]
-                        }
-                    }
-                })
-                .collect();
-
-            let message_with_content = container.children(children);
-
-            // Wrap with action buttons for finalized assistant messages
-            // (hide feedback row while still streaming or content is empty)
-            let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
-            return match msg.role {
-                MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
-                    .child(message_with_content)
-                    .child(render_assistant_actions(
-                        &msg.content,
-                        &msg.feedback,
-                        index,
-                        is_last_message,
-                        on_feedback,
-                        on_regenerate,
-                        cx,
-                    ))
-                    .into_any_element(),
-                _ => message_with_content.into_any_element(),
-            };
-        }
+        // Wrap with action buttons for finalized assistant messages
+        let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
+        return match msg.role {
+            MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
+                .child(message_with_content)
+                .child(render_assistant_actions(
+                    &msg.content,
+                    &msg.feedback,
+                    index,
+                    is_last_message,
+                    on_feedback,
+                    on_regenerate,
+                    cx,
+                ))
+                .into_any_element(),
+            _ => message_with_content.into_any_element(),
+        };
     }
 
     // Render content based on whether it's markdown (no thinking blocks found)
-    // Only render as markdown if NOT streaming (to avoid re-parsing on every chunk)
+    // Markdown is rendered through the full pipeline for both streaming and finalized;
+    // finalized content is cached, streaming content is parsed fresh each render.
 
     debug!(
         index = index,
@@ -878,15 +1223,26 @@ where
             index,
             container,
             collapsed_tool_calls,
+            parsed_cache,
+            streaming_cache,
             on_toggle_tool,
             cx,
         )
-    } else if msg.is_markdown && !msg.is_streaming {
-        // Parse for math expressions
-        let content_elements = render_content_with_code_blocks(&msg.content, index, cx);
+    } else if msg.is_markdown {
+        // Markdown content — use cache for finalized, streaming parse for streaming
+        let content_elements = render_text_segment_cached(
+            &msg.content,
+            index,
+            msg.is_markdown,
+            msg.is_streaming,
+            is_dark,
+            parsed_cache,
+            streaming_cache,
+            cx,
+        );
         container.children(content_elements)
     } else {
-        // Use plain text for streaming messages for better performance
+        // Non-markdown plain text
         container.child(msg.content.clone())
     };
 

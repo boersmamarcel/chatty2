@@ -12,14 +12,33 @@ pub struct CodeBlockComponent {
     language: Option<String>,
     code: String,
     block_index: usize,
+    /// Pre-computed highlighted spans. If Some, skip highlight_code() in render.
+    pre_highlighted: Option<Vec<syntax_highlighter::HighlightedSpan>>,
 }
 
 impl CodeBlockComponent {
+    #[allow(dead_code)]
     pub fn new(language: Option<String>, code: String, block_index: usize) -> Self {
         Self {
             language,
             code,
             block_index,
+            pre_highlighted: None,
+        }
+    }
+
+    /// Construct with pre-computed highlighted spans (from cache).
+    pub fn with_highlighted_spans(
+        language: Option<String>,
+        code: String,
+        spans: Vec<syntax_highlighter::HighlightedSpan>,
+        block_index: usize,
+    ) -> Self {
+        Self {
+            language,
+            code,
+            block_index,
+            pre_highlighted: Some(spans),
         }
     }
 }
@@ -29,9 +48,20 @@ impl RenderOnce for CodeBlockComponent {
         let bg_color = cx.theme().muted;
         let border_color = cx.theme().border;
 
-        // Highlight the code using syntect
-        let highlighted_spans =
-            syntax_highlighter::highlight_code(&self.code, self.language.as_deref(), cx);
+        let CodeBlockComponent {
+            language,
+            code,
+            block_index,
+            pre_highlighted,
+        } = self;
+
+        // Use pre-highlighted spans if available, otherwise compute
+        let highlighted_spans = match pre_highlighted {
+            Some(spans) => spans,
+            None => syntax_highlighter::highlight_code(&code, language.as_deref(), cx),
+        };
+
+        let rendered_lines = render_highlighted_lines(highlighted_spans);
 
         div()
             .relative() // For absolute positioning of copy button
@@ -48,22 +78,19 @@ impl RenderOnce for CodeBlockComponent {
                     .text_size(px(13.0))
                     .line_height(relative(1.5))
                     // Render code line by line to preserve formatting
-                    .child(div().flex().flex_col().gap_0().children(
-                        // Group spans by lines
-                        self.render_lines(highlighted_spans),
-                    ))
+                    .child(div().flex().flex_col().gap_0().children(rendered_lines))
                     // Copy button (top-right overlay)
                     .child(
                         div().absolute().top_0().right_0().child(
                             Button::new(ElementId::Name(
-                                format!("copy-code-btn-{}", self.block_index).into(),
+                                format!("copy-code-btn-{}", block_index).into(),
                             ))
                             .ghost()
                             .xsmall()
                             .icon(Icon::new(CustomIcon::Copy))
                             .tooltip("Copy code")
                             .on_click({
-                                let code = self.code.clone();
+                                let code = code.clone();
                                 move |_event, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                                 }
@@ -74,19 +101,17 @@ impl RenderOnce for CodeBlockComponent {
     }
 }
 
-impl CodeBlockComponent {
-    /// Render highlighted spans as lines
-    fn render_lines(&self, spans: Vec<syntax_highlighter::HighlightedSpan>) -> Vec<Div> {
-        split_spans_into_lines(spans)
-            .into_iter()
-            .map(|line_spans| {
-                div().flex().flex_row().children(
-                    line_spans
-                        .into_iter()
-                        .map(|ls| div().text_color(ls.color).child(ls.text))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect()
-    }
+/// Render highlighted spans as lines
+fn render_highlighted_lines(spans: Vec<syntax_highlighter::HighlightedSpan>) -> Vec<Div> {
+    split_spans_into_lines(spans)
+        .into_iter()
+        .map(|line_spans| {
+            div().flex().flex_row().children(
+                line_spans
+                    .into_iter()
+                    .map(|ls| div().text_color(ls.color).child(ls.text))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }

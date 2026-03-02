@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -6,10 +7,9 @@ use std::time::{Duration, Instant};
 use gpui::{Entity, EventEmitter, Global, Task};
 use tracing::{debug, warn};
 
-/// Minimum interval between batched TextChunk events (~60fps).
-const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
-
-use std::path::PathBuf;
+/// Minimum interval between batched TextChunk events (~250fps).
+/// Keeps text visually smooth while reducing per-token event overhead.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(4);
 
 use crate::chatty::services::StreamChunk;
 use crate::chatty::tools::PendingArtifacts;
@@ -152,7 +152,7 @@ impl StreamManager {
                 task: Some(task),
                 cancel_flag,
                 pending_artifacts,
-                pending_text: String::with_capacity(4096),
+                pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
             },
         );
@@ -187,7 +187,7 @@ impl StreamManager {
                 task: Some(task),
                 cancel_flag,
                 pending_artifacts,
-                pending_text: String::with_capacity(4096),
+                pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
             },
         );
@@ -237,7 +237,7 @@ impl StreamManager {
     /// Process a stream chunk: update internal state and emit the corresponding event.
     ///
     /// Text chunks are batched: text is accumulated in `pending_text` and emitted as a
-    /// single `TextChunk` event only when `FLUSH_INTERVAL` (16ms, ~60fps) has elapsed.
+    /// single `TextChunk` event only when `FLUSH_INTERVAL` (4ms, ~250fps) has elapsed.
     /// All other chunk types are forwarded immediately without delay.
     pub fn handle_chunk(
         &mut self,
@@ -449,6 +449,7 @@ impl StreamManager {
                     text: batch,
                 });
             }
+
             state.cancel_flag.store(true, Ordering::Relaxed);
             debug!("Cancelled pending stream");
             cx.emit(StreamManagerEvent::StreamEnded {
@@ -503,6 +504,7 @@ impl StreamManager {
                         text: batch,
                     });
                 }
+
                 state.cancel_flag.store(true, Ordering::Relaxed);
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: key,
