@@ -12,6 +12,7 @@ pub mod math_parser;
 pub mod math_renderer;
 pub mod message_component;
 pub mod message_types;
+pub mod parsed_cache;
 pub mod sidebar_view;
 pub mod syntax_highlighter;
 pub mod titlebar;
