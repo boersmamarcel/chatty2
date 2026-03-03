@@ -65,6 +65,9 @@ comemo = "0.4"
 
 # Mermaid diagram rendering
 mermaid-rs-renderer = { version = "0.2", default-features = false }
+# SVG-to-PNG rasterization (same versions as gpui uses)
+resvg = "0.45"
+usvg = "0.45"
 
 # Syntax highlighting
 syntect = "5.3"

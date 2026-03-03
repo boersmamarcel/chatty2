@@ -139,6 +139,36 @@ impl MermaidRendererService {
         result.into_owned()
     }
 
+    /// Render a cached SVG file to PNG bytes at 2x scale for crisp output.
+    ///
+    /// Uses resvg (same renderer GPUI uses) so the output matches what the user sees.
+    pub fn render_svg_to_png(svg_path: &std::path::Path) -> Result<Vec<u8>> {
+        let svg_data = std::fs::read(svg_path).context("Failed to read SVG file")?;
+
+        let opts = usvg::Options::default();
+        let tree = usvg::Tree::from_data(&svg_data, &opts)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SVG: {}", e))?;
+
+        let svg_size = tree.size();
+        let scale = 2.0_f32; // 2x for crisp output
+
+        let width = (svg_size.width() * scale) as u32;
+        let height = (svg_size.height() * scale) as u32;
+
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create pixmap ({}x{})", width, height))?;
+
+        // Fill with white background
+        pixmap.fill(resvg::tiny_skia::Color::WHITE);
+
+        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+        pixmap
+            .encode_png()
+            .map_err(|e| anyhow::anyhow!("Failed to encode PNG: {}", e))
+    }
+
     /// Cache version — bump whenever rendering or sanitization logic changes
     /// to invalidate stale on-disk SVGs from previous builds.
     const CACHE_VERSION: &'static str = "v3";

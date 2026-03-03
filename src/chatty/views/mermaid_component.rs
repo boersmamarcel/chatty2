@@ -3,8 +3,10 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable};
+use tracing::warn;
 
 use crate::assets::CustomIcon;
+use crate::chatty::services::MermaidRendererService;
 
 // Mermaid diagram dimensions
 const MERMAID_MAX_WIDTH: f32 = 800.0;
@@ -40,8 +42,8 @@ impl MermaidComponent {
         }
     }
 
-    /// Build a copy button for Mermaid source
-    fn build_copy_button(id: &ElementId, source: &str) -> Button {
+    /// Build a copy-source button for Mermaid code
+    fn build_copy_source_button(id: &ElementId, source: &str) -> Button {
         let source = source.to_string();
         Button::new(ElementId::Name(
             format!("copy-mermaid-{}", id.clone()).into(),
@@ -54,12 +56,35 @@ impl MermaidComponent {
             cx.write_to_clipboard(ClipboardItem::new_string(source.clone()));
         })
     }
+
+    /// Build a copy-as-PNG button for the rendered diagram
+    fn build_copy_png_button(id: &ElementId, svg_path: &std::path::Path) -> Button {
+        let svg_path = svg_path.to_path_buf();
+        Button::new(ElementId::Name(format!("copy-png-{}", id.clone()).into()))
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(CustomIcon::Image))
+            .tooltip("Copy as PNG")
+            .on_click(move |_event, _window, cx| {
+                match MermaidRendererService::render_svg_to_png(&svg_path) {
+                    Ok(png_bytes) => {
+                        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
+                        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to render mermaid PNG for clipboard");
+                    }
+                }
+            })
+    }
 }
 
 impl RenderOnce for MermaidComponent {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         if let Some(svg_path) = &self.cached_svg_path {
-            // Render the SVG diagram with a copy button overlay
+            let copy_png = Self::build_copy_png_button(&self.element_id, svg_path);
+
+            // Render the SVG diagram with copy buttons overlay
             div()
                 .id(self.element_id.clone())
                 .relative()
@@ -77,7 +102,13 @@ impl RenderOnce for MermaidComponent {
                         .absolute()
                         .top_0()
                         .right_0()
-                        .child(Self::build_copy_button(&self.element_id, &self.source)),
+                        .flex()
+                        .gap_0p5()
+                        .child(copy_png)
+                        .child(Self::build_copy_source_button(
+                            &self.element_id,
+                            &self.source,
+                        )),
                 )
         } else {
             // Fallback: render raw mermaid code in a styled box
@@ -107,7 +138,10 @@ impl RenderOnce for MermaidComponent {
                         .absolute()
                         .top_0()
                         .right_0()
-                        .child(Self::build_copy_button(&self.element_id, &self.source)),
+                        .child(Self::build_copy_source_button(
+                            &self.element_id,
+                            &self.source,
+                        )),
                 )
         }
     }
