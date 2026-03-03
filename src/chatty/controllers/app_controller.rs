@@ -1811,8 +1811,9 @@ impl ChattyApp {
         });
 
         // 2. Read response text from ConversationsStore (single source of truth),
-        //    finalize in conversation model, and check if title gen needed
-        let (should_generate_title, assistant_history_index) =
+        //    finalize in conversation model, check if title gen needed, and
+        //    extract model_id for pricing lookup (avoids a second global access later).
+        let (should_generate_title, assistant_history_index, model_id_opt) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     let response_text = conv
@@ -1820,6 +1821,7 @@ impl ChattyApp {
                         .cloned()
                         .unwrap_or_default();
                     let has_trace = trace_json.is_some();
+                    let model_id = conv.model_id().to_string();
                     conv.finalize_response(response_text, artifact_paths, trace_json);
                     let msg_count = conv.message_count();
                     let traces_len = conv.system_traces().len();
@@ -1827,10 +1829,10 @@ impl ChattyApp {
                     let assistant_idx = msg_count.saturating_sub(1);
                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
                     debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
-                    (should_gen, Some(assistant_idx))
+                    (should_gen, Some(assistant_idx), Some(model_id))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    (false, None)
+                    (false, None, None)
                 }
             });
 
@@ -1855,15 +1857,9 @@ impl ChattyApp {
                 TokenUsage::with_turn_count(input_tokens, output_tokens, api_turn_count);
 
             // Calculate cost if pricing is configured for this model
-            let model_id_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                store
-                    .get_conversation(&conv_id)
-                    .map(|conv| conv.model_id().to_string())
-            });
-
-            if let Some(model_id) = model_id_opt {
+            if let Some(ref model_id) = model_id_opt {
                 let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
-                    models.get_model(&model_id).and_then(|model| {
+                    models.get_model(model_id).and_then(|model| {
                         match (
                             model.cost_per_million_input_tokens,
                             model.cost_per_million_output_tokens,

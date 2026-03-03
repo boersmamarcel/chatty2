@@ -312,29 +312,22 @@ fn section_header(label: &str, muted: Hsla) -> Div {
 }
 
 fn breakdown_row(label: &str, pct_text: &str, dot_color: Hsla, fg: Hsla, muted: Hsla) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .px_1()
-        .py_0p5()
-        .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(div().w(px(8.0)).h(px(8.0)).rounded_sm().bg(dot_color))
-                .child(div().text_sm().text_color(fg).child(label.to_string())),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(muted)
-                .child(pct_text.to_string()),
-        )
+    info_row(label, pct_text, Some(dot_color), fg, muted)
 }
 
 fn stat_row(label: &str, value: &str, fg: Hsla, muted: Hsla) -> Div {
+    info_row(label, value, None, fg, muted)
+}
+
+fn info_row(label: &str, value: &str, dot: Option<Hsla>, fg: Hsla, muted: Hsla) -> Div {
+    let label_content = h_flex()
+        .gap_1p5()
+        .items_center()
+        .when_some(dot, |this, c| {
+            this.child(div().w(px(8.0)).h(px(8.0)).rounded_sm().bg(c))
+        })
+        .child(div().text_sm().text_color(fg).child(label.to_string()));
+
     div()
         .flex()
         .flex_row()
@@ -342,6 +335,6 @@ fn stat_row(label: &str, value: &str, fg: Hsla, muted: Hsla) -> Div {
         .justify_between()
         .px_1()
         .py_0p5()
-        .child(div().text_sm().text_color(fg).child(label.to_string()))
+        .child(label_content)
         .child(div().text_sm().text_color(muted).child(value.to_string()))
 }

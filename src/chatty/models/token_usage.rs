@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Token usage for a single message exchange
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Input tokens consumed (note: rig-core accumulates across multi-turn exchanges)
     pub input_tokens: u32,
@@ -24,14 +24,24 @@ fn default_turn_count() -> u32 {
     1
 }
 
+impl Default for TokenUsage {
+    fn default() -> Self {
+        Self {
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated_cost_usd: None,
+            api_turn_count: 1,
+        }
+    }
+}
+
 impl TokenUsage {
     #[allow(dead_code)]
     pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
             input_tokens,
             output_tokens,
-            estimated_cost_usd: None,
-            api_turn_count: 1,
+            ..Default::default()
         }
     }
 
@@ -40,8 +50,8 @@ impl TokenUsage {
         Self {
             input_tokens,
             output_tokens,
-            estimated_cost_usd: None,
             api_turn_count: api_turn_count.max(1),
+            ..Default::default()
         }
     }
 

@@ -342,11 +342,9 @@ impl StreamManager {
             StreamChunk::Error(error) => {
                 // Flush any buffered text before emitting StreamEnded
                 self.flush_pending_text(conv_id, cx);
-                if let Some(state) = self.streams.get_mut(conv_id) {
-                    state.status = StreamStatus::Error(error.clone());
-                }
                 let (token_usage, trace_json, turn_count) =
-                    if let Some(state) = self.streams.get(conv_id) {
+                    if let Some(state) = self.streams.get_mut(conv_id) {
+                        state.status = StreamStatus::Error(error.clone());
                         (
                             state.token_usage,
                             state.trace_json.clone(),
