@@ -48,6 +48,45 @@ pub struct ConversationTokenUsage {
     pub total_estimated_cost_usd: f64,
 }
 
+/// Format a token count for human-readable display.
+///
+/// - `< 1_000` → raw number (`"500"`)
+/// - `1_000 – 999_999` → K suffix (`"16.3K"`, `"1K"`)
+/// - `>= 1_000_000` → M suffix (`"1.2M"`)
+pub fn format_tokens(count: u32) -> String {
+    if count >= 1_000_000 {
+        let m = count as f64 / 1_000_000.0;
+        let s = format!("{:.1}M", m);
+        s.replace(".0M", "M") // drop trailing .0
+    } else if count >= 1_000 {
+        let k = count as f64 / 1_000.0;
+        let s = format!("{:.1}K", k);
+        s.replace(".0K", "K") // drop trailing .0
+    } else {
+        count.to_string()
+    }
+}
+
+/// Format a USD cost for display.
+///
+/// - `>= $0.01` → 2 decimal places (`"$0.12"`)
+/// - `>= $0.001` → 3 decimal places (`"$0.003"`)
+/// - `> 0` → 4 decimal places (`"$0.0001"`) or `"< $0.0001"` floor
+/// - `0` → `"$0.00"`
+pub fn format_cost(cost: f64) -> String {
+    if cost == 0.0 {
+        "$0.00".to_string()
+    } else if cost >= 0.01 {
+        format!("${:.2}", cost)
+    } else if cost >= 0.001 {
+        format!("${:.3}", cost)
+    } else if cost >= 0.0001 {
+        format!("${:.4}", cost)
+    } else {
+        "< $0.0001".to_string()
+    }
+}
+
 impl ConversationTokenUsage {
     pub fn new() -> Self {
         Self::default()
