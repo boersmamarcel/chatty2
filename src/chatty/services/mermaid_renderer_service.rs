@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -73,7 +74,8 @@ impl MermaidRendererService {
         let svg_path = cache_dir.join(format!("{}.svg", cache_key));
 
         if !svg_path.exists() {
-            std::fs::write(&svg_path, &svg_data).context("Failed to write SVG to cache")?;
+            let sanitized = Self::sanitize_svg(&svg_data);
+            std::fs::write(&svg_path, &sanitized).context("Failed to write SVG to cache")?;
             info!(path = ?svg_path, "Wrote mermaid SVG to persistent cache");
         } else {
             debug!(path = ?svg_path, "Mermaid SVG cache hit");
@@ -96,6 +98,36 @@ impl MermaidRendererService {
         theme.cluster_background = "#313244".to_string();
         theme.cluster_border = "#585b70".to_string();
         theme
+    }
+
+    /// Sanitize SVG for usvg/resvg compatibility.
+    ///
+    /// mermaid-rs-renderer emits SVG with `class`, `data-*`, `id`, and `style`
+    /// attributes plus `<style>` blocks that usvg (GPUI's SVG parser) rejects.
+    /// This strips them while preserving inline `style` attributes on elements.
+    fn sanitize_svg(svg: &str) -> String {
+        // Remove <style>...</style> blocks entirely
+        let style_re = Regex::new(r"<style[^>]*>[\s\S]*?</style>").unwrap();
+        let result = style_re.replace_all(svg, "");
+
+        // Remove class="..." attributes
+        let class_re = Regex::new(r#"\s+class="[^"]*""#).unwrap();
+        let result = class_re.replace_all(&result, "");
+
+        // Remove data-*="..." attributes
+        let data_re = Regex::new(r#"\s+data-[a-z\-]+="[^"]*""#).unwrap();
+        let result = data_re.replace_all(&result, "");
+
+        // Remove id="..." attributes (usvg can handle them, but mermaid IDs
+        // contain characters that sometimes cause issues)
+        let id_re = Regex::new(r#"\s+id="[^"]*""#).unwrap();
+        let result = id_re.replace_all(&result, "");
+
+        // Remove style="mix-blend-mode: multiply;" (unsupported by resvg)
+        let blend_re = Regex::new(r#"\s+style="[^"]*mix-blend-mode[^"]*""#).unwrap();
+        let result = blend_re.replace_all(&result, "");
+
+        result.into_owned()
     }
 
     fn make_cache_key(&self, source: &str, is_dark: bool) -> String {
@@ -212,6 +244,25 @@ mod tests {
             .render_to_svg("flowchart LR; A-->B-->C", false)
             .unwrap();
         assert!(svg.contains("<svg"), "Output should be SVG");
+    }
+
+    #[test]
+    fn test_sanitize_strips_class_and_data_attrs() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><g class="nodes" data-edge-id="e1"><rect class="node" data-label-kind="center" width="10"/></g></svg>"#;
+        let sanitized = MermaidRendererService::sanitize_svg(svg);
+        assert!(!sanitized.contains("class="));
+        assert!(!sanitized.contains("data-"));
+        assert!(sanitized.contains("<rect"));
+        assert!(sanitized.contains("<svg"));
+    }
+
+    #[test]
+    fn test_sanitize_strips_style_blocks() {
+        let svg = r#"<svg><style>svg{font-family:sans;}</style><rect width="10"/></svg>"#;
+        let sanitized = MermaidRendererService::sanitize_svg(svg);
+        assert!(!sanitized.contains("<style"));
+        assert!(!sanitized.contains("</style>"));
+        assert!(sanitized.contains("<rect"));
     }
 
     #[test]
