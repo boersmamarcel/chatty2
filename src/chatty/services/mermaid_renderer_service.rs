@@ -41,7 +41,7 @@ impl MermaidRendererService {
 
         debug!(is_dark, "Rendering mermaid diagram to SVG");
 
-        let opts = if is_dark {
+        let mut opts = if is_dark {
             mermaid_rs_renderer::RenderOptions {
                 theme: Self::dark_theme(),
                 ..Default::default()
@@ -49,6 +49,13 @@ impl MermaidRendererService {
         } else {
             mermaid_rs_renderer::RenderOptions::default()
         };
+
+        // Work around mermaid-rs-renderer not XML-escaping font_family in
+        // <text> attributes. The default modern theme contains `"Segoe UI"`
+        // which produces invalid XML: font-family="..., "Segoe UI", ...".
+        // Use a quote-free font stack to avoid the parse failure in usvg.
+        opts.theme.font_family =
+            "Inter, ui-sans-serif, system-ui, -apple-system, sans-serif".to_string();
 
         let svg = mermaid_rs_renderer::render_with_options(source, opts)
             .map_err(|e| anyhow::anyhow!("Failed to render mermaid diagram: {}", e))?;
