@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Token usage for a single message exchange
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TokenUsage {
-    /// Input tokens consumed
+    /// Input tokens consumed (note: rig-core accumulates across multi-turn exchanges)
     pub input_tokens: u32,
 
     /// Output tokens generated
@@ -12,15 +12,45 @@ pub struct TokenUsage {
     /// Estimated cost in USD (computed at save time)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd: Option<f64>,
+
+    /// Number of LLM API turns in this exchange (1 = no tool calls).
+    /// rig-core accumulates input_tokens across all turns, so dividing by this
+    /// gives a rough per-turn average closer to actual context fill.
+    #[serde(default = "default_turn_count")]
+    pub api_turn_count: u32,
+}
+
+fn default_turn_count() -> u32 {
+    1
 }
 
 impl TokenUsage {
+    #[allow(dead_code)]
     pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
             input_tokens,
             output_tokens,
             estimated_cost_usd: None,
+            api_turn_count: 1,
         }
+    }
+
+    /// Create a new TokenUsage with an explicit turn count.
+    pub fn with_turn_count(input_tokens: u32, output_tokens: u32, api_turn_count: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd: None,
+            api_turn_count: api_turn_count.max(1),
+        }
+    }
+
+    /// Estimated context fill: input_tokens normalized by the number of API turns.
+    /// For single-turn exchanges this returns input_tokens exactly.
+    /// For multi-turn exchanges it returns an average that better approximates
+    /// the actual context window fill than the raw accumulated total.
+    pub fn estimated_context_tokens(&self) -> u32 {
+        self.input_tokens / self.api_turn_count.max(1)
     }
 
     #[allow(dead_code)]

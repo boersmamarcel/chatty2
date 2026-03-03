@@ -1655,6 +1655,7 @@ impl ChattyApp {
                 token_usage,
                 trace_json,
                 pending_artifacts,
+                api_turn_count,
             } => {
                 debug!(conv_id = %conversation_id, status = ?status, "StreamManager: stream ended");
                 // Update UI streaming state
@@ -1701,6 +1702,7 @@ impl ChattyApp {
                             *token_usage,
                             trace_json.clone(),
                             artifacts.clone(),
+                            *api_turn_count,
                             cx,
                         );
 
@@ -1794,6 +1796,7 @@ impl ChattyApp {
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
         artifact_paths: Vec<PathBuf>,
+        api_turn_count: u32,
         cx: &mut Context<Self>,
     ) {
         let chat_view = self.chat_view.clone();
@@ -1841,10 +1844,17 @@ impl ChattyApp {
             });
         }
 
-        // 3. Process token usage
+        // 3. Process token usage — always record tokens, optionally calculate cost
         if let Some((input_tokens, output_tokens)) = token_usage {
-            debug!(input_tokens, output_tokens, "Processing token usage");
+            debug!(
+                input_tokens,
+                output_tokens, api_turn_count, "Processing token usage"
+            );
 
+            let mut usage =
+                TokenUsage::with_turn_count(input_tokens, output_tokens, api_turn_count);
+
+            // Calculate cost if pricing is configured for this model
             let model_id_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 store
                     .get_conversation(&conv_id)
@@ -1867,16 +1877,15 @@ impl ChattyApp {
                 });
 
                 if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
-                    let mut usage = TokenUsage::new(input_tokens, output_tokens);
                     usage.calculate_cost(cost_per_million_input, cost_per_million_output);
-
-                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                            conv.add_token_usage(usage);
-                        }
-                    });
                 }
             }
+
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.add_token_usage(usage);
+                }
+            });
         }
 
         // 4. Update sidebar with latest data

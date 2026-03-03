@@ -42,6 +42,10 @@ pub struct StreamState {
     pending_text: String,
     /// When the last TextChunk event was emitted (used for flush interval check).
     last_flush: Instant,
+    /// Number of LLM API turns in this exchange. Starts at 1 (the initial request),
+    /// incremented for each tool call result (which triggers another API call).
+    /// Used to normalize rig-core's accumulated token usage back to per-turn values.
+    api_turn_count: u32,
 }
 
 /// Events emitted by StreamManager for decoupled UI updates.
@@ -100,6 +104,9 @@ pub enum StreamManagerEvent {
         /// Artifact paths queued by AddAttachmentTool during this stream.
         /// Non-empty only when status is Completed.
         pending_artifacts: Option<Vec<PathBuf>>,
+        /// Number of LLM API turns in this exchange (1 = no tool calls).
+        /// Used to normalize rig-core's accumulated token usage.
+        api_turn_count: u32,
     },
 }
 
@@ -154,6 +161,7 @@ impl StreamManager {
                 pending_artifacts,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
+                api_turn_count: 1,
             },
         );
 
@@ -189,6 +197,7 @@ impl StreamManager {
                 pending_artifacts,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
+                api_turn_count: 1,
             },
         );
 
@@ -274,6 +283,11 @@ impl StreamManager {
                 });
             }
             StreamChunk::ToolCallResult { id, result } => {
+                // Each tool result triggers another API call, so increment the turn count.
+                // This is used to normalize rig-core's accumulated token usage.
+                if let Some(state) = self.streams.get_mut(conv_id) {
+                    state.api_turn_count += 1;
+                }
                 cx.emit(StreamManagerEvent::ToolCallResult {
                     conversation_id: conv_id.to_string(),
                     id,
@@ -281,6 +295,9 @@ impl StreamManager {
                 });
             }
             StreamChunk::ToolCallError { id, error } => {
+                if let Some(state) = self.streams.get_mut(conv_id) {
+                    state.api_turn_count += 1;
+                }
                 cx.emit(StreamManagerEvent::ToolCallError {
                     conversation_id: conv_id.to_string(),
                     id,
@@ -328,17 +345,23 @@ impl StreamManager {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.status = StreamStatus::Error(error.clone());
                 }
-                let (token_usage, trace_json) = if let Some(state) = self.streams.get(conv_id) {
-                    (state.token_usage, state.trace_json.clone())
-                } else {
-                    (None, None)
-                };
+                let (token_usage, trace_json, turn_count) =
+                    if let Some(state) = self.streams.get(conv_id) {
+                        (
+                            state.token_usage,
+                            state.trace_json.clone(),
+                            state.api_turn_count,
+                        )
+                    } else {
+                        (None, None, 1)
+                    };
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: conv_id.to_string(),
                     status: StreamStatus::Error(error),
                     token_usage,
                     trace_json,
                     pending_artifacts: None,
+                    api_turn_count: turn_count,
                 });
                 self.streams.remove(conv_id);
             }
@@ -352,18 +375,24 @@ impl StreamManager {
         // Flush any remaining buffered text before emitting StreamEnded
         self.flush_pending_text(conv_id, cx);
 
-        let (token_usage, trace_json, artifacts) = if let Some(state) = self.streams.get(conv_id) {
-            let drained = state
-                .pending_artifacts
-                .as_ref()
-                .and_then(|pa| pa.lock().ok())
-                .map(|mut v| v.drain(..).collect::<Vec<_>>())
-                .filter(|v| !v.is_empty());
-            (state.token_usage, state.trace_json.clone(), drained)
-        } else {
-            warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
-            return;
-        };
+        let (token_usage, trace_json, artifacts, turn_count) =
+            if let Some(state) = self.streams.get(conv_id) {
+                let drained = state
+                    .pending_artifacts
+                    .as_ref()
+                    .and_then(|pa| pa.lock().ok())
+                    .map(|mut v| v.drain(..).collect::<Vec<_>>())
+                    .filter(|v| !v.is_empty());
+                (
+                    state.token_usage,
+                    state.trace_json.clone(),
+                    drained,
+                    state.api_turn_count,
+                )
+            } else {
+                warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
+                return;
+            };
 
         cx.emit(StreamManagerEvent::StreamEnded {
             conversation_id: conv_id.to_string(),
@@ -371,6 +400,7 @@ impl StreamManager {
             token_usage,
             trace_json,
             pending_artifacts: artifacts,
+            api_turn_count: turn_count,
         });
 
         self.streams.remove(conv_id);
@@ -417,6 +447,7 @@ impl StreamManager {
 
             let token_usage = state.token_usage;
             let trace_json = state.trace_json.clone();
+            let turn_count = state.api_turn_count;
 
             debug!(conv_id = %conv_id, "Stream stopped gracefully");
 
@@ -429,6 +460,7 @@ impl StreamManager {
                 token_usage,
                 trace_json,
                 pending_artifacts: None,
+                api_turn_count: turn_count,
             });
 
             // Clean up pending resolved IDs if we used the pending key
@@ -458,6 +490,7 @@ impl StreamManager {
                 token_usage: state.token_usage,
                 trace_json: state.trace_json,
                 pending_artifacts: None,
+                api_turn_count: state.api_turn_count,
             });
         }
         self.pending_resolved_ids.remove("__pending__");
@@ -512,6 +545,7 @@ impl StreamManager {
                     token_usage: state.token_usage,
                     trace_json: state.trace_json,
                     pending_artifacts: None,
+                    api_turn_count: state.api_turn_count,
                 });
             }
         }
@@ -557,6 +591,7 @@ mod tests {
                 pending_artifacts: None,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                api_turn_count: 1,
             },
         );
         assert!(mgr.is_streaming("conv-123"));
@@ -577,6 +612,7 @@ mod tests {
                 pending_artifacts: None,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                api_turn_count: 1,
             },
         );
         mgr.pending_resolved_ids.insert(
@@ -605,6 +641,7 @@ mod tests {
                 pending_artifacts: None,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                api_turn_count: 1,
             },
         );
 

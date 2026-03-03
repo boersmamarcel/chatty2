@@ -49,11 +49,13 @@ fn gather_token_data(cx: &App) -> Option<TokenData> {
     let active_id = store.active_id()?;
     let conv = store.get_conversation(active_id)?;
 
+    // Use estimated_context_tokens() to normalize rig-core's accumulated
+    // input_tokens back to a per-turn average (closer to actual context fill).
     let current_tokens = conv
         .token_usage()
         .message_usages
         .last()
-        .map(|u| u.input_tokens)
+        .map(|u| u.estimated_context_tokens())
         .unwrap_or(0);
 
     let model_id = conv.model_id().to_string();
