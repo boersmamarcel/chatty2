@@ -63,6 +63,12 @@ mitex = "0.2"
 typst-assets = { version = "0.14.2", features = ["fonts"] }
 comemo = "0.4"
 
+# Mermaid diagram rendering
+mermaid-rs-renderer = { version = "0.2", default-features = false }
+# SVG-to-PNG rasterization (same versions as gpui uses)
+resvg = "0.45"
+usvg = "0.45"
+
 # Syntax highlighting
 syntect = "5.3"
 once_cell = "1.19"

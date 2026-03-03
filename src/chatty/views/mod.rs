@@ -10,6 +10,7 @@ pub mod footer;
 pub mod line_splitter;
 pub mod math_parser;
 pub mod math_renderer;
+pub mod mermaid_component;
 pub mod message_component;
 pub mod message_types;
 pub mod parsed_cache;

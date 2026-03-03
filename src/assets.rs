@@ -44,6 +44,7 @@ pub enum CustomIcon {
     Codesandbox,   // codesandbox.svg - Network isolation (sandbox) toggle
     Brain,         // brain.svg - Thinking block header
     Paperclip,     // paperclip.svg - Non-image attachment
+    Image,         // image.svg - Copy as image (PNG)
 }
 
 impl IconNamed for CustomIcon {
@@ -64,6 +65,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::Codesandbox => "icons/codesandbox.svg",
             CustomIcon::Brain => "icons/brain.svg",
             CustomIcon::Paperclip => "icons/paperclip.svg",
+            CustomIcon::Image => "icons/image.svg",
         }
         .into()
     }
