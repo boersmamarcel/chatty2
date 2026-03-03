@@ -137,8 +137,13 @@ impl MermaidRendererService {
         result.into_owned()
     }
 
+    /// Cache version — bump whenever rendering or sanitization logic changes
+    /// to invalidate stale on-disk SVGs from previous builds.
+    const CACHE_VERSION: &'static str = "v2";
+
     fn make_cache_key(&self, source: &str, is_dark: bool) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(Self::CACHE_VERSION.as_bytes());
         hasher.update(source.as_bytes());
         hasher.update(if is_dark { "dark" } else { "light" }.as_bytes());
         format!("{:x}", hasher.finalize())
