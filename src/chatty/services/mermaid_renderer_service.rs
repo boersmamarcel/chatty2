@@ -82,8 +82,14 @@ impl MermaidRendererService {
 
         if !svg_path.exists() {
             let sanitized = Self::sanitize_svg(&svg_data);
+
+            // Validate XML before writing to catch upstream rendering bugs
+            if sanitized.contains("\"Segoe") || sanitized.contains("\"segoe") {
+                warn!("Mermaid SVG still contains unescaped Segoe UI quotes after fix");
+            }
+
             std::fs::write(&svg_path, &sanitized).context("Failed to write SVG to cache")?;
-            info!(path = ?svg_path, "Wrote mermaid SVG to persistent cache");
+            info!(path = ?svg_path, len = sanitized.len(), "Wrote mermaid SVG to persistent cache");
         } else {
             debug!(path = ?svg_path, "Mermaid SVG cache hit");
         }
@@ -109,9 +115,10 @@ impl MermaidRendererService {
 
     /// Sanitize SVG for usvg/resvg compatibility.
     ///
-    /// mermaid-rs-renderer emits SVG with `class`, `data-*`, `id`, and `style`
+    /// mermaid-rs-renderer emits SVG with `class`, `data-*`, and `style`
     /// attributes plus `<style>` blocks that usvg (GPUI's SVG parser) rejects.
-    /// This strips them while preserving inline `style` attributes on elements.
+    /// This strips them while preserving marker `id` attributes needed for
+    /// arrowhead references (`url(#marker-id)`).
     fn sanitize_svg(svg: &str) -> String {
         // Remove <style>...</style> blocks entirely
         let style_re = Regex::new(r"<style[^>]*>[\s\S]*?</style>").unwrap();
@@ -125,11 +132,6 @@ impl MermaidRendererService {
         let data_re = Regex::new(r#"\s+data-[a-z\-]+="[^"]*""#).unwrap();
         let result = data_re.replace_all(&result, "");
 
-        // Remove id="..." attributes (usvg can handle them, but mermaid IDs
-        // contain characters that sometimes cause issues)
-        let id_re = Regex::new(r#"\s+id="[^"]*""#).unwrap();
-        let result = id_re.replace_all(&result, "");
-
         // Remove style="mix-blend-mode: multiply;" (unsupported by resvg)
         let blend_re = Regex::new(r#"\s+style="[^"]*mix-blend-mode[^"]*""#).unwrap();
         let result = blend_re.replace_all(&result, "");
@@ -139,7 +141,7 @@ impl MermaidRendererService {
 
     /// Cache version — bump whenever rendering or sanitization logic changes
     /// to invalidate stale on-disk SVGs from previous builds.
-    const CACHE_VERSION: &'static str = "v2";
+    const CACHE_VERSION: &'static str = "v3";
 
     fn make_cache_key(&self, source: &str, is_dark: bool) -> String {
         let mut hasher = Sha256::new();
@@ -269,6 +271,16 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_preserves_marker_ids() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><defs><marker id="arrow-1" viewBox="0 0 10 10"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs><path marker-end="url(#arrow-1)"/></svg>"#;
+        let sanitized = MermaidRendererService::sanitize_svg(svg);
+        assert!(
+            sanitized.contains(r#"id="arrow-1""#),
+            "Marker id should be preserved for url(#...) references"
+        );
+    }
+
+    #[test]
     fn test_sanitize_strips_style_blocks() {
         let svg = r#"<svg><style>svg{font-family:sans;}</style><rect width="10"/></svg>"#;
         let sanitized = MermaidRendererService::sanitize_svg(svg);
@@ -282,5 +294,22 @@ mod tests {
         let service = MermaidRendererService::new();
         let result = service.render_to_svg("this is not valid mermaid at all!!!", false);
         assert!(result.is_err(), "Invalid mermaid should return error");
+    }
+
+    #[test]
+    fn test_sanitized_svg_has_no_segoe_quotes() {
+        let service = MermaidRendererService::new();
+        let svg = service
+            .render_to_svg("flowchart LR; A-->B-->C", false)
+            .unwrap();
+        let sanitized = MermaidRendererService::sanitize_svg(&svg);
+        assert!(
+            !sanitized.contains("\"Segoe"),
+            "Sanitized SVG must not contain unescaped Segoe UI quotes"
+        );
+        assert!(
+            !sanitized.contains("Segoe"),
+            "Font-family override should remove Segoe UI entirely"
+        );
     }
 }
