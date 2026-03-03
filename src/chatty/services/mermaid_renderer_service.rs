@@ -142,10 +142,36 @@ impl MermaidRendererService {
     /// Render a cached SVG file to PNG bytes at 2x scale for crisp output.
     ///
     /// Uses resvg (same renderer GPUI uses) so the output matches what the user sees.
+    /// Loads system fonts so that text elements render correctly.
     pub fn render_svg_to_png(svg_path: &std::path::Path) -> Result<Vec<u8>> {
+        use std::sync::{Arc, LazyLock};
+
+        // Lazily load system fonts once (same pattern as GPUI's SvgRenderer)
+        static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
+            let mut db = usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            Arc::new(db)
+        });
+
         let svg_data = std::fs::read(svg_path).context("Failed to read SVG file")?;
 
-        let opts = usvg::Options::default();
+        let default_font_resolver = usvg::FontResolver::default_font_selector();
+        let font_resolver = Box::new(
+            move |font: &usvg::Font, db: &mut Arc<usvg::fontdb::Database>| {
+                if db.is_empty() {
+                    *db = FONT_DB.clone();
+                }
+                default_font_resolver(font, db)
+            },
+        );
+        let opts = usvg::Options {
+            font_resolver: usvg::FontResolver {
+                select_font: font_resolver,
+                select_fallback: usvg::FontResolver::default_fallback_selector(),
+            },
+            ..Default::default()
+        };
+
         let tree = usvg::Tree::from_data(&svg_data, &opts)
             .map_err(|e| anyhow::anyhow!("Failed to parse SVG: {}", e))?;
 
