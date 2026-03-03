@@ -1,22 +1,29 @@
 use crate::chatty::models::conversations_store::ConversationsStore;
 use crate::chatty::models::token_usage::{format_cost, format_tokens};
-use crate::settings::models::execution_settings::ExecutionSettingsModel;
-use crate::settings::models::mcp_store::McpServersModel;
-use crate::settings::models::models_store::ModelsModel;
+use crate::chatty::token_budget::{ContextStatus, GlobalTokenBudget, TokenBudgetSnapshot};
+use crate::settings::models::token_tracking_settings::TokenTrackingSettings;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme, Sizable, button::*, h_flex};
 
-const POPOVER_MIN_WIDTH: f32 = 240.0;
-const POPOVER_MAX_WIDTH: f32 = 280.0;
-const FOOTER_BAR_WIDTH: f32 = 80.0;
+// ── Layout constants ──────────────────────────────────────────────────────────
 
-// Category dot colors
-const COLOR_SYSTEM_PROMPT: u32 = 0x60A5FA; // Blue-400
-const COLOR_TOOL_DEFS: u32 = 0xA78BFA; // Violet-400
-// Average tokens per tool schema (JSON definition sent to LLM)
-const TOKENS_PER_TOOL_SCHEMA: u32 = 300;
+const FOOTER_BAR_WIDTH: f32 = 80.0;
+const FOOTER_BAR_HEIGHT: f32 = 6.0;
+const POPOVER_BAR_HEIGHT: f32 = 8.0;
+const POPOVER_MIN_WIDTH: f32 = 260.0;
+const POPOVER_MAX_WIDTH: f32 = 300.0;
+
+// ── Segment colour constants (hex RGB) ───────────────────────────────────────
+// These match the legend dots shown in the popover.
+
+const COLOR_PREAMBLE: u32 = 0x60A5FA; // Blue-400  — system preamble
+const COLOR_TOOLS: u32 = 0xA78BFA; // Violet-400 — tool JSON schemas
+const COLOR_HISTORY: u32 = 0x34D399; // Emerald-400 — conversation history
+const COLOR_USER_MSG: u32 = 0x22D3EE; // Cyan-400  — latest user message
+
+// ── Main view type ────────────────────────────────────────────────────────────
 
 #[derive(IntoElement, Default)]
 pub struct TokenContextBarView;
@@ -27,286 +34,440 @@ impl TokenContextBarView {
     }
 }
 
-/// Pre-computed data for the popover, all Copy types so the closure can own it.
-#[derive(Clone, Copy)]
-struct TokenData {
-    current_tokens: u32,
-    max_context_window: u32,
-    pct: f32,
-    bar_color: Hsla,
-    total_input_tokens: u32,
-    total_output_tokens: u32,
-    total_cost: f64,
-    system_prompt_pct: f32,
-    tool_definitions_pct: f32,
+// ── Snapshot reader ───────────────────────────────────────────────────────────
+
+/// Read the latest `TokenBudgetSnapshot` from the watch channel global.
+///
+/// Returns `None` in three cases:
+/// 1. `GlobalTokenBudget` has not been initialised yet (startup)
+/// 2. No snapshot has been published (conversation with no `max_context_window`, or
+///    before the first message is sent in a new conversation)
+/// 3. The snapshot belongs to a different conversation (stale — cleared by
+///    `load_conversation()` and a fresh one is about to arrive)
+fn read_budget_snapshot(cx: &App) -> Option<TokenBudgetSnapshot> {
+    // Guard: feature disabled
+    if cx
+        .try_global::<TokenTrackingSettings>()
+        .is_some_and(|s| !s.should_show_bar())
+    {
+        return None;
+    }
+
+    let active_id = cx.global::<ConversationsStore>().active_id()?.clone();
+
+    let snap = cx
+        .try_global::<GlobalTokenBudget>()
+        .and_then(|g| g.receiver.borrow().clone())?;
+
+    // Guard: stale snapshot from a previous conversation
+    if snap.conversation_id != active_id {
+        return None;
+    }
+
+    Some(snap)
 }
 
-fn gather_token_data(cx: &App) -> Option<TokenData> {
-    let store = cx.global::<ConversationsStore>();
-    let active_id = store.active_id()?;
-    let conv = store.get_conversation(active_id)?;
+// ── Stacked bar builder ───────────────────────────────────────────────────────
 
-    let model_id = conv.model_id().to_string();
-    let models = cx.global::<ModelsModel>();
-    let model_config = models.get_model(&model_id)?;
-    let max_context_window = model_config.max_context_window.map(|v| v as u32)?;
+/// Render a segmented horizontal bar showing each context component as a
+/// proportional coloured strip. Segments are ordered:
+///   preamble | tools | history | user_msg | remaining (theme bg)
+///
+/// The border colour signals the current `ContextStatus`:
+/// - Normal / Moderate → theme border (no special colour)
+/// - High              → amber (#F59E0B)
+/// - Critical          → red   (#EF4444)
+fn render_stacked_bar(
+    snap: &TokenBudgetSnapshot,
+    bar_width: f32,
+    bar_height: f32,
+    cx: &App,
+) -> impl IntoElement {
+    let frac = snap.component_fractions();
+    let remaining = frac.remaining();
 
-    // Estimate context fill from actual conversation content rather than
-    // API-reported token counts. rig-core's multi-turn token reporting is
-    // unreliable (accumulated across tool-call turns, sometimes missing),
-    // so we estimate: system prompt + tool definitions + message history.
-    // This never decreases and always reflects the real conversation state.
-    let (system_tokens, tool_tokens) = estimate_overhead(model_config, cx);
-    let message_tokens = conv.estimated_history_tokens();
-    let current_tokens = system_tokens + tool_tokens + message_tokens;
-
-    let pct = (current_tokens as f32 / max_context_window as f32 * 100.0).clamp(0.0, 100.0);
-
-    let bar_color: Hsla = if pct >= 85.0 {
-        rgb(0xEF4444).into() // Red-500
-    } else if pct >= 60.0 {
-        rgb(0xF59E0B).into() // Amber-500
-    } else {
-        rgb(0x22C55E).into() // Green-500
+    let border_color: Hsla = match snap.status() {
+        ContextStatus::Critical => rgb(0xEF4444).into(), // Red-500
+        ContextStatus::High => rgb(0xF59E0B).into(),     // Amber-500
+        _ => cx.theme().border,
     };
 
-    let token_usage = conv.token_usage();
-    let total_input_tokens = token_usage.total_input_tokens;
-    let total_output_tokens = token_usage.total_output_tokens;
-    let total_cost = token_usage.total_estimated_cost_usd;
-
-    let max_f = max_context_window as f32;
-    let system_prompt_pct = (system_tokens as f32 / max_f * 100.0).min(100.0);
-    let tool_definitions_pct = (tool_tokens as f32 / max_f * 100.0).min(100.0);
-
-    Some(TokenData {
-        current_tokens,
-        max_context_window,
-        pct,
-        bar_color,
-        total_input_tokens,
-        total_output_tokens,
-        total_cost,
-        system_prompt_pct,
-        tool_definitions_pct,
-    })
+    div()
+        .w(px(bar_width))
+        .h(px(bar_height))
+        .rounded_sm()
+        .bg(cx.theme().border) // default background = "remaining" colour
+        .border_1()
+        .border_color(border_color)
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .child(bar_segment(bar_width, frac.preamble as f32, COLOR_PREAMBLE))
+        .child(bar_segment(bar_width, frac.tools as f32, COLOR_TOOLS))
+        .child(bar_segment(bar_width, frac.history as f32, COLOR_HISTORY))
+        .child(bar_segment(bar_width, frac.user_msg as f32, COLOR_USER_MSG))
+        // Remaining: a slightly darker grey so it blends into the bg
+        .when(remaining > 0.0, |this| {
+            this.child(bar_segment(bar_width, remaining as f32, 0x374151))
+        })
 }
 
-/// Estimate system prompt and tool definition token counts.
-/// Returns (system_tokens, tool_tokens) as absolute values.
-/// These are rough estimates — char-count heuristics for the system prompt,
-/// and per-tool constants for tool definitions.
-fn estimate_overhead(
-    model_config: &crate::settings::models::models_store::ModelConfig,
-    cx: &App,
-) -> (u32, u32) {
-    // System prompt: user preamble + tool summary (~500 chars) + formatting guide (~800 chars)
-    let augmentation_chars: usize = 1300;
-    let system_tokens = (model_config.preamble.len() + augmentation_chars) as u32 / 4;
-
-    // Tool definitions: count enabled tool schemas
-    let exec = cx.global::<ExecutionSettingsModel>();
-    let mut tool_count: u32 = 1; // list_tools always present
-    let workspace = exec.workspace_dir.is_some();
-    if exec.enabled {
-        tool_count += 11; // shell (4) + git (7)
-    }
-    if workspace && exec.filesystem_read_enabled {
-        tool_count += 7; // fs_read (4) + search (3)
-    }
-    if workspace && exec.filesystem_write_enabled {
-        tool_count += 5;
-    }
-    if exec.fetch_enabled {
-        tool_count += 1;
-    }
-    tool_count += 1; // add_attachment
-    tool_count += 4; // MCP management tools
-
-    // Add estimated MCP tools (rough: ~3 tools per enabled server)
-    let mcp_tool_count = cx.global::<McpServersModel>().enabled_count() as u32 * 3;
-    tool_count += mcp_tool_count;
-
-    let tool_tokens = tool_count * TOKENS_PER_TOOL_SCHEMA;
-
-    (system_tokens, tool_tokens)
+/// A single segment div with proportional width.
+fn bar_segment(total_width: f32, fraction: f32, color_hex: u32) -> Div {
+    let w = (total_width * fraction.clamp(0.0, 1.0)).max(0.0);
+    div().w(px(w)).h_full().bg(rgb(color_hex))
 }
+
+// ── Empty bar (no snapshot) ───────────────────────────────────────────────────
+
+/// Rendered while waiting for the first snapshot (no model configured,
+/// new conversation before first send, or during conversation switch).
+fn render_empty_trigger(cx: &App) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .w(px(FOOTER_BAR_WIDTH))
+                .h(px(FOOTER_BAR_HEIGHT))
+                .rounded_sm()
+                .bg(cx.theme().border),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("—"),
+        )
+}
+
+// ── RenderOnce implementation ─────────────────────────────────────────────────
 
 impl RenderOnce for TokenContextBarView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let Some(data) = gather_token_data(cx) else {
-            return div().id("token-context-bar-hidden");
+        let Some(snap) = read_budget_snapshot(cx) else {
+            // No snapshot — render a static empty trigger with no popover
+            return div()
+                .id("token-context-bar-empty")
+                .child(render_empty_trigger(cx));
         };
 
-        let pct = data.pct;
-        let bar_color = data.bar_color;
+        // ── Pre-compute all display strings ───────────────────────────────────
+        // Everything is computed here on the render thread. The closure passed
+        // to `Popover::content` must be `'static`, so we copy/clone before it.
+
+        let pct = (snap.utilization() * 100.0).clamp(0.0, 100.0) as f32;
         let pct_text = format!("{:.0}%", pct);
 
-        // Pre-compute all strings for the popover (avoids lifetime issues in closure)
-        let summary_text = format!(
-            "{} / {} tokens \u{00B7} {:.0}%",
-            format_tokens(data.current_tokens),
-            format_tokens(data.max_context_window),
-            data.pct,
-        );
-        let system_pct_text = format!("~{:.1}%", data.system_prompt_pct);
-        let tools_pct_text = format!("~{:.1}%", data.tool_definitions_pct);
-        let input_text = format_tokens(data.total_input_tokens);
-        let output_text = format_tokens(data.total_output_tokens);
-        let cost_text = format_cost(data.total_cost);
-        let has_cost = data.total_cost > 0.0;
+        // Context status for border colour
+        let status = snap.status();
 
-        // Trigger button: small progress bar + percentage
+        // Summary line in popover
+        let summary_text = format!(
+            "~{} / {} tokens \u{00B7} {:.0}%",
+            format_tokens(snap.estimated_total() as u32),
+            format_tokens(snap.model_context_limit as u32),
+            snap.utilization() * 100.0,
+        );
+
+        // Component breakdowns
+        let frac = snap.component_fractions();
+        let preamble_text = format!(
+            "~{}  ({:.1}%)",
+            format_tokens(snap.preamble_tokens as u32),
+            frac.preamble * 100.0
+        );
+        let tools_text = format!(
+            "~{}  ({:.1}%)",
+            format_tokens(snap.tool_definitions_tokens as u32),
+            frac.tools * 100.0
+        );
+        let history_text = format!(
+            "~{}  ({:.1}%)",
+            format_tokens(snap.conversation_history_tokens as u32),
+            frac.history * 100.0
+        );
+        let user_msg_text = format!(
+            "~{}  ({:.1}%)",
+            format_tokens(snap.latest_user_message_tokens as u32),
+            frac.user_msg * 100.0
+        );
+        let remaining_text = format!(
+            "~{}  ({:.1}%)",
+            format_tokens(snap.remaining() as u32),
+            frac.remaining() * 100.0
+        );
+
+        // Actual token counts from the provider (only shown once they arrive)
+        let has_actuals = snap.has_actuals();
+        let actual_input_text = snap
+            .actual_input_tokens
+            .map(|t| format_tokens(t as u32))
+            .unwrap_or_default();
+        let actual_output_text = snap
+            .actual_output_tokens
+            .map(|t| format_tokens(t as u32))
+            .unwrap_or_default();
+        let delta_text = snap.estimation_delta().map(|d| {
+            if d > 0 {
+                format!(
+                    "+{} (under-estimate)",
+                    format_tokens(d.unsigned_abs() as u32)
+                )
+            } else if d < 0 {
+                format!(
+                    "-{} (over-estimate)",
+                    format_tokens(d.unsigned_abs() as u32)
+                )
+            } else {
+                "exact".to_string()
+            }
+        });
+
+        // Critical status label
+        let is_critical = status.is_critical();
+        let status_label = if is_critical {
+            Some("⚠ Context nearly full — consider summarizing")
+        } else {
+            None
+        };
+
+        // Session totals from ConversationTokenUsage (unchanged from v1)
+        let store = cx.global::<ConversationsStore>();
+        let session_totals: Option<(u32, u32, f64)> = store
+            .active_id()
+            .and_then(|id| store.get_conversation(id))
+            .map(|c| {
+                let u = c.token_usage();
+                (
+                    u.total_input_tokens,
+                    u.total_output_tokens,
+                    u.total_estimated_cost_usd,
+                )
+            });
+
+        let (session_input, session_output, session_cost) = session_totals.unwrap_or((0, 0, 0.0));
+        let has_session = session_input > 0 || session_output > 0;
+        let has_cost = session_cost > 0.0;
+        let session_input_text = format_tokens(session_input);
+        let session_output_text = format_tokens(session_output);
+        let cost_text = format_cost(session_cost);
+
+        // Clone snap fractions for the popover closure (must be 'static)
+        let snap_pct = pct;
+        let snap_context_limit = snap.model_context_limit;
+        let snap_status = snap.status();
+
+        // ── Trigger: small stacked bar + percentage ───────────────────────────
         let trigger = Button::new("token-context-trigger").ghost().xsmall().child(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(
-                    div()
-                        .w(px(FOOTER_BAR_WIDTH))
-                        .h(px(6.0))
-                        .rounded_sm()
-                        .bg(cx.theme().border)
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .w(px(FOOTER_BAR_WIDTH * pct / 100.0))
-                                .h_full()
-                                .rounded_sm()
-                                .bg(bar_color),
-                        ),
-                )
+                .child(render_stacked_bar(
+                    &snap,
+                    FOOTER_BAR_WIDTH,
+                    FOOTER_BAR_HEIGHT,
+                    cx,
+                ))
                 .child(
                     div()
                         .text_xs()
-                        .text_color(cx.theme().muted_foreground)
+                        .text_color(if status.is_warning() {
+                            match snap.status() {
+                                ContextStatus::Critical => rgb(0xEF4444).into(),
+                                ContextStatus::High => rgb(0xF59E0B).into(),
+                                _ => cx.theme().muted_foreground,
+                            }
+                        } else {
+                            cx.theme().muted_foreground
+                        })
                         .child(pct_text),
                 ),
         );
 
-        let dot_system: Hsla = rgb(COLOR_SYSTEM_PROMPT).into();
-        let dot_tools: Hsla = rgb(COLOR_TOOL_DEFS).into();
+        // ── Colour constants for popover (must be copy types) ─────────────────
+        let dot_preamble: Hsla = rgb(COLOR_PREAMBLE).into();
+        let dot_tools: Hsla = rgb(COLOR_TOOLS).into();
+        let dot_history: Hsla = rgb(COLOR_HISTORY).into();
+        let dot_user_msg: Hsla = rgb(COLOR_USER_MSG).into();
 
-        div().id("token-context-bar").child(
-            Popover::new("token-context-popover")
-                .trigger(trigger)
-                .appearance(false)
-                .content(move |_, _window, cx| {
-                    let fg = cx.theme().foreground;
-                    let muted = cx.theme().muted_foreground;
-                    let bg = cx.theme().background;
-                    let border = cx.theme().border;
-
-                    div()
-                        .flex()
-                        .flex_col()
-                        .bg(bg)
-                        .border_1()
-                        .border_color(border)
-                        .rounded_md()
-                        .shadow_md()
-                        .p_2()
-                        .min_w(px(POPOVER_MIN_WIDTH))
-                        .max_w(px(POPOVER_MAX_WIDTH))
-                        // Header
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(fg)
-                                .pb_1()
-                                .child("Context Window"),
-                        )
-                        // Summary line
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(fg)
-                                .pb_1p5()
-                                .child(summary_text.clone()),
-                        )
-                        // Progress bar (wider, inside popover)
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(8.0))
-                                .rounded_sm()
-                                .bg(border)
-                                .overflow_hidden()
-                                .mb_2()
-                                .child(
+        // ── Build and return the popover ──────────────────────────────────────
+        div()
+            .id("token-context-bar")
+            .child(
+                Popover::new("token-context-popover")
+                    .trigger(trigger)
+                    .content(move |_, _window, cx| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .p_3()
+                            .min_w(px(POPOVER_MIN_WIDTH))
+                            .max_w(px(POPOVER_MAX_WIDTH))
+                            // Summary line
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().foreground)
+                                    .child(summary_text.clone()),
+                            )
+                            // Bar in popover (tall version for readability)
+                            .child(render_stacked_bar(
+                                &snap,
+                                POPOVER_MAX_WIDTH - 24.0,
+                                POPOVER_BAR_HEIGHT,
+                                cx,
+                            ))
+                            // Component breakdown legend
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    // Preamble
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .w(px(10.0))
+                                                    .h(px(10.0))
+                                                    .rounded_sm()
+                                                    .bg(dot_preamble),
+                                            )
+                                            .child(format!("Preamble: {}", preamble_text.clone())),
+                                    )
+                                    // Tools
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .w(px(10.0))
+                                                    .h(px(10.0))
+                                                    .rounded_sm()
+                                                    .bg(dot_tools),
+                                            )
+                                            .child(format!("Tools: {}", tools_text.clone())),
+                                    )
+                                    // History
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .w(px(10.0))
+                                                    .h(px(10.0))
+                                                    .rounded_sm()
+                                                    .bg(dot_history),
+                                            )
+                                            .child(format!("History: {}", history_text.clone())),
+                                    )
+                                    // User message
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .w(px(10.0))
+                                                    .h(px(10.0))
+                                                    .rounded_sm()
+                                                    .bg(dot_user_msg),
+                                            )
+                                            .child(format!("Latest message: {}", user_msg_text.clone())),
+                                    )
+                                    // Remaining
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .w(px(10.0))
+                                                    .h(px(10.0))
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().border),
+                                            )
+                                            .child(format!("Remaining: {}", remaining_text.clone())),
+                                    ),
+                            )
+                            // Actual counts section (only if available)
+                            .when(has_actuals, |this| {
+                                this.child(
                                     div()
-                                        .w(relative(pct / 100.0))
-                                        .h_full()
-                                        .rounded_sm()
-                                        .bg(bar_color),
-                                ),
-                        )
-                        // Separator
-                        .child(div().h(px(1.0)).w_full().bg(border).mb_2())
-                        // System section (rough estimates)
-                        .child(section_header("System (est.)", muted))
-                        .child(breakdown_row(
-                            "System Prompt",
-                            &system_pct_text,
-                            dot_system,
-                            fg,
-                            muted,
-                        ))
-                        .child(breakdown_row(
-                            "Tool Definitions",
-                            &tools_pct_text,
-                            dot_tools,
-                            fg,
-                            muted,
-                        ))
-                        // Separator
-                        .child(div().h(px(1.0)).w_full().bg(border).mt_1().mb_2())
-                        // Conversation totals section
-                        .child(section_header("Conversation", muted))
-                        .child(stat_row("Input Tokens", &input_text, fg, muted))
-                        .child(stat_row("Output Tokens", &output_text, fg, muted))
-                        .when(has_cost, |this| {
-                            this.child(stat_row("Cost", &cost_text, fg, muted))
-                        })
-                }),
-        )
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .text_xs()
+                                        .pt_2()
+                                        .border_t_1()
+                                        .border_color(cx.theme().border)
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(cx.theme().foreground)
+                                                .child("Actual (from provider):"),
+                                        )
+                                        .child(format!("Input: {}", actual_input_text.clone()))
+                                        .child(format!("Output: {}", actual_output_text.clone()))
+                                        .when(delta_text.is_some(), |popover_div| {
+                                            popover_div.child(format!(
+                                                "Estimation: {}",
+                                                delta_text.clone().unwrap_or_default()
+                                            ))
+                                        }),
+                                )
+                            })
+                            // Status alert
+                            .when(status_label.is_some(), |this| {
+                                this.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .pt_2()
+                                        .border_t_1()
+                                        .border_color(rgb(0xEF4444))
+                                        .text_xs()
+                                        .text_color(rgb(0xEF4444))
+                                        .child(status_label.unwrap_or_default()),
+                                )
+                            })
+                            // Session totals (unchanged from v1)
+                            .when(has_session, |this| {
+                                this.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .pt_2()
+                                        .border_t_1()
+                                        .border_color(cx.theme().border)
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(cx.theme().foreground)
+                                                .child("Session totals:"),
+                                        )
+                                        .child(format!("Input: {}", session_input_text))
+                                        .child(format!("Output: {}", session_output_text))
+                                        .when(has_cost, |popover_div| {
+                                            popover_div.child(format!("Cost: {}", cost_text))
+                                        }),
+                                )
+                            })
+                    }),
+            )
     }
-}
-
-fn section_header(label: &str, muted: Hsla) -> Div {
-    div()
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(muted)
-        .pb_1()
-        .child(label.to_string())
-}
-
-fn breakdown_row(label: &str, pct_text: &str, dot_color: Hsla, fg: Hsla, muted: Hsla) -> Div {
-    info_row(label, pct_text, Some(dot_color), fg, muted)
-}
-
-fn stat_row(label: &str, value: &str, fg: Hsla, muted: Hsla) -> Div {
-    info_row(label, value, None, fg, muted)
-}
-
-fn info_row(label: &str, value: &str, dot: Option<Hsla>, fg: Hsla, muted: Hsla) -> Div {
-    let label_content = h_flex()
-        .gap_1p5()
-        .items_center()
-        .when_some(dot, |this, c| {
-            this.child(div().w(px(8.0)).h(px(8.0)).rounded_sm().bg(c))
-        })
-        .child(div().text_sm().text_color(fg).child(label.to_string()));
-
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .px_1()
-        .py_0p5()
-        .child(label_content)
-        .child(div().text_sm().text_color(muted).child(value.to_string()))
 }

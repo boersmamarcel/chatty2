@@ -17,6 +17,11 @@ use crate::chatty::models::{
 };
 use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::token_budget::{
+    GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
+    gather_snapshot_inputs, summarize_oldest_half,
+};
+use crate::settings::models::TokenTrackingSettings;
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::sidebar_view::SidebarEvent;
@@ -656,6 +661,12 @@ impl ChattyApp {
     fn load_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
         let sidebar = self.sidebar_view.clone();
+
+        // Clear stale token budget snapshot so the bar shows "no data" during the
+        // conversation transition rather than flashing the previous conversation's numbers.
+        if cx.has_global::<GlobalTokenBudget>() {
+            cx.global::<GlobalTokenBudget>().clear();
+        }
 
         // Update sidebar active state immediately
         sidebar.update(cx, |sidebar, cx| {
@@ -1897,6 +1908,73 @@ impl ChattyApp {
                     store.upsert_metadata(&conv_id, &title, cost, now_ts);
                 }
             });
+
+            // Overlay the pre-send estimate with the actual API-reported token counts.
+            // This lets the popover show both the estimate (computed before send) and the
+            // real numbers from the provider in the same snapshot.
+            if cx.has_global::<GlobalTokenBudget>() {
+                cx.global::<GlobalTokenBudget>()
+                    .update_with_actuals(input_tokens, output_tokens);
+            }
+
+            // 3c. Auto-summarize when context is critically full and the setting is enabled.
+            // Reads the (now-patched) snapshot to check real utilization from the provider.
+            let should_auto_summarize = cx
+                .try_global::<TokenTrackingSettings>()
+                .map(|s| s.auto_summarize)
+                .unwrap_or(false);
+
+            if should_auto_summarize {
+                let is_critical = cx
+                    .try_global::<GlobalTokenBudget>()
+                    .and_then(|g| g.receiver.borrow().clone())
+                    .map(|snap| snap.status().is_critical())
+                    .unwrap_or(false);
+
+                if is_critical {
+                    let conv_id_for_summary = conv_id.clone();
+                    cx.spawn(async move |_weak, cx| {
+                        let data = cx
+                            .update_global::<ConversationsStore, _>(|store, _cx| {
+                                store.get_conversation(&conv_id_for_summary).map(|conv| {
+                                    let midpoint = conv.history().len() / 2;
+                                    (conv.agent().clone(), conv.history().to_vec(), midpoint)
+                                })
+                            })
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                        if let Some((agent, history, midpoint)) = data {
+                            match summarize_oldest_half(&agent, &history).await {
+                                Ok(result) => {
+                                    info!(
+                                        conv_id = %conv_id_for_summary,
+                                        messages_summarized = result.messages_summarized,
+                                        estimated_tokens_freed = result.estimated_tokens_freed,
+                                        "Auto-summarization complete"
+                                    );
+                                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                        if let Some(conv) =
+                                            store.get_conversation_mut(&conv_id_for_summary)
+                                        {
+                                            conv.replace_history(result.new_history, midpoint);
+                                        }
+                                    })
+                                    .map_err(|e| {
+                                        warn!(error = ?e, "Failed to apply auto-summarization")
+                                    })
+                                    .ok();
+                                }
+                                Err(e) => {
+                                    warn!(error = ?e, "Auto-summarization failed");
+                                }
+                            }
+                        }
+
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .detach();
+                }
+            }
         }
 
         // 4. Update sidebar with latest data
@@ -2530,6 +2608,70 @@ async fn run_llm_stream(
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
+
+    // 2b. Compute token budget snapshot in parallel with the LLM call.
+    //
+    // gather_snapshot_inputs() must run on the GPUI thread (reads globals, warms the
+    // static cache), so we call it synchronously here.  The expensive part —
+    // BPE-counting history and the user message — is handed off to a detached
+    // cx.spawn task so stream_prompt() starts immediately on the next line without
+    // waiting for the count to finish.  The bar simply shows the new snapshot on
+    // whatever repaint follows the count completing (~1–10 ms later).
+    {
+        let user_message_text_for_budget = extract_user_message_text(&user_contents);
+        let history_for_budget = history.clone();
+        let conv_id_for_budget = conv_id.clone();
+
+        let budget_inputs = cx
+            .update(|cx| {
+                gather_snapshot_inputs(
+                    &conv_id_for_budget,
+                    user_message_text_for_budget,
+                    history_for_budget,
+                    cx,
+                )
+            })
+            .ok()
+            .flatten();
+
+        if let Some(inputs) = budget_inputs {
+            // Clone the watch::Sender out of the global before spawning.
+            // watch::Sender::send() is &self, so no GPUI context is needed
+            // inside the task — just the sender and the optional settings.
+            let sender = cx
+                .update(|cx| {
+                    cx.try_global::<GlobalTokenBudget>()
+                        .map(|g| g.sender.clone())
+                })
+                .ok()
+                .flatten();
+
+            let settings = cx
+                .update(|cx| {
+                    cx.try_global::<crate::settings::models::TokenTrackingSettings>()
+                        .cloned()
+                })
+                .ok()
+                .flatten();
+
+            // tokio::spawn runs in parallel with stream_prompt below.
+            // The bar will update on whichever repaint follows the count
+            // completing (~1–10 ms), while the LLM call is already in flight.
+            tokio::spawn(async move {
+                match compute_snapshot_background(inputs).await {
+                    Ok(snapshot) => {
+                        check_pressure(&snapshot, settings.as_ref());
+                        if let Some(ref sender) = sender {
+                            let _ = sender.send(Some(snapshot));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Token budget snapshot computation failed (non-fatal)");
+                    }
+                }
+            });
+        }
+    }
 
     // 3. Call stream_prompt
     debug!(conv_id = %conv_id, "Calling stream_prompt()");

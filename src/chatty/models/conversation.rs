@@ -1,3 +1,4 @@
+use crate::chatty::token_budget::CachedTokenCounts;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -66,6 +67,12 @@ pub struct Conversation {
     pending_artifacts: PendingArtifacts,
     /// Persistent shell session for this conversation (lazily initialized)
     shell_session: Option<std::sync::Arc<ShellSession>>,
+    /// Memoized token counts for static context components (preamble, tool definitions).
+    /// Invalidated automatically by content hash when preamble or tool config changes.
+    /// Not serialized — Conversation uses custom serialization methods, not serde derives.
+    /// Reset to default on every app start (cache is rebuilt from scratch each session).
+    #[allow(dead_code)]
+    token_budget_cache: CachedTokenCounts,
 }
 
 impl Conversation {
@@ -136,6 +143,7 @@ impl Conversation {
             streaming_message: None,
             pending_artifacts,
             shell_session,
+            token_budget_cache: CachedTokenCounts::new(),
         })
     }
 
@@ -242,6 +250,7 @@ impl Conversation {
             streaming_message: None, // Always start fresh, streaming state is transient
             pending_artifacts,
             shell_session,
+            token_budget_cache: CachedTokenCounts::new(),
         })
     }
 
@@ -519,6 +528,42 @@ impl Conversation {
         Some((text, timestamp))
     }
 
+    /// Replace the conversation history with a summarized version.
+    ///
+    /// `new_history` is the output of `summarize_oldest_half()`: a single summary
+    /// message followed by the tail of the original history starting at
+    /// `original_tail_offset`. All parallel arrays are rebuilt to match:
+    /// - Index 0 (summary message) gets default/empty metadata.
+    /// - Indices 1..N map to the original entries at `original_tail_offset..`.
+    pub fn replace_history(&mut self, new_history: Vec<Message>, original_tail_offset: usize) {
+        let tail_start = original_tail_offset.min(self.system_traces.len());
+
+        let mut new_traces = Vec::with_capacity(new_history.len());
+        let mut new_attachments = Vec::with_capacity(new_history.len());
+        let mut new_timestamps = Vec::with_capacity(new_history.len());
+        let mut new_feedback = Vec::with_capacity(new_history.len());
+
+        // Default metadata for the summary message at index 0
+        new_traces.push(None);
+        new_attachments.push(vec![]);
+        new_timestamps.push(None);
+        new_feedback.push(None);
+
+        // Preserve metadata for the kept tail of the original history
+        new_traces.extend(self.system_traces[tail_start..].iter().cloned());
+        new_attachments.extend(self.attachment_paths[tail_start..].iter().cloned());
+        new_timestamps.extend(self.message_timestamps[tail_start..].iter().cloned());
+        new_feedback.extend(self.message_feedback[tail_start..].iter().cloned());
+
+        self.history = new_history;
+        self.system_traces = new_traces;
+        self.attachment_paths = new_attachments;
+        self.message_timestamps = new_timestamps;
+        self.message_feedback = new_feedback;
+        self.updated_at = SystemTime::now();
+        self.debug_assert_parallel_arrays_aligned();
+    }
+
     /// Get the agent
     pub fn agent(&self) -> &AgentClient {
         &self.agent
@@ -552,6 +597,15 @@ impl Conversation {
         &self.token_usage
     }
 
+    /// Mutable access to the per-conversation static token count cache.
+    ///
+    /// Used by `manager::gather_snapshot_inputs()` to warm preamble and tool
+    /// token counts on the GPUI thread before handing off to `spawn_blocking`.
+    #[allow(dead_code)]
+    pub fn token_budget_cache_mut(&mut self) -> &mut CachedTokenCounts {
+        &mut self.token_budget_cache
+    }
+
     /// Add token usage for the most recent exchange
     pub fn add_token_usage(&mut self, usage: TokenUsage) {
         self.token_usage.add_usage(usage);
@@ -572,6 +626,9 @@ impl Conversation {
     /// Uses serialized JSON character count / 4 as a heuristic.
     /// Independent of API-reported token counts — always reflects the
     /// actual conversation content and never decreases.
+    ///
+    /// Retained for reference; superseded by `TokenCounter::count_history()` in v2.
+    #[allow(dead_code)]
     pub fn estimated_history_tokens(&self) -> u32 {
         let chars: usize = self
             .history
