@@ -95,13 +95,21 @@ pub struct ConversationTokenUsage {
 /// - `>= 1_000_000` → M suffix (`"1.2M"`)
 pub fn format_tokens(count: u32) -> String {
     if count >= 1_000_000 {
-        let m = count as f64 / 1_000_000.0;
-        let s = format!("{:.1}M", m);
-        s.replace(".0M", "M") // drop trailing .0
+        let whole = count / 1_000_000;
+        let frac = (count % 1_000_000) / 100_000;
+        if frac == 0 {
+            format!("{whole}M")
+        } else {
+            format!("{whole}.{frac}M")
+        }
     } else if count >= 1_000 {
-        let k = count as f64 / 1_000.0;
-        let s = format!("{:.1}K", k);
-        s.replace(".0K", "K") // drop trailing .0
+        let whole = count / 1_000;
+        let frac = (count % 1_000) / 100;
+        if frac == 0 {
+            format!("{whole}K")
+        } else {
+            format!("{whole}.{frac}K")
+        }
     } else {
         count.to_string()
     }

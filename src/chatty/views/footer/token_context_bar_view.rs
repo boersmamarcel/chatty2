@@ -110,26 +110,29 @@ fn estimate_breakdown(
     let augmentation_chars: usize = 1300;
     let system_tokens = (model_config.preamble.len() + augmentation_chars) as u32 / 4;
 
-    // Tool definitions: count enabled tool schemas
+    // Tool definitions: count enabled tool schemas (mirrors agent_factory.rs gating)
     let exec = cx.global::<ExecutionSettingsModel>();
     let mut tool_count: u32 = 1; // list_tools always present
     let workspace = exec.workspace_dir.is_some();
     if exec.enabled {
-        tool_count += 11; // shell (4) + git (7)
+        tool_count += 4; // shell tools
+    }
+    if workspace && exec.git_enabled {
+        tool_count += 7; // git tools
     }
     if workspace && exec.filesystem_read_enabled {
-        tool_count += 7; // fs_read (4) + search (3)
+        tool_count += 4 + 3; // fs_read + search tools
     }
     if workspace && exec.filesystem_write_enabled {
-        tool_count += 5;
+        tool_count += 5; // fs_write tools
     }
     if exec.fetch_enabled {
-        tool_count += 1;
+        tool_count += 1; // fetch tool
     }
     tool_count += 1; // add_attachment
     tool_count += 4; // MCP management tools
 
-    // Add estimated MCP tools (rough: ~3 tools per enabled server)
+    // Estimated MCP tools (~3 tools per enabled server)
     let mcp_tool_count = cx.global::<McpServersModel>().enabled_count() as u32 * 3;
     tool_count += mcp_tool_count;
 
@@ -141,9 +144,9 @@ fn estimate_breakdown(
 
     let max_f = max_context as f32;
     (
-        (system_tokens as f32 / max_f * 100.0).min(100.0),
-        (tool_tokens as f32 / max_f * 100.0).min(100.0),
-        (messages_tokens as f32 / max_f * 100.0).min(100.0),
+        (system_tokens as f32 / max_f * 100.0).clamp(0.0, 100.0),
+        (tool_tokens as f32 / max_f * 100.0).clamp(0.0, 100.0),
+        (messages_tokens as f32 / max_f * 100.0).clamp(0.0, 100.0),
     )
 }
 
