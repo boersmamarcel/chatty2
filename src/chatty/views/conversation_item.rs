@@ -1,3 +1,4 @@
+use crate::chatty::models::token_usage::format_cost;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{ActiveTheme, Collapsible};
@@ -122,20 +123,11 @@ impl RenderOnce for ConversationItem {
                             return parent;
                         }
 
-                        // Always show in dollars for consistency
-                        let cost_text = if cost >= 0.01 {
-                            format!("${:.2}", cost)
-                        } else if cost >= 0.001 {
-                            format!("${:.3}", cost)
-                        } else {
-                            format!("${:.4}", cost)
-                        };
-
                         parent.child(
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(cost_text),
+                                .child(format_cost(cost)),
                         )
                     }),
             )
