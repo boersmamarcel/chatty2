@@ -55,14 +55,6 @@ impl TokenUsage {
         }
     }
 
-    /// Estimated context fill: input_tokens normalized by the number of API turns.
-    /// For single-turn exchanges this returns input_tokens exactly.
-    /// For multi-turn exchanges it returns an average that better approximates
-    /// the actual context window fill than the raw accumulated total.
-    pub fn estimated_context_tokens(&self) -> u32 {
-        self.input_tokens / self.api_turn_count.max(1)
-    }
-
     #[allow(dead_code)]
     pub fn total_tokens(&self) -> u32 {
         self.input_tokens + self.output_tokens

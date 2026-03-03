@@ -1881,6 +1881,21 @@ impl ChattyApp {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     conv.add_token_usage(usage);
                 }
+                // Sync metadata so sidebar cost matches the live conversation cost
+                // after every turn (not just the first turn where title is generated).
+                let cost_and_title = store.get_conversation(&conv_id).map(|c| {
+                    (
+                        c.token_usage().total_estimated_cost_usd,
+                        c.title().to_string(),
+                    )
+                });
+                if let Some((cost, title)) = cost_and_title {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    store.upsert_metadata(&conv_id, &title, cost, now_ts);
+                }
             });
         }
 

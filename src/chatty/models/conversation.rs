@@ -568,6 +568,19 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize token usage")
     }
 
+    /// Rough estimate of the conversation history's token footprint.
+    /// Uses serialized JSON character count / 4 as a heuristic.
+    /// Independent of API-reported token counts — always reflects the
+    /// actual conversation content and never decreases.
+    pub fn estimated_history_tokens(&self) -> u32 {
+        let chars: usize = self
+            .history
+            .iter()
+            .map(|msg| serde_json::to_string(msg).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        (chars / 4) as u32
+    }
+
     /// Get the current streaming message content (if any)
     pub fn streaming_message(&self) -> Option<&String> {
         self.streaming_message.as_ref()

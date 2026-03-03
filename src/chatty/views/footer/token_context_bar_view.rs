@@ -15,8 +15,6 @@ const FOOTER_BAR_WIDTH: f32 = 80.0;
 // Category dot colors
 const COLOR_SYSTEM_PROMPT: u32 = 0x60A5FA; // Blue-400
 const COLOR_TOOL_DEFS: u32 = 0xA78BFA; // Violet-400
-const COLOR_MESSAGES: u32 = 0x34D399; // Emerald-400
-
 // Average tokens per tool schema (JSON definition sent to LLM)
 const TOKENS_PER_TOOL_SCHEMA: u32 = 300;
 
@@ -41,7 +39,6 @@ struct TokenData {
     total_cost: f64,
     system_prompt_pct: f32,
     tool_definitions_pct: f32,
-    messages_pct: f32,
 }
 
 fn gather_token_data(cx: &App) -> Option<TokenData> {
@@ -49,19 +46,19 @@ fn gather_token_data(cx: &App) -> Option<TokenData> {
     let active_id = store.active_id()?;
     let conv = store.get_conversation(active_id)?;
 
-    // Use estimated_context_tokens() to normalize rig-core's accumulated
-    // input_tokens back to a per-turn average (closer to actual context fill).
-    let current_tokens = conv
-        .token_usage()
-        .message_usages
-        .last()
-        .map(|u| u.estimated_context_tokens())
-        .unwrap_or(0);
-
     let model_id = conv.model_id().to_string();
     let models = cx.global::<ModelsModel>();
     let model_config = models.get_model(&model_id)?;
     let max_context_window = model_config.max_context_window.map(|v| v as u32)?;
+
+    // Estimate context fill from actual conversation content rather than
+    // API-reported token counts. rig-core's multi-turn token reporting is
+    // unreliable (accumulated across tool-call turns, sometimes missing),
+    // so we estimate: system prompt + tool definitions + message history.
+    // This never decreases and always reflects the real conversation state.
+    let (system_tokens, tool_tokens) = estimate_overhead(model_config, cx);
+    let message_tokens = conv.estimated_history_tokens();
+    let current_tokens = system_tokens + tool_tokens + message_tokens;
 
     let pct = (current_tokens as f32 / max_context_window as f32 * 100.0).clamp(0.0, 100.0);
 
@@ -78,8 +75,9 @@ fn gather_token_data(cx: &App) -> Option<TokenData> {
     let total_output_tokens = token_usage.total_output_tokens;
     let total_cost = token_usage.total_estimated_cost_usd;
 
-    let (system_prompt_pct, tool_definitions_pct, messages_pct) =
-        estimate_breakdown(current_tokens, max_context_window, model_config, cx);
+    let max_f = max_context_window as f32;
+    let system_prompt_pct = (system_tokens as f32 / max_f * 100.0).min(100.0);
+    let tool_definitions_pct = (tool_tokens as f32 / max_f * 100.0).min(100.0);
 
     Some(TokenData {
         current_tokens,
@@ -91,21 +89,17 @@ fn gather_token_data(cx: &App) -> Option<TokenData> {
         total_cost,
         system_prompt_pct,
         tool_definitions_pct,
-        messages_pct,
     })
 }
 
-/// Estimate token breakdown as percentages of the context window.
-fn estimate_breakdown(
-    current_tokens: u32,
-    max_context: u32,
+/// Estimate system prompt and tool definition token counts.
+/// Returns (system_tokens, tool_tokens) as absolute values.
+/// These are rough estimates — char-count heuristics for the system prompt,
+/// and per-tool constants for tool definitions.
+fn estimate_overhead(
     model_config: &crate::settings::models::models_store::ModelConfig,
     cx: &App,
-) -> (f32, f32, f32) {
-    if current_tokens == 0 || max_context == 0 {
-        return (0.0, 0.0, 0.0);
-    }
-
+) -> (u32, u32) {
     // System prompt: user preamble + tool summary (~500 chars) + formatting guide (~800 chars)
     let augmentation_chars: usize = 1300;
     let system_tokens = (model_config.preamble.len() + augmentation_chars) as u32 / 4;
@@ -135,16 +129,7 @@ fn estimate_breakdown(
 
     let tool_tokens = tool_count * TOKENS_PER_TOOL_SCHEMA;
 
-    // Messages = remainder of current context fill
-    let overhead = system_tokens + tool_tokens;
-    let messages_tokens = current_tokens.saturating_sub(overhead);
-
-    let max_f = max_context as f32;
-    (
-        (system_tokens as f32 / max_f * 100.0).min(100.0),
-        (tool_tokens as f32 / max_f * 100.0).min(100.0),
-        (messages_tokens as f32 / max_f * 100.0).min(100.0),
-    )
+    (system_tokens, tool_tokens)
 }
 
 impl RenderOnce for TokenContextBarView {
@@ -164,9 +149,8 @@ impl RenderOnce for TokenContextBarView {
             format_tokens(data.max_context_window),
             data.pct,
         );
-        let system_pct_text = format!("{:.1}%", data.system_prompt_pct);
-        let tools_pct_text = format!("{:.1}%", data.tool_definitions_pct);
-        let messages_pct_text = format!("{:.1}%", data.messages_pct);
+        let system_pct_text = format!("~{:.1}%", data.system_prompt_pct);
+        let tools_pct_text = format!("~{:.1}%", data.tool_definitions_pct);
         let input_text = format_tokens(data.total_input_tokens);
         let output_text = format_tokens(data.total_output_tokens);
         let cost_text = format_cost(data.total_cost);
@@ -202,7 +186,6 @@ impl RenderOnce for TokenContextBarView {
 
         let dot_system: Hsla = rgb(COLOR_SYSTEM_PROMPT).into();
         let dot_tools: Hsla = rgb(COLOR_TOOL_DEFS).into();
-        let dot_messages: Hsla = rgb(COLOR_MESSAGES).into();
 
         div().id("token-context-bar").child(
             Popover::new("token-context-popover")
@@ -261,8 +244,8 @@ impl RenderOnce for TokenContextBarView {
                         )
                         // Separator
                         .child(div().h(px(1.0)).w_full().bg(border).mb_2())
-                        // System section
-                        .child(section_header("System", muted))
+                        // System section (rough estimates)
+                        .child(section_header("System (est.)", muted))
                         .child(breakdown_row(
                             "System Prompt",
                             &system_pct_text,
@@ -279,19 +262,8 @@ impl RenderOnce for TokenContextBarView {
                         ))
                         // Separator
                         .child(div().h(px(1.0)).w_full().bg(border).mt_1().mb_2())
-                        // Conversation section
+                        // Conversation totals section
                         .child(section_header("Conversation", muted))
-                        .child(breakdown_row(
-                            "Messages",
-                            &messages_pct_text,
-                            dot_messages,
-                            fg,
-                            muted,
-                        ))
-                        // Separator
-                        .child(div().h(px(1.0)).w_full().bg(border).mt_1().mb_2())
-                        // Session section
-                        .child(section_header("Session", muted))
                         .child(stat_row("Input Tokens", &input_text, fg, muted))
                         .child(stat_row("Output Tokens", &output_text, fg, muted))
                         .when(has_cost, |this| {
