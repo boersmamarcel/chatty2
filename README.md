@@ -126,7 +126,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
-- **Context window fill bar** — a compact footer progress bar showing how full the active conversation's context window is, color-coded green/amber/red with a tooltip showing exact token counts. Enable it by setting **Max Context Window** (tokens) on a model via Settings → Models → Advanced tab
+- **Context window fill bar** — a segmented footer progress bar breaking down context usage by component (preamble, tool definitions, conversation history, latest message), color-coded green/amber/red. A popover shows estimated token counts per segment plus the actual input/output counts returned by the provider after each response. Enable it by setting **Max Context Window** (tokens) on a model via Settings → Models → Advanced tab
 - **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
 
 ### Training Data Export (ATIF)
