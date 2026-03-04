@@ -377,12 +377,12 @@ fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
                             }
                         }
                         MarkdownSegment::CodeBlock { language, code } => {
-                            let spans =
+                            let styles =
                                 syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
                             CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
                                 language,
                                 code,
-                                highlighted_spans: spans,
+                                styles,
                             })
                         }
                         MarkdownSegment::Text(t) => {
@@ -576,11 +576,11 @@ fn parse_markdown_segment_streaming(
             if let Some(reused) = try_reuse_code_block(prev_mds, &language, &code) {
                 CachedMarkdownSegment::CodeBlock(reused)
             } else {
-                let spans = syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
+                let styles = syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
                 CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
                     language,
                     code,
-                    highlighted_spans: spans,
+                    styles,
                 })
             }
         }
@@ -596,7 +596,7 @@ fn parse_markdown_segment_streaming(
 
 /// Search previous markdown segments for a code block with matching
 /// language and code content. Returns a clone of the `CachedCodeBlock`
-/// (with its pre-computed highlighted spans) if found.
+/// (with its pre-computed highlight styles) if found.
 fn try_reuse_code_block(
     prev_mds: &[CachedMarkdownSegment],
     language: &Option<String>,
@@ -646,10 +646,10 @@ fn render_cached_markdown_segments(
     for segment in segments {
         match segment {
             CachedMarkdownSegment::CodeBlock(cached_cb) => {
-                let block = CodeBlockComponent::with_highlighted_spans(
+                let block = CodeBlockComponent::with_highlighted_styles(
                     cached_cb.language.clone(),
                     cached_cb.code.clone(),
-                    cached_cb.highlighted_spans.clone(),
+                    cached_cb.styles.clone(),
                     base_index * 100 + code_block_index,
                 );
                 elements.push(block.into_any_element());
@@ -660,16 +660,11 @@ fn render_cached_markdown_segments(
                 elements.extend(math_elements);
             }
             CachedMarkdownSegment::IncompleteCodeBlock { language, code } => {
-                // Render as a code block with plain foreground text (no syntax highlighting)
-                let foreground = cx.theme().foreground;
-                let spans = vec![syntax_highlighter::HighlightedSpan {
-                    text: code.clone(),
-                    color: foreground,
-                }];
-                let block = CodeBlockComponent::with_highlighted_spans(
+                // Render as a code block with no syntax highlighting (empty styles)
+                let block = CodeBlockComponent::with_highlighted_styles(
                     language.clone(),
                     code.clone(),
-                    spans,
+                    vec![],
                     base_index * 100 + code_block_index,
                 );
                 elements.push(block.into_any_element());

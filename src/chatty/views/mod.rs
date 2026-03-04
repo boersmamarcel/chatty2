@@ -7,7 +7,6 @@ pub mod code_block_component;
 pub mod conversation_item;
 pub mod error_log_dialog;
 pub mod footer;
-pub mod line_splitter;
 pub mod math_parser;
 pub mod math_renderer;
 pub mod mermaid_component;
