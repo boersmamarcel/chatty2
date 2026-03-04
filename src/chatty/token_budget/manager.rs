@@ -59,6 +59,7 @@ impl GlobalTokenBudget {
     ///
     /// This is a `&self` operation — `watch::Sender::send` does not require mutation of
     /// `GlobalTokenBudget`, so it can be called directly via `cx.global::<GlobalTokenBudget>()`.
+    #[allow(dead_code)]
     pub fn publish(&self, snapshot: TokenBudgetSnapshot) {
         // Ignore SendError — it only occurs when all receivers have been dropped (i.e. shutdown).
         let _ = self.sender.send(Some(snapshot));
@@ -99,6 +100,7 @@ impl GlobalTokenBudget {
     ///
     /// Returns a `watch::Ref` — zero-copy, holds a read lock until dropped.
     /// For the render path, prefer calling this directly on the `receiver` field.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> watch::Ref<'_, Option<TokenBudgetSnapshot>> {
         self.receiver.borrow()
     }
@@ -124,15 +126,19 @@ pub struct SnapshotInputs {
     pub preamble: String,
     pub history: Vec<rig::completion::Message>,
     pub user_message_text: String,
+    // Populated for potential future use (e.g. re-running tool estimation in-task).
+    #[allow(dead_code)]
     pub exec_settings: crate::settings::models::ExecutionSettingsModel,
+    #[allow(dead_code)]
     pub mcp_server_count: usize,
     /// Pre-computed cached preamble tokens (read from `GlobalTokenBudget::cache` on
     /// the GPUI thread before `spawn_blocking`). Zero if the cache was cold.
     pub cached_preamble_tokens: usize,
     /// Pre-computed cached tool tokens. Zero if the cache was cold.
     pub cached_tool_tokens: usize,
-    /// The tool hint string used to produce `cached_tool_tokens` (needed to pass the
-    /// tool count into the blocking task for re-counting when the cache is cold).
+    /// The tool hint string used to produce `cached_tool_tokens`. Stored for
+    /// diagnostics; not consumed by `compute_snapshot_background`.
+    #[allow(dead_code)]
     pub tool_hint: String,
     pub tool_count: usize,
     /// True when the preamble cache was warm for these inputs.

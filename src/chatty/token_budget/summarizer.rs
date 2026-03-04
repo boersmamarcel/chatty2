@@ -109,7 +109,7 @@ pub async fn summarize_oldest_half(
     // Wrap the summary as a User message prefixed with a clear marker so the LLM
     // knows it is reading a compressed history, not a live user turn.
     let summary_message = Message::User {
-        content: OneOrMany::one(UserContent::Text(rig::completion::message::Text {
+        content: OneOrMany::one(UserContent::Text(Text {
             text: format!(
                 "[CONVERSATION SUMMARY — {midpoint} messages compressed]\n\n{summary_text}"
             ),

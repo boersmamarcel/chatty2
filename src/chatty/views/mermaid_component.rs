@@ -125,8 +125,7 @@ impl MermaidComponent {
                         }
                         #[cfg(not(target_os = "linux"))]
                         {
-                            let image =
-                                gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
+                            let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
                             _cx.write_to_clipboard(ClipboardItem::new_image(&image));
                         }
                     }

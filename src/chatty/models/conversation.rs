@@ -1,4 +1,3 @@
-use crate::chatty::token_budget::CachedTokenCounts;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -67,12 +66,6 @@ pub struct Conversation {
     pending_artifacts: PendingArtifacts,
     /// Persistent shell session for this conversation (lazily initialized)
     shell_session: Option<std::sync::Arc<ShellSession>>,
-    /// Memoized token counts for static context components (preamble, tool definitions).
-    /// Invalidated automatically by content hash when preamble or tool config changes.
-    /// Not serialized — Conversation uses custom serialization methods, not serde derives.
-    /// Reset to default on every app start (cache is rebuilt from scratch each session).
-    #[allow(dead_code)]
-    token_budget_cache: CachedTokenCounts,
 }
 
 impl Conversation {
@@ -143,7 +136,6 @@ impl Conversation {
             streaming_message: None,
             pending_artifacts,
             shell_session,
-            token_budget_cache: CachedTokenCounts::new(),
         })
     }
 
@@ -250,7 +242,6 @@ impl Conversation {
             streaming_message: None, // Always start fresh, streaming state is transient
             pending_artifacts,
             shell_session,
-            token_budget_cache: CachedTokenCounts::new(),
         })
     }
 
@@ -597,15 +588,6 @@ impl Conversation {
         &self.token_usage
     }
 
-    /// Mutable access to the per-conversation static token count cache.
-    ///
-    /// Used by `manager::gather_snapshot_inputs()` to warm preamble and tool
-    /// token counts on the GPUI thread before handing off to `spawn_blocking`.
-    #[allow(dead_code)]
-    pub fn token_budget_cache_mut(&mut self) -> &mut CachedTokenCounts {
-        &mut self.token_budget_cache
-    }
-
     /// Add token usage for the most recent exchange
     pub fn add_token_usage(&mut self, usage: TokenUsage) {
         self.token_usage.add_usage(usage);
@@ -620,22 +602,6 @@ impl Conversation {
     /// Deserialize token usage from JSON string
     pub fn deserialize_token_usage(json: &str) -> Result<ConversationTokenUsage> {
         serde_json::from_str(json).context("Failed to deserialize token usage")
-    }
-
-    /// Rough estimate of the conversation history's token footprint.
-    /// Uses serialized JSON character count / 4 as a heuristic.
-    /// Independent of API-reported token counts — always reflects the
-    /// actual conversation content and never decreases.
-    ///
-    /// Retained for reference; superseded by `TokenCounter::count_history()` in v2.
-    #[allow(dead_code)]
-    pub fn estimated_history_tokens(&self) -> u32 {
-        let chars: usize = self
-            .history
-            .iter()
-            .map(|msg| serde_json::to_string(msg).map(|s| s.len()).unwrap_or(0))
-            .sum();
-        (chars / 4) as u32
     }
 
     /// Get the current streaming message content (if any)

@@ -101,6 +101,7 @@ impl CachedTokenCounts {
     ///
     /// Call this when switching to a conversation whose model uses a different
     /// tokenizer encoding so stale counts from the previous model are discarded.
+    #[allow(dead_code)]
     pub fn invalidate(&mut self) {
         *self = Self::default();
     }
@@ -120,11 +121,13 @@ impl CachedTokenCounts {
     /// Useful when you only need to read the last-computed value and you know the
     /// preamble has not changed (e.g. when building a snapshot inside `spawn_blocking`
     /// after having called `preamble_tokens()` on the GPUI thread moments earlier).
+    #[allow(dead_code)]
     pub fn cached_preamble_tokens(&self) -> usize {
         self.preamble_tokens
     }
 
     /// Return the currently cached tool token count without re-checking the hash.
+    #[allow(dead_code)]
     pub fn cached_tool_tokens(&self) -> usize {
         self.tool_tokens
     }

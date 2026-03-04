@@ -295,6 +295,9 @@ impl StreamManager {
                 });
             }
             StreamChunk::ToolCallError { id, error } => {
+                // A tool error still triggers an API round-trip (the error is
+                // sent back to the model as a tool result), so increment the
+                // turn count here just as we do for a successful ToolCallResult.
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.api_turn_count += 1;
                 }

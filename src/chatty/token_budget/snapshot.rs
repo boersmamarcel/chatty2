@@ -6,6 +6,7 @@
 #[derive(Clone, Debug)]
 pub struct TokenBudgetSnapshot {
     /// When this snapshot was computed (used for staleness detection in the UI)
+    #[allow(dead_code)]
     pub computed_at: std::time::Instant,
 
     /// Hard token limit for the active model (from `ModelConfig.max_context_window`)
@@ -133,6 +134,7 @@ impl ComponentFractions {
     }
 
     /// True when all components are zero (e.g. snapshot has not been computed yet).
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.preamble == 0.0 && self.tools == 0.0 && self.history == 0.0 && self.user_msg == 0.0
     }
@@ -156,6 +158,7 @@ pub enum ContextStatus {
 
 impl ContextStatus {
     /// Human-readable label for the popover.
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             ContextStatus::Normal => "Normal",
@@ -194,6 +197,8 @@ impl ContextStatus {
 ///     }
 /// }).detach();
 /// ```
+// `Relieved` variant and GPUI EventEmitter subscription are not yet wired up.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum ContextPressureEvent {
     /// Utilization crossed the high threshold on the way up (default: 70 %).

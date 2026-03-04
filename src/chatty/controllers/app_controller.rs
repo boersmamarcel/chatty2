@@ -1936,14 +1936,17 @@ impl ChattyApp {
                     cx.spawn(async move |_weak, cx| {
                         let data = cx
                             .update_global::<ConversationsStore, _>(|store, _cx| {
-                                store.get_conversation(&conv_id_for_summary).map(|conv| {
-                                    let midpoint = conv.history().len() / 2;
-                                    (conv.agent().clone(), conv.history().to_vec(), midpoint)
-                                })
+                                store
+                                    .get_conversation(&conv_id_for_summary)
+                                    .map(|conv| (conv.agent().clone(), conv.history().to_vec()))
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                        if let Some((agent, history, midpoint)) = data {
+                        if let Some((agent, history)) = data {
+                            // Compute midpoint from the captured snapshot so it stays
+                            // consistent with the history slice passed to the LLM, even
+                            // if new messages arrive while summarization is in flight.
+                            let midpoint = history.len() / 2;
                             match summarize_oldest_half(&agent, &history).await {
                                 Ok(result) => {
                                     info!(

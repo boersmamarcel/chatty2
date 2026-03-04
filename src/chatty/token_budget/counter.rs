@@ -76,6 +76,7 @@ impl TokenCounter {
     }
 
     /// Which encoding is being used (useful for logging / debugging).
+    #[allow(dead_code)]
     pub fn encoding(&self) -> Encoding {
         self.encoding
     }
