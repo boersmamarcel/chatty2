@@ -1,5 +1,5 @@
-use once_cell::sync::Lazy;
 use rig::completion::Message;
+use std::sync::LazyLock;
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 
 // ── Static BPE instances ──────────────────────────────────────────────────────
@@ -7,8 +7,9 @@ use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 // and reuse across all counting calls. Both instances are Sync so sharing them
 // across threads is safe.
 
-static CL100K: Lazy<CoreBPE> = Lazy::new(|| cl100k_base().expect("cl100k_base init failed"));
-static O200K: Lazy<CoreBPE> = Lazy::new(|| o200k_base().expect("o200k_base init failed"));
+static CL100K: LazyLock<CoreBPE> =
+    LazyLock::new(|| cl100k_base().expect("cl100k_base init failed"));
+static O200K: LazyLock<CoreBPE> = LazyLock::new(|| o200k_base().expect("o200k_base init failed"));
 
 // ── Encoding selection ────────────────────────────────────────────────────────
 

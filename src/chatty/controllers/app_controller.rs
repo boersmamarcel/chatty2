@@ -21,11 +21,11 @@ use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
-use crate::settings::models::TokenTrackingSettings;
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
+use crate::settings::models::TokenTrackingSettings;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
@@ -1959,9 +1959,9 @@ impl ChattyApp {
                                             conv.replace_history(result.new_history, midpoint);
                                         }
                                     })
-                                    .map_err(|e| {
-                                        warn!(error = ?e, "Failed to apply auto-summarization")
-                                    })
+                                    .map_err(
+                                        |e| warn!(error = ?e, "Failed to apply auto-summarization"),
+                                    )
                                     .ok();
                                 }
                                 Err(e) => {

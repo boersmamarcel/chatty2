@@ -254,9 +254,9 @@ impl RenderOnce for TokenContextBarView {
         let cost_text = format_cost(session_cost);
 
         // Clone snap fractions for the popover closure (must be 'static)
-        let snap_pct = pct;
-        let snap_context_limit = snap.model_context_limit;
-        let snap_status = snap.status();
+        let _snap_pct = pct;
+        let _snap_context_limit = snap.model_context_limit;
+        let _snap_status = snap.status();
 
         // ── Trigger: small stacked bar + percentage ───────────────────────────
         let trigger = Button::new("token-context-trigger").ghost().xsmall().child(
@@ -292,182 +292,183 @@ impl RenderOnce for TokenContextBarView {
         let dot_user_msg: Hsla = rgb(COLOR_USER_MSG).into();
 
         // ── Build and return the popover ──────────────────────────────────────
-        div()
-            .id("token-context-bar")
-            .child(
-                Popover::new("token-context-popover")
-                    .trigger(trigger)
-                    .content(move |_, _window, cx| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .p_3()
-                            .min_w(px(POPOVER_MIN_WIDTH))
-                            .max_w(px(POPOVER_MAX_WIDTH))
-                            // Summary line
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().foreground)
-                                    .child(summary_text.clone()),
-                            )
-                            // Bar in popover (tall version for readability)
-                            .child(render_stacked_bar(
-                                &snap,
-                                POPOVER_MAX_WIDTH - 24.0,
-                                POPOVER_BAR_HEIGHT,
-                                cx,
-                            ))
-                            // Component breakdown legend
-                            .child(
+        div().id("token-context-bar").child(
+            Popover::new("token-context-popover")
+                .trigger(trigger)
+                .content(move |_, _window, cx| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .p_3()
+                        .min_w(px(POPOVER_MIN_WIDTH))
+                        .max_w(px(POPOVER_MAX_WIDTH))
+                        // Summary line
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child(summary_text.clone()),
+                        )
+                        // Bar in popover (tall version for readability)
+                        .child(render_stacked_bar(
+                            &snap,
+                            POPOVER_MAX_WIDTH - 24.0,
+                            POPOVER_BAR_HEIGHT,
+                            cx,
+                        ))
+                        // Component breakdown legend
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                // Preamble
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(10.0))
+                                                .h(px(10.0))
+                                                .rounded_sm()
+                                                .bg(dot_preamble),
+                                        )
+                                        .child(format!("Preamble: {}", preamble_text.clone())),
+                                )
+                                // Tools
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(10.0))
+                                                .h(px(10.0))
+                                                .rounded_sm()
+                                                .bg(dot_tools),
+                                        )
+                                        .child(format!("Tools: {}", tools_text.clone())),
+                                )
+                                // History
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(10.0))
+                                                .h(px(10.0))
+                                                .rounded_sm()
+                                                .bg(dot_history),
+                                        )
+                                        .child(format!("History: {}", history_text.clone())),
+                                )
+                                // User message
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(10.0))
+                                                .h(px(10.0))
+                                                .rounded_sm()
+                                                .bg(dot_user_msg),
+                                        )
+                                        .child(format!(
+                                            "Latest message: {}",
+                                            user_msg_text.clone()
+                                        )),
+                                )
+                                // Remaining
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(10.0))
+                                                .h(px(10.0))
+                                                .rounded_sm()
+                                                .bg(cx.theme().border),
+                                        )
+                                        .child(format!("Remaining: {}", remaining_text.clone())),
+                                ),
+                        )
+                        // Actual counts section (only if available)
+                        .when(has_actuals, |this| {
+                            this.child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .gap_2()
                                     .text_xs()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
                                     .text_color(cx.theme().muted_foreground)
-                                    // Preamble
                                     .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .w(px(10.0))
-                                                    .h(px(10.0))
-                                                    .rounded_sm()
-                                                    .bg(dot_preamble),
-                                            )
-                                            .child(format!("Preamble: {}", preamble_text.clone())),
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child("Actual (from provider):"),
                                     )
-                                    // Tools
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .w(px(10.0))
-                                                    .h(px(10.0))
-                                                    .rounded_sm()
-                                                    .bg(dot_tools),
-                                            )
-                                            .child(format!("Tools: {}", tools_text.clone())),
-                                    )
-                                    // History
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .w(px(10.0))
-                                                    .h(px(10.0))
-                                                    .rounded_sm()
-                                                    .bg(dot_history),
-                                            )
-                                            .child(format!("History: {}", history_text.clone())),
-                                    )
-                                    // User message
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .w(px(10.0))
-                                                    .h(px(10.0))
-                                                    .rounded_sm()
-                                                    .bg(dot_user_msg),
-                                            )
-                                            .child(format!("Latest message: {}", user_msg_text.clone())),
-                                    )
-                                    // Remaining
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .w(px(10.0))
-                                                    .h(px(10.0))
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().border),
-                                            )
-                                            .child(format!("Remaining: {}", remaining_text.clone())),
-                                    ),
+                                    .child(format!("Input: {}", actual_input_text.clone()))
+                                    .child(format!("Output: {}", actual_output_text.clone()))
+                                    .when(delta_text.is_some(), |popover_div| {
+                                        popover_div.child(format!(
+                                            "Estimation: {}",
+                                            delta_text.clone().unwrap_or_default()
+                                        ))
+                                    }),
                             )
-                            // Actual counts section (only if available)
-                            .when(has_actuals, |this| {
-                                this.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .text_xs()
-                                        .pt_2()
-                                        .border_t_1()
-                                        .border_color(cx.theme().border)
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            div()
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(cx.theme().foreground)
-                                                .child("Actual (from provider):"),
-                                        )
-                                        .child(format!("Input: {}", actual_input_text.clone()))
-                                        .child(format!("Output: {}", actual_output_text.clone()))
-                                        .when(delta_text.is_some(), |popover_div| {
-                                            popover_div.child(format!(
-                                                "Estimation: {}",
-                                                delta_text.clone().unwrap_or_default()
-                                            ))
-                                        }),
-                                )
-                            })
-                            // Status alert
-                            .when(status_label.is_some(), |this| {
-                                this.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .pt_2()
-                                        .border_t_1()
-                                        .border_color(rgb(0xEF4444))
-                                        .text_xs()
-                                        .text_color(rgb(0xEF4444))
-                                        .child(status_label.unwrap_or_default()),
-                                )
-                            })
-                            // Session totals (unchanged from v1)
-                            .when(has_session, |this| {
-                                this.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .pt_2()
-                                        .border_t_1()
-                                        .border_color(cx.theme().border)
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            div()
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(cx.theme().foreground)
-                                                .child("Session totals:"),
-                                        )
-                                        .child(format!("Input: {}", session_input_text))
-                                        .child(format!("Output: {}", session_output_text))
-                                        .when(has_cost, |popover_div| {
-                                            popover_div.child(format!("Cost: {}", cost_text))
-                                        }),
-                                )
-                            })
-                    }),
-            )
+                        })
+                        // Status alert
+                        .when(status_label.is_some(), |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(rgb(0xEF4444))
+                                    .text_xs()
+                                    .text_color(rgb(0xEF4444))
+                                    .child(status_label.unwrap_or_default()),
+                            )
+                        })
+                        // Session totals (unchanged from v1)
+                        .when(has_session, |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child("Session totals:"),
+                                    )
+                                    .child(format!("Input: {}", session_input_text))
+                                    .child(format!("Output: {}", session_output_text))
+                                    .when(has_cost, |popover_div| {
+                                        popover_div.child(format!("Cost: {}", cost_text))
+                                    }),
+                            )
+                        })
+                }),
+        )
     }
 }
