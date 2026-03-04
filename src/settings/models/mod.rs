@@ -5,6 +5,7 @@ pub mod mcp_store;
 pub mod models_notifier;
 pub mod models_store;
 pub mod providers_store;
+pub mod token_tracking_settings;
 pub mod training_settings;
 pub mod user_secrets_store;
 
@@ -15,5 +16,6 @@ pub use mcp_store::McpServersModel;
 pub use models_notifier::{GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent};
 pub use models_store::ModelsModel;
 pub use providers_store::ProviderModel;
+pub use token_tracking_settings::TokenTrackingSettings;
 pub use training_settings::TrainingSettingsModel;
 pub use user_secrets_store::UserSecretsModel;

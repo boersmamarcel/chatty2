@@ -12,6 +12,52 @@ use crate::chatty::services::MermaidRendererService;
 const MERMAID_MAX_WIDTH: f32 = 800.0;
 const MERMAID_MAX_HEIGHT: f32 = 600.0;
 
+/// Copy raw PNG bytes to the Linux system clipboard.
+///
+/// GPUI's Linux `write_to_clipboard` silently discards image entries (it only
+/// calls `set_text` under the hood). Instead we pipe the bytes to an external
+/// clipboard tool that serves requests in the background:
+///
+/// - `wl-copy --type image/png` on Wayland (from `wl-clipboard` package)
+/// - `xclip -selection clipboard -t image/png` on X11 (from `xclip` package)
+///
+/// Both tools run as background processes, keeping clipboard ownership until
+/// another application reads the data. Returns `true` if a tool was found and
+/// launched successfully.
+#[cfg(target_os = "linux")]
+fn copy_png_to_linux_clipboard(png_bytes: &[u8]) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // Try wl-copy first (Wayland)
+    if let Ok(mut child) = Command::new("wl-copy")
+        .args(["--type", "image/png"])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(png_bytes);
+            // Dropping stdin sends EOF; wl-copy stays alive serving the clipboard.
+        }
+        return true;
+    }
+
+    // Fall back to xclip (X11)
+    if let Ok(mut child) = Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "image/png"])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(png_bytes);
+            // xclip stays alive in the background serving clipboard requests.
+        }
+        return true;
+    }
+
+    false
+}
+
 /// Component for rendering Mermaid diagrams as SVG
 #[derive(IntoElement, Clone)]
 pub struct MermaidComponent {
@@ -65,11 +111,23 @@ impl MermaidComponent {
             .xsmall()
             .icon(Icon::new(CustomIcon::Image))
             .tooltip("Copy as PNG")
-            .on_click(move |_event, _window, cx| {
+            .on_click(move |_event, _window, _cx| {
                 match MermaidRendererService::render_svg_to_png(&svg_path) {
                     Ok(png_bytes) => {
-                        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
-                        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                        #[cfg(target_os = "linux")]
+                        {
+                            // GPUI's Linux clipboard silently discards image entries —
+                            // write_to_clipboard only calls set_text() and ignores image bytes.
+                            // Use wl-copy (Wayland) or xclip (X11) directly instead.
+                            if !copy_png_to_linux_clipboard(&png_bytes) {
+                                warn!("No clipboard tool found (install wl-clipboard or xclip)");
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
+                            _cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                        }
                     }
                     Err(e) => {
                         warn!(error = ?e, "Failed to render mermaid PNG for clipboard");

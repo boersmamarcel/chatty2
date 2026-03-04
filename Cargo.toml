@@ -72,6 +72,9 @@ usvg = "0.45"
 # Syntax highlighting (via gpui-component's tree-sitter highlighter)
 ropey = "2.0.0-beta.1"
 
+# Token counting (local BPE tokenizer — no API calls)
+tiktoken-rs = "0.9"
+
 [target."cfg(unix)".dependencies]
 nix = { version = "0.29", features = ["signal"] }
 

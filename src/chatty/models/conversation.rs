@@ -519,6 +519,42 @@ impl Conversation {
         Some((text, timestamp))
     }
 
+    /// Replace the conversation history with a summarized version.
+    ///
+    /// `new_history` is the output of `summarize_oldest_half()`: a single summary
+    /// message followed by the tail of the original history starting at
+    /// `original_tail_offset`. All parallel arrays are rebuilt to match:
+    /// - Index 0 (summary message) gets default/empty metadata.
+    /// - Indices 1..N map to the original entries at `original_tail_offset..`.
+    pub fn replace_history(&mut self, new_history: Vec<Message>, original_tail_offset: usize) {
+        let tail_start = original_tail_offset.min(self.system_traces.len());
+
+        let mut new_traces = Vec::with_capacity(new_history.len());
+        let mut new_attachments = Vec::with_capacity(new_history.len());
+        let mut new_timestamps = Vec::with_capacity(new_history.len());
+        let mut new_feedback = Vec::with_capacity(new_history.len());
+
+        // Default metadata for the summary message at index 0
+        new_traces.push(None);
+        new_attachments.push(vec![]);
+        new_timestamps.push(None);
+        new_feedback.push(None);
+
+        // Preserve metadata for the kept tail of the original history
+        new_traces.extend(self.system_traces[tail_start..].iter().cloned());
+        new_attachments.extend(self.attachment_paths[tail_start..].iter().cloned());
+        new_timestamps.extend(self.message_timestamps[tail_start..].iter().cloned());
+        new_feedback.extend(self.message_feedback[tail_start..].iter().cloned());
+
+        self.history = new_history;
+        self.system_traces = new_traces;
+        self.attachment_paths = new_attachments;
+        self.message_timestamps = new_timestamps;
+        self.message_feedback = new_feedback;
+        self.updated_at = SystemTime::now();
+        self.debug_assert_parallel_arrays_aligned();
+    }
+
     /// Get the agent
     pub fn agent(&self) -> &AgentClient {
         &self.agent

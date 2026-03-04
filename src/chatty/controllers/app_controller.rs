@@ -17,10 +17,15 @@ use crate::chatty::models::{
 };
 use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::token_budget::{
+    GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
+    gather_snapshot_inputs, summarize_oldest_half,
+};
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
+use crate::settings::models::TokenTrackingSettings;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
@@ -656,6 +661,12 @@ impl ChattyApp {
     fn load_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
         let sidebar = self.sidebar_view.clone();
+
+        // Clear stale token budget snapshot so the bar shows "no data" during the
+        // conversation transition rather than flashing the previous conversation's numbers.
+        if cx.has_global::<GlobalTokenBudget>() {
+            cx.global::<GlobalTokenBudget>().clear();
+        }
 
         // Update sidebar active state immediately
         sidebar.update(cx, |sidebar, cx| {
@@ -1655,6 +1666,7 @@ impl ChattyApp {
                 token_usage,
                 trace_json,
                 pending_artifacts,
+                api_turn_count,
             } => {
                 debug!(conv_id = %conversation_id, status = ?status, "StreamManager: stream ended");
                 // Update UI streaming state
@@ -1701,6 +1713,7 @@ impl ChattyApp {
                             *token_usage,
                             trace_json.clone(),
                             artifacts.clone(),
+                            *api_turn_count,
                             cx,
                         );
 
@@ -1794,6 +1807,7 @@ impl ChattyApp {
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
         artifact_paths: Vec<PathBuf>,
+        api_turn_count: u32,
         cx: &mut Context<Self>,
     ) {
         let chat_view = self.chat_view.clone();
@@ -1808,8 +1822,9 @@ impl ChattyApp {
         });
 
         // 2. Read response text from ConversationsStore (single source of truth),
-        //    finalize in conversation model, and check if title gen needed
-        let (should_generate_title, assistant_history_index) =
+        //    finalize in conversation model, check if title gen needed, and
+        //    extract model_id for pricing lookup (avoids a second global access later).
+        let (should_generate_title, assistant_history_index, model_id_opt) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     let response_text = conv
@@ -1817,6 +1832,7 @@ impl ChattyApp {
                         .cloned()
                         .unwrap_or_default();
                     let has_trace = trace_json.is_some();
+                    let model_id = conv.model_id().to_string();
                     conv.finalize_response(response_text, artifact_paths, trace_json);
                     let msg_count = conv.message_count();
                     let traces_len = conv.system_traces().len();
@@ -1824,10 +1840,10 @@ impl ChattyApp {
                     let assistant_idx = msg_count.saturating_sub(1);
                     let should_gen = msg_count == 2 && conv.title() == "New Chat";
                     debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
-                    (should_gen, Some(assistant_idx))
+                    (should_gen, Some(assistant_idx), Some(model_id))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    (false, None)
+                    (false, None, None)
                 }
             });
 
@@ -1841,19 +1857,20 @@ impl ChattyApp {
             });
         }
 
-        // 3. Process token usage
+        // 3. Process token usage — always record tokens, optionally calculate cost
         if let Some((input_tokens, output_tokens)) = token_usage {
-            debug!(input_tokens, output_tokens, "Processing token usage");
+            debug!(
+                input_tokens,
+                output_tokens, api_turn_count, "Processing token usage"
+            );
 
-            let model_id_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                store
-                    .get_conversation(&conv_id)
-                    .map(|conv| conv.model_id().to_string())
-            });
+            let mut usage =
+                TokenUsage::with_turn_count(input_tokens, output_tokens, api_turn_count);
 
-            if let Some(model_id) = model_id_opt {
+            // Calculate cost if pricing is configured for this model
+            if let Some(ref model_id) = model_id_opt {
                 let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
-                    models.get_model(&model_id).and_then(|model| {
+                    models.get_model(model_id).and_then(|model| {
                         match (
                             model.cost_per_million_input_tokens,
                             model.cost_per_million_output_tokens,
@@ -1867,14 +1884,98 @@ impl ChattyApp {
                 });
 
                 if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
-                    let mut usage = TokenUsage::new(input_tokens, output_tokens);
                     usage.calculate_cost(cost_per_million_input, cost_per_million_output);
+                }
+            }
 
-                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                            conv.add_token_usage(usage);
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.add_token_usage(usage);
+                }
+                // Sync metadata so sidebar cost matches the live conversation cost
+                // after every turn (not just the first turn where title is generated).
+                let cost_and_title = store.get_conversation(&conv_id).map(|c| {
+                    (
+                        c.token_usage().total_estimated_cost_usd,
+                        c.title().to_string(),
+                    )
+                });
+                if let Some((cost, title)) = cost_and_title {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    store.upsert_metadata(&conv_id, &title, cost, now_ts);
+                }
+            });
+
+            // Overlay the pre-send estimate with the actual API-reported token counts.
+            // This lets the popover show both the estimate (computed before send) and the
+            // real numbers from the provider in the same snapshot.
+            if cx.has_global::<GlobalTokenBudget>() {
+                cx.global::<GlobalTokenBudget>()
+                    .update_with_actuals(input_tokens, output_tokens);
+            }
+
+            // 3c. Auto-summarize when context is critically full and the setting is enabled.
+            // Reads the (now-patched) snapshot to check real utilization from the provider.
+            let should_auto_summarize = cx
+                .try_global::<TokenTrackingSettings>()
+                .map(|s| s.auto_summarize)
+                .unwrap_or(false);
+
+            if should_auto_summarize {
+                let is_critical = cx
+                    .try_global::<GlobalTokenBudget>()
+                    .and_then(|g| g.receiver.borrow().clone())
+                    .map(|snap| snap.status().is_critical())
+                    .unwrap_or(false);
+
+                if is_critical {
+                    let conv_id_for_summary = conv_id.clone();
+                    cx.spawn(async move |_weak, cx| {
+                        let data = cx
+                            .update_global::<ConversationsStore, _>(|store, _cx| {
+                                store
+                                    .get_conversation(&conv_id_for_summary)
+                                    .map(|conv| (conv.agent().clone(), conv.history().to_vec()))
+                            })
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                        if let Some((agent, history)) = data {
+                            // Compute midpoint from the captured snapshot so it stays
+                            // consistent with the history slice passed to the LLM, even
+                            // if new messages arrive while summarization is in flight.
+                            let midpoint = history.len() / 2;
+                            match summarize_oldest_half(&agent, &history).await {
+                                Ok(result) => {
+                                    info!(
+                                        conv_id = %conv_id_for_summary,
+                                        messages_summarized = result.messages_summarized,
+                                        estimated_tokens_freed = result.estimated_tokens_freed,
+                                        "Auto-summarization complete"
+                                    );
+                                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                        if let Some(conv) =
+                                            store.get_conversation_mut(&conv_id_for_summary)
+                                        {
+                                            conv.replace_history(result.new_history, midpoint);
+                                        }
+                                    })
+                                    .map_err(
+                                        |e| warn!(error = ?e, "Failed to apply auto-summarization"),
+                                    )
+                                    .ok();
+                                }
+                                Err(e) => {
+                                    warn!(error = ?e, "Auto-summarization failed");
+                                }
+                            }
                         }
-                    });
+
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .detach();
                 }
             }
         }
@@ -2510,6 +2611,70 @@ async fn run_llm_stream(
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
+
+    // 2b. Compute token budget snapshot in parallel with the LLM call.
+    //
+    // gather_snapshot_inputs() must run on the GPUI thread (reads globals, warms the
+    // static cache), so we call it synchronously here.  The expensive part —
+    // BPE-counting history and the user message — is handed off to a detached
+    // cx.spawn task so stream_prompt() starts immediately on the next line without
+    // waiting for the count to finish.  The bar simply shows the new snapshot on
+    // whatever repaint follows the count completing (~1–10 ms later).
+    {
+        let user_message_text_for_budget = extract_user_message_text(&user_contents);
+        let history_for_budget = history.clone();
+        let conv_id_for_budget = conv_id.clone();
+
+        let budget_inputs = cx
+            .update(|cx| {
+                gather_snapshot_inputs(
+                    &conv_id_for_budget,
+                    user_message_text_for_budget,
+                    history_for_budget,
+                    cx,
+                )
+            })
+            .ok()
+            .flatten();
+
+        if let Some(inputs) = budget_inputs {
+            // Clone the watch::Sender out of the global before spawning.
+            // watch::Sender::send() is &self, so no GPUI context is needed
+            // inside the task — just the sender and the optional settings.
+            let sender = cx
+                .update(|cx| {
+                    cx.try_global::<GlobalTokenBudget>()
+                        .map(|g| g.sender.clone())
+                })
+                .ok()
+                .flatten();
+
+            let settings = cx
+                .update(|cx| {
+                    cx.try_global::<crate::settings::models::TokenTrackingSettings>()
+                        .cloned()
+                })
+                .ok()
+                .flatten();
+
+            // tokio::spawn runs in parallel with stream_prompt below.
+            // The bar will update on whichever repaint follows the count
+            // completing (~1–10 ms), while the LLM call is already in flight.
+            tokio::spawn(async move {
+                match compute_snapshot_background(inputs).await {
+                    Ok(snapshot) => {
+                        check_pressure(&snapshot, settings.as_ref());
+                        if let Some(ref sender) = sender {
+                            let _ = sender.send(Some(snapshot));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Token budget snapshot computation failed (non-fatal)");
+                    }
+                }
+            });
+        }
+    }
 
     // 3. Call stream_prompt
     debug!(conv_id = %conv_id, "Calling stream_prompt()");

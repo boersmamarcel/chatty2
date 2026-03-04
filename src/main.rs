@@ -480,6 +480,37 @@ fn main() {
         // Initialize write approval store for tracking filesystem write approvals
         cx.set_global(chatty::models::WriteApprovalStore::new());
 
+        // Initialize token tracking settings with defaults
+        cx.set_global(settings::models::TokenTrackingSettings::default());
+
+        // Initialize the token budget watch channel global used by the context bar
+        cx.set_global(chatty::token_budget::GlobalTokenBudget::new());
+
+        // Spawn background task to watch the token budget channel and trigger window refreshes.
+        // This is necessary because token counting runs asynchronously in parallel with the LLM
+        // call, and the snapshot arrives after the initial render. The watch channel update needs
+        // to signal GPUI to re-render the context bar view.
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            if let Some(global) = cx.update(|cx| {
+                cx.try_global::<chatty::token_budget::GlobalTokenBudget>()
+                    .map(|g| g.receiver.clone())
+            }).ok().flatten() {
+                let mut receiver = global;
+                loop {
+                    // Wait for any change in the watch channel
+                    if receiver.changed().await.is_err() {
+                        // Channel closed (app shutting down)
+                        break;
+                    }
+                    // Trigger a window refresh when snapshot updates
+                    cx.update(|cx| {
+                        cx.refresh_windows();
+                    }).ok();
+                }
+            }
+        })
+        .detach();
+
         // Initialize models notifier entity for event subscriptions
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
         cx.set_global(settings::models::GlobalModelsNotifier {
