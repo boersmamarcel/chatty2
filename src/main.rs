@@ -626,6 +626,17 @@ fn main() {
         if let Err(e) = chatty::services::MathRendererService::cleanup_old_styled_svgs() {
             warn!(error = ?e, "Failed to cleanup old math SVG files");
         }
+
+        // Initialize mermaid renderer service for diagram rendering
+        let mermaid_renderer = chatty::services::MermaidRendererService::new();
+        cx.set_global(mermaid_renderer);
+        info!("Mermaid renderer service initialized");
+
+        // Clean up old mermaid SVG files from previous sessions
+        if let Err(e) = chatty::services::MermaidRendererService::cleanup_old_svgs() {
+            warn!(error = ?e, "Failed to cleanup old mermaid SVG files");
+        }
+
         // Augment PATH for GUI app launch — macOS/Linux .app bundles don't inherit the
         // shell PATH, so executables like npx, uvx, az, etc. won't be found otherwise.
         chatty::auth::azure_auth::augment_gui_app_path();

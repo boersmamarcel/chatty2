@@ -116,6 +116,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - **Markdown** with full formatting
 - **Syntax-highlighted code blocks** (100+ languages) with one-click copy
 - **LaTeX math** — inline (`$...$`) and block (`$$...$$`) rendered to crisp SVGs via Typst
+- **Mermaid diagrams** — ` ```mermaid ` code blocks rendered as SVG diagrams inline in chat, with theme-aware dark/light rendering. Copy the source or copy as PNG with a single click. Supports 23 diagram types (flowcharts, sequence diagrams, ER diagrams, Gantt charts, and more) via a pure Rust renderer — no browser required
 - **Image and PDF** previews inline in chat
 
 ### Conversations & Cost Tracking
@@ -304,6 +305,7 @@ Built with:
 - **[rig-core](https://crates.io/crates/rig-core)** — Multi-provider LLM integration
 - **[rmcp](https://crates.io/crates/rmcp)** — Model Context Protocol support
 - **[Typst](https://crates.io/crates/typst)** — LaTeX math rendering
+- **[mermaid-rs-renderer](https://crates.io/crates/mermaid-rs-renderer)** — Native Mermaid diagram rendering (pure Rust, no browser)
 - **[syntect](https://crates.io/crates/syntect)** — Syntax highlighting
 - **Tokio** — Async runtime
 - **serde** — Serialization/persistence

@@ -143,25 +143,25 @@ impl ProviderModel {
         self.providers = providers;
     }
 
-    /// Get providers that are configured (have API key or are Ollama)
-    pub fn configured_providers(&self) -> Vec<&ProviderConfig> {
-        self.providers
-            .iter()
-            .filter(|p| match p.provider_type {
-                // Include Ollama regardless of API key
-                ProviderType::Ollama => true,
-                // Azure requires endpoint URL AND (API key OR Entra ID)
-                ProviderType::AzureOpenAI => {
-                    let has_endpoint = p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty());
-                    let has_api_key = p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty());
-                    let uses_entra_id = p.azure_auth_method() == AzureAuthMethod::EntraId;
+    /// Get providers that are configured (have API key or are Ollama).
+    ///
+    /// Returns an iterator to avoid allocating a `Vec` on every call.
+    /// Callers that need indexed access or multiple passes should `.collect()`.
+    pub fn configured_providers(&self) -> impl Iterator<Item = &ProviderConfig> {
+        self.providers.iter().filter(|p| match p.provider_type {
+            // Include Ollama regardless of API key
+            ProviderType::Ollama => true,
+            // Azure requires endpoint URL AND (API key OR Entra ID)
+            ProviderType::AzureOpenAI => {
+                let has_endpoint = p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty());
+                let has_api_key = p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+                let uses_entra_id = p.azure_auth_method() == AzureAuthMethod::EntraId;
 
-                    has_endpoint && (has_api_key || uses_entra_id)
-                }
-                // Include others only if they have a non-empty API key
-                _ => p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
-            })
-            .collect()
+                has_endpoint && (has_api_key || uses_entra_id)
+            }
+            // Include others only if they have a non-empty API key
+            _ => p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
+        })
     }
 }
 
@@ -236,7 +236,7 @@ mod tests {
         provider.api_key = Some("test-key".to_string());
         model.add_provider(provider);
 
-        let configured = model.configured_providers();
+        let configured: Vec<_> = model.configured_providers().collect();
         assert_eq!(configured.len(), 1);
         assert_eq!(configured[0].name, "test");
     }
@@ -249,7 +249,7 @@ mod tests {
         provider.set_azure_auth_method(AzureAuthMethod::EntraId);
         model.add_provider(provider);
 
-        let configured = model.configured_providers();
+        let configured: Vec<_> = model.configured_providers().collect();
         assert_eq!(configured.len(), 1);
         assert_eq!(configured[0].name, "test");
     }
@@ -262,8 +262,7 @@ mod tests {
         provider.api_key = Some("test-key".to_string());
         model.add_provider(provider);
 
-        let configured = model.configured_providers();
-        assert_eq!(configured.len(), 0); // Should be filtered out
+        assert_eq!(model.configured_providers().count(), 0); // Should be filtered out
     }
 
     #[test]
@@ -274,8 +273,7 @@ mod tests {
         // No API key and no Entra ID
         model.add_provider(provider);
 
-        let configured = model.configured_providers();
-        assert_eq!(configured.len(), 0); // Should be filtered out
+        assert_eq!(model.configured_providers().count(), 0); // Should be filtered out
     }
 
     #[test]

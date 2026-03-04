@@ -157,11 +157,20 @@ impl ConversationsStore {
 
     /// List the N most recent conversations from the in-memory cache.
     /// Prefer `list_recent_metadata()` for sidebar display.
+    ///
+    /// Uses O(n) average selection via `select_nth_unstable_by` to find the top-K
+    /// without sorting the entire collection, then sorts only the K results.
+    /// Overall complexity: O(n + K log K) instead of O(n log n).
     #[allow(dead_code)]
     pub fn list_recent(&self, limit: usize) -> Vec<&Conversation> {
         let mut convs: Vec<&Conversation> = self.conversations.values().collect();
+        if convs.len() > limit {
+            convs.select_nth_unstable_by(limit, |a, b| {
+                b.updated_at().cmp(&a.updated_at()) // descending: largest first
+            });
+            convs.truncate(limit);
+        }
         convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at()));
-        convs.truncate(limit);
         convs
     }
 }
@@ -169,5 +178,61 @@ impl ConversationsStore {
 impl Default for ConversationsStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_store_with_n_entries(n: usize) -> ConversationsStore {
+        let mut store = ConversationsStore::new();
+        for i in 0..n {
+            store.upsert_metadata(
+                &format!("conv-{i}"),
+                &format!("Title {i}"),
+                0.0,
+                i as i64, // updated_at: conv-0 is oldest, conv-(n-1) is newest
+            );
+        }
+        store
+    }
+
+    #[test]
+    fn list_recent_metadata_returns_correct_count() {
+        let store = make_store_with_n_entries(100);
+        assert_eq!(store.list_recent_metadata(20).len(), 20);
+        assert_eq!(store.list_recent_metadata(100).len(), 100);
+        assert_eq!(store.list_recent_metadata(200).len(), 100); // capped at total
+    }
+
+    #[test]
+    fn list_recent_metadata_is_sorted_most_recent_first() {
+        let store = make_store_with_n_entries(50);
+        let recent = store.list_recent_metadata(10);
+        assert_eq!(recent.len(), 10);
+        // Newest entries have the highest updated_at; upsert assigns updated_at = i,
+        // so conv-49 is first, conv-48 is second, etc.
+        assert_eq!(recent[0].0, "conv-49");
+        assert_eq!(recent[1].0, "conv-48");
+        assert_eq!(recent[9].0, "conv-40");
+    }
+
+    #[test]
+    fn upsert_metadata_updates_existing_entry_and_re_sorts() {
+        let mut store = make_store_with_n_entries(5);
+        // conv-0 has updated_at=0 (oldest). Update it to be the newest.
+        store.upsert_metadata("conv-0", "Title 0 updated", 1.5, 999);
+        let all = store.list_recent_metadata(5);
+        assert_eq!(all[0].0, "conv-0"); // conv-0 is now first (most recent)
+    }
+
+    #[test]
+    fn all_metadata_ids_returns_all_ids_most_recent_first() {
+        let store = make_store_with_n_entries(1000);
+        let ids = store.all_metadata_ids();
+        assert_eq!(ids.len(), 1000);
+        assert_eq!(ids[0], "conv-999");
+        assert_eq!(ids[999], "conv-0");
     }
 }

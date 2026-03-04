@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 
 use super::math_parser::MathSegment;
-use super::syntax_highlighter::HighlightedSpan;
+use gpui::HighlightStyle;
 
 /// Maximum number of entries before oldest are evicted.
 const MAX_ENTRIES: usize = 200;
@@ -20,12 +21,14 @@ impl ContentCacheKey {
     }
 }
 
-/// Cached segments for a code block with pre-computed syntax highlighting
+/// Cached segments for a code block with pre-computed syntax highlighting.
+///
+/// Styles are byte-range offsets into `code` paired with `HighlightStyle`.
 #[derive(Clone, Debug)]
 pub struct CachedCodeBlock {
     pub language: Option<String>,
     pub code: String,
-    pub highlighted_spans: Vec<HighlightedSpan>,
+    pub styles: Vec<(std::ops::Range<usize>, HighlightStyle)>,
 }
 
 /// One segment of rendered content — either text (possibly containing math) or a code block
@@ -40,6 +43,12 @@ pub enum CachedMarkdownSegment {
     IncompleteCodeBlock {
         language: Option<String>,
         code: String,
+    },
+    /// Rendered Mermaid diagram with pre-computed SVG path.
+    /// `svg_path` is None if rendering failed (falls back to raw source display).
+    MermaidDiagram {
+        source: String,
+        svg_path: Option<PathBuf>,
     },
 }
 
