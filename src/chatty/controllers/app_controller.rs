@@ -24,6 +24,10 @@ use crate::chatty::token_budget::{
 };
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
+use crate::chatty::views::message_types::{
+    ApprovalBlock, ApprovalState, ToolCallBlock, ToolCallState, friendly_tool_name,
+    is_denial_result,
+};
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
 use crate::settings::models::TokenTrackingSettings;
@@ -753,10 +757,11 @@ impl ChattyApp {
                 (
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
+                    conv.streaming_trace().cloned(),
                 )
             });
 
-        if let Some((model_id, streaming_content)) = minimal_data {
+        if let Some((model_id, streaming_content, streaming_trace)) = minimal_data {
             // Check if this conversation has an active stream via StreamManager
             let has_active_stream = cx
                 .try_global::<GlobalStreamManager>()
@@ -819,6 +824,13 @@ impl ChattyApp {
                         // Stream active but no content yet - show placeholder
                         debug!(conv_id = %conv_id, "Stream active but no content yet, starting placeholder");
                         view.start_assistant_message(cx);
+                    }
+
+                    // Restore in-progress tool trace from Conversation model
+                    if let Some(trace) = streaming_trace {
+                        debug!(conv_id = %conv_id, trace_items = trace.items.len(),
+                               "Restoring streaming trace from Conversation model");
+                        view.restore_live_trace(trace, cx);
                     }
                 }
             });
@@ -1586,6 +1598,30 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let name = name.clone();
+
+                // Update Conversation model unconditionally (survives view switches)
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
+                        let text_before = conv.streaming_message().cloned().unwrap_or_default();
+                        let display_name = friendly_tool_name(&name);
+                        let tool_call = ToolCallBlock {
+                            id: id.clone(),
+                            tool_name: name.clone(),
+                            display_name,
+                            input: String::new(),
+                            output: None,
+                            output_preview: None,
+                            state: ToolCallState::Running,
+                            duration: None,
+                            text_before,
+                        };
+                        let trace = conv.ensure_streaming_trace();
+                        let index = trace.items.len();
+                        trace.add_tool_call(tool_call);
+                        trace.set_active_tool(index);
+                    }
+                });
+
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_tool_call_started(id, name, cx);
@@ -1599,6 +1635,21 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let arguments = arguments.clone();
+
+                // Update Conversation model unconditionally
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id)
+                        && let Some(trace) = conv.streaming_trace_mut()
+                    {
+                        let args = arguments.clone();
+                        if !trace.update_tool_call(&id, |tc| {
+                            tc.input = args;
+                        }) {
+                            warn!(tool_id = %id, "ToolCallInput: tool call not found in model trace");
+                        }
+                    }
+                });
+
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_tool_call_input(id, arguments, cx);
@@ -1612,6 +1663,28 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let result = result.clone();
+
+                // Update Conversation model unconditionally
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id)
+                        && let Some(trace) = conv.streaming_trace_mut()
+                    {
+                        let res = result.clone();
+                        let is_denied = is_denial_result(&res);
+                        if !trace.update_tool_call(&id, |tc| {
+                            tc.output = Some(res);
+                            tc.state = if is_denied {
+                                ToolCallState::Error("Denied by user".to_string())
+                            } else {
+                                ToolCallState::Success
+                            };
+                        }) {
+                            warn!(tool_id = %id, "ToolCallResult: tool call not found in model trace");
+                        }
+                        trace.clear_active_tool();
+                    }
+                });
+
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_tool_call_result(id, result, cx);
@@ -1625,6 +1698,22 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let error = error.clone();
+
+                // Update Conversation model unconditionally
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id)
+                        && let Some(trace) = conv.streaming_trace_mut()
+                    {
+                        let err = error.clone();
+                        if !trace.update_tool_call(&id, |tc| {
+                            tc.state = ToolCallState::Error(err);
+                        }) {
+                            warn!(tool_id = %id, "ToolCallError: tool call not found in model trace");
+                        }
+                        trace.clear_active_tool();
+                    }
+                });
+
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_tool_call_error(id, error, cx);
@@ -1641,6 +1730,24 @@ impl ChattyApp {
                 let id = id.clone();
                 let command = command.clone();
                 let is_sandboxed = *is_sandboxed;
+
+                // Update Conversation model unconditionally
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
+                        let approval = ApprovalBlock {
+                            id: id.clone(),
+                            command: command.clone(),
+                            is_sandboxed,
+                            state: ApprovalState::Pending,
+                            created_at: std::time::SystemTime::now(),
+                        };
+                        let trace = conv.ensure_streaming_trace();
+                        let index = trace.items.len();
+                        trace.add_approval(approval);
+                        trace.set_active_tool(index);
+                    }
+                });
+
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_approval_requested(id, command, is_sandboxed, cx);
@@ -1655,6 +1762,22 @@ impl ChattyApp {
                 debug!(id = %id, approved = approved, "StreamManager: approval resolved");
                 let id = id.clone();
                 let approved = *approved;
+
+                // Update Conversation model unconditionally
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id)
+                        && let Some(trace) = conv.streaming_trace_mut()
+                    {
+                        let new_state = if approved {
+                            ApprovalState::Approved
+                        } else {
+                            ApprovalState::Denied
+                        };
+                        trace.update_approval_state(&id, new_state);
+                        trace.clear_active_tool();
+                    }
+                });
+
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_approval_resolved(&id, approved, cx);
@@ -1745,10 +1868,11 @@ impl ChattyApp {
                     _ => {}
                 }
 
-                // Clear streaming message from Conversation model
+                // Clear streaming message and trace from Conversation model
                 cx.update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation_mut(conversation_id) {
                         conv.set_streaming_message(None);
+                        conv.set_streaming_trace(None);
                     }
                 });
             }
@@ -1765,16 +1889,22 @@ impl ChattyApp {
 
         debug!(conv_id = %conv_id, "stop_stream called");
 
-        // Extract trace before stopping (only if conversation is displayed)
-        let trace_json = self.chat_view.update(cx, |view, _cx| {
-            view.extract_current_trace()
-                .and_then(|trace| match serde_json::to_value(&trace) {
-                    Ok(val) => Some(val),
-                    Err(e) => {
-                        error!(error = ?e, "Failed to serialize trace in stop_stream");
-                        None
-                    }
-                })
+        // Extract trace before stopping.
+        // Try ChatView first, fall back to Conversation model streaming_trace.
+        let trace_from_view = self
+            .chat_view
+            .update(cx, |view, _cx| view.extract_current_trace());
+        let trace = trace_from_view.or_else(|| {
+            cx.try_global::<ConversationsStore>()
+                .and_then(|store| store.get_conversation(&conv_id))
+                .and_then(|conv| conv.streaming_trace().cloned())
+        });
+        let trace_json = trace.and_then(|trace| match serde_json::to_value(&trace) {
+            Ok(val) => Some(val),
+            Err(e) => {
+                error!(error = ?e, "Failed to serialize trace in stop_stream");
+                None
+            }
         });
 
         // Set trace on StreamManager so it's included in the StreamEnded event
@@ -2796,19 +2926,31 @@ async fn run_llm_stream(
     // 6. Extract trace and finalize via StreamManager
     debug!(conv_id = %conv_id, "Stream loop finished, finalizing via StreamManager");
 
-    let trace_json = chat_view
+    // Try to extract trace from ChatView first (if this conversation is displayed).
+    // Fall back to the streaming_trace from the Conversation model (if user switched away).
+    let trace_from_view = chat_view
         .update(cx, |view, _cx| view.extract_current_trace())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?
-        .and_then(|trace| match serde_json::to_value(&trace) {
-            Ok(val) => {
-                debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
-                Some(val)
-            }
-            Err(e) => {
-                error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
-                None
-            }
-        });
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let trace = trace_from_view.or_else(|| {
+        cx.try_read_global::<ConversationsStore, _>(|store, _| {
+            store
+                .get_conversation(&conv_id)
+                .and_then(|conv| conv.streaming_trace().cloned())
+        })
+        .flatten()
+    });
+
+    let trace_json = trace.and_then(|trace| match serde_json::to_value(&trace) {
+        Ok(val) => {
+            debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
+            Some(val)
+        }
+        Err(e) => {
+            error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
+            None
+        }
+    });
 
     if let Some(ref sm) = stream_manager {
         sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {

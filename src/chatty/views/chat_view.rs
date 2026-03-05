@@ -14,7 +14,7 @@ use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
-    ToolCallState, TraceItem, UserMessage,
+    ToolCallState, TraceItem, UserMessage, friendly_tool_name, is_denial_result,
 };
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
@@ -308,6 +308,40 @@ impl ChatView {
         None
     }
 
+    /// Restore a live trace from a saved SystemTrace (e.g. when switching back to a streaming conversation).
+    /// Creates the SystemTraceView entity and subscribes to its events.
+    pub fn restore_live_trace(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
+        let last = match self.messages.last_mut() {
+            Some(msg) if msg.is_streaming => msg,
+            _ => return,
+        };
+
+        last.live_trace = Some(trace.clone());
+
+        if trace.has_items() {
+            let trace_view = cx.new(|_cx| SystemTraceView::new(trace));
+
+            let chat_view_entity = cx.entity();
+            cx.subscribe(
+                &trace_view,
+                move |_chat_view, _trace_view, event: &super::message_types::TraceEvent, cx| {
+                    let event_clone = event.clone();
+                    let chat_view = chat_view_entity.clone();
+                    cx.defer(move |cx| {
+                        chat_view.update(cx, |chat_view, cx| {
+                            chat_view.handle_trace_event(&event_clone, cx);
+                        });
+                    });
+                },
+            )
+            .detach();
+
+            last.system_trace_view = Some(trace_view);
+        }
+
+        cx.notify();
+    }
+
     /// Handle tool call started event
     pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
@@ -430,34 +464,15 @@ impl ChatView {
             }
         };
 
-        // Pass 1 (reverse): find the last entry with matching ID still in Running state.
-        // This correctly targets the most recent pending tool call when IDs are
-        // non-unique (e.g., multiple "shell_execute" calls).
-        for item in trace.items.iter_mut().rev() {
-            if let super::message_types::TraceItem::ToolCall(tc) = item {
-                if tc.id == tool_id && matches!(tc.state, ToolCallState::Running) {
-                    updater(tc);
-                    return true;
-                }
-            }
+        if !trace.update_tool_call(tool_id, updater) {
+            warn!(
+                "update_tool_call_by_id: Tool call with id={} not found in trace items",
+                tool_id
+            );
+            return false;
         }
 
-        // Pass 2 (fallback, reverse): no Running entry found — update the last
-        // entry with matching ID regardless of state.
-        for item in trace.items.iter_mut().rev() {
-            if let super::message_types::TraceItem::ToolCall(tc) = item {
-                if tc.id == tool_id {
-                    updater(tc);
-                    return true;
-                }
-            }
-        }
-
-        warn!(
-            "update_tool_call_by_id: Tool call with id={} not found in trace items",
-            tool_id
-        );
-        false
+        true
     }
 
     /// Handle tool call input event
@@ -490,8 +505,7 @@ impl ChatView {
         debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
 
         // Check if result indicates a denial or error
-        let is_denied = result.to_lowercase().contains("denied by user")
-            || result.to_lowercase().contains("execution denied");
+        let is_denied = is_denial_result(&result);
 
         // Update trace by ID
         self.update_tool_call_by_id(&id, |tc| {
@@ -1351,22 +1365,5 @@ impl Render for ChatView {
                     .p_4()
                     .child(ChatInput::new(self.chat_input_state.clone())),
             )
-    }
-}
-
-/// Map raw tool names to user-friendly display names
-fn friendly_tool_name(name: &str) -> String {
-    match name {
-        "read_file" => "Reading file".to_string(),
-        "read_binary" => "Reading binary file".to_string(),
-        "list_directory" => "Listing directory".to_string(),
-        "glob_search" => "Searching files".to_string(),
-        "write_file" => "Writing file".to_string(),
-        "create_directory" => "Creating directory".to_string(),
-        "delete_file" => "Deleting file".to_string(),
-        "move_file" => "Moving file".to_string(),
-        "apply_diff" => "Applying diff".to_string(),
-        "shell_execute" => "Running command".to_string(),
-        other => other.to_string(),
     }
 }
