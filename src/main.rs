@@ -505,7 +505,9 @@ fn main() {
                     // Trigger a window refresh when snapshot updates
                     cx.update(|cx| {
                         cx.refresh_windows();
-                    }).ok();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to refresh windows for token snapshot"))
+                    .ok();
                 }
             }
         })

@@ -5,20 +5,21 @@ use tokio::sync::oneshot;
 
 /// Decision for a filesystem write approval request
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum WriteApprovalDecision {
     Approved,
     Denied,
 }
 
 /// Types of write operations that require approval
+///
+/// Pre-built API: variant fields will be read by the write approval UI (not yet wired).
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum WriteOperation {
     /// Writing/overwriting a file
     WriteFile {
         path: String,
         is_overwrite: bool,
+        #[allow(dead_code)]
         content_preview: String,
     },
     /// Deleting a file
@@ -28,12 +29,13 @@ pub enum WriteOperation {
     /// Applying a diff to a file
     ApplyDiff {
         path: String,
+        #[allow(dead_code)]
         old_preview: String,
+        #[allow(dead_code)]
         new_preview: String,
     },
 }
 
-#[allow(dead_code)]
 impl WriteOperation {
     /// Get a human-readable description for display
     pub fn description(&self) -> String {
@@ -57,6 +59,9 @@ impl WriteOperation {
     }
 
     /// Whether this is a destructive operation (delete, overwrite)
+    ///
+    /// Pre-built API: will be called by the write approval UI (not yet wired).
+    #[allow(dead_code)]
     pub fn is_destructive(&self) -> bool {
         matches!(
             self,
@@ -70,11 +75,14 @@ impl WriteOperation {
 }
 
 /// Request for user approval to perform a filesystem write operation
-#[allow(dead_code)]
+///
+/// Pre-built API: `id` and `operation` will be read by the write approval UI (not yet wired).
 pub struct WriteApprovalRequest {
     /// Unique ID for tracking this request
+    #[allow(dead_code)]
     pub id: String,
     /// The operation to be approved
+    #[allow(dead_code)]
     pub operation: WriteOperation,
     /// Channel to send approval decision back to waiting tool
     pub responder: oneshot::Sender<WriteApprovalDecision>,
