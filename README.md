@@ -18,8 +18,7 @@
 
 ---
 
-<!-- TODO: Add a hero screenshot or GIF here showing the main chat interface -->
-<!-- <p align="center"><img src="assets/screenshots/hero.png" alt="Chatty screenshot" width="800"></p> -->
+<p align="center"><img src="assets/animations/hero_high_quality.gif" alt="Chatty in action" width="800"></p>
 
 ## Getting Started
 
@@ -42,9 +41,6 @@ When you first launch Chatty, you'll need to connect at least one LLM provider.
 3. Click **Add Provider** and select one (e.g., OpenAI, Anthropic, Ollama)
 4. Paste your API key (not needed for Ollama — it connects to your local instance automatically)
 
-<!-- TODO: Add GIF or screenshot showing the provider setup flow -->
-<!-- <p align="center"><img src="assets/screenshots/add-provider.gif" alt="Adding a provider" width="600"></p> -->
-
 ### 3. Add a Model
 
 After adding a provider, you need to tell Chatty which model(s) to use.
@@ -54,15 +50,11 @@ After adding a provider, you need to tell Chatty which model(s) to use.
 3. Pick a provider and enter a model ID (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.0-flash`)
 4. Chatty auto-detects capabilities like vision and PDF support — no extra config needed
 
-<!-- TODO: Add GIF or screenshot showing model setup -->
-<!-- <p align="center"><img src="assets/screenshots/add-model.gif" alt="Adding a model" width="600"></p> -->
+<p align="center"><img src="assets/animations/add_provider_and_model.gif" alt="Adding a provider and model" width="700"></p>
 
 ### 4. Start Chatting
 
 Close Settings and type your first message. You can switch between models using the model selector at the bottom of the chat.
-
-<!-- TODO: Add GIF showing a first conversation with model switching -->
-<!-- <p align="center"><img src="assets/screenshots/first-chat.gif" alt="First conversation" width="600"></p> -->
 
 ### 5. Enable Tools (Optional)
 
@@ -116,7 +108,13 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 - **Markdown** with full formatting
 - **Syntax-highlighted code blocks** (30+ languages via tree-sitter) with one-click copy
 - **LaTeX math** — inline (`$...$`) and block (`$$...$$`) rendered to crisp SVGs via Typst
+
+  <img src="assets/animations/advanced_math_rendering.gif" alt="LaTeX math rendering" width="680">
+
 - **Mermaid diagrams** — ` ```mermaid ` code blocks rendered as SVG diagrams inline in chat, with theme-aware dark/light rendering. Copy the source or copy as PNG with a single click. Supports 23 diagram types (flowcharts, sequence diagrams, ER diagrams, Gantt charts, and more) via a pure Rust renderer — no browser required
+
+  <img src="assets/animations/mermaid.gif" alt="Mermaid diagram rendering" width="680">
+
 - **Image and PDF** previews inline in chat
 
 ### Conversations & Cost Tracking
@@ -295,6 +293,39 @@ Fetch and convert web pages to markdown for the LLM to read.
 - **Optional network isolation** — block shell commands from making network requests entirely
 - **MCP servers disabled by default** — servers added by the LLM must be manually enabled
 - **No telemetry** — nothing is sent anywhere except directly to your configured LLM provider
+
+<details>
+<summary><strong>More Feature Demos</strong></summary>
+
+#### Syntax-Highlighted Code Blocks
+
+<img src="assets/animations/codehighlighting.gif" alt="Code highlighting" width="700">
+
+#### Token & Cost Tracking
+
+<img src="assets/animations/advanced_token_tracking.gif" alt="Token tracking" width="700">
+
+#### File Operations (Read, Write, Delete)
+
+<img src="assets/animations/file_add_edit_delete.gif" alt="File add, edit, delete" width="700">
+
+#### Shell Command Execution
+
+<img src="assets/animations/shell_command.gif" alt="Shell command execution" width="700">
+
+#### Web Fetch
+
+<img src="assets/animations/webfetch.gif" alt="Web fetch" width="700">
+
+#### MCP Server Management
+
+<img src="assets/animations/mcp_add_edit_delete2.gif" alt="MCP server add, edit, delete" width="700">
+
+#### Internet Access Settings
+
+<img src="assets/animations/advanced_internet_access_settings.gif" alt="Internet access settings" width="700">
+
+</details>
 
 ---
 
