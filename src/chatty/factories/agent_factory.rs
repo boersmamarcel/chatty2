@@ -11,11 +11,11 @@ use crate::chatty::services::search_service::CodeSearchService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool,
-    GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
+    DeleteMcpTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool,
+    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, SearchCodeTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
+    MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool,
+    ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -60,6 +60,9 @@ type GitTools = (
 
 /// Code search tool set (search_code, find_files, find_definition)
 type SearchTools = (SearchCodeTool, FindFilesTool, FindDefinitionTool);
+
+/// Excel tool sets (gated on filesystem read/write settings)
+type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
 /// All four MCP management tools bundled together.
 ///
@@ -243,6 +246,8 @@ fn collect_tools(
     shell_tools: Option<ShellTools>,
     git_tools: Option<GitTools>,
     search_tools: Option<SearchTools>,
+    excel_read: Option<ReadExcelTool>,
+    excel_write: Option<ExcelWriteTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -296,6 +301,13 @@ fn collect_tools(
         tools.push(Box::new(sc));
         tools.push(Box::new(ff));
         tools.push(Box::new(fd));
+    }
+    if let Some(t) = excel_read {
+        tools.push(Box::new(t));
+    }
+    if let Some((wt, et)) = excel_write {
+        tools.push(Box::new(wt));
+        tools.push(Box::new(et));
     }
     tools
 }
@@ -399,90 +411,113 @@ impl AgentClient {
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
         let mut search_tools: Option<SearchTools> = None;
-        let (fs_read_tools, fs_write_tools): (Option<FsReadTools>, Option<FsWriteTools>) =
-            match exec_settings
-                .as_ref()
-                .and_then(|s| s.workspace_dir.as_ref())
-            {
-                Some(workspace_dir) => match FileSystemService::new(workspace_dir).await {
-                    Ok(service) => {
-                        let service = std::sync::Arc::new(service);
+        let (fs_read_tools, fs_write_tools, excel_read_tool, excel_write_tools): (
+            Option<FsReadTools>,
+            Option<FsWriteTools>,
+            Option<ReadExcelTool>,
+            Option<ExcelWriteTools>,
+        ) = match exec_settings
+            .as_ref()
+            .and_then(|s| s.workspace_dir.as_ref())
+        {
+            Some(workspace_dir) => match FileSystemService::new(workspace_dir).await {
+                Ok(service) => {
+                    let service = std::sync::Arc::new(service);
 
-                        // Read tools - check both workspace_dir AND filesystem_read_enabled
-                        let read_tools = if exec_settings
-                            .as_ref()
-                            .map(|s| s.filesystem_read_enabled)
-                            .unwrap_or(false)
-                        {
-                            tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
+                    // Read tools - check both workspace_dir AND filesystem_read_enabled
+                    let read_tools = if exec_settings
+                        .as_ref()
+                        .map(|s| s.filesystem_read_enabled)
+                        .unwrap_or(false)
+                    {
+                        tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
 
-                            // Create add_attachment tool alongside read tools.
-                            // Available for all models — the tool displays files inline
-                            // in the chat and does not require multimodal model support.
-                            if let Some(ref artifacts) = pending_artifacts {
-                                add_attachment_tool = Some(AddAttachmentTool::new(
-                                    service.clone(),
-                                    artifacts.clone(),
+                        // Create add_attachment tool alongside read tools.
+                        // Available for all models — the tool displays files inline
+                        // in the chat and does not require multimodal model support.
+                        if let Some(ref artifacts) = pending_artifacts {
+                            add_attachment_tool =
+                                Some(AddAttachmentTool::new(service.clone(), artifacts.clone()));
+                        }
+
+                        // Create code search tools alongside filesystem read tools
+                        match CodeSearchService::new(workspace_dir) {
+                            Ok(search_service) => {
+                                let search_service = std::sync::Arc::new(search_service);
+                                tracing::info!(workspace = %workspace_dir, "Code search tools enabled");
+                                search_tools = Some((
+                                    SearchCodeTool::new(search_service.clone()),
+                                    FindFilesTool::new(search_service.clone()),
+                                    FindDefinitionTool::new(search_service.clone()),
                                 ));
                             }
-
-                            // Create code search tools alongside filesystem read tools
-                            match CodeSearchService::new(workspace_dir) {
-                                Ok(search_service) => {
-                                    let search_service = std::sync::Arc::new(search_service);
-                                    tracing::info!(workspace = %workspace_dir, "Code search tools enabled");
-                                    search_tools = Some((
-                                        SearchCodeTool::new(search_service.clone()),
-                                        FindFilesTool::new(search_service.clone()),
-                                        FindDefinitionTool::new(search_service.clone()),
-                                    ));
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize code search tools");
-                                }
+                            Err(e) => {
+                                tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize code search tools");
                             }
+                        }
 
-                            Some((
-                                ReadFileTool::new(service.clone()),
-                                ReadBinaryTool::new(service.clone()),
-                                ListDirectoryTool::new(service.clone()),
-                                GlobSearchTool::new(service.clone()),
-                            ))
-                        } else {
-                            tracing::info!(workspace = %workspace_dir, "Filesystem read tools disabled");
-                            None
-                        };
+                        Some((
+                            ReadFileTool::new(service.clone()),
+                            ReadBinaryTool::new(service.clone()),
+                            ListDirectoryTool::new(service.clone()),
+                            GlobSearchTool::new(service.clone()),
+                        ))
+                    } else {
+                        tracing::info!(workspace = %workspace_dir, "Filesystem read tools disabled");
+                        None
+                    };
 
-                        // Write tools - check both workspace_dir AND filesystem_write_enabled
-                        let write_tools = if exec_settings
-                            .as_ref()
-                            .map(|s| s.filesystem_write_enabled)
-                            .unwrap_or(false)
-                        {
-                            tracing::info!(workspace = %workspace_dir, "Filesystem write tools enabled");
-                            pending_write_approvals.as_ref().map(|approvals| {
-                                (
-                                    WriteFileTool::new(service.clone(), approvals.clone()),
-                                    CreateDirectoryTool::new(service.clone()),
-                                    DeleteFileTool::new(service.clone(), approvals.clone()),
-                                    MoveFileTool::new(service.clone(), approvals.clone()),
-                                    ApplyDiffTool::new(service.clone(), approvals.clone()),
-                                )
-                            })
-                        } else {
-                            tracing::info!(workspace = %workspace_dir, "Filesystem write tools disabled");
-                            None
-                        };
+                    // Write tools - check both workspace_dir AND filesystem_write_enabled
+                    let write_tools = if exec_settings
+                        .as_ref()
+                        .map(|s| s.filesystem_write_enabled)
+                        .unwrap_or(false)
+                    {
+                        tracing::info!(workspace = %workspace_dir, "Filesystem write tools enabled");
+                        pending_write_approvals.as_ref().map(|approvals| {
+                            (
+                                WriteFileTool::new(service.clone(), approvals.clone()),
+                                CreateDirectoryTool::new(service.clone()),
+                                DeleteFileTool::new(service.clone(), approvals.clone()),
+                                MoveFileTool::new(service.clone(), approvals.clone()),
+                                ApplyDiffTool::new(service.clone(), approvals.clone()),
+                            )
+                        })
+                    } else {
+                        tracing::info!(workspace = %workspace_dir, "Filesystem write tools disabled");
+                        None
+                    };
 
-                        (read_tools, write_tools)
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize filesystem tools");
-                        (None, None)
-                    }
-                },
-                None => (None, None),
-            };
+                    // Excel read tool - gated on filesystem_read_enabled
+                    let excel_read_tool = if read_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "Excel read tool enabled");
+                        Some(ReadExcelTool::new(service.clone()))
+                    } else {
+                        None
+                    };
+
+                    // Excel write tools - gated on filesystem_write_enabled
+                    let excel_write_tools = if write_tools.is_some() {
+                        pending_write_approvals.as_ref().map(|approvals| {
+                            tracing::info!(workspace = %workspace_dir, "Excel write tools enabled");
+                            (
+                                WriteExcelTool::new(service.clone(), approvals.clone()),
+                                EditExcelTool::new(service.clone(), approvals.clone()),
+                            )
+                        })
+                    } else {
+                        None
+                    };
+
+                    (read_tools, write_tools, excel_read_tool, excel_write_tools)
+                }
+                Err(e) => {
+                    tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize filesystem tools");
+                    (None, None, None, None)
+                }
+            },
+            None => (None, None, None, None),
+        };
 
         // Extract MCP tool metadata so list_tools can report them to the model
         let mcp_tool_info: Vec<(String, String, String)> = mcp_tools
@@ -670,6 +705,8 @@ impl AgentClient {
             git_tools.is_some(),
             search_tools.is_some(),
             add_attachment_tool.is_some(),
+            excel_read_tool.is_some(),
+            excel_write_tools.is_some(),
             mcp_tool_info,
         );
 
@@ -727,6 +764,20 @@ impl AgentClient {
                  Useful for showing generated plots, screenshots, or documents."
                     .to_string(),
             );
+        }
+        if excel_read_tool.is_some() || excel_write_tools.is_some() {
+            let mut excel_desc = Vec::new();
+            if excel_read_tool.is_some() {
+                excel_desc.push("**read_excel**");
+            }
+            if excel_write_tools.is_some() {
+                excel_desc.push("**write_excel** / **edit_excel**");
+            }
+            tool_sections.push(format!(
+                "- {}: Read, create, and edit Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods). \
+                 Supports cell data, formatting, formulas, merged cells, and auto-filters.",
+                excel_desc.join(" / ")
+            ));
         }
         if mcp_mgmt_tools.is_enabled() {
             tool_sections.push(
@@ -819,6 +870,8 @@ impl AgentClient {
                     shell_tools,
                     git_tools,
                     search_tools,
+                    excel_read_tool.clone(),
+                    excel_write_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -862,6 +915,8 @@ impl AgentClient {
                     shell_tools,
                     git_tools,
                     search_tools,
+                    excel_read_tool.clone(),
+                    excel_write_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -889,6 +944,8 @@ impl AgentClient {
                     shell_tools,
                     git_tools,
                     search_tools,
+                    excel_read_tool.clone(),
+                    excel_write_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -919,6 +976,8 @@ impl AgentClient {
                     shell_tools,
                     git_tools,
                     search_tools,
+                    excel_read_tool.clone(),
+                    excel_write_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -948,6 +1007,8 @@ impl AgentClient {
                     shell_tools,
                     git_tools,
                     search_tools,
+                    excel_read_tool.clone(),
+                    excel_write_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1095,6 +1156,8 @@ impl AgentClient {
                     shell_tools,
                     git_tools,
                     search_tools,
+                    excel_read_tool.clone(),
+                    excel_write_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
