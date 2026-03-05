@@ -3,7 +3,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
+use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
 
 use super::message_types::{
     ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceEvent, TraceItem,
@@ -414,7 +414,10 @@ impl SystemTraceView {
                             .bg(panel_bg)
                             .rounded_sm()
                             .text_color(text_color)
-                            .child(formatted_output),
+                            .child(SelectableText::new(
+                                ElementId::Name(format!("tool-output-{}", index).into()),
+                                formatted_output,
+                            )),
                     ),
             );
         }
@@ -451,7 +454,10 @@ impl SystemTraceView {
                             .bg(error_bg)
                             .rounded_sm()
                             .text_color(error_color)
-                            .child(error.clone()),
+                            .child(SelectableText::new(
+                                ElementId::Name(format!("tool-error-{}", index).into()),
+                                error.clone(),
+                            )),
                     ),
             );
         }
@@ -661,8 +667,8 @@ impl Render for SystemTraceView {
 /// Public function to render a single tool call inline (for interleaved content)
 pub fn render_tool_call_inline<F>(
     tool_call: &ToolCallBlock,
-    _message_index: usize,
-    _tool_index: usize,
+    message_index: usize,
+    tool_index: usize,
     collapsed: bool,
     on_toggle: F,
     cx: &App,
@@ -771,7 +777,12 @@ where
                 .bg(panel_bg)
                 .rounded_sm()
                 .text_color(text_color)
-                .child(formatted_output)
+                .child(SelectableText::new(
+                    ElementId::Name(
+                        format!("inline-tool-output-{}-{}", message_index, tool_index).into(),
+                    ),
+                    formatted_output,
+                ))
                 .into_any_element(),
         );
     } else if matches!(tool_call.state, ToolCallState::Running) {
@@ -813,7 +824,13 @@ where
                         .bg(error_bg)
                         .rounded_sm()
                         .text_color(error_color)
-                        .child(error.clone()),
+                        .child(SelectableText::new(
+                            ElementId::Name(
+                                format!("inline-tool-error-{}-{}", message_index, tool_index)
+                                    .into(),
+                            ),
+                            error.clone(),
+                        )),
                 )
                 .into_any_element(),
         );
@@ -946,4 +963,28 @@ fn format_tool_output(output: &str) -> String {
 
     // Return as-is if not JSON or can't extract anything useful
     output.to_string()
+}
+
+/// A simple `RenderOnce` wrapper that renders plain text using `TextView` with
+/// text selection enabled. Using a struct defers the `window`/`cx` requirement
+/// of `TextView::markdown` to render time, so callers don't need `&mut Window`.
+#[derive(IntoElement)]
+struct SelectableText {
+    id: ElementId,
+    text: SharedString,
+}
+
+impl SelectableText {
+    fn new(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+}
+
+impl RenderOnce for SelectableText {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        TextView::markdown(self.id, self.text, window, cx).selectable(true)
+    }
 }
