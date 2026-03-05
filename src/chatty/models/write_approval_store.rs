@@ -5,15 +5,17 @@ use tokio::sync::oneshot;
 
 /// Decision for a filesystem write approval request
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum WriteApprovalDecision {
     Approved,
     Denied,
 }
 
 /// Types of write operations that require approval
-#[derive(Clone, Debug)]
+///
+/// Pre-built API: variant fields and `is_destructive()` will be read by the
+/// write approval UI (not yet wired). See `docs/pre-built-apis.md`.
 #[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub enum WriteOperation {
     /// Writing/overwriting a file
     WriteFile {
@@ -33,7 +35,6 @@ pub enum WriteOperation {
     },
 }
 
-#[allow(dead_code)]
 impl WriteOperation {
     /// Get a human-readable description for display
     pub fn description(&self) -> String {
@@ -57,6 +58,9 @@ impl WriteOperation {
     }
 
     /// Whether this is a destructive operation (delete, overwrite)
+    ///
+    /// Pre-built API: will be called by the write approval UI (not yet wired).
+    #[allow(dead_code)]
     pub fn is_destructive(&self) -> bool {
         matches!(
             self,
@@ -70,6 +74,9 @@ impl WriteOperation {
 }
 
 /// Request for user approval to perform a filesystem write operation
+///
+/// Pre-built API: `id` and `operation` will be read by the write approval UI
+/// (not yet wired). See `docs/pre-built-apis.md`.
 #[allow(dead_code)]
 pub struct WriteApprovalRequest {
     /// Unique ID for tracking this request
@@ -103,6 +110,8 @@ impl WriteApprovalStore {
     }
 
     /// Resolve an approval request by ID
+    ///
+    /// Pre-built API: will be called by the write approval UI (not yet wired).
     #[allow(dead_code)]
     pub fn resolve(&self, id: &str, decision: WriteApprovalDecision) -> bool {
         let mut pending = self.pending_requests.lock().unwrap();

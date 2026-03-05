@@ -12,7 +12,6 @@ use crate::chatty::models::execution_approval_store::{ApprovalNotification, Appr
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum StreamChunk {
     Text(String),
     ToolCallStarted {

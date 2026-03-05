@@ -72,7 +72,7 @@ impl McpConnection {
         );
 
         Ok(Self {
-            name: name.clone(),
+            name,
             service,
             pid,
             cached_tools: None,

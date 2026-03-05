@@ -2,6 +2,7 @@ pub mod atif_exporter;
 pub mod jsonl_exporter;
 pub mod types;
 
+// Pre-built API: re-exports for training data pipeline (not yet wired to UI)
 #[allow(unused_imports)]
 pub use atif_exporter::conversation_to_atif;
 #[allow(unused_imports)]

@@ -12,10 +12,11 @@ use crate::chatty::exporters::jsonl_exporter::{
 use crate::chatty::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
-    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamChunk,
-    StreamManagerEvent, StreamStatus,
+    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
+    StreamStatus,
 };
 use crate::chatty::repositories::{ConversationData, ConversationRepository};
+use crate::chatty::services::StreamChunk;
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
@@ -717,6 +718,7 @@ impl ChattyApp {
                                     app.update(cx, |app, cx| {
                                         app.display_loaded_conversation(&conv_id, cx);
                                     })
+                                    .map_err(|e| warn!(error = ?e, "Failed to display lazy-loaded conversation"))
                                     .ok();
                                 }
                             }
@@ -955,7 +957,9 @@ impl ChattyApp {
                 .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok();
+            let mcp_tools = mcp_service.get_all_tools_with_sinks().await
+                .map_err(|e| warn!(error = ?e, "Failed to get MCP tools"))
+                .ok();
             let mcp_tools =
                 mcp_tools.and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
@@ -1076,7 +1080,11 @@ impl ChattyApp {
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
                         // Get MCP tools from active servers (outside of cx.update)
-                        let mcp_tools = mcp_service.get_all_tools_with_sinks().await.ok();
+                        let mcp_tools = mcp_service
+                            .get_all_tools_with_sinks()
+                            .await
+                            .map_err(|e| warn!(error = ?e, "Failed to get MCP tools"))
+                            .ok();
 
                         let mcp_tools = mcp_tools
                             .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
