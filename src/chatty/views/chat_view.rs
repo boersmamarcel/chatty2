@@ -14,7 +14,7 @@ use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
-    ToolCallState, TraceItem, UserMessage,
+    ToolCallState, TraceItem, UserMessage, friendly_tool_name,
 };
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
@@ -306,6 +306,40 @@ impl ChatView {
             }
         }
         None
+    }
+
+    /// Restore a live trace from a saved SystemTrace (e.g. when switching back to a streaming conversation).
+    /// Creates the SystemTraceView entity and subscribes to its events.
+    pub fn restore_live_trace(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
+        let last = match self.messages.last_mut() {
+            Some(msg) if msg.is_streaming => msg,
+            _ => return,
+        };
+
+        last.live_trace = Some(trace.clone());
+
+        if trace.has_items() {
+            let trace_view = cx.new(|_cx| SystemTraceView::new(trace));
+
+            let chat_view_entity = cx.entity();
+            cx.subscribe(
+                &trace_view,
+                move |_chat_view, _trace_view, event: &super::message_types::TraceEvent, cx| {
+                    let event_clone = event.clone();
+                    let chat_view = chat_view_entity.clone();
+                    cx.defer(move |cx| {
+                        chat_view.update(cx, |chat_view, cx| {
+                            chat_view.handle_trace_event(&event_clone, cx);
+                        });
+                    });
+                },
+            )
+            .detach();
+
+            last.system_trace_view = Some(trace_view);
+        }
+
+        cx.notify();
     }
 
     /// Handle tool call started event
@@ -1351,22 +1385,5 @@ impl Render for ChatView {
                     .p_4()
                     .child(ChatInput::new(self.chat_input_state.clone())),
             )
-    }
-}
-
-/// Map raw tool names to user-friendly display names
-fn friendly_tool_name(name: &str) -> String {
-    match name {
-        "read_file" => "Reading file".to_string(),
-        "read_binary" => "Reading binary file".to_string(),
-        "list_directory" => "Listing directory".to_string(),
-        "glob_search" => "Searching files".to_string(),
-        "write_file" => "Writing file".to_string(),
-        "create_directory" => "Creating directory".to_string(),
-        "delete_file" => "Deleting file".to_string(),
-        "move_file" => "Moving file".to_string(),
-        "apply_diff" => "Applying diff".to_string(),
-        "shell_execute" => "Running command".to_string(),
-        other => other.to_string(),
     }
 }

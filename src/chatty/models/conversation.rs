@@ -13,6 +13,7 @@ use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::chatty::repositories::ConversationData;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::PendingArtifacts;
+use crate::chatty::views::message_types::SystemTrace;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
@@ -62,6 +63,8 @@ pub struct Conversation {
     updated_at: SystemTime,
     /// Partial streaming message being composed (None if no active stream)
     streaming_message: Option<String>,
+    /// Partial streaming trace being composed (None if no active stream)
+    streaming_trace: Option<SystemTrace>,
     /// Shared state for artifacts queued by AddAttachmentTool during a stream
     pending_artifacts: PendingArtifacts,
     /// Persistent shell session for this conversation (lazily initialized)
@@ -134,6 +137,7 @@ impl Conversation {
             created_at: now,
             updated_at: now,
             streaming_message: None,
+            streaming_trace: None,
             pending_artifacts,
             shell_session,
         })
@@ -240,6 +244,7 @@ impl Conversation {
             created_at,
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
+            streaming_trace: None,
             pending_artifacts,
             shell_session,
         })
@@ -612,6 +617,26 @@ impl Conversation {
     /// Set the streaming message content
     pub fn set_streaming_message(&mut self, content: Option<String>) {
         self.streaming_message = content;
+    }
+
+    /// Get the current streaming trace (if any)
+    pub fn streaming_trace(&self) -> Option<&SystemTrace> {
+        self.streaming_trace.as_ref()
+    }
+
+    /// Get a mutable reference to the current streaming trace (if any)
+    pub fn streaming_trace_mut(&mut self) -> Option<&mut SystemTrace> {
+        self.streaming_trace.as_mut()
+    }
+
+    /// Set the streaming trace
+    pub fn set_streaming_trace(&mut self, trace: Option<SystemTrace>) {
+        self.streaming_trace = trace;
+    }
+
+    /// Get or create the streaming trace, returning a mutable reference
+    pub fn ensure_streaming_trace(&mut self) -> &mut SystemTrace {
+        self.streaming_trace.get_or_insert_with(SystemTrace::new)
     }
 
     /// Append text to the streaming message

@@ -215,6 +215,57 @@ impl SystemTrace {
             }
         }
     }
+
+    /// Update a tool call by ID using a two-pass reverse scan.
+    ///
+    /// Pass 1 (reverse): find the LAST entry with matching ID in Running state.
+    /// Pass 2 (fallback, reverse): find the LAST entry with matching ID regardless of state.
+    ///
+    /// Returns true if a matching tool call was found and updated.
+    pub fn update_tool_call<F>(&mut self, tool_id: &str, updater: F) -> bool
+    where
+        F: FnOnce(&mut ToolCallBlock),
+    {
+        // Pass 1: find last Running entry with matching ID
+        for item in self.items.iter_mut().rev() {
+            if let TraceItem::ToolCall(tc) = item
+                && tc.id == tool_id
+                && matches!(tc.state, ToolCallState::Running)
+            {
+                updater(tc);
+                return true;
+            }
+        }
+
+        // Pass 2 (fallback): find last entry with matching ID regardless of state
+        for item in self.items.iter_mut().rev() {
+            if let TraceItem::ToolCall(tc) = item
+                && tc.id == tool_id
+            {
+                updater(tc);
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Map raw tool names to user-friendly display names
+pub fn friendly_tool_name(name: &str) -> String {
+    match name {
+        "read_file" => "Reading file".to_string(),
+        "read_binary" => "Reading binary file".to_string(),
+        "list_directory" => "Listing directory".to_string(),
+        "glob_search" => "Searching files".to_string(),
+        "write_file" => "Writing file".to_string(),
+        "create_directory" => "Creating directory".to_string(),
+        "delete_file" => "Deleting file".to_string(),
+        "move_file" => "Moving file".to_string(),
+        "apply_diff" => "Applying diff".to_string(),
+        "shell_execute" => "Running command".to_string(),
+        other => other.to_string(),
+    }
 }
 
 impl Default for SystemTrace {
