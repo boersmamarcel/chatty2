@@ -998,8 +998,8 @@ fn escape_markdown(s: &str) -> SharedString {
     let mut out = String::with_capacity(s.len() + 16);
     for ch in s.chars() {
         match ch {
-            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-'
-            | '.' | '!' | '|' | '>' | '~' => {
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.'
+            | '!' | '|' | '>' | '~' => {
                 out.push('\\');
                 out.push(ch);
             }
