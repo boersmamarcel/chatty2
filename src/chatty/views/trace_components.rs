@@ -985,6 +985,26 @@ impl SelectableText {
 
 impl RenderOnce for SelectableText {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        TextView::markdown(self.id, self.text, window, cx).selectable(true)
+        // Escape markdown-significant characters so raw tool output (JSON, shell
+        // output, etc.) is rendered verbatim rather than interpreted as markdown.
+        let escaped = escape_markdown(&self.text);
+        TextView::markdown(self.id, escaped, window, cx).selectable(true)
     }
+}
+
+/// Escape characters that carry special meaning in CommonMark so that arbitrary
+/// plain text is rendered literally when fed to a markdown renderer.
+fn escape_markdown(s: &str) -> SharedString {
+    let mut out = String::with_capacity(s.len() + 16);
+    for ch in s.chars() {
+        match ch {
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-'
+            | '.' | '!' | '|' | '>' | '~' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    SharedString::from(out)
 }

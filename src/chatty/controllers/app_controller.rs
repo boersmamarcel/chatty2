@@ -26,6 +26,7 @@ use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
     ApprovalBlock, ApprovalState, ToolCallBlock, ToolCallState, friendly_tool_name,
+    is_denial_result,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
@@ -1669,8 +1670,7 @@ impl ChattyApp {
                         && let Some(trace) = conv.streaming_trace_mut()
                     {
                         let res = result.clone();
-                        let is_denied = res.to_lowercase().contains("denied by user")
-                            || res.to_lowercase().contains("execution denied");
+                        let is_denied = is_denial_result(&res);
                         if !trace.update_tool_call(&id, |tc| {
                             tc.output = Some(res);
                             tc.state = if is_denied {

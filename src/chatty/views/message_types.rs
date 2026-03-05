@@ -249,6 +249,12 @@ impl SystemTrace {
     }
 }
 
+/// Returns true if a tool result string indicates the action was denied by the user.
+pub fn is_denial_result(result: &str) -> bool {
+    let lower = result.to_lowercase();
+    lower.contains("denied by user") || lower.contains("execution denied")
+}
+
 /// Map raw tool names to user-friendly display names
 pub fn friendly_tool_name(name: &str) -> String {
     match name {

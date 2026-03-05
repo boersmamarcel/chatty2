@@ -14,7 +14,7 @@ use super::chat_input::{ChatInput, ChatInputState};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
-    ToolCallState, TraceItem, UserMessage, friendly_tool_name,
+    ToolCallState, TraceItem, UserMessage, friendly_tool_name, is_denial_result,
 };
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
@@ -505,8 +505,7 @@ impl ChatView {
         debug!(tool_id = %id, result_length = result.len(), "UI: handle_tool_call_result called");
 
         // Check if result indicates a denial or error
-        let is_denied = result.to_lowercase().contains("denied by user")
-            || result.to_lowercase().contains("execution denied");
+        let is_denied = is_denial_result(&result);
 
         // Update trace by ID
         self.update_tool_call_by_id(&id, |tc| {
