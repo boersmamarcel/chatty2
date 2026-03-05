@@ -77,7 +77,7 @@ Several methods in the token budget subsystem are pre-built for planned features
 | `TokenBudgetCache::cached_preamble_tokens()` | `cache.rs:124` | Read-through cache accessor |
 | `TokenBudgetCache::cached_tool_tokens()` | `cache.rs:130` | Read-through cache accessor |
 | `TokenCounter::encoding()` | `counter.rs:79` | Get current encoding for diagnostics |
-| `TokenBudgetSummarizer::summarize_with_model()` | `summarizer.rs:142` | Secondary-model summarization (panics) |
+| `TokenBudgetSummarizer::summarize_with_model()` | `summarizer.rs:142` | Secondary-model summarization (returns error) |
 | `PreComputeInput.exec_settings` | `manager.rs:130` | Stored for future tool estimation |
 | `PreComputeInput.mcp_server_count` | `manager.rs:132` | Stored for future tool estimation |
 | `PreComputeInput.tool_hint` | `manager.rs:141` | Stored for diagnostics |

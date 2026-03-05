@@ -12,14 +12,15 @@ pub enum WriteApprovalDecision {
 
 /// Types of write operations that require approval
 ///
-/// Pre-built API: variant fields will be read by the write approval UI (not yet wired).
+/// Pre-built API: variant fields and `is_destructive()` will be read by the
+/// write approval UI (not yet wired). See `docs/pre-built-apis.md`.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum WriteOperation {
     /// Writing/overwriting a file
     WriteFile {
         path: String,
         is_overwrite: bool,
-        #[allow(dead_code)]
         content_preview: String,
     },
     /// Deleting a file
@@ -29,9 +30,7 @@ pub enum WriteOperation {
     /// Applying a diff to a file
     ApplyDiff {
         path: String,
-        #[allow(dead_code)]
         old_preview: String,
-        #[allow(dead_code)]
         new_preview: String,
     },
 }
@@ -76,13 +75,13 @@ impl WriteOperation {
 
 /// Request for user approval to perform a filesystem write operation
 ///
-/// Pre-built API: `id` and `operation` will be read by the write approval UI (not yet wired).
+/// Pre-built API: `id` and `operation` will be read by the write approval UI
+/// (not yet wired). See `docs/pre-built-apis.md`.
+#[allow(dead_code)]
 pub struct WriteApprovalRequest {
     /// Unique ID for tracking this request
-    #[allow(dead_code)]
     pub id: String,
     /// The operation to be approved
-    #[allow(dead_code)]
     pub operation: WriteOperation,
     /// Channel to send approval decision back to waiting tool
     pub responder: oneshot::Sender<WriteApprovalDecision>,
@@ -111,6 +110,8 @@ impl WriteApprovalStore {
     }
 
     /// Resolve an approval request by ID
+    ///
+    /// Pre-built API: will be called by the write approval UI (not yet wired).
     #[allow(dead_code)]
     pub fn resolve(&self, id: &str, decision: WriteApprovalDecision) -> bool {
         let mut pending = self.pending_requests.lock().unwrap();

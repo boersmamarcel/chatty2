@@ -136,15 +136,15 @@ pub async fn summarize_oldest_half(
 /// requires access to provider configs and the MCP service, which is easier to wire
 /// in `app_controller.rs`. This stub exists so the settings field has a clear call site.
 ///
-/// # Panics
-/// Always panics in the current version. Remove this function when the secondary-model
-/// path is wired up.
+/// # Errors
+/// Always returns an error in the current version. Replace with a real implementation
+/// when the secondary-model path is wired up.
 #[allow(dead_code)]
 pub async fn summarize_with_model(
     _model_id: &str,
     _history: &[Message],
 ) -> Result<SummarizationResult> {
-    unimplemented!(
+    anyhow::bail!(
         "summarize_with_model is not yet implemented. \
          Use summarize_oldest_half() with the conversation's own agent for now."
     )
