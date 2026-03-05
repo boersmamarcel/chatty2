@@ -464,34 +464,15 @@ impl ChatView {
             }
         };
 
-        // Pass 1 (reverse): find the last entry with matching ID still in Running state.
-        // This correctly targets the most recent pending tool call when IDs are
-        // non-unique (e.g., multiple "shell_execute" calls).
-        for item in trace.items.iter_mut().rev() {
-            if let super::message_types::TraceItem::ToolCall(tc) = item {
-                if tc.id == tool_id && matches!(tc.state, ToolCallState::Running) {
-                    updater(tc);
-                    return true;
-                }
-            }
+        if !trace.update_tool_call(tool_id, updater) {
+            warn!(
+                "update_tool_call_by_id: Tool call with id={} not found in trace items",
+                tool_id
+            );
+            return false;
         }
 
-        // Pass 2 (fallback, reverse): no Running entry found — update the last
-        // entry with matching ID regardless of state.
-        for item in trace.items.iter_mut().rev() {
-            if let super::message_types::TraceItem::ToolCall(tc) = item {
-                if tc.id == tool_id {
-                    updater(tc);
-                    return true;
-                }
-            }
-        }
-
-        warn!(
-            "update_tool_call_by_id: Tool call with id={} not found in trace items",
-            tool_id
-        );
-        false
+        true
     }
 
     /// Handle tool call input event

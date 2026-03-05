@@ -1641,9 +1641,11 @@ impl ChattyApp {
                         && let Some(trace) = conv.streaming_trace_mut()
                     {
                         let args = arguments.clone();
-                        trace.update_tool_call(&id, |tc| {
+                        if !trace.update_tool_call(&id, |tc| {
                             tc.input = args;
-                        });
+                        }) {
+                            warn!(tool_id = %id, "ToolCallInput: tool call not found in model trace");
+                        }
                     }
                 });
 
@@ -1669,14 +1671,16 @@ impl ChattyApp {
                         let res = result.clone();
                         let is_denied = res.to_lowercase().contains("denied by user")
                             || res.to_lowercase().contains("execution denied");
-                        trace.update_tool_call(&id, |tc| {
+                        if !trace.update_tool_call(&id, |tc| {
                             tc.output = Some(res);
                             tc.state = if is_denied {
                                 ToolCallState::Error("Denied by user".to_string())
                             } else {
                                 ToolCallState::Success
                             };
-                        });
+                        }) {
+                            warn!(tool_id = %id, "ToolCallResult: tool call not found in model trace");
+                        }
                         trace.clear_active_tool();
                     }
                 });
@@ -1701,9 +1705,11 @@ impl ChattyApp {
                         && let Some(trace) = conv.streaming_trace_mut()
                     {
                         let err = error.clone();
-                        trace.update_tool_call(&id, |tc| {
+                        if !trace.update_tool_call(&id, |tc| {
                             tc.state = ToolCallState::Error(err);
-                        });
+                        }) {
+                            warn!(tool_id = %id, "ToolCallError: tool call not found in model trace");
+                        }
                         trace.clear_active_tool();
                     }
                 });
