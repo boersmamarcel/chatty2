@@ -641,7 +641,17 @@ impl Tool for WriteExcelTool {
                                 "data": {
                                     "type": "array",
                                     "description": "Array of rows, each row is an array of cell values (string, number, boolean, or null)",
-                                    "items": { "type": "array" }
+                                    "items": {
+                                        "type": "array",
+                                        "items": {
+                                            "oneOf": [
+                                                { "type": "string" },
+                                                { "type": "number" },
+                                                { "type": "boolean" },
+                                                { "type": "null" }
+                                            ]
+                                        }
+                                    }
                                 },
                                 "column_widths": {
                                     "type": "array",
@@ -885,7 +895,21 @@ impl Tool for EditExcelTool {
                                 "cell": { "type": "string", "description": "Cell reference (for set_cell, set_formula)" },
                                 "value": { "description": "Cell value (for set_cell)" },
                                 "start_cell": { "type": "string", "description": "Starting cell for set_range" },
-                                "data": { "type": "array", "description": "Row data (for set_range, add_sheet)" },
+                                "data": {
+                                    "type": "array",
+                                    "description": "Row data (for set_range, add_sheet). Each element is an array of cell values.",
+                                    "items": {
+                                        "type": "array",
+                                        "items": {
+                                            "oneOf": [
+                                                { "type": "string" },
+                                                { "type": "number" },
+                                                { "type": "boolean" },
+                                                { "type": "null" }
+                                            ]
+                                        }
+                                    }
+                                },
                                 "name": { "type": "string", "description": "Sheet name (for add_sheet)" },
                                 "start_row": { "type": "integer", "description": "1-based start row (for delete_rows)" },
                                 "count": { "type": "integer", "description": "Number of rows to delete" },
