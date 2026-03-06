@@ -56,6 +56,7 @@ impl ListToolsTool {
         has_pdf_to_image: bool,
         has_pdf_info: bool,
         has_pdf_extract_text: bool,
+        has_data_query: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -297,6 +298,21 @@ impl ListToolsTool {
             });
         }
 
+        if has_data_query {
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "query_data".to_string(),
+                    description: "Run SQL queries against local Parquet, CSV, or JSON files using DuckDB. Supports aggregations, joins, window functions, and all standard SQL.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "describe_data".to_string(),
+                    description: "Inspect the schema and statistics of a local data file (Parquet, CSV, JSON). Returns column names, types, row count, and file size.".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -315,6 +331,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,
@@ -349,6 +366,7 @@ impl Tool for ListToolsTool {
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit\n\
                          - add_attachment: Display images or PDFs inline in chat responses\n\
                          - PDF tools: pdf_info, pdf_extract_text, pdf_to_image\n\
+                         - Data query tools: query_data, describe_data (SQL on Parquet/CSV/JSON via DuckDB)\n\
                          - MCP tools: External tools from connected servers\n\
                          \n\
                          Use this to discover what capabilities you have for task execution. \

@@ -11,12 +11,12 @@ use crate::chatty::services::search_service::CodeSearchService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
+    DeleteMcpTool, DescribeDataTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool,
+    FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
+    ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
+    QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -64,6 +64,9 @@ type SearchTools = (SearchCodeTool, FindFilesTool, FindDefinitionTool);
 
 /// Excel tool sets (gated on filesystem read/write settings)
 type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
+
+/// DuckDB data query tools (gated on filesystem_read_enabled)
+type DataQueryTools = (QueryDataTool, DescribeDataTool);
 
 /// All four MCP management tools bundled together.
 ///
@@ -252,6 +255,7 @@ fn collect_tools(
     search_tools: Option<SearchTools>,
     excel_read: Option<ReadExcelTool>,
     excel_write: Option<ExcelWriteTools>,
+    data_query: Option<DataQueryTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -321,6 +325,10 @@ fn collect_tools(
     if let Some((wt, et)) = excel_write {
         tools.push(Box::new(wt));
         tools.push(Box::new(et));
+    }
+    if let Some((qt, dt)) = data_query {
+        tools.push(Box::new(qt));
+        tools.push(Box::new(dt));
     }
     tools
 }
@@ -427,11 +435,13 @@ impl AgentClient {
         let mut pdf_info_tool: Option<PdfInfoTool> = None;
         let mut pdf_extract_text_tool: Option<PdfExtractTextTool> = None;
         let mut search_tools: Option<SearchTools> = None;
-        let (fs_read_tools, fs_write_tools, excel_read_tool, excel_write_tools): (
+        #[allow(clippy::type_complexity)]
+        let (fs_read_tools, fs_write_tools, excel_read_tool, excel_write_tools, data_query_tools): (
             Option<FsReadTools>,
             Option<FsWriteTools>,
             Option<ReadExcelTool>,
             Option<ExcelWriteTools>,
+            Option<DataQueryTools>,
         ) = match exec_settings
             .as_ref()
             .and_then(|s| s.workspace_dir.as_ref())
@@ -531,14 +541,25 @@ impl AgentClient {
                         None
                     };
 
-                    (read_tools, write_tools, excel_read_tool, excel_write_tools)
+                    // Data query tools - gated on filesystem_read_enabled
+                    let data_query_tools = if read_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "Data query tools enabled");
+                        Some((
+                            QueryDataTool::new(service.clone()),
+                            DescribeDataTool::new(service.clone()),
+                        ))
+                    } else {
+                        None
+                    };
+
+                    (read_tools, write_tools, excel_read_tool, excel_write_tools, data_query_tools)
                 }
                 Err(e) => {
                     tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize filesystem tools");
-                    (None, None, None, None)
+                    (None, None, None, None, None)
                 }
             },
-            None => (None, None, None, None),
+            None => (None, None, None, None, None),
         };
 
         // Extract MCP tool metadata so list_tools can report them to the model
@@ -732,6 +753,7 @@ impl AgentClient {
             pdf_to_image_tool.is_some(),
             pdf_info_tool.is_some(),
             pdf_extract_text_tool.is_some(),
+            data_query_tools.is_some(),
             mcp_tool_info,
         );
 
@@ -824,6 +846,14 @@ impl AgentClient {
             }
             pdf_desc.push('.');
             tool_sections.push(pdf_desc);
+        }
+        if data_query_tools.is_some() {
+            tool_sections.push(
+                "- **query_data / describe_data**: Run SQL queries against local Parquet, CSV, \
+                 and JSON files using DuckDB. Use `describe_data` to inspect schema first, \
+                 then `query_data` for analytical SQL (aggregations, joins, window functions)."
+                    .to_string(),
+            );
         }
         if mcp_mgmt_tools.is_enabled() {
             tool_sections.push(
@@ -921,6 +951,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    data_query_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -969,6 +1000,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    data_query_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1001,6 +1033,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    data_query_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1036,6 +1069,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    data_query_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1070,6 +1104,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    data_query_tools.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1222,6 +1257,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    data_query_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
