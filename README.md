@@ -203,6 +203,9 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `read_excel` | Read Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods) as JSON with markdown table preview | No |
 | `write_excel` | Create a new Excel (.xlsx) file with data, formatting, formulas, merged cells, and auto-filters | Yes |
 | `edit_excel` | Edit an existing Excel file with targeted modifications (set cells, add sheets, delete rows, formulas, formatting) | Yes |
+| `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | No |
+| `pdf_info` | Get metadata and structural information about a PDF file | No |
+| `pdf_extract_text` | Extract text content from PDF pages (up to 50 pages) | No |
 | `list_tools` | Lists all available tools and schemas | No |
 
 ### MCP Servers
