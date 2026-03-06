@@ -2,6 +2,7 @@ use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
 use crate::chatty::services::MermaidRendererService;
+use crate::chatty::services::chart_svg_renderer;
 use crate::chatty::tools::chart_tool::ChartSpec;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -897,13 +898,64 @@ struct IndexedDataPoint {
     color_index: usize,
 }
 
+/// Build a "Copy as PNG" button for a chart.
+///
+/// Generates an SVG from the chart spec, converts to PNG via resvg,
+/// and copies the result to the system clipboard.
+fn build_chart_copy_png_button(spec: &ChartSpec, msg_idx: usize, tool_idx: usize) -> Button {
+    let spec_clone = spec.clone();
+    Button::new(ElementId::Name(
+        format!("copy-chart-png-{msg_idx}-{tool_idx}").into(),
+    ))
+    .ghost()
+    .xsmall()
+    .icon(Icon::new(CustomIcon::Image))
+    .tooltip("Copy as PNG")
+    .on_click(move |_event, _window, _cx| {
+        let svg_str = chart_svg_renderer::render_chart_svg(&spec_clone);
+
+        // Write SVG to a temp file so render_svg_to_png can read it
+        let tmp_path = std::env::temp_dir().join(format!("chatty_chart_{msg_idx}_{tool_idx}.svg"));
+        if let Err(e) = std::fs::write(&tmp_path, &svg_str) {
+            tracing::warn!(error = ?e, "Failed to write chart SVG to temp file");
+            return;
+        }
+
+        match MermaidRendererService::render_svg_to_png(&tmp_path) {
+            Ok(png_bytes) => {
+                #[cfg(target_os = "linux")]
+                {
+                    if !super::mermaid_component::copy_png_to_linux_clipboard(&png_bytes) {
+                        tracing::warn!("No clipboard tool found (install wl-clipboard or xclip)");
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
+                    _cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to render chart PNG for clipboard");
+            }
+        }
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&tmp_path);
+    })
+}
+
 /// Render a chart inline from the validated ChartSpec.
 fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> Stateful<Div> {
     let element_id = ElementId::Name(format!("chart-{msg_idx}-{tool_idx}").into());
     let border_color = cx.theme().border;
 
+    // Build copy button before we move spec.data into indexed_data
+    let copy_png_button = build_chart_copy_png_button(&spec, msg_idx, tool_idx);
+
     let mut chart_container = div()
         .id(element_id)
+        .relative()
         .w_full()
         .max_w(px(600.0))
         .rounded_lg()
@@ -990,6 +1042,10 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
             );
         }
     }
+
+    // Copy as PNG button overlay (top-right corner)
+    chart_container =
+        chart_container.child(div().absolute().top_1().right_1().child(copy_png_button));
 
     chart_container
 }
