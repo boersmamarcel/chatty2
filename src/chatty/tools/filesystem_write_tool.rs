@@ -30,7 +30,7 @@ fn preview(s: &str, max: usize) -> String {
 
 /// Request user approval for a write operation.
 /// Posts a request to the shared pending approvals store, then waits for the UI to resolve it.
-async fn request_write_approval(
+pub async fn request_write_approval(
     pending: &PendingWriteApprovals,
     operation: WriteOperation,
 ) -> Result<bool, anyhow::Error> {

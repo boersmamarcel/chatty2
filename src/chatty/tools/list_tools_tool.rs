@@ -51,6 +51,8 @@ impl ListToolsTool {
         has_git: bool,
         has_search: bool,
         has_add_attachment: bool,
+        has_excel_read: bool,
+        has_excel_write: bool,
         has_pdf_to_image: bool,
         has_pdf_info: bool,
         has_pdf_extract_text: bool,
@@ -248,6 +250,29 @@ impl ListToolsTool {
             });
         }
 
+        if has_excel_read {
+            native_tools.push(ToolInfo {
+                name: "read_excel".to_string(),
+                description: "Read an Excel spreadsheet and return structured data as JSON with a markdown table preview. Supports .xlsx, .xls, .xlsm, .xlsb, .ods formats.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
+        if has_excel_write {
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "write_excel".to_string(),
+                    description: "Create a new Excel (.xlsx) file with data, formatting, formulas, merged cells, and auto-filters.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "edit_excel".to_string(),
+                    description: "Edit an existing Excel file by applying targeted modifications (set cells, add sheets, delete rows, formulas, formatting). Warning: rewrites the file, which may lose original formatting/macros.".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
+        }
+
         if has_pdf_to_image {
             native_tools.push(ToolInfo {
                 name: "pdf_to_image".to_string(),
@@ -290,6 +315,8 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
+            false,
             false,
             false,
             false,
