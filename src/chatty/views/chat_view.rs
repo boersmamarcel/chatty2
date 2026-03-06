@@ -39,6 +39,8 @@ pub struct ChatView {
     pending_approval: Option<PendingApprovalInfo>,
     /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
+    /// Tracks which diff views are fully expanded: (message_idx, tool_idx) -> expanded
+    diff_expanded: HashMap<(usize, usize), bool>,
     /// Cache for parsed message content (markdown, math, code highlighting)
     parsed_cache: ParsedContentCache,
     /// Incremental streaming parse state, reusing stable content/markdown segments
@@ -106,6 +108,7 @@ impl ChatView {
             scroll_handle,
             pending_approval: None,
             collapsed_tool_calls: HashMap::new(),
+            diff_expanded: HashMap::new(),
             parsed_cache: ParsedContentCache::new(),
             streaming_parse_cache: None,
             stick_to_bottom: true,
@@ -862,6 +865,7 @@ impl ChatView {
 
         // Clear collapsed tool calls state from previous conversation
         self.collapsed_tool_calls.clear();
+        self.diff_expanded.clear();
 
         // Clear parsed content cache from previous conversation
         self.parsed_cache.clear();
@@ -1205,6 +1209,8 @@ impl Render for ChatView {
                                     .children({
                                         let collapsed_tool_calls =
                                             self.collapsed_tool_calls.clone();
+                                        let diff_expanded =
+                                            self.diff_expanded.clone();
                                         let chat_view_entity = cx.entity();
 
                                         // Temporarily move caches out to avoid split borrow
@@ -1247,6 +1253,7 @@ impl Render for ChatView {
                                             .into_iter()
                                             .map(|(index, msg)| {
                                                 let entity_clone = chat_view_entity.clone();
+                                                let entity_for_diff = chat_view_entity.clone();
                                                 let entity_for_feedback = chat_view_entity.clone();
                                                 let entity_for_regenerate = chat_view_entity.clone();
                                                 let history_index = msg.history_index;
@@ -1265,6 +1272,7 @@ impl Render for ChatView {
                                                     index,
                                                     is_last_message,
                                                     &collapsed_tool_calls,
+                                                    &diff_expanded,
                                                     &mut parsed_cache,
                                                     sc,
                                                     move |msg_idx, tool_idx, cx| {
@@ -1278,6 +1286,21 @@ impl Render for ChatView {
 
                                                             chat_view
                                                                 .collapsed_tool_calls
+                                                                .insert(key, !current);
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                    move |msg_idx, tool_idx, cx| {
+                                                        entity_for_diff.update(cx, |chat_view, cx| {
+                                                            let key = (msg_idx, tool_idx);
+                                                            let current = chat_view
+                                                                .diff_expanded
+                                                                .get(&key)
+                                                                .copied()
+                                                                .unwrap_or(false);
+
+                                                            chat_view
+                                                                .diff_expanded
                                                                 .insert(key, !current);
                                                             cx.notify();
                                                         });

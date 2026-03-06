@@ -5,6 +5,7 @@ pub mod chat_input;
 pub mod chat_view;
 pub mod code_block_component;
 pub mod conversation_item;
+pub mod diff_view_component;
 pub mod error_log_dialog;
 pub mod footer;
 pub mod math_parser;

@@ -920,18 +920,21 @@ fn render_text_segment_cached(
 
 /// Render interleaved content: text segments mixed with tool calls
 #[allow(clippy::too_many_arguments)]
-fn render_interleaved_content<F>(
+fn render_interleaved_content<F, D>(
     msg: &DisplayMessage,
     index: usize,
     mut container: Div,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
+    diff_expanded: &std::collections::HashMap<(usize, usize), bool>,
     parsed_cache: &mut ParsedContentCache,
     streaming_cache: &mut Option<StreamingParseState>,
     on_toggle_tool: F,
+    on_toggle_diff: D,
     cx: &App,
 ) -> Div
 where
     F: Fn(usize, usize, &mut App) + 'static + Clone,
+    D: Fn(usize, usize, &mut App) + 'static + Clone,
 {
     use super::message_types::TraceItem;
 
@@ -1009,6 +1012,17 @@ where
                     on_toggle_clone(msg_idx, tool_idx, cx);
                 };
 
+            let is_diff_expanded = diff_expanded
+                .get(&(index, tool_idx))
+                .copied()
+                .unwrap_or(false);
+
+            let on_diff_clone = on_toggle_diff.clone();
+            let diff_callback =
+                move |_event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                    on_diff_clone(msg_idx, tool_idx, cx);
+                };
+
             container = container.child(div().mt_2().mb_2().child(
                 super::trace_components::render_tool_call_inline(
                     tool_call,
@@ -1016,6 +1030,8 @@ where
                     tool_idx,
                     is_collapsed,
                     toggle_callback,
+                    is_diff_expanded,
+                    diff_callback,
                     cx,
                 ),
             ));
@@ -1176,20 +1192,23 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_message<F, G, R>(
+pub fn render_message<F, D, G, R>(
     msg: &DisplayMessage,
     index: usize,
     is_last_message: bool,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
+    diff_expanded: &std::collections::HashMap<(usize, usize), bool>,
     parsed_cache: &mut ParsedContentCache,
     streaming_cache: &mut Option<StreamingParseState>,
     on_toggle_tool: F,
+    on_toggle_diff: D,
     on_feedback: G,
     on_regenerate: R,
     cx: &App,
 ) -> AnyElement
 where
     F: Fn(usize, usize, &mut App) + 'static + Clone,
+    D: Fn(usize, usize, &mut App) + 'static + Clone,
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
     R: Fn(usize, &mut App) + 'static + Clone,
 {
@@ -1285,9 +1304,11 @@ where
             index,
             container,
             collapsed_tool_calls,
+            diff_expanded,
             parsed_cache,
             streaming_cache,
             on_toggle_tool,
+            on_toggle_diff,
             cx,
         )
     } else if msg.is_markdown {
