@@ -2,10 +2,12 @@ use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
 use crate::chatty::services::MermaidRendererService;
+use crate::chatty::tools::chart_tool::ChartSpec;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::chart::{BarChart, LineChart, PieChart};
 use gpui_component::text::TextView;
 use gpui_component::{Icon, IconName, Sizable};
 use std::path::PathBuf;
@@ -882,6 +884,116 @@ fn extract_pdf_image_paths(
     Some(paths).filter(|v| !v.is_empty())
 }
 
+/// Extract chart specification from a `create_chart` tool call output JSON.
+fn extract_chart_spec(tool_call: &super::message_types::ToolCallBlock) -> Option<ChartSpec> {
+    let output = tool_call.output.as_ref()?;
+    serde_json::from_str(output).ok()
+}
+
+/// A chart data point with a pre-assigned color index for themed rendering.
+struct IndexedDataPoint {
+    label: String,
+    value: f64,
+    color_index: usize,
+}
+
+/// Render a chart inline from the validated ChartSpec.
+fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> Stateful<Div> {
+    let element_id = ElementId::Name(format!("chart-{msg_idx}-{tool_idx}").into());
+    let border_color = cx.theme().border;
+
+    let mut chart_container = div()
+        .id(element_id)
+        .w_full()
+        .max_w(px(600.0))
+        .rounded_lg()
+        .border_1()
+        .border_color(border_color)
+        .bg(cx.theme().background)
+        .p_4()
+        .mt_2()
+        .mb_2();
+
+    // Optional title
+    if let Some(title) = &spec.title {
+        chart_container = chart_container.child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .mb_2()
+                .child(title.clone()),
+        );
+    }
+
+    // Pre-build indexed data with color assignments
+    let indexed_data: Vec<IndexedDataPoint> = spec
+        .data
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| IndexedDataPoint {
+            label: d.label,
+            value: d.value,
+            color_index: i,
+        })
+        .collect();
+
+    // Capture all 5 theme chart colors for closures
+    let chart_colors = [
+        cx.theme().chart_1,
+        cx.theme().chart_2,
+        cx.theme().chart_3,
+        cx.theme().chart_4,
+        cx.theme().chart_5,
+    ];
+
+    match spec.chart_type.as_str() {
+        "bar" => {
+            chart_container = chart_container.child(
+                div().h(px(250.0)).child(
+                    BarChart::new(indexed_data)
+                        .x(|d| SharedString::from(d.label.clone()))
+                        .y(|d| d.value)
+                        .fill(move |d| chart_colors[d.color_index % 5]),
+                ),
+            );
+        }
+        "line" => {
+            let stroke_color = chart_colors[0];
+            chart_container = chart_container.child(
+                div().h(px(250.0)).child(
+                    LineChart::new(indexed_data)
+                        .x(|d| SharedString::from(d.label.clone()))
+                        .y(|d| d.value)
+                        .stroke(stroke_color)
+                        .natural()
+                        .dot(),
+                ),
+            );
+        }
+        "pie" => {
+            chart_container = chart_container.child(
+                div().h(px(300.0)).child(
+                    PieChart::new(indexed_data)
+                        .value(|d| d.value as f32)
+                        .color(move |d| chart_colors[d.color_index % 5])
+                        .pad_angle(0.03),
+                ),
+            );
+        }
+        _ => {
+            chart_container = chart_container.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("Unsupported chart type: {}", spec.chart_type)),
+            );
+        }
+    }
+
+    chart_container
+}
+
 /// Render a text segment using the cache, handling embedded `<thinking>` blocks.
 ///
 /// For finalized markdown content, uses the persistent cache to avoid re-parsing.
@@ -1048,6 +1160,17 @@ where
                     &format!("msg-{index}-tool-{tool_idx}"),
                     cx,
                 ));
+            }
+
+            // If this is a successful create_chart call, render the chart inline
+            if tool_call.tool_name == "create_chart"
+                && matches!(
+                    tool_call.state,
+                    super::message_types::ToolCallState::Success
+                )
+                && let Some(chart_spec) = extract_chart_spec(tool_call)
+            {
+                container = container.child(render_chart(chart_spec, index, tool_idx, cx));
             }
         }
     }

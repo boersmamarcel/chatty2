@@ -10,11 +10,11 @@ use crate::chatty::services::git_service::GitService;
 use crate::chatty::services::search_service::CodeSearchService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateChartTool, CreateDirectoryTool,
+    DeleteFileTool, DeleteMcpTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool,
+    FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
+    ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
     ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
@@ -252,6 +252,7 @@ fn collect_tools(
     search_tools: Option<SearchTools>,
     excel_read: Option<ReadExcelTool>,
     excel_write: Option<ExcelWriteTools>,
+    chart_tool: Option<CreateChartTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -321,6 +322,9 @@ fn collect_tools(
     if let Some((wt, et)) = excel_write {
         tools.push(Box::new(wt));
         tools.push(Box::new(et));
+    }
+    if let Some(t) = chart_tool {
+        tools.push(Box::new(t));
     }
     tools
 }
@@ -735,6 +739,9 @@ impl AgentClient {
             mcp_tool_info,
         );
 
+        // Chart tool is always available (no service dependencies)
+        let chart_tool: Option<CreateChartTool> = Some(CreateChartTool::new());
+
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
         // to call list_tools first.
@@ -790,6 +797,12 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        // Chart tool is always available (no filesystem/service dependencies)
+        tool_sections.push(
+            "- **create_chart**: Create and display a chart inline in the chat response. \
+             Supports bar, line, and pie charts. Use this to visualize data for the user."
+                .to_string(),
+        );
         if excel_read_tool.is_some() || excel_write_tools.is_some() {
             let mut excel_desc = Vec::new();
             if excel_read_tool.is_some() {
@@ -921,6 +934,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -969,6 +983,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1001,6 +1016,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1036,6 +1052,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1070,6 +1087,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1222,6 +1240,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
