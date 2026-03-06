@@ -866,6 +866,22 @@ fn extract_attachment_path(tool_call: &super::message_types::ToolCallBlock) -> O
     Some(PathBuf::from(path_str))
 }
 
+/// Extract image paths from a `pdf_to_image` tool call output JSON.
+/// The output has the shape `{"images": ["/path/to/page0.png", ...], ...}`.
+fn extract_pdf_image_paths(
+    tool_call: &super::message_types::ToolCallBlock,
+) -> Option<Vec<PathBuf>> {
+    let output = tool_call.output.as_ref()?;
+    let json: serde_json::Value = serde_json::from_str(output).ok()?;
+    let images = json.get("images")?.as_array()?;
+    let paths: Vec<PathBuf> = images
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(PathBuf::from)
+        .collect();
+    Some(paths).filter(|v| !v.is_empty())
+}
+
 /// Render a text segment using the cache, handling embedded `<thinking>` blocks.
 ///
 /// For finalized markdown content, uses the persistent cache to avoid re-parsing.
@@ -1014,6 +1030,21 @@ where
             {
                 container = container.child(render_attachments(
                     &[path],
+                    &format!("msg-{index}-tool-{tool_idx}"),
+                    cx,
+                ));
+            }
+
+            // If this is a successful pdf_to_image call, render the page images inline
+            if tool_call.tool_name == "pdf_to_image"
+                && matches!(
+                    tool_call.state,
+                    super::message_types::ToolCallState::Success
+                )
+                && let Some(paths) = extract_pdf_image_paths(tool_call)
+            {
+                container = container.child(render_attachments(
+                    &paths,
                     &format!("msg-{index}-tool-{tool_idx}"),
                     cx,
                 ));

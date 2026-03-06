@@ -4,6 +4,7 @@ use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
+use std::time::Duration;
 
 use super::message_types::{
     ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceEvent, TraceItem,
@@ -183,12 +184,23 @@ impl SystemTraceView {
 
                 let mut step_container = div().flex().items_center().gap_1();
 
-                // Add indicator when active
+                // Add animated indicator when active
                 if is_active {
                     step_container = step_container.child(
-                        Icon::new(CustomIcon::Refresh)
-                            .size(px(12.0))
-                            .text_color(color),
+                        div()
+                            .id("active-indicator")
+                            .child(
+                                Icon::new(CustomIcon::Refresh)
+                                    .size(px(12.0))
+                                    .text_color(color),
+                            )
+                            .with_animation(
+                                "active-indicator-pulse",
+                                Animation::new(Duration::from_secs(2))
+                                    .repeat()
+                                    .with_easing(pulsating_between(0.4, 1.0)),
+                                move |this, delta| this.opacity(delta),
+                            ),
                     );
                 }
 
@@ -315,7 +327,7 @@ impl SystemTraceView {
         tool_call: &ToolCallBlock,
         cx: &App,
     ) -> impl IntoElement {
-        let _is_active = self.trace.active_tool_index == Some(index);
+        let is_running = matches!(tool_call.state, ToolCallState::Running);
 
         let (prefix, prefix_color, state_label) = match &tool_call.state {
             ToolCallState::Running => (">", cx.theme().primary, "running"),
@@ -328,6 +340,16 @@ impl SystemTraceView {
         let text_color = cx.theme().foreground;
         let panel_bg = cx.theme().muted;
         let badge_text = cx.theme().primary_foreground;
+
+        let badge = div()
+            .id(ElementId::Name(format!("tool-badge-{}", index).into()))
+            .text_xs()
+            .px_2()
+            .py(px(0.5))
+            .rounded_sm()
+            .bg(prefix_color)
+            .text_color(badge_text)
+            .child(state_label);
 
         let mut container = div().flex().flex_col().gap_1().child(
             // Command invocation line
@@ -349,16 +371,21 @@ impl SystemTraceView {
                         .font_weight(FontWeight::BOLD)
                         .child(extract_command_display(tool_call)),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .px_2()
-                        .py(px(0.5))
-                        .rounded_sm()
-                        .bg(prefix_color)
-                        .text_color(badge_text)
-                        .child(state_label),
-                )
+                .map(|this| {
+                    if is_running {
+                        this.child(
+                            badge.with_animation(
+                                ElementId::Name(format!("tool-badge-pulse-{}", index).into()),
+                                Animation::new(Duration::from_secs(2))
+                                    .repeat()
+                                    .with_easing(pulsating_between(0.4, 1.0)),
+                                |el, delta| el.opacity(delta),
+                            ),
+                        )
+                    } else {
+                        this.child(badge)
+                    }
+                })
                 .when_some(tool_call.duration, |this, duration| {
                     this.child(
                         div()
@@ -683,6 +710,8 @@ where
         tool_call.display_name, tool_call.state
     );
 
+    let is_running = matches!(tool_call.state, ToolCallState::Running);
+
     let (prefix, prefix_color, state_label) = match &tool_call.state {
         ToolCallState::Running => (">", cx.theme().primary, "running"),
         ToolCallState::Success => ("✓", gpui::green(), "success"),
@@ -693,6 +722,19 @@ where
     let text_color = cx.theme().foreground;
     let panel_bg = cx.theme().muted;
     let badge_text = cx.theme().primary_foreground;
+
+    let inline_badge = div()
+        .id(ElementId::Name(
+            format!("inline-badge-{}-{}", message_index, tool_index).into(),
+        ))
+        .text_xs()
+        .px_2()
+        .py(px(0.5))
+        .rounded_sm()
+        .bg(prefix_color)
+        .text_color(badge_text)
+        .flex_shrink_0()
+        .child(state_label);
 
     // Compact clickable header (always visible)
     let header = div()
@@ -731,17 +773,23 @@ where
                 .text_ellipsis()
                 .child(format!("$ {}", extract_command_display(tool_call))),
         )
-        .child(
-            div()
-                .text_xs()
-                .px_2()
-                .py(px(0.5))
-                .rounded_sm()
-                .bg(prefix_color)
-                .text_color(badge_text)
-                .flex_shrink_0()
-                .child(state_label),
-        )
+        .map(|this| {
+            if is_running {
+                this.child(
+                    inline_badge.with_animation(
+                        ElementId::Name(
+                            format!("inline-badge-pulse-{}-{}", message_index, tool_index).into(),
+                        ),
+                        Animation::new(Duration::from_secs(2))
+                            .repeat()
+                            .with_easing(pulsating_between(0.4, 1.0)),
+                        |el, delta| el.opacity(delta),
+                    ),
+                )
+            } else {
+                this.child(inline_badge)
+            }
+        })
         .when_some(tool_call.duration, |this, duration| {
             this.child(
                 div()
