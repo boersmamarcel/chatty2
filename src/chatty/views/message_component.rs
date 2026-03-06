@@ -1012,16 +1012,56 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
         }
         "line" => {
             let stroke_color = chart_colors[0];
-            chart_container = chart_container.child(
-                div().h(px(250.0)).child(
-                    LineChart::new(indexed_data)
-                        .x(|d| SharedString::from(d.label.clone()))
-                        .y(|d| d.value)
-                        .stroke(stroke_color)
-                        .natural()
-                        .dot(),
-                ),
-            );
+            // Build value labels row before moving indexed_data into the chart
+            let value_labels: Vec<(String, f64)> = indexed_data
+                .iter()
+                .map(|d| (d.label.clone(), d.value))
+                .collect();
+            chart_container = chart_container
+                .child(
+                    div().h(px(250.0)).child(
+                        LineChart::new(indexed_data)
+                            .x(|d| SharedString::from(d.label.clone()))
+                            .y(|d| d.value)
+                            .stroke(stroke_color)
+                            .natural()
+                            .dot(),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_x_4()
+                        .gap_y_1()
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .children(value_labels.into_iter().map(|(label, value)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(stroke_color)
+                                        .child(if value.fract() == 0.0 {
+                                            format!("{}", value as i64)
+                                        } else {
+                                            format!("{:.1}", value)
+                                        }),
+                                )
+                        })),
+                );
         }
         "pie" => {
             chart_container = chart_container.child(
@@ -1029,6 +1069,10 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
                     PieChart::new(indexed_data)
                         .value(|d| d.value as f32)
                         .color(move |d| chart_colors[d.color_index % 5])
+                        // Workaround: gpui-component PieChart bug passes Some(0.0) for
+                        // outer_radius per-arc, overriding the bounds-computed value.
+                        // Explicitly set outer_radius = div_height * 0.4 = 300 * 0.4.
+                        .outer_radius(120.0)
                         .pad_angle(0.03),
                 ),
             );
