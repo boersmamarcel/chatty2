@@ -6,6 +6,7 @@ use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
 use std::time::Duration;
 
+use super::diff_view_component::DiffViewComponent;
 use super::message_types::{
     ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceEvent, TraceItem,
 };
@@ -692,16 +693,20 @@ impl Render for SystemTraceView {
 }
 
 /// Public function to render a single tool call inline (for interleaved content)
-pub fn render_tool_call_inline<F>(
+#[allow(clippy::too_many_arguments)]
+pub fn render_tool_call_inline<F, D>(
     tool_call: &ToolCallBlock,
     message_index: usize,
     tool_index: usize,
     collapsed: bool,
     on_toggle: F,
+    diff_expanded: bool,
+    on_expand_diff: D,
     cx: &App,
 ) -> impl IntoElement
 where
     F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    D: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 {
     use tracing::debug;
 
@@ -809,40 +814,62 @@ where
         content_children.push(render_full_command_box(full_command, panel_bg, text_color));
     }
 
-    // Add output section if available
-    if let Some(output) = tool_call
-        .output
-        .as_ref()
-        .or(tool_call.output_preview.as_ref())
+    // For apply_diff tool calls with success, render a visual diff view
+    let has_diff_view = if tool_call.tool_name == "apply_diff"
+        && matches!(tool_call.state, ToolCallState::Success)
     {
-        let formatted_output = format_tool_output(output);
-        content_children.push(
-            div()
-                .font_family("monospace")
-                .text_xs()
-                .px_2()
-                .py_1()
-                .bg(panel_bg)
-                .rounded_sm()
-                .text_color(text_color)
-                .child(SelectableText::new(
-                    ElementId::Name(
-                        format!("inline-tool-output-{}-{}", message_index, tool_index).into(),
-                    ),
-                    formatted_output,
-                ))
-                .into_any_element(),
-        );
-    } else if matches!(tool_call.state, ToolCallState::Running) {
-        // Show "Running..." for running tools
-        content_children.push(
-            div()
-                .font_family("monospace")
-                .text_xs()
-                .text_color(muted_text)
-                .child("Running...")
-                .into_any_element(),
-        );
+        if let Some(diff_view) = try_build_diff_view(
+            &tool_call.input,
+            message_index,
+            tool_index,
+            diff_expanded,
+            on_expand_diff,
+        ) {
+            content_children.push(diff_view);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Add output section if available (skip for apply_diff with diff view)
+    if !has_diff_view {
+        if let Some(output) = tool_call
+            .output
+            .as_ref()
+            .or(tool_call.output_preview.as_ref())
+        {
+            let formatted_output = format_tool_output(output);
+            content_children.push(
+                div()
+                    .font_family("monospace")
+                    .text_xs()
+                    .px_2()
+                    .py_1()
+                    .bg(panel_bg)
+                    .rounded_sm()
+                    .text_color(text_color)
+                    .child(SelectableText::new(
+                        ElementId::Name(
+                            format!("inline-tool-output-{}-{}", message_index, tool_index).into(),
+                        ),
+                        formatted_output,
+                    ))
+                    .into_any_element(),
+            );
+        } else if matches!(tool_call.state, ToolCallState::Running) {
+            // Show "Running..." for running tools
+            content_children.push(
+                div()
+                    .font_family("monospace")
+                    .text_xs()
+                    .text_color(muted_text)
+                    .child("Running...")
+                    .into_any_element(),
+            );
+        }
     }
 
     // Add error section if error state
@@ -906,6 +933,38 @@ where
                     .children(content_children),
             )
         })
+}
+
+/// Try to build a diff view from apply_diff tool input JSON.
+/// Returns None if parsing fails.
+fn try_build_diff_view(
+    input_json: &str,
+    message_index: usize,
+    tool_index: usize,
+    diff_expanded: bool,
+    on_expand_diff: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Option<AnyElement> {
+    #[derive(serde::Deserialize)]
+    struct ApplyDiffInput {
+        path: String,
+        old_content: String,
+        new_content: String,
+    }
+
+    let args: ApplyDiffInput = serde_json::from_str(input_json).ok()?;
+
+    Some(
+        DiffViewComponent::new(
+            args.old_content,
+            args.new_content,
+            args.path,
+            message_index,
+            tool_index,
+            diff_expanded,
+        )
+        .on_expand(on_expand_diff)
+        .into_any_element(),
+    )
 }
 
 /// Render the full command text box (used when the header was truncated)
