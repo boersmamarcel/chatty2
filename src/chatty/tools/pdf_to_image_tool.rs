@@ -4,8 +4,10 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::services::pdfium_utils::create_pdfium;
 use crate::chatty::tools::add_attachment_tool::PendingArtifacts;
 
 #[derive(Debug, thiserror::Error)]
@@ -52,12 +54,6 @@ impl PdfToImageTool {
             pending_artifacts,
         }
     }
-}
-
-/// Get the path to the pdfium library set by build.rs
-fn pdfium_lib_path() -> Option<PathBuf> {
-    let lib_dir = option_env!("PDFIUM_LIB_DIR")?;
-    Some(PathBuf::from(lib_dir))
 }
 
 /// Maximum number of pages to convert in a single call
@@ -132,9 +128,10 @@ impl Tool for PdfToImageTool {
         // Clamp DPI
         let dpi = args.dpi.clamp(72, MAX_DPI);
 
-        // Resolve output directory: workspace path if provided, else session temp dir
+        // Resolve output directory: workspace path if provided, else session temp dir.
+        // create_directory validates workspace bounds; resolve_path then canonicalizes the
+        // now-existing directory through the same validator to get the canonical path.
         let output_dir_path: PathBuf = if let Some(ref dir) = args.output_dir {
-            // Validate and create the directory within workspace bounds
             self.service.create_directory(dir).await.map_err(|e| {
                 PdfToImageError::OperationError(anyhow::anyhow!(
                     "Failed to create output directory '{}': {}",
@@ -142,14 +139,7 @@ impl Tool for PdfToImageTool {
                     e
                 ))
             })?;
-            let candidate = self.service.workspace_root().join(dir);
-            tokio::fs::canonicalize(&candidate).await.map_err(|e| {
-                PdfToImageError::OperationError(anyhow::anyhow!(
-                    "Could not resolve output directory '{}': {}",
-                    dir,
-                    e
-                ))
-            })?
+            self.service.resolve_path(dir).await?
         } else {
             crate::chatty::services::pdf_thumbnail::get_thumbnail_dir().map_err(|e| {
                 PdfToImageError::OperationError(anyhow::anyhow!(
@@ -171,10 +161,13 @@ impl Tool for PdfToImageTool {
         })??;
 
         // Queue all rendered images as pending artifacts
-        if let Ok(mut artifacts) = self.pending_artifacts.lock() {
-            for path in &result.image_paths {
-                artifacts.push(path.clone());
-            }
+        match self.pending_artifacts.lock() {
+            Ok(mut artifacts) => artifacts.extend(result.image_paths.iter().cloned()),
+            Err(e) => warn!(
+                error = ?e,
+                path = %args.path,
+                "Failed to lock pending_artifacts; images rendered to disk but not queued for display"
+            ),
         }
 
         let image_strings: Vec<String> = result
@@ -193,7 +186,10 @@ impl Tool for PdfToImageTool {
                 args.path,
                 dpi,
                 if args.output_dir.is_some() {
-                    format!(" Saved to workspace directory '{}'.", args.output_dir.as_deref().unwrap_or(""))
+                    format!(
+                        " Saved to workspace directory '{}'.",
+                        args.output_dir.as_deref().unwrap_or("")
+                    )
                 } else {
                     String::new()
                 }
@@ -213,18 +209,7 @@ fn render_pdf_pages(
     dpi: u32,
     output_dir: PathBuf,
 ) -> Result<RenderResult, PdfToImageError> {
-    let lib_dir = pdfium_lib_path().ok_or_else(|| {
-        PdfToImageError::OperationError(anyhow::anyhow!("PDFIUM_LIB_DIR not set by build.rs"))
-    })?;
-
-    let lib_path = lib_dir.join(Pdfium::pdfium_platform_library_name());
-    let bindings = Pdfium::bind_to_library(&lib_path)
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            PdfToImageError::OperationError(anyhow::anyhow!("Failed to bind pdfium: {:?}", e))
-        })?;
-
-    let pdfium = Pdfium::new(bindings);
+    let pdfium = create_pdfium()?;
     let document = pdfium.load_pdf_from_file(pdf_path, None).map_err(|e| {
         PdfToImageError::OperationError(anyhow::anyhow!(
             "Failed to open PDF '{}': {:?}",
@@ -318,7 +303,6 @@ fn render_pdf_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chatty::services::pdf_thumbnail::cleanup_thumbnails;
     use rig::tool::Tool;
     use std::fs;
     use std::io::Write;
@@ -417,19 +401,18 @@ startxref
                 path: "test_convert.pdf".into(),
                 pages: None,
                 dpi: 150,
-                output_dir: None,
+                output_dir: Some("out_all".into()),
             })
             .await;
 
         let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_dir_all(workspace.join("out_all"));
 
         assert!(result.is_ok(), "Expected success, got: {:?}", result.err());
         let output = result.unwrap();
         assert_eq!(output.page_count, 1);
         assert_eq!(output.total_pages, 1);
         assert_eq!(pending.lock().unwrap().len(), 1);
-
-        cleanup_thumbnails();
     }
 
     #[tokio::test]
@@ -443,18 +426,17 @@ startxref
                 path: "test_specific.pdf".into(),
                 pages: Some(vec![0]),
                 dpi: 72,
-                output_dir: None,
+                output_dir: Some("out_specific".into()),
             })
             .await;
 
         let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_dir_all(workspace.join("out_specific"));
 
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.page_count, 1);
         assert_eq!(pending.lock().unwrap().len(), 1);
-
-        cleanup_thumbnails();
     }
 
     #[tokio::test]
@@ -507,18 +489,17 @@ startxref
                 path: "test_range.pdf".into(),
                 pages: Some(vec![0, 99]),
                 dpi: 150,
-                output_dir: None,
+                output_dir: Some("out_range".into()),
             })
             .await;
 
         let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_dir_all(workspace.join("out_range"));
 
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.page_count, 1);
         assert_eq!(pending.lock().unwrap().len(), 1);
-
-        cleanup_thumbnails();
     }
 
     #[tokio::test]
@@ -541,7 +522,41 @@ startxref
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("No valid pages"));
+    }
 
-        cleanup_thumbnails();
+    #[tokio::test]
+    async fn test_output_dir_saves_to_workspace() {
+        let (tool, pending, workspace) = create_test_tool().await;
+        let pdf_path = workspace.join("test_outdir.pdf");
+        create_test_pdf(&pdf_path);
+
+        let result = tool
+            .call(PdfToImageArgs {
+                path: "test_outdir.pdf".into(),
+                pages: None,
+                dpi: 72,
+                output_dir: Some("pdf_images".into()),
+            })
+            .await;
+
+        let _ = fs::remove_file(&pdf_path);
+
+        assert!(result.is_ok(), "Expected success, got: {:?}", result.err());
+        let output = result.unwrap();
+        assert_eq!(output.page_count, 1);
+        assert_eq!(pending.lock().unwrap().len(), 1);
+
+        // Image should be saved inside the workspace, not in temp.
+        // Canonicalize workspace to resolve symlinks (e.g. /tmp → /private/tmp on macOS).
+        let img_path = PathBuf::from(&output.images[0]);
+        let canonical_workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace.clone());
+        assert!(
+            img_path.starts_with(&canonical_workspace),
+            "Expected image inside workspace, got {:?}",
+            img_path
+        );
+        assert!(img_path.exists(), "Image file should exist on disk");
+
+        let _ = fs::remove_dir_all(workspace.join("pdf_images"));
     }
 }

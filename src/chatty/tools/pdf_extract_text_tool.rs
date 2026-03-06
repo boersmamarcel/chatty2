@@ -1,11 +1,10 @@
-use pdfium_render::prelude::*;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::services::pdfium_utils::create_pdfium;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PdfExtractTextError {
@@ -43,11 +42,6 @@ impl PdfExtractTextTool {
     pub fn new(service: Arc<FileSystemService>) -> Self {
         Self { service }
     }
-}
-
-fn pdfium_lib_path() -> Option<PathBuf> {
-    let lib_dir = option_env!("PDFIUM_LIB_DIR")?;
-    Some(PathBuf::from(lib_dir))
 }
 
 /// Maximum number of pages to extract text from in a single call
@@ -134,18 +128,7 @@ fn extract_text(
     pdf_path: &std::path::Path,
     pages: Option<&[u32]>,
 ) -> Result<ExtractResult, PdfExtractTextError> {
-    let lib_dir = pdfium_lib_path().ok_or_else(|| {
-        PdfExtractTextError::OperationError(anyhow::anyhow!("PDFIUM_LIB_DIR not set by build.rs"))
-    })?;
-
-    let lib_path = lib_dir.join(Pdfium::pdfium_platform_library_name());
-    let bindings = Pdfium::bind_to_library(&lib_path)
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            PdfExtractTextError::OperationError(anyhow::anyhow!("Failed to bind pdfium: {:?}", e))
-        })?;
-
-    let pdfium = Pdfium::new(bindings);
+    let pdfium = create_pdfium()?;
     let document = pdfium.load_pdf_from_file(pdf_path, None).map_err(|e| {
         PdfExtractTextError::OperationError(anyhow::anyhow!(
             "Failed to open PDF '{}': {:?}",
@@ -200,6 +183,7 @@ mod tests {
     use rig::tool::Tool;
     use std::fs;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn create_test_pdf(path: &std::path::Path) {
         let pdf_content = b"%PDF-1.4

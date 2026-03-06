@@ -2,10 +2,10 @@ use pdfium_render::prelude::*;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::chatty::services::filesystem_service::FileSystemService;
+use crate::chatty::services::pdfium_utils::create_pdfium;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PdfInfoError {
@@ -53,10 +53,10 @@ impl PdfInfoTool {
     }
 }
 
-fn pdfium_lib_path() -> Option<PathBuf> {
-    let lib_dir = option_env!("PDFIUM_LIB_DIR")?;
-    Some(PathBuf::from(lib_dir))
-}
+/// Maximum number of pages to include in the `pages` array returned by `pdf_info`.
+/// For PDFs with more pages, only the first `MAX_INFO_PAGES` entries are returned;
+/// `page_count` still reflects the true total.
+const MAX_INFO_PAGES: u32 = 100;
 
 impl Tool for PdfInfoTool {
     const NAME: &'static str = "pdf_info";
@@ -71,6 +71,9 @@ impl Tool for PdfInfoTool {
                          Returns page count, page dimensions, and document metadata \
                          (title, author, creation date, etc.). Use this to understand \
                          a PDF's structure before converting pages or extracting text.\n\
+                         \n\
+                         Page dimension details are returned for up to 100 pages; \
+                         page_count always reflects the true total.\n\
                          \n\
                          Examples:\n\
                          - Get PDF info: {\"path\": \"docs/report.pdf\"}\n\
@@ -139,18 +142,7 @@ struct PdfInfoResult {
 }
 
 fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, PdfInfoError> {
-    let lib_dir = pdfium_lib_path().ok_or_else(|| {
-        PdfInfoError::OperationError(anyhow::anyhow!("PDFIUM_LIB_DIR not set by build.rs"))
-    })?;
-
-    let lib_path = lib_dir.join(Pdfium::pdfium_platform_library_name());
-    let bindings = Pdfium::bind_to_library(&lib_path)
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            PdfInfoError::OperationError(anyhow::anyhow!("Failed to bind pdfium: {:?}", e))
-        })?;
-
-    let pdfium = Pdfium::new(bindings);
+    let pdfium = create_pdfium()?;
     let document = pdfium.load_pdf_from_file(pdf_path, None).map_err(|e| {
         PdfInfoError::OperationError(anyhow::anyhow!(
             "Failed to open PDF '{}': {:?}",
@@ -167,7 +159,7 @@ fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, PdfInfoErro
     let page_count = document.pages().len() as u32;
     let mut pages = Vec::new();
 
-    for i in 0..page_count.min(100) {
+    for i in 0..page_count.min(MAX_INFO_PAGES) {
         if let Ok(page) = document.pages().get(i as u16) {
             let width_pt = page.width().value;
             let height_pt = page.height().value;
@@ -201,6 +193,7 @@ mod tests {
     use rig::tool::Tool;
     use std::fs;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn create_test_pdf(path: &std::path::Path) {
         let pdf_content = b"%PDF-1.4

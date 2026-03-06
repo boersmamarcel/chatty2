@@ -1041,14 +1041,13 @@ where
                     tool_call.state,
                     super::message_types::ToolCallState::Success
                 )
+                && let Some(paths) = extract_pdf_image_paths(tool_call)
             {
-                if let Some(paths) = extract_pdf_image_paths(tool_call) {
-                    container = container.child(render_attachments(
-                        &paths,
-                        &format!("msg-{index}-tool-{tool_idx}"),
-                        cx,
-                    ));
-                }
+                container = container.child(render_attachments(
+                    &paths,
+                    &format!("msg-{index}-tool-{tool_idx}"),
+                    cx,
+                ));
             }
         }
     }

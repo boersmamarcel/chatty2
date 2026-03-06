@@ -7,6 +7,7 @@ pub mod mcp_service;
 pub mod mermaid_renderer_service;
 pub mod path_validator;
 pub mod pdf_thumbnail;
+pub mod pdfium_utils;
 pub mod search_service;
 pub mod shell_service;
 pub mod title_generator;
