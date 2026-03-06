@@ -200,6 +200,9 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `move_file` | Move or rename files | Yes |
 | `bash` | Execute shell commands (sandboxed, streaming output) | Yes |
 | `add_attachment` | Display a generated image or PDF inline in the chat | No |
+| `read_excel` | Read Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods) as JSON with markdown table preview | No |
+| `write_excel` | Create a new Excel (.xlsx) file with data, formatting, formulas, merged cells, and auto-filters | Yes |
+| `edit_excel` | Edit an existing Excel file with targeted modifications (set cells, add sheets, delete rows, formulas, formatting) | Yes |
 | `list_tools` | Lists all available tools and schemas | No |
 
 ### MCP Servers
