@@ -200,6 +200,9 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `move_file` | Move or rename files | Yes |
 | `bash` | Execute shell commands (sandboxed, streaming output) | Yes |
 | `add_attachment` | Display a generated image or PDF inline in the chat | No |
+| `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | No |
+| `pdf_info` | Get metadata and structural information about a PDF file | No |
+| `pdf_extract_text` | Extract text content from PDF pages (up to 50 pages) | No |
 | `list_tools` | Lists all available tools and schemas | No |
 
 ### MCP Servers
