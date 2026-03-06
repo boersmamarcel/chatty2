@@ -53,6 +53,11 @@ impl FileSystemService {
         Ok(Self { validator })
     }
 
+    /// Returns the workspace root directory.
+    pub fn workspace_root(&self) -> &Path {
+        self.validator.workspace_root()
+    }
+
     /// Resolve a path within the workspace and return the canonicalized absolute path.
     pub async fn resolve_path(&self, path: &str) -> Result<PathBuf> {
         self.validator.validate(path).await

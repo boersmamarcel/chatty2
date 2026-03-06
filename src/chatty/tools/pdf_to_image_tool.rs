@@ -21,6 +21,10 @@ pub struct PdfToImageArgs {
     pub pages: Option<Vec<u32>>,
     #[serde(default = "default_dpi")]
     pub dpi: u32,
+    /// Optional workspace-relative directory to save PNG files into.
+    /// Created if it does not exist. Falls back to session temp dir when omitted.
+    #[serde(default)]
+    pub output_dir: Option<String>,
 }
 
 fn default_dpi() -> u32 {
@@ -98,6 +102,10 @@ impl Tool for PdfToImageTool {
                     "dpi": {
                         "type": "integer",
                         "description": "Resolution in DPI (72-300). Default: 150. Higher values produce larger, sharper images."
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Workspace-relative directory to save the PNG files into (e.g. \"pdf_images/\"). Created automatically if it does not exist. If omitted, images are saved to a session temp directory and are not persisted to the workspace."
                     }
                 },
                 "required": ["path"]
@@ -124,11 +132,38 @@ impl Tool for PdfToImageTool {
         // Clamp DPI
         let dpi = args.dpi.clamp(72, MAX_DPI);
 
+        // Resolve output directory: workspace path if provided, else session temp dir
+        let output_dir_path: PathBuf = if let Some(ref dir) = args.output_dir {
+            // Validate and create the directory within workspace bounds
+            self.service.create_directory(dir).await.map_err(|e| {
+                PdfToImageError::OperationError(anyhow::anyhow!(
+                    "Failed to create output directory '{}': {}",
+                    dir,
+                    e
+                ))
+            })?;
+            let candidate = self.service.workspace_root().join(dir);
+            tokio::fs::canonicalize(&candidate).await.map_err(|e| {
+                PdfToImageError::OperationError(anyhow::anyhow!(
+                    "Could not resolve output directory '{}': {}",
+                    dir,
+                    e
+                ))
+            })?
+        } else {
+            crate::chatty::services::pdf_thumbnail::get_thumbnail_dir().map_err(|e| {
+                PdfToImageError::OperationError(anyhow::anyhow!(
+                    "Failed to create temp directory: {}",
+                    e
+                ))
+            })?
+        };
+
         // Render pages in a blocking task since pdfium is not async
         let pages_arg = args.pages.clone();
         let pdf_path = canonical.clone();
         let result = tokio::task::spawn_blocking(move || {
-            render_pdf_pages(&pdf_path, pages_arg.as_deref(), dpi)
+            render_pdf_pages(&pdf_path, pages_arg.as_deref(), dpi, output_dir_path)
         })
         .await
         .map_err(|e| {
@@ -153,10 +188,15 @@ impl Tool for PdfToImageTool {
             total_pages: result.total_pages,
             images: image_strings,
             message: format!(
-                "Converted {} page(s) of '{}' to PNG images ({}dpi). Images will be displayed inline.",
+                "Converted {} page(s) of '{}' to PNG images ({}dpi). Images will be displayed inline.{}",
                 result.image_paths.len(),
                 args.path,
-                dpi
+                dpi,
+                if args.output_dir.is_some() {
+                    format!(" Saved to workspace directory '{}'.", args.output_dir.as_deref().unwrap_or(""))
+                } else {
+                    String::new()
+                }
             ),
         })
     }
@@ -171,6 +211,7 @@ fn render_pdf_pages(
     pdf_path: &std::path::Path,
     pages: Option<&[u32]>,
     dpi: u32,
+    output_dir: PathBuf,
 ) -> Result<RenderResult, PdfToImageError> {
     let lib_dir = pdfium_lib_path().ok_or_else(|| {
         PdfToImageError::OperationError(anyhow::anyhow!("PDFIUM_LIB_DIR not set by build.rs"))
@@ -214,11 +255,6 @@ fn render_pdf_pages(
             total_pages
         )));
     }
-
-    // Create output directory using the same session temp pattern as pdf_thumbnail
-    let output_dir = crate::chatty::services::pdf_thumbnail::get_thumbnail_dir().map_err(|e| {
-        PdfToImageError::OperationError(anyhow::anyhow!("Failed to create temp directory: {}", e))
-    })?;
 
     // Compute a hash of the PDF path for unique filenames
     let path_hash = {
@@ -381,6 +417,7 @@ startxref
                 path: "test_convert.pdf".into(),
                 pages: None,
                 dpi: 150,
+                output_dir: None,
             })
             .await;
 
@@ -406,6 +443,7 @@ startxref
                 path: "test_specific.pdf".into(),
                 pages: Some(vec![0]),
                 dpi: 72,
+                output_dir: None,
             })
             .await;
 
@@ -430,6 +468,7 @@ startxref
                 path: "notes.txt".into(),
                 pages: None,
                 dpi: 150,
+                output_dir: None,
             })
             .await;
 
@@ -448,6 +487,7 @@ startxref
                 path: "nonexistent.pdf".into(),
                 pages: None,
                 dpi: 150,
+                output_dir: None,
             })
             .await;
 
@@ -467,6 +507,7 @@ startxref
                 path: "test_range.pdf".into(),
                 pages: Some(vec![0, 99]),
                 dpi: 150,
+                output_dir: None,
             })
             .await;
 
@@ -491,6 +532,7 @@ startxref
                 path: "test_allrange.pdf".into(),
                 pages: Some(vec![99, 100]),
                 dpi: 150,
+                output_dir: None,
             })
             .await;
 
