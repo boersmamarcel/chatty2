@@ -14,8 +14,9 @@ use crate::chatty::tools::{
     DeleteMcpTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool,
     GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    MoveFileTool, PendingArtifacts, ReadBinaryTool, ReadFileTool, SearchCodeTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteFileTool,
+    MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
+    ReadBinaryTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
+    ShellStatusTool, WriteFileTool,
 };
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
@@ -238,6 +239,9 @@ fn collect_tools(
     fs_read: Option<FsReadTools>,
     fs_write: Option<FsWriteTools>,
     add_attachment: Option<AddAttachmentTool>,
+    pdf_to_image: Option<PdfToImageTool>,
+    pdf_info: Option<PdfInfoTool>,
+    pdf_extract_text: Option<PdfExtractTextTool>,
     mcp_mgmt: McpTools,
     fetch_tool: Option<FetchTool>,
     shell_tools: Option<ShellTools>,
@@ -272,6 +276,15 @@ fn collect_tools(
         tools.push(Box::new(ad));
     }
     if let Some(t) = add_attachment {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = pdf_to_image {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = pdf_info {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = pdf_extract_text {
         tools.push(Box::new(t));
     }
     if let Some(t) = fetch_tool {
@@ -398,6 +411,9 @@ impl AgentClient {
 
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
+        let mut pdf_to_image_tool: Option<PdfToImageTool> = None;
+        let mut pdf_info_tool: Option<PdfInfoTool> = None;
+        let mut pdf_extract_text_tool: Option<PdfExtractTextTool> = None;
         let mut search_tools: Option<SearchTools> = None;
         let (fs_read_tools, fs_write_tools): (Option<FsReadTools>, Option<FsWriteTools>) =
             match exec_settings
@@ -424,7 +440,13 @@ impl AgentClient {
                                     service.clone(),
                                     artifacts.clone(),
                                 ));
+                                pdf_to_image_tool =
+                                    Some(PdfToImageTool::new(service.clone(), artifacts.clone()));
                             }
+
+                            // PDF tools that don't need PendingArtifacts
+                            pdf_info_tool = Some(PdfInfoTool::new(service.clone()));
+                            pdf_extract_text_tool = Some(PdfExtractTextTool::new(service.clone()));
 
                             // Create code search tools alongside filesystem read tools
                             match CodeSearchService::new(workspace_dir) {
@@ -670,6 +692,9 @@ impl AgentClient {
             git_tools.is_some(),
             search_tools.is_some(),
             add_attachment_tool.is_some(),
+            pdf_to_image_tool.is_some(),
+            pdf_info_tool.is_some(),
+            pdf_extract_text_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -727,6 +752,27 @@ impl AgentClient {
                  Useful for showing generated plots, screenshots, or documents."
                     .to_string(),
             );
+        }
+        if pdf_to_image_tool.is_some() || pdf_info_tool.is_some() || pdf_extract_text_tool.is_some()
+        {
+            let mut pdf_desc = String::from("- **PDF tools**:");
+            if pdf_info_tool.is_some() {
+                pdf_desc.push_str(" `pdf_info` (page count, dimensions, metadata),");
+            }
+            if pdf_extract_text_tool.is_some() {
+                pdf_desc.push_str(" `pdf_extract_text` (extract text from pages),");
+            }
+            if pdf_to_image_tool.is_some() {
+                pdf_desc.push_str(
+                    " `pdf_to_image` (render pages as PNG images for visual inspection),",
+                );
+            }
+            // Remove trailing comma and add period
+            if pdf_desc.ends_with(',') {
+                pdf_desc.pop();
+            }
+            pdf_desc.push('.');
+            tool_sections.push(pdf_desc);
         }
         if mcp_mgmt_tools.is_enabled() {
             tool_sections.push(
@@ -814,6 +860,9 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
+                    pdf_to_image_tool.clone(),
+                    pdf_info_tool.clone(),
+                    pdf_extract_text_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
@@ -857,6 +906,9 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
+                    pdf_to_image_tool.clone(),
+                    pdf_info_tool.clone(),
+                    pdf_extract_text_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
@@ -884,6 +936,9 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
+                    pdf_to_image_tool.clone(),
+                    pdf_info_tool.clone(),
+                    pdf_extract_text_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
@@ -914,6 +969,9 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
+                    pdf_to_image_tool.clone(),
+                    pdf_info_tool.clone(),
+                    pdf_extract_text_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
@@ -943,6 +1001,9 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
+                    pdf_to_image_tool.clone(),
+                    pdf_info_tool.clone(),
+                    pdf_extract_text_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
@@ -1090,6 +1151,9 @@ impl AgentClient {
                     fs_read_tools,
                     fs_write_tools,
                     add_attachment_tool.clone(),
+                    pdf_to_image_tool.clone(),
+                    pdf_info_tool.clone(),
+                    pdf_extract_text_tool.clone(),
                     mcp_mgmt_tools,
                     fetch_tool.clone(),
                     shell_tools,
