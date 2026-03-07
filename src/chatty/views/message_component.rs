@@ -442,7 +442,10 @@ fn build_streaming_parse_result(
         let mut segments = Vec::with_capacity(content_segment_count);
 
         // Reuse all content segments except the last
-        for seg in &prev_segments[..prev_segments.len() - 1] {
+        for seg in prev_segments
+            .get(..prev_segments.len().saturating_sub(1))
+            .unwrap_or(&[])
+        {
             segments.push(seg.clone());
         }
 

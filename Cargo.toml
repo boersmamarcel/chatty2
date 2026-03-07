@@ -60,6 +60,9 @@ image = "0.25"
 calamine = "0.33"
 rust_xlsxwriter = "0.93"
 
+# DuckDB embedded analytics (Parquet/CSV query tool)
+duckdb = { version = "1.4", features = ["bundled", "parquet", "json"] }
+
 # Math rendering with Typst
 typst = "0.14.2"
 typst-svg = "0.14.2"

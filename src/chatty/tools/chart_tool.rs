@@ -76,11 +76,18 @@ pub struct ChartSpec {
 pub struct CreateChartTool {
     /// The configured workspace directory, used as base for relative save paths.
     pub workspace_dir: Option<String>,
+    /// Theme chart colors captured at agent creation time (hex strings, e.g. "#4e79a7").
+    /// Used when saving charts to disk so the file matches the inline chart appearance.
+    /// Falls back to `DEFAULT_CHART_COLORS` when not set.
+    pub theme_colors: Option<[String; 5]>,
 }
 
 impl CreateChartTool {
-    pub fn new(workspace_dir: Option<String>) -> Self {
-        Self { workspace_dir }
+    pub fn new(workspace_dir: Option<String>, theme_colors: Option<[String; 5]>) -> Self {
+        Self {
+            workspace_dir,
+            theme_colors,
+        }
     }
 }
 
@@ -274,7 +281,12 @@ impl Tool for CreateChartTool {
 
         // Save to disk if the caller requested it.
         if let Some(save_path) = args.save_path {
-            match save_chart_png(&spec, &save_path, self.workspace_dir.as_deref()) {
+            match save_chart_png(
+                &spec,
+                &save_path,
+                self.workspace_dir.as_deref(),
+                self.theme_colors.as_ref(),
+            ) {
                 Ok(resolved) => {
                     return Ok(ChartSpec {
                         saved_path: Some(resolved),
@@ -295,7 +307,10 @@ impl Tool for CreateChartTool {
 
 /// Render `spec` to a PNG file at `save_path`.
 ///
-/// Uses the default palette (no theme colors available in the tool layer).
+/// Uses `theme_colors` when provided (captured at agent-creation time so the saved
+/// file matches the inline chart the user sees). Falls back to `DEFAULT_CHART_COLORS`
+/// when no theme is available.
+///
 /// Creates parent directories if they don't exist.
 /// Path resolution priority for relative paths:
 ///   1. `workspace_dir` if set (the user's configured working directory)
@@ -307,12 +322,14 @@ fn save_chart_png(
     spec: &ChartSpec,
     save_path: &str,
     workspace_dir: Option<&str>,
+    theme_colors: Option<&[String; 5]>,
 ) -> Result<String, String> {
     use crate::chatty::services::chart_svg_renderer::{DEFAULT_CHART_COLORS, render_chart_svg};
     use crate::chatty::services::mermaid_renderer_service::MermaidRendererService;
 
-    let colors: [String; 5] = DEFAULT_CHART_COLORS.map(str::to_owned);
-    let svg = render_chart_svg(spec, &colors);
+    let fallback: [String; 5] = DEFAULT_CHART_COLORS.map(str::to_owned);
+    let colors = theme_colors.unwrap_or(&fallback);
+    let svg = render_chart_svg(spec, colors);
 
     let resolved = super::path_utils::resolve_output_path(save_path, workspace_dir)?;
     let path = resolved.as_path();
@@ -353,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bar_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "bar".to_string(),
@@ -383,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_line_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "line".to_string(),
@@ -404,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_series_line_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "line".to_string(),
@@ -452,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_line_chart_requires_data_or_series() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "line".to_string(),
@@ -470,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pie_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "pie".to_string(),
@@ -497,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_donut_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "donut".to_string(),
@@ -527,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_area_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "area".to_string(),
@@ -548,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_candlestick_chart() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "candlestick".to_string(),
@@ -572,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_candlestick_requires_data() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "candlestick".to_string(),
@@ -590,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_chart_type() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "scatter".to_string(),
@@ -611,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_data() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let result = tool
             .call(CreateChartArgs {
                 chart_type: "bar".to_string(),
@@ -629,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_definition_metadata() {
-        let tool = CreateChartTool::new(None);
+        let tool = CreateChartTool::new(None, None);
         let def = tool.definition("test".into()).await;
         assert_eq!(def.name, "create_chart");
         assert!(def.description.contains("bar"));

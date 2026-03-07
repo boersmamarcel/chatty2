@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui_component::ActiveTheme;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -303,6 +304,7 @@ impl ChattyApp {
         pending_approvals: crate::chatty::models::execution_approval_store::PendingApprovals,
         pending_write_approvals: crate::chatty::models::write_approval_store::PendingWriteApprovals,
         user_secrets: Vec<(String, String)>,
+        theme_colors: Option<[String; 5]>,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
@@ -345,6 +347,7 @@ impl ChattyApp {
             Some(pending_approvals),
             Some(pending_write_approvals),
             user_secrets,
+            theme_colors,
         )
         .await
     }
@@ -563,28 +566,35 @@ impl ChattyApp {
                         .ok()
                         .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
 
-                    // Get execution settings, approval stores, and user secrets for tools
-                    let (exec_settings, pending_approvals, pending_write_approvals, user_secrets) =
-                        cx.update(|cx| {
-                            let settings = cx
-                                .global::<crate::settings::models::ExecutionSettingsModel>()
-                                .clone();
-                            let approvals = cx
-                                .global::<crate::chatty::models::ExecutionApprovalStore>()
-                                .get_pending_approvals();
-                            let write_approvals = cx
-                                .global::<crate::chatty::models::WriteApprovalStore>()
-                                .get_pending_approvals();
-                            let secrets = cx
-                                .global::<crate::settings::models::UserSecretsModel>()
-                                .as_env_pairs();
-                            (
-                                Some(settings),
-                                Some(approvals),
-                                Some(write_approvals),
-                                secrets,
-                            )
-                        })?;
+                    // Get execution settings, approval stores, user secrets, and theme colors for tools
+                    let (
+                        exec_settings,
+                        pending_approvals,
+                        pending_write_approvals,
+                        user_secrets,
+                        theme_colors,
+                    ) = cx.update(|cx| {
+                        let settings = cx
+                            .global::<crate::settings::models::ExecutionSettingsModel>()
+                            .clone();
+                        let approvals = cx
+                            .global::<crate::chatty::models::ExecutionApprovalStore>()
+                            .get_pending_approvals();
+                        let write_approvals = cx
+                            .global::<crate::chatty::models::WriteApprovalStore>()
+                            .get_pending_approvals();
+                        let secrets = cx
+                            .global::<crate::settings::models::UserSecretsModel>()
+                            .as_env_pairs();
+                        let colors = extract_theme_chart_colors(cx);
+                        (
+                            Some(settings),
+                            Some(approvals),
+                            Some(write_approvals),
+                            secrets,
+                            Some(colors),
+                        )
+                    })?;
 
                     let conversation = Conversation::new(
                         conv_id.clone(),
@@ -596,6 +606,7 @@ impl ChattyApp {
                         pending_approvals,
                         pending_write_approvals,
                         user_secrets,
+                        theme_colors,
                     )
                     .await?;
 
@@ -697,12 +708,14 @@ impl ChattyApp {
                 let pending_approvals = cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|s, _| s.get_pending_approvals())?;
                 let pending_write_approvals = cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|s, _| s.get_pending_approvals())?;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
+                let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
                         match Self::restore_conversation_from_data(
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
+                            theme_colors,
                         )
                         .await
                         {
@@ -987,7 +1000,7 @@ impl ChattyApp {
                 "Rebuilding agent with fresh MCP tools"
             );
 
-            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets) = cx
+            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets, theme_colors) = cx
                 .update(|cx| {
                     let settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -1020,7 +1033,8 @@ impl ChattyApp {
                     let secrets = cx
                         .global::<crate::settings::models::UserSecretsModel>()
                         .as_env_pairs();
-                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session, secrets)
+                    let colors = extract_theme_chart_colors(cx);
+                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session, secrets, Some(colors))
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -1035,6 +1049,7 @@ impl ChattyApp {
                 pending_artifacts,
                 shell_session,
                 user_secrets,
+                theme_colors,
             )
             .await?;
 
@@ -1114,6 +1129,7 @@ impl ChattyApp {
                             pending_artifacts,
                             shell_session,
                             user_secrets,
+                            theme_colors,
                         ) = cx
                             .update(|cx| {
                                 let settings = cx
@@ -1132,6 +1148,7 @@ impl ChattyApp {
                                 let secrets = cx
                                     .global::<crate::settings::models::UserSecretsModel>()
                                     .as_env_pairs();
+                                let colors = extract_theme_chart_colors(cx);
                                 (
                                     Some(settings),
                                     Some(approvals),
@@ -1139,6 +1156,7 @@ impl ChattyApp {
                                     artifacts,
                                     session,
                                     secrets,
+                                    Some(colors),
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1155,6 +1173,7 @@ impl ChattyApp {
                                 pending_artifacts,
                                 shell_session,
                                 user_secrets,
+                                theme_colors,
                             )
                             .await?;
 
@@ -2651,6 +2670,29 @@ impl ChattyApp {
 
 /// Serialize a `Conversation` into a `ConversationData` snapshot suitable for persistence
 /// or export. Returns `None` if history or traces cannot be serialized.
+/// Extract the current theme's chart colors as hex strings.
+///
+/// These are captured at agent-creation time so that charts saved to disk by the
+/// `create_chart` tool match the inline chart appearance in the app.
+fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
+    [
+        cx.theme().chart_1,
+        cx.theme().chart_2,
+        cx.theme().chart_3,
+        cx.theme().chart_4,
+        cx.theme().chart_5,
+    ]
+    .map(|c| {
+        let r = c.to_rgb();
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            (r.r * 255.0) as u8,
+            (r.g * 255.0) as u8,
+            (r.b * 255.0) as u8
+        )
+    })
+}
+
 ///
 /// Sets `updated_at` to the current time; all other timestamps are taken from the
 /// conversation itself.
