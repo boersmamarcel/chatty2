@@ -1,3 +1,4 @@
+use super::path_utils::resolve_output_path;
 use crate::chatty::services::typst_compiler_service::TypstCompilerService;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -99,8 +100,8 @@ impl Tool for CompileTypstTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Resolve output path (same logic as chart_tool.rs)
-        let resolved = resolve_path(&args.output_path, self.workspace_dir.as_deref())
+        // Resolve output path using the shared path utility (same rules as chart_tool).
+        let resolved = resolve_output_path(&args.output_path, self.workspace_dir.as_deref())
             .map_err(TypstToolError::Error)?;
 
         // Ensure parent directory exists
@@ -132,57 +133,6 @@ impl Tool for CompileTypstTool {
             saved_path: resolved.to_string_lossy().into_owned(),
             page_count,
         })
-    }
-}
-
-/// Normalize a path by resolving `.` and `..` components without filesystem access.
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                components.pop();
-            }
-            std::path::Component::CurDir => {}
-            c => components.push(c),
-        }
-    }
-    components.iter().collect()
-}
-
-/// Resolve a path against workspace_dir, expanding `~` and relative paths.
-///
-/// Relative paths are normalized and bounds-checked against the workspace to
-/// prevent directory traversal attacks (e.g. `../../sensitive/file.pdf`).
-fn resolve_path(path: &str, workspace_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-
-    if path.starts_with("~/") || path == "~" {
-        Ok(normalize_path(&home.join(&path[2..])))
-    } else {
-        let p = std::path::Path::new(path);
-        if p.is_absolute() {
-            Ok(normalize_path(p))
-        } else {
-            // Relative path: resolve against workspace_dir (or home as fallback)
-            let base = workspace_dir
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| home.clone());
-            let resolved = normalize_path(&base.join(p));
-
-            // Bounds-check: ensure the resolved path stays within the workspace
-            if let Some(workspace) = workspace_dir {
-                let workspace_norm = normalize_path(std::path::Path::new(workspace));
-                if !resolved.starts_with(&workspace_norm) {
-                    return Err(format!(
-                        "Output path '{}' resolves outside the workspace directory",
-                        path
-                    ));
-                }
-            }
-
-            Ok(resolved)
-        }
     }
 }
 
@@ -256,36 +206,5 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_resolve_path_absolute() {
-        let resolved = resolve_path("/tmp/report.pdf", None).unwrap();
-        assert_eq!(resolved, std::path::PathBuf::from("/tmp/report.pdf"));
-    }
-
-    #[test]
-    fn test_resolve_path_relative_with_workspace() {
-        let resolved = resolve_path("report.pdf", Some("/workspace")).unwrap();
-        assert_eq!(resolved, std::path::PathBuf::from("/workspace/report.pdf"));
-    }
-
-    #[test]
-    fn test_resolve_path_traversal_blocked() {
-        // Relative path with `..` must not escape the workspace
-        let result = resolve_path("../../etc/passwd", Some("/workspace/project"));
-        assert!(result.is_err(), "traversal should be blocked");
-        let err = result.unwrap_err();
-        assert!(err.contains("resolves outside the workspace"));
-    }
-
-    #[test]
-    fn test_resolve_path_nested_relative_allowed() {
-        // Safe relative paths inside workspace still work
-        let resolved = resolve_path("subdir/report.pdf", Some("/workspace")).unwrap();
-        assert_eq!(
-            resolved,
-            std::path::PathBuf::from("/workspace/subdir/report.pdf")
-        );
     }
 }

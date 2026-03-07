@@ -293,21 +293,6 @@ impl Tool for CreateChartTool {
     }
 }
 
-/// Normalize a path by resolving `.` and `..` components without filesystem access.
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                components.pop();
-            }
-            std::path::Component::CurDir => {}
-            c => components.push(c),
-        }
-    }
-    components.iter().collect()
-}
-
 /// Render `spec` to a PNG file at `save_path`.
 ///
 /// Uses the default palette (no theme colors available in the tool layer).
@@ -329,39 +314,7 @@ fn save_chart_png(
     let colors: [String; 5] = DEFAULT_CHART_COLORS.map(str::to_owned);
     let svg = render_chart_svg(spec, &colors);
 
-    // Expand `~` and resolve relative paths
-    let resolved: std::path::PathBuf = {
-        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-
-        if save_path.starts_with("~/") || save_path == "~" {
-            normalize_path(&home.join(&save_path[2..]))
-        } else {
-            let p = std::path::Path::new(save_path);
-            if p.is_absolute() {
-                normalize_path(p)
-            } else {
-                // Relative path: prefer workspace_dir, fall back to home
-                let base = workspace_dir
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| home.clone());
-                let resolved = normalize_path(&base.join(p));
-
-                // Bounds-check: ensure the resolved path stays within the workspace
-                if let Some(workspace) = workspace_dir {
-                    let workspace_norm = normalize_path(std::path::Path::new(workspace));
-                    if !resolved.starts_with(&workspace_norm) {
-                        return Err(format!(
-                            "Save path '{}' resolves outside the workspace directory",
-                            save_path
-                        ));
-                    }
-                }
-
-                resolved
-            }
-        }
-    };
-
+    let resolved = super::path_utils::resolve_output_path(save_path, workspace_dir)?;
     let path = resolved.as_path();
 
     // Ensure parent directory exists

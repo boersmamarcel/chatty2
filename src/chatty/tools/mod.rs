@@ -11,6 +11,7 @@ pub mod filesystem_write_tool;
 pub mod git_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
+mod path_utils;
 pub mod pdf_extract_text_tool;
 pub mod pdf_info_tool;
 pub mod pdf_to_image_tool;
