@@ -370,6 +370,7 @@ impl AgentClient {
         pending_artifacts: Option<PendingArtifacts>,
         shell_session: Option<std::sync::Arc<ShellSession>>,
         user_secrets: Vec<(String, String)>,
+        theme_colors: Option<[String; 5]>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -749,8 +750,10 @@ impl AgentClient {
 
         // Chart tool is always available (no service dependencies).
         // Pass workspace_dir so relative save_path values resolve correctly.
+        // Pass theme_colors so saved PNG files match the inline chart appearance.
         let chart_tool: Option<CreateChartTool> = Some(CreateChartTool::new(
             exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
+            theme_colors,
         ));
 
         // Typst compile tool - gated on filesystem_write_enabled (writes PDF files to disk).

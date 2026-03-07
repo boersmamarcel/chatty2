@@ -39,9 +39,15 @@ fn sandboxed_connection(workspace_root: &str) -> Result<Connection, DataQueryErr
     let conn = Connection::open_in_memory()
         .map_err(|e| DataQueryError::QueryFailed(format!("Failed to open DuckDB: {}", e)))?;
 
-    // Disable network/external access
-    conn.execute_batch("SET enable_external_access = false;")
-        .map_err(|e| DataQueryError::QueryFailed(format!("Failed to configure sandbox: {}", e)))?;
+    // Block extension auto-downloading without disabling local filesystem access.
+    // `enable_external_access = false` would also block reading local files, so we use
+    // more granular settings instead.
+    conn.execute_batch(
+        "SET autoinstall_known_extensions = false;
+         SET autoload_known_extensions = false;
+         SET allow_community_extensions = false;",
+    )
+    .map_err(|e| DataQueryError::QueryFailed(format!("Failed to configure sandbox: {}", e)))?;
 
     // Set working directory so relative paths resolve within workspace
     conn.execute_batch(&format!(
@@ -61,19 +67,39 @@ fn results_to_markdown(
     sql: &str,
     max_rows: u32,
 ) -> Result<(String, Vec<ColumnInfo>, usize, bool), DataQueryError> {
+    // Use DESCRIBE to get column metadata before executing the query.
+    // Calling column_type() before query() panics for dynamic queries like
+    // SELECT * FROM read_parquet(...) because DuckDB needs to scan the file
+    // to determine the schema.
+    let describe_sql = format!("DESCRIBE ({})", sql);
+    let columns: Vec<ColumnInfo> = {
+        let mut stmt = conn
+            .prepare(&describe_sql)
+            .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
+        let rows = stmt
+            .query([])
+            .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
+        let mut row_iter = rows;
+        let mut cols = Vec::new();
+        loop {
+            match row_iter.next() {
+                Ok(Some(row)) => {
+                    let name: String = row.get(0).unwrap_or_default();
+                    let data_type: String = row.get(1).unwrap_or_default();
+                    cols.push(ColumnInfo { name, data_type });
+                }
+                Ok(None) => break,
+                Err(e) => return Err(DataQueryError::QueryFailed(e.to_string())),
+            }
+        }
+        cols
+    };
+
+    let column_count = columns.len();
+
     let mut stmt = conn
         .prepare(sql)
         .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
-
-    let column_count = stmt.column_count();
-    let columns: Vec<ColumnInfo> = (0..column_count)
-        .map(|i| ColumnInfo {
-            name: stmt
-                .column_name(i)
-                .map_or("?".to_string(), |v| v.to_string()),
-            data_type: format!("{:?}", stmt.column_type(i)),
-        })
-        .collect();
 
     let mut rows_data: Vec<Vec<String>> = Vec::new();
     // Fetch max_rows + 1 to detect truncation
@@ -248,13 +274,17 @@ impl Tool for QueryDataTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let max_rows = args.max_rows.unwrap_or(100).min(10000);
         let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
+        let query = args.query.clone();
 
         info!(query = %args.query, max_rows, "Executing data query");
 
-        let conn = sandboxed_connection(&workspace_root)?;
-
         let (markdown_table, columns, row_count, truncated) =
-            results_to_markdown(&conn, &args.query, max_rows)?;
+            tokio::task::spawn_blocking(move || {
+                let conn = sandboxed_connection(&workspace_root)?;
+                results_to_markdown(&conn, &query, max_rows)
+            })
+            .await
+            .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
 
         let note = if truncated {
             Some(format!(
@@ -383,78 +413,69 @@ impl Tool for DescribeDataTool {
         };
 
         let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
-        let conn = sandboxed_connection(&workspace_root)?;
-
-        let file_path_str = canonical.to_string_lossy();
-
-        // Get schema via DESCRIBE
-        let describe_sql = match format {
-            "parquet" => format!(
-                "DESCRIBE SELECT * FROM read_parquet('{}')",
-                file_path_str.replace('\'', "''")
-            ),
-            "csv" => format!(
-                "DESCRIBE SELECT * FROM read_csv('{}')",
-                file_path_str.replace('\'', "''")
-            ),
-            "json" => format!(
-                "DESCRIBE SELECT * FROM read_json_auto('{}')",
-                file_path_str.replace('\'', "''")
-            ),
-            _ => unreachable!(),
-        };
-
-        let mut columns = Vec::new();
-        {
-            let mut stmt = conn
-                .prepare(&describe_sql)
-                .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
-            let rows = stmt
-                .query([])
-                .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
-            let mut row_iter = rows;
-            loop {
-                match row_iter.next() {
-                    Ok(Some(row)) => {
-                        let name: String = row.get(0).unwrap_or_default();
-                        let data_type: String = row.get(1).unwrap_or_default();
-                        columns.push(ColumnInfo { name, data_type });
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!(error = ?e, "Error reading DESCRIBE result");
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Get row count
-        let count_sql = match format {
-            "parquet" => format!(
-                "SELECT COUNT(*) FROM read_parquet('{}')",
-                file_path_str.replace('\'', "''")
-            ),
-            "csv" => format!(
-                "SELECT COUNT(*) FROM read_csv('{}')",
-                file_path_str.replace('\'', "''")
-            ),
-            "json" => format!(
-                "SELECT COUNT(*) FROM read_json_auto('{}')",
-                file_path_str.replace('\'', "''")
-            ),
-            _ => unreachable!(),
-        };
-
-        let row_count: u64 = conn
-            .query_row(&count_sql, [], |row| row.get(0))
-            .unwrap_or(0);
+        let file_path_owned = canonical.to_string_lossy().to_string();
+        let format_owned = format.to_string();
 
         let file_name = canonical
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(&args.path)
             .to_string();
+
+        let (columns, row_count) = tokio::task::spawn_blocking(move || {
+            let conn = sandboxed_connection(&workspace_root)?;
+
+            let escaped = file_path_owned.replace('\'', "''");
+
+            // Get schema via DESCRIBE
+            let describe_sql = match format_owned.as_str() {
+                "parquet" => format!("DESCRIBE SELECT * FROM read_parquet('{}')", escaped),
+                "csv" => format!("DESCRIBE SELECT * FROM read_csv('{}')", escaped),
+                "json" => format!("DESCRIBE SELECT * FROM read_json_auto('{}')", escaped),
+                _ => unreachable!(),
+            };
+
+            let mut columns = Vec::new();
+            {
+                let mut stmt = conn
+                    .prepare(&describe_sql)
+                    .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
+                let rows = stmt
+                    .query([])
+                    .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
+                let mut row_iter = rows;
+                loop {
+                    match row_iter.next() {
+                        Ok(Some(row)) => {
+                            let name: String = row.get(0).unwrap_or_default();
+                            let data_type: String = row.get(1).unwrap_or_default();
+                            columns.push(ColumnInfo { name, data_type });
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!(error = ?e, "Error reading DESCRIBE result");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Get row count
+            let count_sql = match format_owned.as_str() {
+                "parquet" => format!("SELECT COUNT(*) FROM read_parquet('{}')", escaped),
+                "csv" => format!("SELECT COUNT(*) FROM read_csv('{}')", escaped),
+                "json" => format!("SELECT COUNT(*) FROM read_json_auto('{}')", escaped),
+                _ => unreachable!(),
+            };
+
+            let row_count: u64 = conn
+                .query_row(&count_sql, [], |row| row.get(0))
+                .unwrap_or(0);
+
+            Ok::<_, DataQueryError>((columns, row_count))
+        })
+        .await
+        .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
 
         info!(
             file = %file_name,
