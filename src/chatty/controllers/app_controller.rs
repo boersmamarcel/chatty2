@@ -1237,8 +1237,6 @@ impl ChattyApp {
             } else {
                 error!("Model not found");
             }
-        } else {
-            error!("No active conversation");
         }
     }
 

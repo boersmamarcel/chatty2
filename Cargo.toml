@@ -1,6 +1,6 @@
 [package]
 name = "chatty"
-version = "0.1.78"
+version = "0.1.81"
 edition = "2024"
 
 [dependencies]
@@ -66,6 +66,7 @@ duckdb = { version = "1.4", features = ["bundled"] }
 # Math rendering with Typst
 typst = "0.14.2"
 typst-svg = "0.14.2"
+typst-pdf = "0.14.2"
 mitex = "0.2"
 typst-assets = { version = "0.14.2", features = ["fonts"] }
 comemo = "0.4"

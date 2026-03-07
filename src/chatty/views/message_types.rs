@@ -268,6 +268,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "move_file" => "Moving file".to_string(),
         "apply_diff" => "Applying diff".to_string(),
         "shell_execute" => "Running command".to_string(),
+        "create_chart" => "Creating chart".to_string(),
         other => other.to_string(),
     }
 }

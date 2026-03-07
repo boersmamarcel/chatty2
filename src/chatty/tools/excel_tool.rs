@@ -893,7 +893,7 @@ impl Tool for EditExcelTool {
                                 },
                                 "sheet": { "type": "string", "description": "Target sheet name" },
                                 "cell": { "type": "string", "description": "Cell reference (for set_cell, set_formula)" },
-                                "value": { "description": "Cell value (for set_cell)" },
+                                "value": { "type": "string", "description": "Cell value (for set_cell). Numbers and booleans will be parsed automatically." },
                                 "start_cell": { "type": "string", "description": "Starting cell for set_range" },
                                 "data": {
                                     "type": "array",

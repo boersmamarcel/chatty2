@@ -1,5 +1,6 @@
 pub mod add_attachment_tool;
 pub mod add_mcp_tool;
+pub mod chart_tool;
 pub mod data_query_tool;
 pub mod delete_mcp_tool;
 pub mod edit_mcp_tool;
@@ -11,6 +12,7 @@ pub mod filesystem_write_tool;
 pub mod git_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
+mod path_utils;
 pub mod pdf_extract_text_tool;
 pub mod pdf_info_tool;
 pub mod pdf_to_image_tool;
@@ -18,9 +20,11 @@ pub mod search_tool;
 pub mod shell_tool;
 #[cfg(test)]
 pub mod test_helpers;
+pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use add_mcp_tool::AddMcpTool;
+pub use chart_tool::CreateChartTool;
 pub use data_query_tool::{DescribeDataTool, QueryDataTool};
 pub use delete_mcp_tool::DeleteMcpTool;
 pub use edit_mcp_tool::EditMcpTool;
@@ -41,3 +45,4 @@ pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
+pub use typst_tool::CompileTypstTool;

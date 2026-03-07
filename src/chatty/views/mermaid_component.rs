@@ -25,7 +25,7 @@ const MERMAID_MAX_HEIGHT: f32 = 600.0;
 /// another application reads the data. Returns `true` if a tool was found and
 /// launched successfully.
 #[cfg(target_os = "linux")]
-fn copy_png_to_linux_clipboard(png_bytes: &[u8]) -> bool {
+pub(super) fn copy_png_to_linux_clipboard(png_bytes: &[u8]) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
 

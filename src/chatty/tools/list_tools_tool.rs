@@ -57,6 +57,7 @@ impl ListToolsTool {
         has_pdf_info: bool,
         has_pdf_extract_text: bool,
         has_data_query: bool,
+        has_compile_typst: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -313,6 +314,14 @@ impl ListToolsTool {
             ]);
         }
 
+        if has_compile_typst {
+            native_tools.push(ToolInfo {
+                name: "compile_typst".to_string(),
+                description: "Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -331,6 +340,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,
