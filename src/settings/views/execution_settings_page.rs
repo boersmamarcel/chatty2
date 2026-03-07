@@ -76,6 +76,20 @@ pub fn execution_settings_page() -> SettingPage {
                          (commit, branch) require user confirmation.",
                     ),
                     SettingItem::new(
+                        "Enable Docker Code Execution",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().docker_code_execution_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_docker_code_execution(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Execute code in isolated Docker containers. Supports Python, JavaScript, \
+                         TypeScript, Rust, and Bash. Requires Docker to be installed and running.",
+                    ),
+                    SettingItem::new(
                         "Approval Mode",
                         SettingField::render(|_options, _window, cx| {
                             let current_mode = cx.global::<ExecutionSettingsModel>().approval_mode.clone();

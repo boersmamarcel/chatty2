@@ -41,6 +41,10 @@ pub struct ExecutionSettingsModel {
     /// Requires workspace_dir to be set and the workspace to be a git repository.
     #[serde(default)]
     pub git_enabled: bool,
+    /// Enable Docker-based code execution sandbox.
+    /// Requires Docker to be installed and running on the host.
+    #[serde(default)]
+    pub docker_code_execution_enabled: bool,
     /// Maximum execution time in seconds
     pub timeout_seconds: u32,
     /// Maximum output size in bytes (prevents memory exhaustion)
@@ -71,6 +75,7 @@ impl Default for ExecutionSettingsModel {
             mcp_service_tool_enabled: false,
             fetch_enabled: true, // Enabled by default for zero-config web access
             git_enabled: false,  // Opt-in: requires workspace with git repo
+            docker_code_execution_enabled: false, // Opt-in: requires Docker
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
