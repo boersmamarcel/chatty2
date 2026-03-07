@@ -24,9 +24,9 @@ impl RenderOnce for NetworkIndicatorView {
             rgb(0x3B82F6) // Blue-500
         };
         let tooltip = if network_isolation {
-            "Sandbox: network blocked for shell commands (click to allow)"
+            "Sandbox: network blocked for shell & Docker (click to allow)"
         } else {
-            "Sandbox: network allowed for shell commands (click to block)"
+            "Sandbox: network allowed for shell & Docker (click to block)"
         };
 
         div()

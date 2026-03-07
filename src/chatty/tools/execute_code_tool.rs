@@ -22,6 +22,10 @@ pub struct ExecuteCodeArgs {
     pub language: String,
     /// The code to execute
     pub code: String,
+    /// Optional container port to publish to the host (e.g. 8080 for a web server).
+    /// When set, the container's port is bound to a random localhost port.
+    /// The actual host port is returned in port_mappings.
+    pub expose_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,6 +34,9 @@ pub struct ExecuteCodeOutput {
     pub stderr: String,
     pub exit_code: i64,
     pub timed_out: bool,
+    /// Published port mappings: container_port → host_port.
+    /// When a web server is running, tell the user to connect to http://localhost:<host_port>
+    pub port_mappings: std::collections::HashMap<u16, u16>,
 }
 
 // ── Tool ─────────────────────────────────────────────────────────────────────
@@ -59,7 +66,7 @@ impl Tool for ExecuteCodeTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         serde_json::from_value(serde_json::json!({
             "name": "execute_code",
-            "description": "Execute code in an isolated Docker sandbox. Supported languages: python, javascript, typescript, rust, bash. The sandbox preserves state (variables, installed packages) throughout the conversation. No network access.",
+            "description": "Execute code in an isolated Docker sandbox. Supported languages: python, javascript, typescript, rust, bash. The sandbox preserves state (variables, installed packages) throughout the conversation. To start a web server the user can access, set expose_port to the port your server listens on (e.g. 8080). The actual host port is returned in port_mappings — tell the user to open http://localhost:<host_port>.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -71,6 +78,10 @@ impl Tool for ExecuteCodeTool {
                     "code": {
                         "type": "string",
                         "description": "The code to execute"
+                    },
+                    "expose_port": {
+                        "type": "integer",
+                        "description": "Optional container port to publish to the host. Use when starting a web server so the user can access it. The mapped host port is returned in port_mappings."
                     }
                 },
                 "required": ["language", "code"]
@@ -81,13 +92,17 @@ impl Tool for ExecuteCodeTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let language = Language::parse(&args.language);
-        let result = self.manager.execute(&args.code, &language).await?;
+        let result = self
+            .manager
+            .execute(&args.code, &language, args.expose_port)
+            .await?;
 
         Ok(ExecuteCodeOutput {
             stdout: result.stdout,
             stderr: result.stderr,
             exit_code: result.exit_code,
             timed_out: result.timed_out,
+            port_mappings: result.port_mappings,
         })
     }
 }

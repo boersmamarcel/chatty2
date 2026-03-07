@@ -787,7 +787,11 @@ impl AgentClient {
                     .as_ref()
                     .map(|s| s.timeout_seconds as u64)
                     .unwrap_or(30),
-                network: false,
+                network: !exec_settings
+                    .as_ref()
+                    .map(|s| s.network_isolation)
+                    .unwrap_or(true),
+                workspace_path: exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
                 ..SandboxConfig::default()
             };
             let manager = std::sync::Arc::new(SandboxManager::new(sandbox_config));

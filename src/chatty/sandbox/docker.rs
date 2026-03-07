@@ -7,7 +7,7 @@ use bollard::container::{
 };
 use bollard::exec::CreateExecOptions;
 use bollard::image::CreateImageOptions;
-use bollard::models::HostConfig;
+use bollard::models::{HostConfig, PortBinding};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -21,6 +21,8 @@ pub struct DockerSandbox {
     docker: Docker,
     container_id: String,
     config: SandboxConfig,
+    /// Actual host ports mapped from the container (container_port → host_port)
+    port_mappings: HashMap<u16, u16>,
 }
 
 impl DockerSandbox {
@@ -33,8 +35,58 @@ impl DockerSandbox {
 
         let container_name = format!("chatty-sandbox-{}", Uuid::new_v4());
 
+        let binds = config
+            .workspace_path
+            .as_ref()
+            .map(|p| vec![format!("{}:/workspace", p)]);
+
+        let (working_dir, home) = if config.workspace_path.is_some() {
+            ("/workspace".to_string(), "/tmp".to_string())
+        } else {
+            ("/tmp".to_string(), "/tmp".to_string())
+        };
+
+        // When ports are exposed we need bridge networking; otherwise disable networking entirely.
+        let needs_network = config.network || !config.expose_ports.is_empty();
+
+        // Build port bindings: publish each requested container port to a random host port.
+        let port_bindings: Option<HashMap<String, Option<Vec<PortBinding>>>> =
+            if config.expose_ports.is_empty() {
+                None
+            } else {
+                Some(
+                    config
+                        .expose_ports
+                        .iter()
+                        .map(|&p| {
+                            (
+                                format!("{}/tcp", p),
+                                Some(vec![PortBinding {
+                                    host_ip: Some("127.0.0.1".to_string()),
+                                    host_port: Some(String::new()), // "" = auto-assign
+                                }]),
+                            )
+                        })
+                        .collect(),
+                )
+            };
+
+        // Expose the ports in the container config (required alongside port_bindings).
+        let exposed_ports: Option<HashMap<String, HashMap<(), ()>>> =
+            if config.expose_ports.is_empty() {
+                None
+            } else {
+                Some(
+                    config
+                        .expose_ports
+                        .iter()
+                        .map(|&p| (format!("{}/tcp", p), HashMap::new()))
+                        .collect(),
+                )
+            };
+
         let host_config = HostConfig {
-            network_mode: if config.network {
+            network_mode: if needs_network {
                 None
             } else {
                 Some("none".to_string())
@@ -42,8 +94,10 @@ impl DockerSandbox {
             readonly_rootfs: Some(true),
             tmpfs: Some(HashMap::from([(
                 "/tmp".to_string(),
-                "size=256m,noexec=off".to_string(),
+                "size=256m,exec".to_string(),
             )])),
+            binds,
+            port_bindings,
             memory: Some((config.memory_mb * 1024 * 1024) as i64),
             cpu_quota: Some(config.cpu_quota),
             pids_limit: Some(64),
@@ -55,11 +109,12 @@ impl DockerSandbox {
         let container_config = Config {
             image: Some(config.language.docker_image().to_string()),
             cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
-            working_dir: Some("/tmp".to_string()),
-            network_disabled: Some(!config.network),
+            working_dir: Some(working_dir),
+            network_disabled: Some(!needs_network),
+            exposed_ports,
             host_config: Some(host_config),
             env: Some(vec![
-                "HOME=/tmp".to_string(),
+                format!("HOME={}", home),
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
             ]),
             ..Default::default()
@@ -81,10 +136,43 @@ impl DockerSandbox {
             .await
             .context("Failed to start container")?;
 
+        // Inspect the container to discover the actual host ports Docker assigned.
+        let port_mappings = if config.expose_ports.is_empty() {
+            HashMap::new()
+        } else {
+            let info = docker
+                .inspect_container(&container.id, None)
+                .await
+                .context("Failed to inspect container for port mappings")?;
+
+            info.network_settings
+                .and_then(|ns| ns.ports)
+                .map(|ports| {
+                    let mut mappings = HashMap::new();
+                    for (key, bindings) in ports {
+                        // key is like "8080/tcp"
+                        if let Some(container_port) =
+                            key.split('/').next().and_then(|p| p.parse::<u16>().ok())
+                            && let Some(Some(binding_list)) = bindings
+                                .as_ref()
+                                .map(|b| if b.is_empty() { None } else { Some(b) })
+                            && let Some(host_port_str) =
+                                binding_list.first().and_then(|b| b.host_port.as_deref())
+                            && let Ok(host_port) = host_port_str.parse::<u16>()
+                        {
+                            mappings.insert(container_port, host_port);
+                        }
+                    }
+                    mappings
+                })
+                .unwrap_or_default()
+        };
+
         Ok(Self {
             docker,
             container_id: container.id,
             config,
+            port_mappings,
         })
     }
 
@@ -184,6 +272,7 @@ impl DockerSandbox {
                 stderr,
                 exit_code,
                 timed_out: false,
+                port_mappings: HashMap::new(), // filled in by caller
             })
         };
 
@@ -194,6 +283,7 @@ impl DockerSandbox {
                 stderr: "Execution timeout exceeded.".to_string(),
                 exit_code: -1,
                 timed_out: true,
+                port_mappings: HashMap::new(),
             }),
         }
     }
@@ -204,7 +294,9 @@ impl SandboxBackend for DockerSandbox {
     async fn execute(&self, code: &str, language: &Language) -> Result<ExecutionResult> {
         let filename = self.write_code_file(code, language).await?;
         let cmd = language.run_command(&filename);
-        self.run_exec(cmd, self.config.timeout_secs).await
+        let mut result = self.run_exec(cmd, self.config.timeout_secs).await?;
+        result.port_mappings = self.port_mappings.clone();
+        Ok(result)
     }
 
     async fn destroy(self: Box<Self>) -> Result<()> {
@@ -219,6 +311,10 @@ impl SandboxBackend for DockerSandbox {
             .await
             .context("Failed to remove container")?;
         Ok(())
+    }
+
+    fn has_port_exposed(&self, port: u16) -> bool {
+        self.config.expose_ports.contains(&port)
     }
 
     async fn is_available() -> Result<bool> {

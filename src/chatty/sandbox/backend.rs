@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Result of executing code in a sandbox container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,6 +10,9 @@ pub struct ExecutionResult {
     pub stderr: String,
     pub exit_code: i64,
     pub timed_out: bool,
+    /// Exposed port mappings: container_port → host_port (populated when ports are published)
+    #[serde(default)]
+    pub port_mappings: HashMap<u16, u16>,
 }
 
 /// Configuration for a sandbox container.
@@ -23,6 +27,10 @@ pub struct SandboxConfig {
     pub timeout_secs: u64,
     /// Whether network access is allowed (default: false)
     pub network: bool,
+    /// Host path to mount at /workspace inside the container (default: None)
+    pub workspace_path: Option<String>,
+    /// Container ports to publish to the host (default: empty = no ports published)
+    pub expose_ports: Vec<u16>,
 }
 
 impl Default for SandboxConfig {
@@ -33,12 +41,14 @@ impl Default for SandboxConfig {
             cpu_quota: 50000,
             timeout_secs: 30,
             network: false,
+            workspace_path: None,
+            expose_ports: vec![],
         }
     }
 }
 
 /// Supported programming languages for sandbox execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Language {
     Python,
     JavaScript,
@@ -106,8 +116,10 @@ pub trait SandboxBackend: Send + Sync {
     async fn execute(&self, code: &str, language: &Language) -> Result<ExecutionResult>;
 
     /// Destroy the sandbox and remove its container.
-    #[allow(dead_code)]
     async fn destroy(self: Box<Self>) -> Result<()>;
+
+    /// Returns true if the given container port is published to the host.
+    fn has_port_exposed(&self, port: u16) -> bool;
 
     /// Health check — is the backend available?
     #[allow(dead_code)]
