@@ -28,7 +28,7 @@ impl FullWorld {
         let library = LazyHash::new(Library::builder().build());
 
         let fonts = typst_assets::fonts()
-            .map(|data| Font::new(Bytes::new(data), 0).unwrap())
+            .filter_map(|data| Font::new(Bytes::new(data), 0))
             .collect::<Vec<_>>();
 
         let book = LazyHash::new(FontBook::from_fonts(fonts.iter()));
