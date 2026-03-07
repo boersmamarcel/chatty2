@@ -165,6 +165,7 @@ Enable auto-export in **Settings > Training Data**.
 
 - **Extended thinking** blocks for models that emit chain-of-thought reasoning via `<thinking>`, `<think>`, or `<thought>` tags — rendered as collapsible blocks instead of raw text
 - **Tool call traces** showing input, output, duration, and status
+- **Visual diff view** for `apply_diff` tool calls — additions shown in green, deletions in red, with context lines around each change. Long runs of unchanged lines collapse automatically; large diffs show a preview with an expandable "Show N more lines" button
 - Collapsible so they don't clutter the conversation
 
 ### Themes
