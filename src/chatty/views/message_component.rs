@@ -3,7 +3,7 @@ use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
 use crate::chatty::services::MermaidRendererService;
 use crate::chatty::services::chart_svg_renderer;
-use crate::chatty::tools::chart_tool::{CandlestickDataPoint, ChartSpec};
+use crate::chatty::tools::chart_tool::{CandlestickDataPoint, ChartSpec, SeriesData};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -898,6 +898,12 @@ struct IndexedDataPoint {
     color_index: usize,
 }
 
+/// A multi-series data point: one label with one value per series (aligned by index).
+struct MultiSeriesPoint {
+    label: String,
+    values: Vec<f64>,
+}
+
 /// Build a "Copy as PNG" button for a chart.
 ///
 /// Generates an SVG from the chart spec, converts to PNG via resvg,
@@ -948,6 +954,56 @@ fn build_chart_copy_png_button(
         // Clean up temp file
         let _ = std::fs::remove_file(&tmp_path);
     })
+}
+
+/// Build a `Vec<MultiSeriesPoint>` aligned by index across all series.
+/// All series are assumed to share the same x-axis labels in the same order.
+fn build_multi_series_points(series: &[SeriesData]) -> Vec<MultiSeriesPoint> {
+    if series.is_empty() {
+        return vec![];
+    }
+    let n = series[0].data.len();
+    (0..n)
+        .map(|i| MultiSeriesPoint {
+            label: series[0].data[i].label.clone(),
+            values: series
+                .iter()
+                .map(|s| s.data.get(i).map(|d| d.value).unwrap_or(0.0))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Render a colored legend row for multi-series charts.
+/// `series_meta` is a list of (name, color_index) pairs.
+fn render_series_legend(
+    series_meta: &[(String, usize)],
+    chart_colors: &[gpui::Hsla; 5],
+    cx: &App,
+) -> impl gpui::IntoElement {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_x_4()
+        .gap_y_1()
+        .mt_2()
+        .pt_2()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .children(series_meta.iter().map(|(name, color_idx)| {
+            let color = chart_colors[color_idx % 5];
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().w(px(10.0)).h(px(10.0)).rounded_sm().bg(color))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().foreground)
+                        .child(name.clone()),
+                )
+        }))
 }
 
 /// Render a chart inline from the validated ChartSpec.
@@ -1043,57 +1099,101 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
             );
         }
         "line" => {
-            let stroke_color = chart_colors[0];
-            // Build value labels row before moving indexed_data into the chart
-            let value_labels: Vec<(String, f64)> = indexed_data
-                .iter()
-                .map(|d| (d.label.clone(), d.value))
-                .collect();
-            chart_container = chart_container
-                .child(
-                    div().h(px(250.0)).child(
-                        LineChart::new(indexed_data)
-                            .x(|d| SharedString::from(d.label.clone()))
-                            .y(|d| d.value)
-                            .stroke(stroke_color)
-                            .natural()
-                            .dot(),
-                    ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_x_4()
-                        .gap_y_1()
-                        .mt_2()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .children(value_labels.into_iter().map(|(label, value)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(stroke_color)
-                                        .child(if value.fract() == 0.0 {
-                                            format!("{}", value as i64)
-                                        } else {
-                                            format!("{:.1}", value)
-                                        }),
-                                )
-                        })),
-                );
+            let line_series = spec.series;
+            let is_multi = line_series.as_ref().is_some_and(|s| s.len() > 1);
+            if is_multi {
+                // Multi-series: use AreaChart with transparent fill (renders as pure lines)
+                let series = line_series.unwrap();
+                let series_meta: Vec<(String, usize)> = series
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.name.clone(), i))
+                    .collect();
+                let multi_points = build_multi_series_points(&series);
+                let num_series = series_meta.len();
+                let mut area_chart = AreaChart::new(multi_points)
+                    .x(|d: &MultiSeriesPoint| SharedString::from(d.label.clone()))
+                    .natural();
+                for i in 0..num_series {
+                    let color = chart_colors[i % 5];
+                    area_chart = area_chart
+                        .y(move |d: &MultiSeriesPoint| d.values[i])
+                        .stroke(color)
+                        .fill(color.opacity(0.0)); // transparent — line chart look
+                }
+                chart_container = chart_container
+                    .child(div().h(px(250.0)).child(area_chart))
+                    .child(render_series_legend(&series_meta, &chart_colors, cx));
+            } else {
+                // Single series: use LineChart (from spec.data or the single series entry)
+                let source_data = if let Some(mut s) = line_series {
+                    s.pop()
+                        .map(|sd| {
+                            sd.data
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, d)| IndexedDataPoint {
+                                    label: d.label,
+                                    value: d.value,
+                                    color_index: i,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or(indexed_data)
+                } else {
+                    indexed_data
+                };
+                let stroke_color = chart_colors[0];
+                let value_labels: Vec<(String, f64)> = source_data
+                    .iter()
+                    .map(|d| (d.label.clone(), d.value))
+                    .collect();
+                chart_container = chart_container
+                    .child(
+                        div().h(px(250.0)).child(
+                            LineChart::new(source_data)
+                                .x(|d| SharedString::from(d.label.clone()))
+                                .y(|d| d.value)
+                                .stroke(stroke_color)
+                                .natural()
+                                .dot(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x_4()
+                            .gap_y_1()
+                            .mt_2()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .children(value_labels.into_iter().map(|(label, value)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(stroke_color)
+                                            .child(if value.fract() == 0.0 {
+                                                format!("{}", value as i64)
+                                            } else {
+                                                format!("{:.1}", value)
+                                            }),
+                                    )
+                            })),
+                    );
+            }
         }
         "pie" | "donut" => {
             let is_donut = spec.chart_type == "donut";
@@ -1118,121 +1218,142 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
                 pie = pie.inner_radius(spec.inner_radius.unwrap_or(50.0));
             }
 
-            chart_container = chart_container
-                .child(div().h(px(300.0)).child(pie))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_x_4()
-                        .gap_y_1()
-                        .mt_2()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .children(legend.into_iter().map(|(label, value, color_idx)| {
-                            let color = chart_colors[color_idx % 5];
-                            let pct = if total > 0.0 {
-                                format!(" ({:.1}%)", value / total * 100.0)
-                            } else {
-                                String::new()
-                            };
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .w(px(10.0))
-                                        .h(px(10.0))
-                                        .rounded_sm()
-                                        .bg(color),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(cx.theme().foreground)
-                                        .child(format!(
-                                            "{}{}",
-                                            if value.fract() == 0.0 {
-                                                format!("{}", value as i64)
-                                            } else {
-                                                format!("{:.1}", value)
-                                            },
-                                            pct
-                                        )),
-                                )
-                        })),
-                );
-        }
-        "area" => {
-            let stroke_color = chart_colors[0];
-            let value_labels: Vec<(String, f64)> = indexed_data
-                .iter()
-                .map(|d| (d.label.clone(), d.value))
-                .collect();
-            chart_container = chart_container
-                .child(
-                    div().h(px(250.0)).child(
-                        AreaChart::new(indexed_data)
-                            .x(|d| SharedString::from(d.label.clone()))
-                            .y(|d| d.value)
-                            .stroke(stroke_color)
-                            .natural(),
-                    ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_x_4()
-                        .gap_y_1()
-                        .mt_2()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .children(value_labels.into_iter().map(|(label, value)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(stroke_color)
-                                        .child(if value.fract() == 0.0 {
+            chart_container = chart_container.child(div().h(px(300.0)).child(pie)).child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x_4()
+                    .gap_y_1()
+                    .mt_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .children(legend.into_iter().map(|(label, value, color_idx)| {
+                        let color = chart_colors[color_idx % 5];
+                        let pct = if total > 0.0 {
+                            format!(" ({:.1}%)", value / total * 100.0)
+                        } else {
+                            String::new()
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().w(px(10.0)).h(px(10.0)).rounded_sm().bg(color))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().foreground)
+                                    .child(format!(
+                                        "{}{}",
+                                        if value.fract() == 0.0 {
                                             format!("{}", value as i64)
                                         } else {
                                             format!("{:.1}", value)
-                                        }),
-                                )
-                        })),
-                );
+                                        },
+                                        pct
+                                    )),
+                            )
+                    })),
+            );
+        }
+        "area" => {
+            let area_series = spec.series;
+            let is_multi = area_series.as_ref().is_some_and(|s| s.len() > 1);
+            if is_multi {
+                // Multi-series area chart
+                let series = area_series.unwrap();
+                let series_meta: Vec<(String, usize)> = series
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.name.clone(), i))
+                    .collect();
+                let multi_points = build_multi_series_points(&series);
+                let num_series = series_meta.len();
+                let mut area_chart = AreaChart::new(multi_points)
+                    .x(|d: &MultiSeriesPoint| SharedString::from(d.label.clone()))
+                    .natural();
+                for i in 0..num_series {
+                    let color = chart_colors[i % 5];
+                    area_chart = area_chart
+                        .y(move |d: &MultiSeriesPoint| d.values[i])
+                        .stroke(color)
+                        .fill(color.opacity(0.2)); // subtle fill per series
+                }
+                chart_container = chart_container
+                    .child(div().h(px(250.0)).child(area_chart))
+                    .child(render_series_legend(&series_meta, &chart_colors, cx));
+            } else {
+                let stroke_color = chart_colors[0];
+                let value_labels: Vec<(String, f64)> = indexed_data
+                    .iter()
+                    .map(|d| (d.label.clone(), d.value))
+                    .collect();
+                chart_container = chart_container
+                    .child(
+                        div().h(px(250.0)).child(
+                            AreaChart::new(indexed_data)
+                                .x(|d| SharedString::from(d.label.clone()))
+                                .y(|d| d.value)
+                                .stroke(stroke_color)
+                                .natural(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x_4()
+                            .gap_y_1()
+                            .mt_2()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .children(value_labels.into_iter().map(|(label, value)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(stroke_color)
+                                            .child(if value.fract() == 0.0 {
+                                                format!("{}", value as i64)
+                                            } else {
+                                                format!("{:.1}", value)
+                                            }),
+                                    )
+                            })),
+                    );
+            }
         }
         "candlestick" => {
             if let Some(cs_data) = spec.candlestick_data {
-                chart_container = chart_container.child(div().h(px(280.0)).child(
-                    CandlestickChart::new(cs_data)
-                        .x(|d: &CandlestickDataPoint| SharedString::from(d.date.clone()))
-                        .open(|d: &CandlestickDataPoint| d.open)
-                        .high(|d: &CandlestickDataPoint| d.high)
-                        .low(|d: &CandlestickDataPoint| d.low)
-                        .close(|d: &CandlestickDataPoint| d.close),
-                ));
+                chart_container = chart_container.child(
+                    div().h(px(280.0)).child(
+                        CandlestickChart::new(cs_data)
+                            .x(|d: &CandlestickDataPoint| SharedString::from(d.date.clone()))
+                            .open(|d: &CandlestickDataPoint| d.open)
+                            .high(|d: &CandlestickDataPoint| d.high)
+                            .low(|d: &CandlestickDataPoint| d.low)
+                            .close(|d: &CandlestickDataPoint| d.close),
+                    ),
+                );
             } else {
                 chart_container = chart_container.child(
                     div()
