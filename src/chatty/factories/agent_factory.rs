@@ -5,6 +5,7 @@ use rig::tool::ToolDyn;
 use std::sync::OnceLock;
 
 use crate::chatty::auth::{AzureTokenCache, azure_auth};
+use crate::chatty::sandbox::{SandboxConfig, SandboxManager};
 use crate::chatty::services::filesystem_service::FileSystemService;
 use crate::chatty::services::git_service::GitService;
 use crate::chatty::services::search_service::CodeSearchService;
@@ -12,10 +13,10 @@ use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CompileTypstTool, CreateChartTool,
     CreateDirectoryTool, DeleteFileTool, DeleteMcpTool, DescribeDataTool, EditExcelTool,
-    EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool,
-    GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
-    GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool, MoveFileTool,
-    PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
+    EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool,
+    GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
+    GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
+    MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
     ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
@@ -259,6 +260,7 @@ fn collect_tools(
     data_query: Option<DataQueryTools>,
     chart_tool: Option<CreateChartTool>,
     typst_tool: Option<CompileTypstTool>,
+    execute_code_tool: Option<ExecuteCodeTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -337,6 +339,9 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = typst_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = execute_code_tool {
         tools.push(Box::new(t));
     }
     tools
@@ -770,6 +775,32 @@ impl AgentClient {
             None
         };
 
+        // Docker code execution tool - gated on docker_code_execution_enabled
+        let execute_code_tool: Option<ExecuteCodeTool> = if exec_settings
+            .as_ref()
+            .map(|s| s.docker_code_execution_enabled)
+            .unwrap_or(false)
+        {
+            tracing::info!("Docker code execution tool enabled");
+            let sandbox_config = SandboxConfig {
+                timeout_secs: exec_settings
+                    .as_ref()
+                    .map(|s| s.timeout_seconds as u64)
+                    .unwrap_or(30),
+                network: !exec_settings
+                    .as_ref()
+                    .map(|s| s.network_isolation)
+                    .unwrap_or(true),
+                workspace_path: exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
+                ..SandboxConfig::default()
+            };
+            let manager = std::sync::Arc::new(SandboxManager::new(sandbox_config));
+            Some(ExecuteCodeTool::new(manager))
+        } else {
+            tracing::info!("Docker code execution tool disabled by execution settings");
+            None
+        };
+
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             fs_read_tools.is_some(),
@@ -787,6 +818,7 @@ impl AgentClient {
             pdf_extract_text_tool.is_some(),
             data_query_tools.is_some(),
             typst_tool.is_some(),
+            execute_code_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -911,6 +943,16 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        if execute_code_tool.is_some() {
+            tool_sections.push(
+                "- **execute_code**: Execute code in an isolated Docker sandbox. \
+                 Supports python, javascript, typescript, rust, and bash. \
+                 State (variables, installed packages) persists throughout the conversation. \
+                 No network access. Use this for running code snippets, \
+                 data analysis, or verifying solutions."
+                    .to_string(),
+            );
+        }
         // Always present
         tool_sections.push(
             "- **list_tools**: Call this at any time to get the full, up-to-date list of \
@@ -1003,6 +1045,7 @@ impl AgentClient {
                     data_query_tools.clone(),
                     chart_tool.clone(),
                     typst_tool.clone(),
+                    execute_code_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1071,6 +1114,7 @@ impl AgentClient {
                     data_query_tools.clone(),
                     chart_tool.clone(),
                     typst_tool.clone(),
+                    execute_code_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1106,6 +1150,7 @@ impl AgentClient {
                     data_query_tools.clone(),
                     chart_tool.clone(),
                     typst_tool.clone(),
+                    execute_code_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1144,6 +1189,7 @@ impl AgentClient {
                     data_query_tools.clone(),
                     chart_tool.clone(),
                     typst_tool.clone(),
+                    execute_code_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1181,6 +1227,7 @@ impl AgentClient {
                     data_query_tools.clone(),
                     chart_tool.clone(),
                     typst_tool.clone(),
+                    execute_code_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1354,6 +1401,7 @@ impl AgentClient {
                     data_query_tools.clone(),
                     chart_tool.clone(),
                     typst_tool.clone(),
+                    execute_code_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);

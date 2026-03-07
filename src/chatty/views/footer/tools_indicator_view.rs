@@ -64,6 +64,7 @@ impl RenderOnce for ToolsIndicatorView {
                     let workspace_set = settings.workspace_dir.is_some();
                     let fs_read_enabled = settings.filesystem_read_enabled;
                     let fs_write_enabled = settings.filesystem_write_enabled;
+                    let docker_enabled = settings.docker_code_execution_enabled;
 
                     div()
                         .flex()
@@ -85,8 +86,10 @@ impl RenderOnce for ToolsIndicatorView {
                                 .child("Filesystem Tools"),
                         )
                         .child(div().h(px(1.0)).w_full().bg(cx.theme().border).mb_2())
-                        // Shell Execution - always toggleable
+                        // Shell Execution - always toggleable (danger!)
                         .child(render_shell_item(shell_enabled, cx))
+                        // Docker - always toggleable (danger!)
+                        .child(render_docker_item(docker_enabled, cx))
                         // Filesystem Read - toggleable only if workspace_dir is set
                         .child(render_filesystem_toggle_item(
                             "Filesystem Read",
@@ -126,7 +129,7 @@ impl RenderOnce for ToolsIndicatorView {
     }
 }
 
-/// Count enabled tool categories (0-3)
+/// Count enabled tool categories (0-4)
 fn count_enabled_categories(settings: &ExecutionSettingsModel) -> usize {
     let mut count = 0;
     if settings.enabled {
@@ -137,6 +140,9 @@ fn count_enabled_categories(settings: &ExecutionSettingsModel) -> usize {
     }
     if settings.workspace_dir.is_some() && settings.filesystem_write_enabled {
         count += 1; // Filesystem Write
+    }
+    if settings.docker_code_execution_enabled {
+        count += 1; // Docker
     }
     count
 }
@@ -154,15 +160,41 @@ fn render_shell_item(enabled: bool, _cx: &App) -> impl IntoElement {
         .px_2()
         .py_1()
         .rounded_md()
-        .child(div().text_sm().child("Shell Execution"))
+        .child(div().text_sm().child("Shell (danger!)"))
         .child(
             Button::new(button_id)
                 .xsmall()
-                .when(enabled, |btn| btn.primary())
+                .when(enabled, |btn| btn.danger())
                 .when(!enabled, |btn| btn.ghost())
                 .child(if enabled { "Enabled" } else { "Disabled" })
                 .on_click(move |_event, _window, cx| {
                     execution_settings_controller::toggle_execution(cx);
+                }),
+        )
+}
+
+/// Render the Docker code execution toggle button (danger!)
+fn render_docker_item(enabled: bool, _cx: &App) -> impl IntoElement {
+    let button_id = SharedString::from("toggle-docker");
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .child(div().text_sm().child("Docker (danger!)"))
+        .child(
+            Button::new(button_id)
+                .xsmall()
+                .when(enabled, |btn| btn.danger())
+                .when(!enabled, |btn| btn.ghost())
+                .child(if enabled { "Enabled" } else { "Disabled" })
+                .on_click(move |_event, _window, cx| {
+                    execution_settings_controller::toggle_docker_code_execution(cx);
                 }),
         )
 }
