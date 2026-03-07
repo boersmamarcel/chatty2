@@ -3,12 +3,12 @@ use crate::chatty::models::MessageFeedback;
 use crate::chatty::services::MathRendererService;
 use crate::chatty::services::MermaidRendererService;
 use crate::chatty::services::chart_svg_renderer;
-use crate::chatty::tools::chart_tool::ChartSpec;
+use crate::chatty::tools::chart_tool::{CandlestickDataPoint, ChartSpec};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::chart::{BarChart, LineChart, PieChart};
+use gpui_component::chart::{AreaChart, BarChart, CandlestickChart, LineChart, PieChart};
 use gpui_component::text::TextView;
 use gpui_component::{Icon, IconName, Sizable};
 use std::path::PathBuf;
@@ -902,7 +902,12 @@ struct IndexedDataPoint {
 ///
 /// Generates an SVG from the chart spec, converts to PNG via resvg,
 /// and copies the result to the system clipboard.
-fn build_chart_copy_png_button(spec: &ChartSpec, msg_idx: usize, tool_idx: usize) -> Button {
+fn build_chart_copy_png_button(
+    spec: &ChartSpec,
+    msg_idx: usize,
+    tool_idx: usize,
+    colors: [String; 5],
+) -> Button {
     let spec_clone = spec.clone();
     Button::new(ElementId::Name(
         format!("copy-chart-png-{msg_idx}-{tool_idx}").into(),
@@ -912,7 +917,7 @@ fn build_chart_copy_png_button(spec: &ChartSpec, msg_idx: usize, tool_idx: usize
     .icon(Icon::new(CustomIcon::Image))
     .tooltip("Copy as PNG")
     .on_click(move |_event, _window, _cx| {
-        let svg_str = chart_svg_renderer::render_chart_svg(&spec_clone);
+        let svg_str = chart_svg_renderer::render_chart_svg(&spec_clone, &colors);
 
         // Write SVG to a temp file so render_svg_to_png can read it
         let tmp_path = std::env::temp_dir().join(format!("chatty_chart_{msg_idx}_{tool_idx}.svg"));
@@ -950,8 +955,28 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
     let element_id = ElementId::Name(format!("chart-{msg_idx}-{tool_idx}").into());
     let border_color = cx.theme().border;
 
+    // Extract theme colors as hex strings for the SVG renderer
+    let theme_chart_colors = {
+        let colors = [
+            cx.theme().chart_1,
+            cx.theme().chart_2,
+            cx.theme().chart_3,
+            cx.theme().chart_4,
+            cx.theme().chart_5,
+        ];
+        colors.map(|c| {
+            let r = c.to_rgb();
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                (r.r * 255.0) as u8,
+                (r.g * 255.0) as u8,
+                (r.b * 255.0) as u8
+            )
+        })
+    };
+
     // Build copy button before we move spec.data into indexed_data
-    let copy_png_button = build_chart_copy_png_button(&spec, msg_idx, tool_idx);
+    let copy_png_button = build_chart_copy_png_button(&spec, msg_idx, tool_idx, theme_chart_colors);
 
     let mut chart_container = div()
         .id(element_id)
@@ -1006,7 +1031,14 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
                     BarChart::new(indexed_data)
                         .x(|d| SharedString::from(d.label.clone()))
                         .y(|d| d.value)
-                        .fill(move |d| chart_colors[d.color_index % 5]),
+                        .fill(move |d| chart_colors[d.color_index % 5])
+                        .label(|d| {
+                            SharedString::from(if d.value.fract() == 0.0 {
+                                format!("{}", d.value as i64)
+                            } else {
+                                format!("{:.1}", d.value)
+                            })
+                        }),
                 ),
             );
         }
@@ -1063,19 +1095,152 @@ fn render_chart(spec: ChartSpec, msg_idx: usize, tool_idx: usize, cx: &App) -> S
                         })),
                 );
         }
-        "pie" => {
-            chart_container = chart_container.child(
-                div().h(px(300.0)).child(
-                    PieChart::new(indexed_data)
-                        .value(|d| d.value as f32)
-                        .color(move |d| chart_colors[d.color_index % 5])
-                        // Workaround: gpui-component PieChart bug passes Some(0.0) for
-                        // outer_radius per-arc, overriding the bounds-computed value.
-                        // Explicitly set outer_radius = div_height * 0.4 = 300 * 0.4.
-                        .outer_radius(120.0)
-                        .pad_angle(0.03),
-                ),
-            );
+        "pie" | "donut" => {
+            let is_donut = spec.chart_type == "donut";
+            let pad_angle = spec.pad_angle.unwrap_or(0.03);
+            let total: f64 = indexed_data.iter().map(|d| d.value).sum();
+            // Build legend data before moving indexed_data into the chart
+            let legend: Vec<(String, f64, usize)> = indexed_data
+                .iter()
+                .map(|d| (d.label.clone(), d.value, d.color_index))
+                .collect();
+
+            let mut pie = PieChart::new(indexed_data)
+                .value(|d| d.value as f32)
+                .color(move |d| chart_colors[d.color_index % 5])
+                // Workaround: gpui-component PieChart bug passes Some(0.0) for
+                // outer_radius per-arc, overriding the bounds-computed value.
+                // Explicitly set outer_radius = div_height * 0.4 = 300 * 0.4.
+                .outer_radius(120.0)
+                .pad_angle(pad_angle);
+
+            if is_donut {
+                pie = pie.inner_radius(spec.inner_radius.unwrap_or(50.0));
+            }
+
+            chart_container = chart_container
+                .child(div().h(px(300.0)).child(pie))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_x_4()
+                        .gap_y_1()
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .children(legend.into_iter().map(|(label, value, color_idx)| {
+                            let color = chart_colors[color_idx % 5];
+                            let pct = if total > 0.0 {
+                                format!(" ({:.1}%)", value / total * 100.0)
+                            } else {
+                                String::new()
+                            };
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .w(px(10.0))
+                                        .h(px(10.0))
+                                        .rounded_sm()
+                                        .bg(color),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child(format!(
+                                            "{}{}",
+                                            if value.fract() == 0.0 {
+                                                format!("{}", value as i64)
+                                            } else {
+                                                format!("{:.1}", value)
+                                            },
+                                            pct
+                                        )),
+                                )
+                        })),
+                );
+        }
+        "area" => {
+            let stroke_color = chart_colors[0];
+            let value_labels: Vec<(String, f64)> = indexed_data
+                .iter()
+                .map(|d| (d.label.clone(), d.value))
+                .collect();
+            chart_container = chart_container
+                .child(
+                    div().h(px(250.0)).child(
+                        AreaChart::new(indexed_data)
+                            .x(|d| SharedString::from(d.label.clone()))
+                            .y(|d| d.value)
+                            .stroke(stroke_color)
+                            .natural(),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_x_4()
+                        .gap_y_1()
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .children(value_labels.into_iter().map(|(label, value)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(stroke_color)
+                                        .child(if value.fract() == 0.0 {
+                                            format!("{}", value as i64)
+                                        } else {
+                                            format!("{:.1}", value)
+                                        }),
+                                )
+                        })),
+                );
+        }
+        "candlestick" => {
+            if let Some(cs_data) = spec.candlestick_data {
+                chart_container = chart_container.child(div().h(px(280.0)).child(
+                    CandlestickChart::new(cs_data)
+                        .x(|d: &CandlestickDataPoint| SharedString::from(d.date.clone()))
+                        .open(|d: &CandlestickDataPoint| d.open)
+                        .high(|d: &CandlestickDataPoint| d.high)
+                        .low(|d: &CandlestickDataPoint| d.low)
+                        .close(|d: &CandlestickDataPoint| d.close),
+                ));
+            } else {
+                chart_container = chart_container.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No candlestick data provided"),
+                );
+            }
         }
         _ => {
             chart_container = chart_container.child(

@@ -800,7 +800,8 @@ impl AgentClient {
         // Chart tool is always available (no filesystem/service dependencies)
         tool_sections.push(
             "- **create_chart**: Create and display a chart inline in the chat response. \
-             Supports bar, line, and pie charts. Use this to visualize data for the user."
+             Supports bar (with value labels), line, pie, donut, area, and candlestick charts. \
+             Use this to visualize data for the user."
                 .to_string(),
         );
         if excel_read_tool.is_some() || excel_write_tools.is_some() {

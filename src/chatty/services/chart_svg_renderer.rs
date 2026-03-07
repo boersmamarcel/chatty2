@@ -12,9 +12,9 @@ const SVG_HEIGHT: f64 = 400.0;
 const PADDING: f64 = 60.0;
 const TITLE_HEIGHT: f64 = 30.0;
 
-/// 5 chart colors matching gpui-component's default theme palette.
-/// These are static hex values used for SVG export only (not themed).
-const CHART_COLORS: [&str; 5] = ["#4e79a7", "#59a14f", "#f28e2b", "#e15759", "#76b7b2"];
+/// Fallback chart colors used in tests (and as a reference palette).
+#[cfg(test)]
+const FALLBACK_CHART_COLORS: [&str; 5] = ["#4e79a7", "#59a14f", "#f28e2b", "#e15759", "#76b7b2"];
 
 // SVG fill colors for text elements (avoid raw string issues with `"#` sequences)
 const FILL_TITLE: &str = "#333333";
@@ -23,13 +23,19 @@ const FILL_LABEL: &str = "#666666";
 const FILL_MUTED: &str = "#888888";
 const STROKE_AXIS: &str = "#cccccc";
 const STROKE_GRID: &str = "#eeeeee";
+const BULLISH_COLOR: &str = "#22c55e";
+const BEARISH_COLOR: &str = "#ef4444";
 
-/// Generate an SVG string from a ChartSpec.
-pub fn render_chart_svg(spec: &ChartSpec) -> String {
+/// Generate an SVG string from a ChartSpec using the provided theme colors.
+pub fn render_chart_svg(spec: &ChartSpec, colors: &[String; 5]) -> String {
+    let colors: [&str; 5] = colors.each_ref().map(|s| s.as_str());
     match spec.chart_type.as_str() {
-        "bar" => render_bar_svg(spec),
-        "line" => render_line_svg(spec),
-        "pie" => render_pie_svg(spec),
+        "bar" => render_bar_svg(spec, &colors),
+        "line" => render_line_svg(spec, &colors),
+        "pie" => render_pie_svg(spec, false, &colors),
+        "donut" => render_pie_svg(spec, true, &colors),
+        "area" => render_area_svg(spec, &colors),
+        "candlestick" => render_candlestick_svg(spec),
         _ => format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_WIDTH}" height="{SVG_HEIGHT}">
   <text x="{}" y="{}" text-anchor="middle" font-family="sans-serif" font-size="14" fill="{FILL_MUTED}">Unsupported chart type: {}</text>
@@ -41,7 +47,7 @@ pub fn render_chart_svg(spec: &ChartSpec) -> String {
     }
 }
 
-fn render_bar_svg(spec: &ChartSpec) -> String {
+fn render_bar_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
     let title_offset = if spec.title.is_some() {
         TITLE_HEIGHT
     } else {
@@ -90,7 +96,7 @@ fn render_bar_svg(spec: &ChartSpec) -> String {
         let x = chart_left + bar_gap + i as f64 * (bar_width + bar_gap);
         let bar_height = (d.value / max_val) * chart_height;
         let y = chart_bottom - bar_height;
-        let color = CHART_COLORS[i % CHART_COLORS.len()];
+        let color = colors[i % colors.len()];
 
         // Bar
         elements.push(format!(
@@ -117,7 +123,7 @@ fn render_bar_svg(spec: &ChartSpec) -> String {
     wrap_svg(&elements)
 }
 
-fn render_line_svg(spec: &ChartSpec) -> String {
+fn render_line_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
     let title_offset = if spec.title.is_some() {
         TITLE_HEIGHT
     } else {
@@ -202,7 +208,7 @@ fn render_line_svg(spec: &ChartSpec) -> String {
         })
         .collect();
 
-    let color = CHART_COLORS[0];
+    let color = colors[0];
     elements.push(format!(
         r#"  <path d="{path_d}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>"#,
     ));
@@ -233,10 +239,16 @@ fn render_line_svg(spec: &ChartSpec) -> String {
     wrap_svg(&elements)
 }
 
-fn render_pie_svg(spec: &ChartSpec) -> String {
+fn render_pie_svg(spec: &ChartSpec, is_donut: bool, colors: &[&str; 5]) -> String {
     let cx = SVG_WIDTH / 2.0;
     let cy = SVG_HEIGHT / 2.0 + if spec.title.is_some() { 15.0 } else { 0.0 };
-    let radius = 140.0;
+    let outer_radius = 140.0;
+    let inner_radius = if is_donut {
+        spec.inner_radius.unwrap_or(50.0) as f64 * (outer_radius / 120.0)
+    } else {
+        0.0
+    };
+    let gap_angle = spec.pad_angle.unwrap_or(0.03) as f64;
 
     let total: f64 = spec.data.iter().map(|d| d.value.max(0.0)).sum();
     if total == 0.0 || spec.data.is_empty() {
@@ -256,7 +268,6 @@ fn render_pie_svg(spec: &ChartSpec) -> String {
     }
 
     let mut start_angle: f64 = -std::f64::consts::FRAC_PI_2; // Start at top
-    let gap_angle = 0.03;
 
     for (i, d) in spec.data.iter().enumerate() {
         let fraction = d.value.max(0.0) / total;
@@ -268,22 +279,36 @@ fn render_pie_svg(spec: &ChartSpec) -> String {
 
         let inner_start = start_angle + gap_angle / 2.0;
         let end_angle = inner_start + sweep;
-
-        let x1 = cx + radius * inner_start.cos();
-        let y1 = cy + radius * inner_start.sin();
-        let x2 = cx + radius * end_angle.cos();
-        let y2 = cy + radius * end_angle.sin();
-
         let large_arc = if sweep > std::f64::consts::PI { 1 } else { 0 };
-        let color = CHART_COLORS[i % CHART_COLORS.len()];
+        let color = colors[i % colors.len()];
 
-        elements.push(format!(
-            r#"  <path d="M{cx},{cy} L{x1},{y1} A{radius},{radius} 0 {large_arc},1 {x2},{y2} Z" fill="{color}"/>"#,
-        ));
+        if is_donut && inner_radius > 0.0 {
+            // Donut slice: outer arc + inner arc (reverse)
+            let ox1 = cx + outer_radius * inner_start.cos();
+            let oy1 = cy + outer_radius * inner_start.sin();
+            let ox2 = cx + outer_radius * end_angle.cos();
+            let oy2 = cy + outer_radius * end_angle.sin();
+            let ix1 = cx + inner_radius * end_angle.cos();
+            let iy1 = cy + inner_radius * end_angle.sin();
+            let ix2 = cx + inner_radius * inner_start.cos();
+            let iy2 = cy + inner_radius * inner_start.sin();
+            elements.push(format!(
+                r#"  <path d="M{ox1},{oy1} A{outer_radius},{outer_radius} 0 {large_arc},1 {ox2},{oy2} L{ix1},{iy1} A{inner_radius},{inner_radius} 0 {large_arc},0 {ix2},{iy2} Z" fill="{color}"/>"#,
+            ));
+        } else {
+            // Full pie slice
+            let x1 = cx + outer_radius * inner_start.cos();
+            let y1 = cy + outer_radius * inner_start.sin();
+            let x2 = cx + outer_radius * end_angle.cos();
+            let y2 = cy + outer_radius * end_angle.sin();
+            elements.push(format!(
+                r#"  <path d="M{cx},{cy} L{x1},{y1} A{outer_radius},{outer_radius} 0 {large_arc},1 {x2},{y2} Z" fill="{color}"/>"#,
+            ));
+        }
 
         // Label at mid-angle, slightly outside
         let mid_angle = inner_start + sweep / 2.0;
-        let label_r = radius + 20.0;
+        let label_r = outer_radius + 20.0;
         let lx = cx + label_r * mid_angle.cos();
         let ly = cy + label_r * mid_angle.sin();
 
@@ -294,6 +319,237 @@ fn render_pie_svg(spec: &ChartSpec) -> String {
         ));
 
         start_angle += fraction * 2.0 * std::f64::consts::PI;
+    }
+
+    wrap_svg(&elements)
+}
+
+fn render_area_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
+    let title_offset = if spec.title.is_some() {
+        TITLE_HEIGHT
+    } else {
+        0.0
+    };
+    let chart_top = PADDING + title_offset;
+    let chart_bottom = SVG_HEIGHT - PADDING;
+    let chart_left = PADDING;
+    let chart_right = SVG_WIDTH - PADDING;
+    let chart_width = chart_right - chart_left;
+    let chart_height = chart_bottom - chart_top;
+
+    let max_val = spec
+        .data
+        .iter()
+        .map(|d| d.value)
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(0.0);
+    let min_val = spec
+        .data
+        .iter()
+        .map(|d| d.value)
+        .fold(f64::INFINITY, f64::min)
+        .min(0.0);
+    let range = (max_val - min_val).max(1.0);
+    let n = spec.data.len();
+    if n == 0 {
+        return empty_svg(spec);
+    }
+
+    let mut elements = Vec::new();
+
+    // Title
+    if let Some(title) = &spec.title {
+        elements.push(format!(
+            r#"  <text x="{}" y="{}" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="{FILL_TITLE}">{}</text>"#,
+            SVG_WIDTH / 2.0,
+            PADDING - 5.0 + title_offset / 2.0,
+            escape_xml(title)
+        ));
+    }
+
+    // Grid lines
+    for i in 0..=4 {
+        let y = chart_top + (i as f64 / 4.0) * chart_height;
+        elements.push(format!(
+            r#"  <line x1="{chart_left}" y1="{y}" x2="{chart_right}" y2="{y}" stroke="{STROKE_GRID}" stroke-width="1" stroke-dasharray="4,2"/>"#,
+        ));
+    }
+
+    // Build points
+    let points: Vec<(f64, f64)> = spec
+        .data
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let x = if n == 1 {
+                chart_left + chart_width / 2.0
+            } else {
+                chart_left + (i as f64 / (n - 1) as f64) * chart_width
+            };
+            let y = chart_bottom - ((d.value - min_val) / range) * chart_height;
+            (x, y)
+        })
+        .collect();
+
+    let color = colors[0];
+    let fill_color = format!("{}40", color); // semi-transparent (append alpha)
+
+    // Area fill path (closed back to baseline)
+    let first_x = points[0].0;
+    let last_x = points[points.len() - 1].0;
+    let area_d: String = {
+        let mut d = format!("M{first_x},{chart_bottom}");
+        for (x, y) in &points {
+            d.push_str(&format!(" L{x},{y}"));
+        }
+        d.push_str(&format!(" L{last_x},{chart_bottom} Z"));
+        d
+    };
+    elements.push(format!(
+        r#"  <path d="{area_d}" fill="{fill_color}"/>"#,
+    ));
+
+    // Line path
+    let line_d: String = points
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            if i == 0 {
+                format!("M{x},{y}")
+            } else {
+                format!(" L{x},{y}")
+            }
+        })
+        .collect();
+    elements.push(format!(
+        r#"  <path d="{line_d}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>"#,
+    ));
+
+    // Axis
+    elements.push(format!(
+        r#"  <line x1="{chart_left}" y1="{chart_bottom}" x2="{chart_right}" y2="{chart_bottom}" stroke="{STROKE_AXIS}" stroke-width="1"/>"#,
+    ));
+
+    // X labels and dots
+    for (i, ((x, y), d)) in points.iter().zip(spec.data.iter()).enumerate() {
+        elements.push(format!(
+            r#"  <circle cx="{x}" cy="{y}" r="3" fill="{color}" stroke="white" stroke-width="1.5"/>"#,
+        ));
+        if i == 0 || i == n - 1 || n <= 8 || i % (n / 6 + 1) == 0 {
+            elements.push(format!(
+                r#"  <text x="{x}" y="{}" text-anchor="middle" font-family="sans-serif" font-size="11" fill="{FILL_LABEL}">{}</text>"#,
+                chart_bottom + 18.0,
+                escape_xml(&d.label)
+            ));
+        }
+    }
+
+    wrap_svg(&elements)
+}
+
+fn render_candlestick_svg(spec: &ChartSpec) -> String {
+    let Some(cs_data) = &spec.candlestick_data else {
+        return empty_svg(spec);
+    };
+    if cs_data.is_empty() {
+        return empty_svg(spec);
+    }
+
+    let title_offset = if spec.title.is_some() {
+        TITLE_HEIGHT
+    } else {
+        0.0
+    };
+    let chart_top = PADDING + title_offset;
+    let chart_bottom = SVG_HEIGHT - PADDING;
+    let chart_left = PADDING;
+    let chart_right = SVG_WIDTH - PADDING;
+    let chart_width = chart_right - chart_left;
+    let chart_height = chart_bottom - chart_top;
+
+    let all_prices: Vec<f64> = cs_data
+        .iter()
+        .flat_map(|d| [d.open, d.high, d.low, d.close])
+        .collect();
+    let max_val = all_prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_val = all_prices.iter().cloned().fold(f64::INFINITY, f64::min);
+    let range = (max_val - min_val).max(1.0);
+
+    let n = cs_data.len();
+    let candle_total_width = chart_width / n as f64;
+    let candle_body_width = (candle_total_width * 0.6).max(2.0);
+    let wick_width = 1.5_f64;
+
+    let price_to_y = |price: f64| -> f64 {
+        chart_bottom - ((price - min_val) / range) * chart_height
+    };
+
+    let mut elements = Vec::new();
+
+    // Title
+    if let Some(title) = &spec.title {
+        elements.push(format!(
+            r#"  <text x="{}" y="{}" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="{FILL_TITLE}">{}</text>"#,
+            SVG_WIDTH / 2.0,
+            PADDING - 5.0 + title_offset / 2.0,
+            escape_xml(title)
+        ));
+    }
+
+    // Grid lines
+    for i in 0..=4 {
+        let y = chart_top + (i as f64 / 4.0) * chart_height;
+        elements.push(format!(
+            r#"  <line x1="{chart_left}" y1="{y}" x2="{chart_right}" y2="{y}" stroke="{STROKE_GRID}" stroke-width="1" stroke-dasharray="4,2"/>"#,
+        ));
+    }
+
+    // Axis
+    elements.push(format!(
+        r#"  <line x1="{chart_left}" y1="{chart_bottom}" x2="{chart_right}" y2="{chart_bottom}" stroke="{STROKE_AXIS}" stroke-width="1"/>"#,
+    ));
+
+    // Candles
+    for (i, d) in cs_data.iter().enumerate() {
+        let center_x = chart_left + (i as f64 + 0.5) * candle_total_width;
+        let is_bullish = d.close >= d.open;
+        let color = if is_bullish {
+            BULLISH_COLOR
+        } else {
+            BEARISH_COLOR
+        };
+
+        let body_top = price_to_y(d.open.max(d.close));
+        let body_bottom = price_to_y(d.open.min(d.close));
+        let body_height = (body_bottom - body_top).max(1.0);
+        let body_x = center_x - candle_body_width / 2.0;
+
+        // High wick
+        let high_y = price_to_y(d.high);
+        elements.push(format!(
+            r#"  <line x1="{center_x}" y1="{high_y}" x2="{center_x}" y2="{body_top}" stroke="{color}" stroke-width="{wick_width}"/>"#,
+        ));
+
+        // Low wick
+        let low_y = price_to_y(d.low);
+        elements.push(format!(
+            r#"  <line x1="{center_x}" y1="{body_bottom}" x2="{center_x}" y2="{low_y}" stroke="{color}" stroke-width="{wick_width}"/>"#,
+        ));
+
+        // Body
+        elements.push(format!(
+            r#"  <rect x="{body_x}" y="{body_top}" width="{candle_body_width}" height="{body_height}" fill="{color}" rx="1"/>"#,
+        ));
+
+        // X label (sparse to avoid overlap)
+        let show_label = n <= 10 || i == 0 || i == n - 1 || i % (n / 5).max(1) == 0;
+        if show_label {
+            elements.push(format!(
+                r#"  <text x="{center_x}" y="{}" text-anchor="middle" font-family="sans-serif" font-size="10" fill="{FILL_LABEL}">{}</text>"#,
+                chart_bottom + 16.0,
+                escape_xml(&d.date)
+            ));
+        }
     }
 
     wrap_svg(&elements)
@@ -341,25 +597,38 @@ fn format_value(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chatty::tools::chart_tool::ChartDataPoint;
+    use crate::chatty::tools::chart_tool::{CandlestickDataPoint, ChartDataPoint};
+
+    fn make_spec(chart_type: &str, data: Vec<ChartDataPoint>) -> ChartSpec {
+        ChartSpec {
+            chart_type: chart_type.to_string(),
+            title: None,
+            data,
+            candlestick_data: None,
+            inner_radius: None,
+            pad_angle: None,
+        }
+    }
 
     #[test]
     fn bar_svg_contains_rects() {
         let spec = ChartSpec {
-            chart_type: "bar".to_string(),
             title: Some("Test".to_string()),
-            data: vec![
-                ChartDataPoint {
-                    label: "A".into(),
-                    value: 10.0,
-                },
-                ChartDataPoint {
-                    label: "B".into(),
-                    value: 20.0,
-                },
-            ],
+            ..make_spec(
+                "bar",
+                vec![
+                    ChartDataPoint {
+                        label: "A".into(),
+                        value: 10.0,
+                    },
+                    ChartDataPoint {
+                        label: "B".into(),
+                        value: 20.0,
+                    },
+                ],
+            )
         };
-        let svg = render_chart_svg(&spec);
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
         assert!(svg.contains("<rect"));
         assert!(svg.contains("Test"));
         assert!(svg.contains("A"));
@@ -368,10 +637,9 @@ mod tests {
 
     #[test]
     fn line_svg_contains_path() {
-        let spec = ChartSpec {
-            chart_type: "line".to_string(),
-            title: None,
-            data: vec![
+        let spec = make_spec(
+            "line",
+            vec![
                 ChartDataPoint {
                     label: "Jan".into(),
                     value: 5.0,
@@ -381,8 +649,8 @@ mod tests {
                     value: 15.0,
                 },
             ],
-        };
-        let svg = render_chart_svg(&spec);
+        );
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
         assert!(svg.contains("<path"));
         assert!(svg.contains("<circle"));
     }
@@ -390,33 +658,93 @@ mod tests {
     #[test]
     fn pie_svg_contains_arcs() {
         let spec = ChartSpec {
-            chart_type: "pie".to_string(),
             title: Some("Share".to_string()),
-            data: vec![
-                ChartDataPoint {
-                    label: "X".into(),
-                    value: 60.0,
-                },
-                ChartDataPoint {
-                    label: "Y".into(),
-                    value: 40.0,
-                },
-            ],
+            ..make_spec(
+                "pie",
+                vec![
+                    ChartDataPoint {
+                        label: "X".into(),
+                        value: 60.0,
+                    },
+                    ChartDataPoint {
+                        label: "Y".into(),
+                        value: 40.0,
+                    },
+                ],
+            )
         };
-        let svg = render_chart_svg(&spec);
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
         assert!(svg.contains("<path"));
         assert!(svg.contains("60%"));
         assert!(svg.contains("40%"));
     }
 
     #[test]
-    fn empty_data_produces_valid_svg() {
+    fn donut_svg_contains_arcs() {
         let spec = ChartSpec {
-            chart_type: "bar".to_string(),
-            title: None,
-            data: vec![],
+            inner_radius: Some(50.0),
+            ..make_spec(
+                "donut",
+                vec![
+                    ChartDataPoint {
+                        label: "A".into(),
+                        value: 70.0,
+                    },
+                    ChartDataPoint {
+                        label: "B".into(),
+                        value: 30.0,
+                    },
+                ],
+            )
         };
-        let svg = render_chart_svg(&spec);
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
+        assert!(svg.contains("<path"));
+        assert!(svg.contains("A"));
+    }
+
+    #[test]
+    fn area_svg_contains_filled_path() {
+        let spec = make_spec(
+            "area",
+            vec![
+                ChartDataPoint {
+                    label: "Mon".into(),
+                    value: 100.0,
+                },
+                ChartDataPoint {
+                    label: "Tue".into(),
+                    value: 200.0,
+                },
+            ],
+        );
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
+        assert!(svg.contains("<path"));
+        // Filled area uses semi-transparent fill
+        assert!(svg.contains("fill"));
+    }
+
+    #[test]
+    fn candlestick_svg_contains_candles() {
+        let spec = ChartSpec {
+            candlestick_data: Some(vec![CandlestickDataPoint {
+                date: "2024-01".into(),
+                open: 100.0,
+                high: 120.0,
+                low: 90.0,
+                close: 110.0,
+            }]),
+            ..make_spec("candlestick", vec![])
+        };
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
+        assert!(svg.contains("<rect"));
+        assert!(svg.contains("<line"));
+        assert!(svg.contains("2024-01"));
+    }
+
+    #[test]
+    fn empty_data_produces_valid_svg() {
+        let spec = make_spec("bar", vec![]);
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
         assert!(svg.contains("<svg"));
         assert!(svg.contains("</svg>"));
     }
@@ -424,14 +752,16 @@ mod tests {
     #[test]
     fn xml_escaping_works() {
         let spec = ChartSpec {
-            chart_type: "bar".to_string(),
             title: Some("A & B <test>".to_string()),
-            data: vec![ChartDataPoint {
-                label: "x\"y".into(),
-                value: 10.0,
-            }],
+            ..make_spec(
+                "bar",
+                vec![ChartDataPoint {
+                    label: "x\"y".into(),
+                    value: 10.0,
+                }],
+            )
         };
-        let svg = render_chart_svg(&spec);
+        let svg = render_chart_svg(&spec, &FALLBACK_CHART_COLORS.map(str::to_owned));
         assert!(svg.contains("A &amp; B &lt;test&gt;"));
         assert!(svg.contains("x&quot;y"));
     }
