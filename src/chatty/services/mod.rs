@@ -1,3 +1,4 @@
+pub mod chart_svg_renderer;
 pub mod error_collector_layer;
 pub mod filesystem_service;
 pub mod git_service;

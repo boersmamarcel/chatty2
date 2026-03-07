@@ -10,11 +10,11 @@ use crate::chatty::services::git_service::GitService;
 use crate::chatty::services::search_service::CodeSearchService;
 use crate::chatty::services::shell_service::ShellSession;
 use crate::chatty::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateDirectoryTool, DeleteFileTool,
-    DeleteMcpTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, CreateChartTool, CreateDirectoryTool,
+    DeleteFileTool, DeleteMcpTool, EditExcelTool, EditMcpTool, FetchTool, FindDefinitionTool,
+    FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
+    ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
     ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
@@ -252,6 +252,7 @@ fn collect_tools(
     search_tools: Option<SearchTools>,
     excel_read: Option<ReadExcelTool>,
     excel_write: Option<ExcelWriteTools>,
+    chart_tool: Option<CreateChartTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -321,6 +322,9 @@ fn collect_tools(
     if let Some((wt, et)) = excel_write {
         tools.push(Box::new(wt));
         tools.push(Box::new(et));
+    }
+    if let Some(t) = chart_tool {
+        tools.push(Box::new(t));
     }
     tools
 }
@@ -735,6 +739,12 @@ impl AgentClient {
             mcp_tool_info,
         );
 
+        // Chart tool is always available (no service dependencies).
+        // Pass workspace_dir so relative save_path values resolve correctly.
+        let chart_tool: Option<CreateChartTool> = Some(CreateChartTool::new(
+            exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
+        ));
+
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
         // to call list_tools first.
@@ -790,6 +800,13 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        // Chart tool is always available (no filesystem/service dependencies)
+        tool_sections.push(
+            "- **create_chart**: Create and display a chart inline in the chat response. \
+             Supports bar (with value labels), line, pie, donut, area, and candlestick charts. \
+             Use this to visualize data for the user."
+                .to_string(),
+        );
         if excel_read_tool.is_some() || excel_write_tools.is_some() {
             let mut excel_desc = Vec::new();
             if excel_read_tool.is_some() {
@@ -921,6 +938,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -935,14 +953,30 @@ impl AgentClient {
                     .agent(&model_config.model_identifier)
                     .preamble(&preamble);
 
+                // Detect reasoning models by identifier:
+                // - o-series: o1, o3, o4, o1-mini, o3-mini, o4-mini, etc.
+                // - gpt-5 series: gpt-5, gpt-5-mini, gpt-5-nano, etc.
+                // Note: supports_temperature defaults to true, so we cannot rely on it alone
+                // to detect reasoning models — users may not have explicitly set it.
+                let is_reasoning_model = {
+                    let id = model_config.model_identifier.as_str();
+                    let is_o_series = {
+                        let mut chars = id.chars();
+                        chars.next() == Some('o') && chars.next().is_some_and(|c| c.is_ascii_digit())
+                    };
+                    is_o_series || id.starts_with("gpt-5")
+                };
+
                 // Only set temperature if the model supports it (reasoning models don't)
-                if model_config.supports_temperature {
+                if model_config.supports_temperature && !is_reasoning_model {
                     builder = builder.temperature(model_config.temperature as f64);
-                } else {
+                }
+
+                if is_reasoning_model || !model_config.supports_temperature {
                     // TODO(#127): Remove once rig-core handles reasoning IDs correctly.
-                    // Reasoning models (o-series, gpt-5-nano, etc.) need explicit reasoning
-                    // summary configuration for multi-turn tool calling to work. Without this,
-                    // the Responses API doesn't include reasoning summaries in OutputItemDone
+                    // Reasoning models (o-series, gpt-5) need explicit reasoning summary
+                    // configuration for multi-turn tool calling to work. Without this, the
+                    // Responses API doesn't include reasoning summaries in OutputItemDone
                     // events, causing rig-core to lose the reasoning ID when assembling
                     // conversation history. OpenAI then rejects the next turn with:
                     // "function_call was provided without its required reasoning item"
@@ -969,6 +1003,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1001,6 +1036,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1036,6 +1072,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1070,6 +1107,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1198,8 +1236,25 @@ impl AgentClient {
                     .agent(&model_config.model_identifier)
                     .preamble(&preamble);
 
-                if model_config.supports_temperature {
+                let is_reasoning_model = {
+                    let id = model_config.model_identifier.as_str();
+                    let is_o_series = {
+                        let mut chars = id.chars();
+                        chars.next() == Some('o') && chars.next().is_some_and(|c| c.is_ascii_digit())
+                    };
+                    is_o_series || id.starts_with("gpt-5")
+                };
+
+                if model_config.supports_temperature && !is_reasoning_model {
                     builder = builder.temperature(model_config.temperature as f64);
+                }
+
+                if is_reasoning_model || !model_config.supports_temperature {
+                    builder = builder.additional_params(serde_json::json!({
+                        "reasoning": {
+                            "summary": "auto"
+                        }
+                    }));
                 }
 
                 if let Some(max_tokens) = model_config.max_tokens {
@@ -1222,6 +1277,7 @@ impl AgentClient {
                     search_tools,
                     excel_read_tool.clone(),
                     excel_write_tools.clone(),
+                    chart_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
