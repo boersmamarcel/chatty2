@@ -12,6 +12,7 @@ pub mod pdfium_utils;
 pub mod search_service;
 pub mod shell_service;
 pub mod title_generator;
+pub mod typst_compiler_service;
 
 pub use error_collector_layer::ErrorCollectorLayer;
 pub use llm_service::{StreamChunk, stream_prompt};

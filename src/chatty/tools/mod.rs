@@ -18,6 +18,7 @@ pub mod search_tool;
 pub mod shell_tool;
 #[cfg(test)]
 pub mod test_helpers;
+pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use add_mcp_tool::AddMcpTool;
@@ -41,3 +42,4 @@ pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
+pub use typst_tool::CompileTypstTool;

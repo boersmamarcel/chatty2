@@ -240,15 +240,13 @@ impl Tool for CreateChartTool {
                     .is_some_and(|s| !s.is_empty() && s.iter().all(|s| !s.data.is_empty()));
                 if !has_data && !has_series {
                     return Err(ChartToolError::ValidationError(
-                        "Either 'data' or 'series' (with non-empty data) must be provided".to_string(),
+                        "Either 'data' or 'series' (with non-empty data) must be provided"
+                            .to_string(),
                     ));
                 }
             }
             "candlestick" => {
-                let empty = args
-                    .candlestick_data
-                    .as_ref()
-                    .is_none_or(|d| d.is_empty());
+                let empty = args.candlestick_data.as_ref().is_none_or(|d| d.is_empty());
                 if empty {
                     return Err(ChartToolError::ValidationError(
                         "candlestick_data must not be empty for candlestick charts".to_string(),
@@ -277,7 +275,12 @@ impl Tool for CreateChartTool {
         // Save to disk if the caller requested it.
         if let Some(save_path) = args.save_path {
             match save_chart_png(&spec, &save_path, self.workspace_dir.as_deref()) {
-                Ok(resolved) => return Ok(ChartSpec { saved_path: Some(resolved), ..spec }),
+                Ok(resolved) => {
+                    return Ok(ChartSpec {
+                        saved_path: Some(resolved),
+                        ..spec
+                    });
+                }
                 Err(e) => {
                     return Err(ChartToolError::ValidationError(format!(
                         "Chart created but failed to save PNG to '{save_path}': {e}"
@@ -297,9 +300,14 @@ impl Tool for CreateChartTool {
 /// Path resolution priority for relative paths:
 ///   1. `workspace_dir` if set (the user's configured working directory)
 ///   2. User's home directory as fallback
+///
 /// `~` is always expanded to the home directory.
 /// Returns the resolved absolute path on success.
-fn save_chart_png(spec: &ChartSpec, save_path: &str, workspace_dir: Option<&str>) -> Result<String, String> {
+fn save_chart_png(
+    spec: &ChartSpec,
+    save_path: &str,
+    workspace_dir: Option<&str>,
+) -> Result<String, String> {
     use crate::chatty::services::chart_svg_renderer::{DEFAULT_CHART_COLORS, render_chart_svg};
     use crate::chatty::services::mermaid_renderer_service::MermaidRendererService;
 
@@ -308,8 +316,7 @@ fn save_chart_png(spec: &ChartSpec, save_path: &str, workspace_dir: Option<&str>
 
     // Expand `~` and resolve relative paths
     let resolved: std::path::PathBuf = {
-        let home = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
         if save_path.starts_with("~/") || save_path == "~" {
             home.join(&save_path[2..])
@@ -319,9 +326,7 @@ fn save_chart_png(spec: &ChartSpec, save_path: &str, workspace_dir: Option<&str>
                 p.to_path_buf()
             } else {
                 // Relative path: prefer workspace_dir, fall back to home
-                let base = workspace_dir
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or(home);
+                let base = workspace_dir.map(std::path::PathBuf::from).unwrap_or(home);
                 base.join(p)
             }
         }
@@ -330,11 +335,11 @@ fn save_chart_png(spec: &ChartSpec, save_path: &str, workspace_dir: Option<&str>
     let path = resolved.as_path();
 
     // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Could not create directory '{}': {e}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create directory '{}': {e}", parent.display()))?;
     }
 
     // Write SVG to a temp file, then convert to PNG via resvg
@@ -345,8 +350,7 @@ fn save_chart_png(spec: &ChartSpec, save_path: &str, workspace_dir: Option<&str>
             .map(|d| d.subsec_nanos())
             .unwrap_or(0)
     ));
-    std::fs::write(&tmp_svg, &svg)
-        .map_err(|e| format!("Failed to write temp SVG: {e}"))?;
+    std::fs::write(&tmp_svg, &svg).map_err(|e| format!("Failed to write temp SVG: {e}"))?;
 
     let png_bytes = MermaidRendererService::render_svg_to_png(&tmp_svg)
         .map_err(|e| format!("SVG→PNG render failed: {e}"))?;
@@ -427,15 +431,27 @@ mod tests {
                     SeriesData {
                         name: "Revenue".to_string(),
                         data: vec![
-                            ChartDataPoint { label: "Jan".to_string(), value: 1000.0 },
-                            ChartDataPoint { label: "Feb".to_string(), value: 1200.0 },
+                            ChartDataPoint {
+                                label: "Jan".to_string(),
+                                value: 1000.0,
+                            },
+                            ChartDataPoint {
+                                label: "Feb".to_string(),
+                                value: 1200.0,
+                            },
                         ],
                     },
                     SeriesData {
                         name: "Expenses".to_string(),
                         data: vec![
-                            ChartDataPoint { label: "Jan".to_string(), value: 800.0 },
-                            ChartDataPoint { label: "Feb".to_string(), value: 950.0 },
+                            ChartDataPoint {
+                                label: "Jan".to_string(),
+                                value: 800.0,
+                            },
+                            ChartDataPoint {
+                                label: "Feb".to_string(),
+                                value: 950.0,
+                            },
                         ],
                     },
                 ]),
