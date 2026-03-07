@@ -11,6 +11,7 @@ pub mod filesystem_write_tool;
 pub mod git_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
+mod path_utils;
 pub mod pdf_extract_text_tool;
 pub mod pdf_info_tool;
 pub mod pdf_to_image_tool;
@@ -18,6 +19,7 @@ pub mod search_tool;
 pub mod shell_tool;
 #[cfg(test)]
 pub mod test_helpers;
+pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use add_mcp_tool::AddMcpTool;
@@ -41,3 +43,4 @@ pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
+pub use typst_tool::CompileTypstTool;

@@ -126,10 +126,10 @@ fn render_bar_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
 }
 
 fn render_line_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
-    if let Some(series) = &spec.series {
-        if series.len() > 1 {
-            return render_multi_line_svg(spec, series, colors);
-        }
+    if let Some(series) = &spec.series
+        && series.len() > 1
+    {
+        return render_multi_line_svg(spec, series, colors);
     }
 
     // Single-series fallback: use spec.data (or the single series entry)
@@ -144,7 +144,11 @@ fn render_line_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
             std::borrow::Cow::Borrowed(&spec.data)
         };
 
-    let title_offset = if spec.title.is_some() { TITLE_HEIGHT } else { 0.0 };
+    let title_offset = if spec.title.is_some() {
+        TITLE_HEIGHT
+    } else {
+        0.0
+    };
     let chart_top = PADDING + title_offset;
     let chart_bottom = SVG_HEIGHT - PADDING;
     let chart_left = PADDING;
@@ -152,8 +156,16 @@ fn render_line_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
     let chart_width = chart_right - chart_left;
     let chart_height = chart_bottom - chart_top;
 
-    let max_val = data.iter().map(|d| d.value).fold(f64::NEG_INFINITY, f64::max).max(0.0);
-    let min_val = data.iter().map(|d| d.value).fold(f64::INFINITY, f64::min).min(0.0);
+    let max_val = data
+        .iter()
+        .map(|d| d.value)
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(0.0);
+    let min_val = data
+        .iter()
+        .map(|d| d.value)
+        .fold(f64::INFINITY, f64::min)
+        .min(0.0);
     let range = max_val - min_val;
     let n = data.len();
     if n == 0 || range == 0.0 {
@@ -179,15 +191,31 @@ fn render_line_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
         ));
     }
 
-    let points: Vec<(f64, f64)> = data.iter().enumerate().map(|(i, d)| {
-        let x = if n == 1 { chart_left + chart_width / 2.0 } else { chart_left + (i as f64 / (n - 1) as f64) * chart_width };
-        let y = chart_bottom - ((d.value - min_val) / range) * chart_height;
-        (x, y)
-    }).collect();
+    let points: Vec<(f64, f64)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let x = if n == 1 {
+                chart_left + chart_width / 2.0
+            } else {
+                chart_left + (i as f64 / (n - 1) as f64) * chart_width
+            };
+            let y = chart_bottom - ((d.value - min_val) / range) * chart_height;
+            (x, y)
+        })
+        .collect();
 
-    let path_d: String = points.iter().enumerate().map(|(i, (x, y))| {
-        if i == 0 { format!("M{x},{y}") } else { format!(" L{x},{y}") }
-    }).collect();
+    let path_d: String = points
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            if i == 0 {
+                format!("M{x},{y}")
+            } else {
+                format!(" L{x},{y}")
+            }
+        })
+        .collect();
 
     let color = colors[0];
     elements.push(format!(
@@ -195,7 +223,9 @@ fn render_line_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
     ));
 
     for (i, ((x, y), d)) in points.iter().zip(data.iter()).enumerate() {
-        elements.push(format!(r#"  <circle cx="{x}" cy="{y}" r="4" fill="{color}" stroke="white" stroke-width="2"/>"#));
+        elements.push(format!(
+            r#"  <circle cx="{x}" cy="{y}" r="4" fill="{color}" stroke="white" stroke-width="2"/>"#
+        ));
         elements.push(format!(
             r#"  <text x="{x}" y="{}" text-anchor="middle" font-family="sans-serif" font-size="11" fill="{FILL_LABEL}">{}</text>"#,
             chart_bottom + 18.0, escape_xml(&d.label)
@@ -235,7 +265,11 @@ fn render_multi_line_svg(
 
     // Reserve space at bottom for legend
     let legend_height = 24.0 * ((series.len() as f64 / 3.0).ceil()).max(1.0);
-    let title_offset = if spec.title.is_some() { TITLE_HEIGHT } else { 0.0 };
+    let title_offset = if spec.title.is_some() {
+        TITLE_HEIGHT
+    } else {
+        0.0
+    };
     let chart_top = PADDING + title_offset;
     let chart_bottom = SVG_HEIGHT - PADDING - legend_height;
     let chart_left = PADDING;
@@ -265,17 +299,32 @@ fn render_multi_line_svg(
 
     // Draw each series
     let x_fn = |i: usize| -> f64 {
-        if n == 1 { chart_left + chart_width / 2.0 } else { chart_left + (i as f64 / (n - 1) as f64) * chart_width }
+        if n == 1 {
+            chart_left + chart_width / 2.0
+        } else {
+            chart_left + (i as f64 / (n - 1) as f64) * chart_width
+        }
     };
     let y_fn = |v: f64| -> f64 { chart_bottom - ((v - min_val) / range) * chart_height };
 
     for (si, s) in series.iter().enumerate() {
         let color = colors[si % 5];
-        let points: Vec<(f64, f64)> = s.data.iter().enumerate()
+        let points: Vec<(f64, f64)> = s
+            .data
+            .iter()
+            .enumerate()
             .map(|(i, d)| (x_fn(i), y_fn(d.value)))
             .collect();
-        let path_d: String = points.iter().enumerate()
-            .map(|(i, (x, y))| if i == 0 { format!("M{x},{y}") } else { format!(" L{x},{y}") })
+        let path_d: String = points
+            .iter()
+            .enumerate()
+            .map(|(i, (x, y))| {
+                if i == 0 {
+                    format!("M{x},{y}")
+                } else {
+                    format!(" L{x},{y}")
+                }
+            })
             .collect();
         elements.push(format!(
             r#"  <path d="{path_d}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>"#,
@@ -405,10 +454,10 @@ fn render_pie_svg(spec: &ChartSpec, is_donut: bool, colors: &[&str; 5]) -> Strin
 }
 
 fn render_area_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
-    if let Some(series) = &spec.series {
-        if series.len() > 1 {
-            return render_multi_area_svg(spec, series, colors);
-        }
+    if let Some(series) = &spec.series
+        && series.len() > 1
+    {
+        return render_multi_area_svg(spec, series, colors);
     }
 
     // Single-series fallback
@@ -423,7 +472,11 @@ fn render_area_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
             std::borrow::Cow::Borrowed(&spec.data)
         };
 
-    let title_offset = if spec.title.is_some() { TITLE_HEIGHT } else { 0.0 };
+    let title_offset = if spec.title.is_some() {
+        TITLE_HEIGHT
+    } else {
+        0.0
+    };
     let chart_top = PADDING + title_offset;
     let chart_bottom = SVG_HEIGHT - PADDING;
     let chart_left = PADDING;
@@ -431,8 +484,16 @@ fn render_area_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
     let chart_width = chart_right - chart_left;
     let chart_height = chart_bottom - chart_top;
 
-    let max_val = data.iter().map(|d| d.value).fold(f64::NEG_INFINITY, f64::max).max(0.0);
-    let min_val = data.iter().map(|d| d.value).fold(f64::INFINITY, f64::min).min(0.0);
+    let max_val = data
+        .iter()
+        .map(|d| d.value)
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(0.0);
+    let min_val = data
+        .iter()
+        .map(|d| d.value)
+        .fold(f64::INFINITY, f64::min)
+        .min(0.0);
     let range = (max_val - min_val).max(1.0);
     let n = data.len();
     if n == 0 {
@@ -455,11 +516,19 @@ fn render_area_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
         ));
     }
 
-    let points: Vec<(f64, f64)> = data.iter().enumerate().map(|(i, d)| {
-        let x = if n == 1 { chart_left + chart_width / 2.0 } else { chart_left + (i as f64 / (n - 1) as f64) * chart_width };
-        let y = chart_bottom - ((d.value - min_val) / range) * chart_height;
-        (x, y)
-    }).collect();
+    let points: Vec<(f64, f64)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let x = if n == 1 {
+                chart_left + chart_width / 2.0
+            } else {
+                chart_left + (i as f64 / (n - 1) as f64) * chart_width
+            };
+            let y = chart_bottom - ((d.value - min_val) / range) * chart_height;
+            (x, y)
+        })
+        .collect();
 
     let color = colors[0];
     let fill_color = format!("{}40", color);
@@ -468,14 +537,24 @@ fn render_area_svg(spec: &ChartSpec, colors: &[&str; 5]) -> String {
     let last_x = points[points.len() - 1].0;
     let area_d: String = {
         let mut d = format!("M{first_x},{chart_bottom}");
-        for (x, y) in &points { d.push_str(&format!(" L{x},{y}")); }
+        for (x, y) in &points {
+            d.push_str(&format!(" L{x},{y}"));
+        }
         d.push_str(&format!(" L{last_x},{chart_bottom} Z"));
         d
     };
     elements.push(format!(r#"  <path d="{area_d}" fill="{fill_color}"/>"#));
 
-    let line_d: String = points.iter().enumerate()
-        .map(|(i, (x, y))| if i == 0 { format!("M{x},{y}") } else { format!(" L{x},{y}") })
+    let line_d: String = points
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            if i == 0 {
+                format!("M{x},{y}")
+            } else {
+                format!(" L{x},{y}")
+            }
+        })
         .collect();
     elements.push(format!(
         r#"  <path d="{line_d}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>"#,
@@ -505,14 +584,28 @@ fn render_multi_area_svg(
     series: &[crate::chatty::tools::chart_tool::SeriesData],
     colors: &[&str; 5],
 ) -> String {
-    let max_val = series.iter().flat_map(|s| s.data.iter().map(|d| d.value)).fold(f64::NEG_INFINITY, f64::max).max(0.0);
-    let min_val = series.iter().flat_map(|s| s.data.iter().map(|d| d.value)).fold(f64::INFINITY, f64::min).min(0.0);
+    let max_val = series
+        .iter()
+        .flat_map(|s| s.data.iter().map(|d| d.value))
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(0.0);
+    let min_val = series
+        .iter()
+        .flat_map(|s| s.data.iter().map(|d| d.value))
+        .fold(f64::INFINITY, f64::min)
+        .min(0.0);
     let range = (max_val - min_val).max(1.0);
     let n = series.first().map(|s| s.data.len()).unwrap_or(0);
-    if n == 0 { return empty_svg(spec); }
+    if n == 0 {
+        return empty_svg(spec);
+    }
 
     let legend_height = 24.0 * ((series.len() as f64 / 3.0).ceil()).max(1.0);
-    let title_offset = if spec.title.is_some() { TITLE_HEIGHT } else { 0.0 };
+    let title_offset = if spec.title.is_some() {
+        TITLE_HEIGHT
+    } else {
+        0.0
+    };
     let chart_top = PADDING + title_offset;
     let chart_bottom = SVG_HEIGHT - PADDING - legend_height;
     let chart_left = PADDING;
@@ -540,30 +633,56 @@ fn render_multi_area_svg(
     }
 
     let x_fn = |i: usize| -> f64 {
-        if n == 1 { chart_left + chart_width / 2.0 } else { chart_left + (i as f64 / (n - 1) as f64) * chart_width }
+        if n == 1 {
+            chart_left + chart_width / 2.0
+        } else {
+            chart_left + (i as f64 / (n - 1) as f64) * chart_width
+        }
     };
     let y_fn = |v: f64| -> f64 { chart_bottom - ((v - min_val) / range) * chart_height };
 
     // Draw fills first (back to front), then lines
     for (si, s) in series.iter().enumerate() {
         let color = colors[si % 5];
-        let points: Vec<(f64, f64)> = s.data.iter().enumerate().map(|(i, d)| (x_fn(i), y_fn(d.value))).collect();
+        let points: Vec<(f64, f64)> = s
+            .data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (x_fn(i), y_fn(d.value)))
+            .collect();
         let first_x = points[0].0;
         let last_x = points[points.len() - 1].0;
         let area_d: String = {
             let mut d = format!("M{first_x},{chart_bottom}");
-            for (x, y) in &points { d.push_str(&format!(" L{x},{y}")); }
+            for (x, y) in &points {
+                d.push_str(&format!(" L{x},{y}"));
+            }
             d.push_str(&format!(" L{last_x},{chart_bottom} Z"));
             d
         };
-        elements.push(format!(r#"  <path d="{area_d}" fill="{color}" fill-opacity="0.15"/>"#));
+        elements.push(format!(
+            r#"  <path d="{area_d}" fill="{color}" fill-opacity="0.15"/>"#
+        ));
     }
 
     for (si, s) in series.iter().enumerate() {
         let color = colors[si % 5];
-        let points: Vec<(f64, f64)> = s.data.iter().enumerate().map(|(i, d)| (x_fn(i), y_fn(d.value))).collect();
-        let path_d: String = points.iter().enumerate()
-            .map(|(i, (x, y))| if i == 0 { format!("M{x},{y}") } else { format!(" L{x},{y}") })
+        let points: Vec<(f64, f64)> = s
+            .data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (x_fn(i), y_fn(d.value)))
+            .collect();
+        let path_d: String = points
+            .iter()
+            .enumerate()
+            .map(|(i, (x, y))| {
+                if i == 0 {
+                    format!("M{x},{y}")
+                } else {
+                    format!(" L{x},{y}")
+                }
+            })
             .collect();
         elements.push(format!(
             r#"  <path d="{path_d}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>"#,
@@ -592,7 +711,10 @@ fn render_multi_area_svg(
         let lx = PADDING + col as f64 * col_width;
         let ly = legend_y + row as f64 * 20.0;
         let color = colors[si % 5];
-        elements.push(format!(r#"  <rect x="{lx}" y="{}" width="12" height="12" rx="2" fill="{color}"/>"#, ly - 9.0));
+        elements.push(format!(
+            r#"  <rect x="{lx}" y="{}" width="12" height="12" rx="2" fill="{color}"/>"#,
+            ly - 9.0
+        ));
         elements.push(format!(
             r#"  <text x="{}" y="{ly}" font-family="sans-serif" font-size="11" fill="{FILL_LABEL}">{}</text>"#,
             lx + 16.0, escape_xml(&s.name)
@@ -762,6 +884,7 @@ mod tests {
             candlestick_data: None,
             inner_radius: None,
             pad_angle: None,
+            saved_path: None,
         }
     }
 
