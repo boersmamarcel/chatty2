@@ -5,7 +5,7 @@
 <h1 align="center">Chatty</h1>
  
 <p align="center">
-  <strong>A fast, native desktop chat client for LLMs — built with Rust and GPU-accelerated rendering.</strong>
+  <strong>A fast, native desktop chat client for LLMs — built with Rust and GPU-accelerated rendering. Also ships a lightweight terminal interface (<code>chatty-tui</code>) for headless and pipe workflows.</strong>
 </p>
 
 <p align="center">
@@ -13,6 +13,7 @@
   <a href="#why-chatty">Why Chatty</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="#tools--mcp">Tools & MCP</a> &bull;
+  <a href="#chatty-tui--terminal-interface">Terminal Interface</a> &bull;
   <a href="#development">Development</a>
 </p>
 
@@ -343,10 +344,50 @@ Fetch and convert web pages to markdown for the LLM to read.
 
 ---
 
+## chatty-tui — Terminal Interface
+
+`chatty-tui` is a lightweight terminal companion to the desktop app. It shares the same provider and model configuration and supports three modes:
+
+| Mode | How to run | Description |
+|:-----|:-----------|:------------|
+| **Interactive** | `chatty-tui` | Full-screen TUI with scrollable chat, model picker, and tool picker |
+| **Headless** | `chatty-tui --headless -m "your question"` | Send a single message; response printed to stdout |
+| **Pipe** | `cat file.rs \| chatty-tui --pipe` | Read from stdin, send as a message, print the response |
+
+### Installing chatty-tui
+
+**From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
+
+**From releases** — download the same release package as the desktop app; `chatty-tui` is included.
+
+**From source:**
+
+```bash
+cargo install --path crates/chatty-tui
+```
+
+### Interactive mode keybindings
+
+| Key | Action |
+|:----|:-------|
+| `Enter` | Send message |
+| `/model` | Open model picker |
+| `/tools` | Open tool picker |
+| `--enable tool1,tool2` / `--disable tool1,tool2` | Override tool availability at launch |
+| `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` | Scroll chat view |
+| `y` / `n` | Approve / deny a tool execution prompt |
+| `Ctrl+C` | Stop streaming response (or quit if idle) |
+| `Ctrl+Q` | Quit immediately |
+
+> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere.
+
+---
+
 ## Development
 
 Built with:
-- **[GPUI](https://crates.io/crates/gpui)** — Zed's GPU-accelerated UI framework
+- **[GPUI](https://crates.io/crates/gpui)** — Zed's GPU-accelerated UI framework (desktop app)
+- **[Ratatui](https://crates.io/crates/ratatui)** — Terminal UI framework (chatty-tui)
 - **[rig-core](https://crates.io/crates/rig-core)** — Multi-provider LLM integration
 - **[rmcp](https://crates.io/crates/rmcp)** — Model Context Protocol support
 - **[Typst](https://crates.io/crates/typst)** — LaTeX math rendering
