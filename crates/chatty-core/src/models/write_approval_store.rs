@@ -107,9 +107,6 @@ impl WriteApprovalStore {
     }
 
     /// Resolve an approval request by ID
-    ///
-    /// Pre-built API: will be called by the write approval UI (not yet wired).
-    #[allow(dead_code)]
     pub fn resolve(&self, id: &str, decision: WriteApprovalDecision) -> bool {
         let mut pending = self.pending_requests.lock().unwrap();
         if let Some(request) = pending.remove(id) {

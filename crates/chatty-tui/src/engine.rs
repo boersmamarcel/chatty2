@@ -7,7 +7,7 @@ use chatty_core::models::Conversation;
 use chatty_core::models::execution_approval_store::{
     ApprovalDecision, ApprovalNotification, ApprovalResolution, ExecutionApprovalStore,
 };
-use chatty_core::models::write_approval_store::WriteApprovalStore;
+use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::{McpService, StreamChunk, stream_prompt};
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
@@ -482,21 +482,27 @@ impl ChatEngine {
         }
     }
 
-    /// Approve a pending tool execution
+    /// Approve a pending tool execution (checks both execution and write stores)
     pub fn approve(&mut self) {
-        if let Some(approval) = &self.pending_approval {
-            self.execution_approval_store
-                .resolve(&approval.id, ApprovalDecision::Approved);
-            self.pending_approval = None;
+        if let Some(approval) = self.pending_approval.take()
+            && !self
+                .execution_approval_store
+                .resolve(&approval.id, ApprovalDecision::Approved)
+        {
+            self.write_approval_store
+                .resolve(&approval.id, WriteApprovalDecision::Approved);
         }
     }
 
-    /// Deny a pending tool execution
+    /// Deny a pending tool execution (checks both execution and write stores)
     pub fn deny(&mut self) {
-        if let Some(approval) = &self.pending_approval {
-            self.execution_approval_store
-                .resolve(&approval.id, ApprovalDecision::Denied);
-            self.pending_approval = None;
+        if let Some(approval) = self.pending_approval.take()
+            && !self
+                .execution_approval_store
+                .resolve(&approval.id, ApprovalDecision::Denied)
+        {
+            self.write_approval_store
+                .resolve(&approval.id, WriteApprovalDecision::Denied);
         }
     }
 

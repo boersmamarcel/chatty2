@@ -122,6 +122,16 @@ struct Cli {
     /// Example: --disable fetch,docker-exec
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
     disable: Vec<String>,
+
+    /// Auto-approve all tool executions without prompting.
+    ///
+    /// Skips the y/n approval prompt for shell commands, file writes,
+    /// git operations, and all other tool calls. Useful for scripting,
+    /// automation, and AI agent workflows where human confirmation is
+    /// not needed. Use with caution — the LLM will be able to execute
+    /// any enabled tool without user review.
+    #[arg(long)]
+    auto_approve: bool,
 }
 
 #[tokio::main]
@@ -167,6 +177,15 @@ async fn main() -> Result<()> {
 
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
+
+    // Apply auto-approve if requested
+    if cli.auto_approve {
+        use chatty_core::settings::models::execution_settings::ApprovalMode;
+        execution_settings.approval_mode = ApprovalMode::AutoApproveAll;
+        chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
+            ApprovalMode::AutoApproveAll,
+        );
+    }
 
     let models = {
         let mut m = ModelsModel::new();

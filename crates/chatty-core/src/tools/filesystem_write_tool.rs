@@ -11,10 +11,26 @@ use crate::models::write_approval_store::{
     PendingWriteApprovals, WriteApprovalDecision, WriteApprovalRequest, WriteOperation,
 };
 use crate::services::filesystem_service::FileSystemService;
+use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::filesystem_tool::FileSystemToolError;
 
 /// Maximum wait time for user approval (5 minutes)
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+// Global approval mode for write operations (set once at startup, read by tools)
+static GLOBAL_WRITE_APPROVAL_MODE: std::sync::OnceLock<std::sync::Mutex<ApprovalMode>> =
+    std::sync::OnceLock::new();
+
+/// Set the global write approval mode (call at startup)
+pub fn set_global_write_approval_mode(mode: ApprovalMode) {
+    GLOBAL_WRITE_APPROVAL_MODE
+        .get_or_init(|| std::sync::Mutex::new(ApprovalMode::AlwaysAsk));
+    *GLOBAL_WRITE_APPROVAL_MODE
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap() = mode;
+}
 
 /// Maximum characters to show in content preview
 const PREVIEW_MAX_CHARS: usize = 200;
@@ -30,10 +46,21 @@ fn preview(s: &str, max: usize) -> String {
 
 /// Request user approval for a write operation.
 /// Posts a request to the shared pending approvals store, then waits for the UI to resolve it.
+/// If `approval_mode` is `AutoApproveAll`, approves immediately without user interaction.
 pub async fn request_write_approval(
     pending: &PendingWriteApprovals,
     operation: WriteOperation,
 ) -> Result<bool, anyhow::Error> {
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    // Check global auto-approve setting
+    if let Some(mode) = GLOBAL_WRITE_APPROVAL_MODE.get() {
+        let mode = mode.lock().unwrap().clone();
+        if mode == ApprovalMode::AutoApproveAll {
+            return Ok(true);
+        }
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
 
