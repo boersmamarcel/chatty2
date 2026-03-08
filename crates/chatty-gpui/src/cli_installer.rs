@@ -142,7 +142,7 @@ async fn do_install() -> Result<String, String> {
 
     // Check if ~/.local/bin is in PATH
     let path_var = std::env::var("PATH").unwrap_or_default();
-    let in_path = path_var.split(':').any(|p| PathBuf::from(p) == bin_dir);
+    let in_path = path_var.split(':').any(|p| bin_dir == std::path::Path::new(p));
 
     if in_path {
         Ok(format!(

@@ -1512,6 +1512,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "dirs 5.0.1",
  "futures",
  "ratatui",
  "rig-core",
