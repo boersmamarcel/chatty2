@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-core"
-version = "0.1.83"
+version = "0.1.84"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-gpui"
-version = "0.1.83"
+version = "0.1.84"
 dependencies = [
  "anyhow",
  "async-stream",
