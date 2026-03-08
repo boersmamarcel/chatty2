@@ -102,7 +102,6 @@ impl Default for TokenTrackingSettings {
     }
 }
 
-
 impl TokenTrackingSettings {
     /// Validate the settings and clamp/fix any out-of-range values.
     ///

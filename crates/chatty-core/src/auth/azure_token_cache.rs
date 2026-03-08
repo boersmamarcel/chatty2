@@ -37,7 +37,6 @@ pub struct AzureTokenCache {
     refresh_lock: Arc<Mutex<()>>,
 }
 
-
 impl AzureTokenCache {
     /// Create a new token cache with Azure credentials
     ///

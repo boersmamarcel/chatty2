@@ -147,7 +147,6 @@ pub struct ExecutionApprovalStore {
     resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
-
 impl ExecutionApprovalStore {
     pub fn new() -> Self {
         Self {

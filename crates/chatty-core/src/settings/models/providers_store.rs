@@ -108,7 +108,6 @@ pub struct ProviderModel {
     providers: Vec<ProviderConfig>,
 }
 
-
 impl ProviderModel {
     pub fn new() -> Self {
         Self {

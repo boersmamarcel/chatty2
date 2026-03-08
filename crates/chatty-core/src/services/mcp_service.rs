@@ -118,7 +118,6 @@ pub struct McpService {
     pids: Arc<Mutex<HashMap<String, u32>>>,
 }
 
-
 impl McpService {
     /// Create a new MCP service
     pub fn new() -> Self {

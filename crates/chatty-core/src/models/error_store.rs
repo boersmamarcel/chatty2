@@ -37,7 +37,6 @@ pub struct ErrorStore {
     max_entries: usize,
 }
 
-
 impl ErrorStore {
     pub fn new(max_entries: usize) -> Self {
         Self {

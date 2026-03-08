@@ -27,7 +27,6 @@ pub struct UserSecretsModel {
     pub revealed_keys: HashSet<String>,
 }
 
-
 impl UserSecretsModel {
     /// Return secrets as (key, value) pairs for shell injection.
     pub fn as_env_pairs(&self) -> Vec<(String, String)> {

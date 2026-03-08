@@ -5,8 +5,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
-
-
 /// Mermaid diagram renderer service that converts Mermaid syntax to SVG
 ///
 /// Uses `mermaid-rs-renderer` for pure-Rust rendering (no browser needed).
@@ -16,6 +14,12 @@ use tracing::{debug, info, warn};
 /// Dark/light mode variants are cached separately via the `is_dark` hash flag.
 pub struct MermaidRendererService {
     cache: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Default for MermaidRendererService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MermaidRendererService {

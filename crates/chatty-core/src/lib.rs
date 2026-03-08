@@ -68,9 +68,7 @@ pub fn init_repositories() -> anyhow::Result<()> {
     MODELS_REPOSITORY
         .set(Arc::new(JsonModelsRepository::new()?))
         .ok();
-    MCP_REPOSITORY
-        .set(Arc::new(JsonMcpRepository::new()?))
-        .ok();
+    MCP_REPOSITORY.set(Arc::new(JsonMcpRepository::new()?)).ok();
     EXECUTION_SETTINGS_REPOSITORY
         .set(Arc::new(ExecutionSettingsJsonRepository::new()?))
         .ok();
@@ -118,8 +116,8 @@ pub fn mcp_repository() -> Arc<dyn settings::repositories::McpRepository> {
 }
 
 /// Returns a cloned Arc to the execution settings repository.
-pub fn execution_settings_repository() -> Arc<dyn settings::repositories::ExecutionSettingsRepository>
-{
+pub fn execution_settings_repository()
+-> Arc<dyn settings::repositories::ExecutionSettingsRepository> {
     EXECUTION_SETTINGS_REPOSITORY
         .get()
         .expect("init_repositories() not called")

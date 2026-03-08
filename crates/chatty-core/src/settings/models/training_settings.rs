@@ -12,4 +12,3 @@ pub struct TrainingSettingsModel {
     #[serde(default)]
     pub jsonl_auto_export: bool,
 }
-

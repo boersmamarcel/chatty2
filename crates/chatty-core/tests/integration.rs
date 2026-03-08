@@ -13,22 +13,16 @@
 //! - Token budget: TokenBudgetSnapshot status calculations
 
 use chatty_core::models::ConversationsStore;
-use chatty_core::settings::models::{
-    GeneralSettingsModel, ModelsModel, ProviderModel,
-};
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::{
     AzureAuthMethod, ProviderConfig, ProviderType,
 };
+use chatty_core::settings::models::{GeneralSettingsModel, ModelsModel, ProviderModel};
 use chatty_core::token_budget::{ContextStatus, TokenBudgetSnapshot};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn make_snapshot(
-    used_tokens: usize,
-    model_limit: usize,
-    reserve: usize,
-) -> TokenBudgetSnapshot {
+fn make_snapshot(used_tokens: usize, model_limit: usize, reserve: usize) -> TokenBudgetSnapshot {
     // Distribute `used_tokens` evenly across all four components
     let quarter = used_tokens / 4;
     TokenBudgetSnapshot {
@@ -74,11 +68,18 @@ fn settings_models_work_together_at_startup() {
 
     // Verify the Anthropic provider is configured (has a non-empty API key)
     let configured: Vec<_> = provider_model.configured_providers().collect();
-    assert_eq!(configured.len(), 1, "Provider with API key should be configured");
+    assert_eq!(
+        configured.len(),
+        1,
+        "Provider with API key should be configured"
+    );
 
     // Verify the model reflects Anthropic's default capabilities
     let model = models_model.get_model("model-1").unwrap();
-    assert!(model.supports_images, "Anthropic models should support images");
+    assert!(
+        model.supports_images,
+        "Anthropic models should support images"
+    );
     assert!(model.supports_pdf, "Anthropic models should support PDFs");
 }
 
@@ -174,7 +175,11 @@ fn conversations_store_full_lifecycle() {
     assert!(store.set_active("conv-2".to_string()));
     assert_eq!(store.active_id().unwrap(), "conv-2");
     assert!(!store.set_active("does-not-exist".to_string()));
-    assert_eq!(store.active_id().unwrap(), "conv-2", "Active unchanged on failed set");
+    assert_eq!(
+        store.active_id().unwrap(),
+        "conv-2",
+        "Active unchanged on failed set"
+    );
 
     // set_active_by_id skips validation (used right after creating a new conversation)
     store.set_active_by_id("conv-1".to_string());
@@ -183,20 +188,36 @@ fn conversations_store_full_lifecycle() {
     // Upsert updates existing entry and re-sorts (e.g. after title generation or cost update)
     store.upsert_metadata("conv-3", "Go generics deep dive", 0.008, 1_700_002_000);
     let list = store.list_recent_metadata(1);
-    assert_eq!(list[0].0, "conv-3", "conv-3 should be first after timestamp update");
-    assert_eq!(list[0].1, "Go generics deep dive", "Title should be updated");
+    assert_eq!(
+        list[0].0, "conv-3",
+        "conv-3 should be first after timestamp update"
+    );
+    assert_eq!(
+        list[0].1, "Go generics deep dive",
+        "Title should be updated"
+    );
 
     // Delete active conversation: active should shift to the next most recent
     store.set_active_by_id("conv-2".to_string());
     assert!(store.delete_conversation("conv-2"));
-    assert!(store.active_id().is_some(), "Active should fallback after deletion");
-    assert_ne!(store.active_id().unwrap(), "conv-2", "Deleted conv should not be active");
+    assert!(
+        store.active_id().is_some(),
+        "Active should fallback after deletion"
+    );
+    assert_ne!(
+        store.active_id().unwrap(),
+        "conv-2",
+        "Deleted conv should not be active"
+    );
     assert_eq!(store.count(), 2);
 
     // Delete a non-active conversation
     assert!(store.delete_conversation("conv-1"));
     assert_eq!(store.count(), 1);
-    assert!(!store.delete_conversation("conv-1"), "Second delete should return false");
+    assert!(
+        !store.delete_conversation("conv-1"),
+        "Second delete should return false"
+    );
 
     // is_loaded: false before data is fetched from DB
     assert!(!store.is_loaded("conv-3"));
@@ -297,7 +318,11 @@ fn azure_provider_configured_providers_filter() {
     provider_model.add_provider(missing_creds);
 
     let configured: Vec<_> = provider_model.configured_providers().collect();
-    assert_eq!(configured.len(), 2, "Only fully-configured Azure providers should pass");
+    assert_eq!(
+        configured.len(),
+        2,
+        "Only fully-configured Azure providers should pass"
+    );
     let names: Vec<&str> = configured.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"Azure API Key"));
     assert!(names.contains(&"Azure Entra"));

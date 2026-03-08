@@ -29,7 +29,6 @@ const BLOCK_MARGIN_Y: f64 = 10.0;
 // SVG scaling factor for high-DPI displays
 const SVG_SCALE_FACTOR: f64 = 1.5;
 
-
 /// Minimal World implementation for Typst math rendering
 struct MathWorld {
     library: LazyHash<Library>,
@@ -103,6 +102,12 @@ impl World for MathWorld {
 /// Math renderer service that converts LaTeX to SVG using Typst
 pub struct MathRendererService {
     cache: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Default for MathRendererService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MathRendererService {

@@ -94,7 +94,6 @@ pub struct WriteApprovalStore {
     pending_requests: PendingWriteApprovals,
 }
 
-
 impl WriteApprovalStore {
     pub fn new() -> Self {
         Self {

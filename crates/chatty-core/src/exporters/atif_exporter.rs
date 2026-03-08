@@ -8,9 +8,9 @@ use rig::completion::message::{AssistantContent, UserContent};
 
 use crate::exporters::types::*;
 use crate::models::conversation::{MessageFeedback, RegenerationRecord};
+use crate::models::message_types::{SystemTrace, TraceItem};
 use crate::models::token_usage::ConversationTokenUsage;
 use crate::repositories::ConversationData;
-use crate::models::message_types::{SystemTrace, TraceItem};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderType;
 
@@ -349,10 +349,10 @@ fn build_extra(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::token_usage::TokenUsage;
     use crate::models::message_types::{
         ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState,
     };
+    use crate::models::token_usage::TokenUsage;
     use rig::OneOrMany;
     use rig::completion::message::Text;
     use std::collections::HashMap;

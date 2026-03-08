@@ -115,8 +115,8 @@ impl Tool for ListMcpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::test_helpers::MockMcpRepository;
     use crate::settings::models::mcp_store::McpServerConfig;
+    use crate::tools::test_helpers::MockMcpRepository;
     use std::collections::HashMap;
 
     fn make_server(name: &str, api_key: &str) -> McpServerConfig {

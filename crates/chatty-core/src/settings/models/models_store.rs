@@ -83,7 +83,6 @@ pub struct ModelsModel {
     models: Vec<ModelConfig>,
 }
 
-
 impl ModelsModel {
     pub fn new() -> Self {
         Self { models: Vec::new() }

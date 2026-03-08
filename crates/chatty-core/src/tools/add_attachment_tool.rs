@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::services::filesystem_service::FileSystemService;
 use crate::models::attachment_validation::validate_attachment_async;
+use crate::services::filesystem_service::FileSystemService;
 
 /// Thread-safe storage for artifact paths queued during a stream.
 /// Drained after the stream completes to send as multimodal content.

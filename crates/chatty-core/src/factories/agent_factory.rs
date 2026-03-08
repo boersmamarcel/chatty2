@@ -10,6 +10,8 @@ use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
+use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
+use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 use crate::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, CompileTypstTool, CreateChartTool,
     CreateDirectoryTool, DeleteFileTool, DeleteMcpTool, DescribeDataTool, EditExcelTool,
@@ -20,8 +22,6 @@ use crate::tools::{
     ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
-use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
-use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -366,12 +366,8 @@ impl AgentClient {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<
-            crate::models::execution_approval_store::PendingApprovals,
-        >,
-        pending_write_approvals: Option<
-            crate::models::write_approval_store::PendingWriteApprovals,
-        >,
+        pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
+        pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
         pending_artifacts: Option<PendingArtifacts>,
         shell_session: Option<std::sync::Arc<ShellSession>>,
         user_secrets: Vec<(String, String)>,
@@ -641,11 +637,7 @@ impl AgentClient {
                             sender.clone(),
                             service.clone(),
                         ),
-                        EditMcpTool::new_with_services(
-                            crate::mcp_repository(),
-                            sender,
-                            service,
-                        ),
+                        EditMcpTool::new_with_services(crate::mcp_repository(), sender, service),
                     ),
                     _ => {
                         tracing::warn!(

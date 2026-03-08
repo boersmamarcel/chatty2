@@ -187,7 +187,7 @@ impl ContextStatus {
 /// or trigger automatic summarization.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// cx.subscribe(&notifier, |_, _, event: &ContextPressureEvent, _cx| {
 ///     match event {
 ///         ContextPressureEvent::CriticalPressure { utilization, .. } => {

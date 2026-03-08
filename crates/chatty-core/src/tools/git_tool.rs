@@ -3,9 +3,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::models::execution_approval_store::{
-    PendingApprovals, request_execution_approval,
-};
+use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::services::git_service::{
     GitAddOutput, GitCommitOutput, GitLogEntry, GitService, GitStatusOutput,
 };

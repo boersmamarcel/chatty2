@@ -18,7 +18,6 @@ pub struct ConversationsStore {
     active_conversation_id: Option<String>,
 }
 
-
 impl ConversationsStore {
     pub fn new() -> Self {
         Self {

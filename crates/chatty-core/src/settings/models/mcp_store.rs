@@ -90,7 +90,6 @@ pub struct McpServersModel {
     servers: Vec<McpServerConfig>,
 }
 
-
 impl McpServersModel {
     pub fn new() -> Self {
         Self {

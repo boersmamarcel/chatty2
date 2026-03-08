@@ -13,11 +13,9 @@
 //! not included here — those require a windowed environment not available in CI.
 
 use chatty_core::models::ConversationsStore;
-use chatty_core::settings::models::{
-    GeneralSettingsModel, ModelsModel, ProviderModel,
-};
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+use chatty_core::settings::models::{GeneralSettingsModel, ModelsModel, ProviderModel};
 use chatty_core::token_budget::{ContextStatus, TokenBudgetSnapshot};
 
 // ── Core types usable with gpui-globals feature enabled ───────────────────────
@@ -101,7 +99,8 @@ fn general_settings_model_functional_with_gpui_globals() {
 
     // JSON serialization must still work (settings are loaded from disk)
     let json = serde_json::to_string(&settings).expect("serialization failed");
-    let restored: GeneralSettingsModel = serde_json::from_str(&json).expect("deserialization failed");
+    let restored: GeneralSettingsModel =
+        serde_json::from_str(&json).expect("deserialization failed");
     assert!((restored.font_size - 18.0).abs() < f32::EPSILON);
     assert_eq!(restored.theme_name.as_deref(), Some("gruvbox"));
 }
@@ -146,7 +145,10 @@ fn startup_flow_models_providers_conversations_interact() {
 
     // 6. Model capability check (done before attaching files in chat_input)
     let model = models_model.get_model("claude-sonnet").unwrap();
-    assert!(model.supports_images, "Should support images before sending");
+    assert!(
+        model.supports_images,
+        "Should support images before sending"
+    );
     assert!(model.supports_pdf, "Should support PDFs before sending");
 }
 
@@ -158,7 +160,7 @@ fn startup_flow_models_providers_conversations_interact() {
 fn token_budget_snapshot_usable_from_gpui_crate() {
     let snap = TokenBudgetSnapshot {
         computed_at: std::time::Instant::now(),
-        model_context_limit: 200_000,  // Claude 3 limit
+        model_context_limit: 200_000, // Claude 3 limit
         response_reserve: 8_192,
         preamble_tokens: 500,
         tool_definitions_tokens: 2_000,

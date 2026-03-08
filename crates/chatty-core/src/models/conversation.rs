@@ -9,13 +9,13 @@ use rig::completion::Message;
 use rig::completion::message::{AssistantContent, Text};
 
 use crate::factories::AgentClient;
+use crate::models::message_types::SystemTrace;
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::services::shell_service::ShellSession;
-use crate::tools::PendingArtifacts;
-use crate::models::message_types::SystemTrace;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
+use crate::tools::PendingArtifacts;
 
 /// User feedback signal for an individual assistant message
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,12 +81,8 @@ impl Conversation {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<
-            crate::models::execution_approval_store::PendingApprovals,
-        >,
-        pending_write_approvals: Option<
-            crate::models::write_approval_store::PendingWriteApprovals,
-        >,
+        pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
+        pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
     ) -> Result<Self> {
@@ -153,12 +149,8 @@ impl Conversation {
         provider_config: &ProviderConfig,
         mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
         exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<
-            crate::models::execution_approval_store::PendingApprovals,
-        >,
-        pending_write_approvals: Option<
-            crate::models::write_approval_store::PendingWriteApprovals,
-        >,
+        pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
+        pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
     ) -> Result<Self> {

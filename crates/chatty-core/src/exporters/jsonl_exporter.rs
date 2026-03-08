@@ -5,8 +5,8 @@ use rig::completion::Message;
 use rig::completion::message::{AssistantContent, UserContent};
 
 use crate::models::conversation::RegenerationRecord;
-use crate::repositories::ConversationData;
 use crate::models::message_types::{SystemTrace, TraceItem};
+use crate::repositories::ConversationData;
 use crate::settings::models::models_store::ModelConfig;
 
 /// Configuration options for SFT JSONL export
