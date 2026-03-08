@@ -128,13 +128,25 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging (suppress for headless/pipe to keep stdout clean)
-    if !cli.headless && !cli.pipe {
+    // Initialize logging
+    if cli.headless || cli.pipe {
+        // Headless/pipe: suppress all logging to keep stdout clean
+    } else {
+        // Interactive TUI: log to file to avoid corrupting the terminal
+        let log_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("chatty");
+        std::fs::create_dir_all(&log_dir).ok();
+        let log_file = std::fs::File::create(log_dir.join("chatty-tui.log"))
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env()
                     .add_directive(tracing::Level::WARN.into()),
             )
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_ansi(false)
             .init();
     }
 
