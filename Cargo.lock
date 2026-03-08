@@ -1328,7 +1328,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chatty"
+name = "chatty-core"
 version = "0.1.83"
 dependencies = [
  "anyhow",
@@ -1339,6 +1339,59 @@ dependencies = [
  "base64 0.22.1",
  "bollard",
  "calamine",
+ "chrono",
+ "comemo 0.4.0",
+ "dirs 5.0.1",
+ "duckdb",
+ "flate2",
+ "futures",
+ "glob",
+ "gpui",
+ "image",
+ "lazy_static",
+ "mermaid-rs-renderer",
+ "mitex",
+ "nix 0.29.0",
+ "pdfium-render",
+ "regex",
+ "reqwest 0.13.2",
+ "resvg",
+ "rig-core",
+ "rmcp",
+ "rust_xlsxwriter",
+ "serde",
+ "serde_json",
+ "sha2",
+ "similar",
+ "sqlx",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tiktoken-rs",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "typst",
+ "typst-assets",
+ "typst-pdf",
+ "typst-svg",
+ "usvg",
+ "uuid",
+]
+
+[[package]]
+name = "chatty-gpui"
+version = "0.1.83"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "azure_core",
+ "azure_identity",
+ "base64 0.22.1",
+ "bollard",
+ "calamine",
+ "chatty-core",
  "chrono",
  "comemo 0.4.0",
  "dirs 5.0.1",

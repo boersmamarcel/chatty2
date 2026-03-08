@@ -3,7 +3,7 @@
 **/target/
 **.DS_Store
 *.db
-/libs/
+**/libs/
 
 # AppImage build artifacts
 /squashfs-root

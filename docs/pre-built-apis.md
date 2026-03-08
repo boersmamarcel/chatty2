@@ -4,7 +4,7 @@ This document catalogs public APIs that are defined but not yet wired to callers
 
 ## Write Approval System
 
-**Location**: `src/chatty/models/write_approval_store.rs`
+**Location**: `crates/chatty-core/src/models/write_approval_store.rs`
 
 The write approval flow mirrors the execution approval system but for filesystem write operations (file creation, overwrite, delete, move, diff application). The store and types are fully implemented; what's missing is the UI for presenting write approval prompts.
 
@@ -21,7 +21,7 @@ The write approval flow mirrors the execution approval system but for filesystem
 
 ## Thinking Block Lifecycle (ChatView)
 
-**Location**: `src/chatty/views/chat_view.rs`
+**Location**: `crates/chatty-gpui/src/chatty/views/chat_view.rs`
 
 Methods for displaying LLM "thinking" / chain-of-thought blocks in the UI. The StreamManager emits thinking events but ChatView doesn't yet process them.
 
@@ -36,7 +36,7 @@ Methods for displaying LLM "thinking" / chain-of-thought blocks in the UI. The S
 
 ## Trace Session Methods
 
-**Location**: `src/chatty/views/message_types.rs`
+**Location**: `crates/chatty-core/src/models/message_types.rs`
 
 | Method | Line | Purpose |
 |--------|------|---------|
@@ -48,7 +48,7 @@ Methods for displaying LLM "thinking" / chain-of-thought blocks in the UI. The S
 
 ## Message Event Variants
 
-**Location**: `src/chatty/views/message_types.rs`
+**Location**: `crates/chatty-core/src/models/message_types.rs`
 
 Event enum variants and their fields that are defined but not matched on:
 
@@ -61,7 +61,7 @@ Event enum variants and their fields that are defined but not matched on:
 
 ## Token Budget System
 
-**Location**: `src/chatty/token_budget/`
+**Location**: `crates/chatty-core/src/token_budget/` and `crates/chatty-gpui/src/chatty/token_budget/`
 
 Several methods in the token budget subsystem are pre-built for planned features:
 
@@ -84,7 +84,7 @@ Several methods in the token budget subsystem are pre-built for planned features
 
 ## Token Tracking Settings
 
-**Location**: `src/settings/models/token_tracking_settings.rs`
+**Location**: `crates/chatty-core/src/settings/models/token_tracking_settings.rs`
 
 | Method | Line | Purpose |
 |--------|------|---------|
@@ -106,7 +106,7 @@ Several methods in the token budget subsystem are pre-built for planned features
 
 ## Token Usage
 
-**Location**: `src/chatty/models/token_usage.rs`
+**Location**: `crates/chatty-core/src/models/token_usage.rs`
 
 | Method | Purpose |
 |--------|---------|
