@@ -15,30 +15,21 @@ use auto_updater::AutoUpdater;
 use chatty::repositories::{ConversationRepository, ConversationSqliteRepository};
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
-use settings::repositories::{
-    ExecutionSettingsJsonRepository, ExecutionSettingsRepository, GeneralSettingsJsonRepository,
-    GeneralSettingsRepository, JsonFileRepository, JsonMcpRepository, JsonModelsRepository,
-    McpRepository, ModelsRepository, ProviderRepository, TrainingSettingsJsonRepository,
-    TrainingSettingsRepository, UserSecretsJsonRepository, UserSecretsRepository,
-};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// Use global singletons from chatty-core
+use chatty_core::{
+    EXECUTION_SETTINGS_REPOSITORY, GENERAL_SETTINGS_REPOSITORY, MCP_REPOSITORY,
+    MCP_SERVICE, MCP_UPDATE_SENDER, MODELS_REPOSITORY, PROVIDER_REPOSITORY,
+    TRAINING_SETTINGS_REPOSITORY, USER_SECRETS_REPOSITORY,
+};
 
 /// Flag to prevent theme observer from saving during initialization.
 /// This avoids a race condition where the default theme could overwrite
 /// the user's saved theme preference before settings are loaded.
 static THEME_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
-
-/// Sender half of the MCP update channel. Initialized once at startup.
-/// AddMcpTool sends the updated server list here after a successful save.
-pub static MCP_UPDATE_SENDER: OnceLock<
-    tokio::sync::mpsc::Sender<Vec<settings::models::mcp_store::McpServerConfig>>,
-> = OnceLock::new();
-
-/// McpService instance accessible from tool context (no GPUI available there).
-pub static MCP_SERVICE: OnceLock<chatty::services::McpService> = OnceLock::new();
 
 actions!(
     chatty,
@@ -52,52 +43,6 @@ actions!(
         DeleteActiveConversation
     ]
 );
-
-// Global repositories
-lazy_static::lazy_static! {
-    static ref PROVIDER_REPOSITORY: Arc<dyn ProviderRepository> = {
-        let repo = JsonFileRepository::new()
-            .expect("Failed to initialize provider repository");
-        Arc::new(repo)
-    };
-
-    static ref GENERAL_SETTINGS_REPOSITORY: Arc<dyn GeneralSettingsRepository> = {
-        let repo = GeneralSettingsJsonRepository::new()
-            .expect("Failed to initialize general settings repository");
-        Arc::new(repo)
-    };
-
-    static ref MODELS_REPOSITORY: Arc<dyn ModelsRepository> = {
-        let repo = JsonModelsRepository::new()
-            .expect("Failed to initialize models repository");
-        Arc::new(repo)
-    };
-
-    static ref MCP_REPOSITORY: Arc<dyn McpRepository> = {
-        let repo = JsonMcpRepository::new()
-            .expect("Failed to initialize MCP repository");
-        Arc::new(repo)
-    };
-
-    static ref EXECUTION_SETTINGS_REPOSITORY: Arc<dyn ExecutionSettingsRepository> = {
-        let repo = ExecutionSettingsJsonRepository::new()
-            .expect("Failed to initialize execution settings repository");
-        Arc::new(repo)
-    };
-
-    static ref TRAINING_SETTINGS_REPOSITORY: Arc<dyn TrainingSettingsRepository> = {
-        let repo = TrainingSettingsJsonRepository::new()
-            .expect("Failed to initialize training settings repository");
-        Arc::new(repo)
-    };
-
-    static ref USER_SECRETS_REPOSITORY: Arc<dyn UserSecretsRepository> = {
-        let repo = UserSecretsJsonRepository::new()
-            .expect("Failed to initialize user secrets repository");
-        Arc::new(repo)
-    };
-
-}
 
 fn get_themes_dir() -> PathBuf {
     // Check CHATTY_DATA_DIR environment variable (set by AppImage)

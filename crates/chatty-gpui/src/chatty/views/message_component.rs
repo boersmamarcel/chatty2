@@ -270,7 +270,13 @@ fn render_math_segments(
 
                 // Pre-compute styled SVG path with theme color
                 let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
-                    let theme_color = cx.theme().foreground;
+                    let hsla = cx.theme().foreground;
+                    let rgb = hsla.to_rgb();
+                    let theme_color = chatty_core::services::math_renderer_service::RgbColor {
+                        r: rgb.r,
+                        g: rgb.g,
+                        b: rgb.b,
+                    };
                     match service.render_to_styled_svg_file(math_content, true, theme_color) {
                         Ok(svg_path) => MathComponent::with_svg_path(
                             math_content.clone(),
@@ -309,7 +315,13 @@ fn render_math_segments(
 
                 // Pre-compute styled SVG path with theme color
                 let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
-                    let theme_color = cx.theme().foreground;
+                    let hsla = cx.theme().foreground;
+                    let rgb = hsla.to_rgb();
+                    let theme_color = chatty_core::services::math_renderer_service::RgbColor {
+                        r: rgb.r,
+                        g: rgb.g,
+                        b: rgb.b,
+                    };
                     match service.render_to_styled_svg_file(math_content, false, theme_color) {
                         Ok(svg_path) => MathComponent::with_svg_path(
                             math_content.clone(),

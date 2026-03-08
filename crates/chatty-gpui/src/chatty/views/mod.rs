@@ -1,6 +1,6 @@
 pub mod app_view;
 pub mod approval_prompt_bar;
-pub mod attachment_validation;
+pub use chatty_core::models::attachment_validation;
 pub mod chat_input;
 pub mod chat_view;
 pub mod code_block_component;
@@ -12,7 +12,7 @@ pub mod math_parser;
 pub mod math_renderer;
 pub mod mermaid_component;
 pub mod message_component;
-pub mod message_types;
+pub use chatty_core::models::message_types;
 pub mod parsed_cache;
 pub mod sidebar_view;
 pub mod syntax_highlighter;

@@ -11,7 +11,7 @@ use crate::settings::models::models_store::ModelConfig;
 
 /// Configuration options for SFT JSONL export
 #[derive(Clone, Debug)]
-pub(crate) struct SftExportOptions {
+pub struct SftExportOptions {
     /// If true and ModelConfig.preamble is non-empty, prepend a system message
     pub include_system_prompt: bool,
     /// If true, include tool_call and tool messages in ChatML format
@@ -312,7 +312,7 @@ fn parse_trace_outputs(trace_json: serde_json::Value) -> HashMap<String, String>
 /// 2. Filter out lines matching the conversation_id
 /// 3. Append new lines
 /// 4. Write atomically (temp file + rename)
-pub(crate) async fn append_jsonl_with_dedup(
+pub async fn append_jsonl_with_dedup(
     path: &std::path::Path,
     new_lines: &[serde_json::Value],
     conversation_id: &str,
