@@ -52,6 +52,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; CLI binary
+Source: "..\target\release\chatty-tui.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Themes
 Source: "..\themes\*.json"; DestDir: "{app}\themes"; Flags: ignoreversion
 
