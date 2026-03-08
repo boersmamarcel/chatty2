@@ -23,13 +23,13 @@ send_message() / handle_regeneration()
 
 | File | Purpose |
 |:-----|:--------|
-| `src/chatty/token_budget/snapshot.rs` | `TokenBudgetSnapshot`, `ComponentFractions`, `ContextStatus`, `ContextPressureEvent` |
-| `src/chatty/token_budget/counter.rs` | `TokenCounter` — tiktoken-rs BPE wrapper, provider-aware |
-| `src/chatty/token_budget/cache.rs` | `CachedTokenCounts` — hash-keyed cache for preamble + tool tokens |
-| `src/chatty/token_budget/manager.rs` | `GlobalTokenBudget`, `gather_snapshot_inputs()`, `compute_snapshot_background()`, `check_pressure()` |
-| `src/chatty/token_budget/summarizer.rs` | Stub — future conversation summarization |
-| `src/settings/models/token_tracking_settings.rs` | `TokenTrackingSettings` GPUI global |
-| `src/chatty/views/footer/token_context_bar_view.rs` | Footer bar and popover UI |
+| `crates/chatty-core/src/token_budget/snapshot.rs` | `TokenBudgetSnapshot`, `ComponentFractions`, `ContextStatus`, `ContextPressureEvent` |
+| `crates/chatty-core/src/token_budget/counter.rs` | `TokenCounter` — tiktoken-rs BPE wrapper, provider-aware |
+| `crates/chatty-core/src/token_budget/cache.rs` | `CachedTokenCounts` — hash-keyed cache for preamble + tool tokens |
+| `crates/chatty-gpui/src/chatty/token_budget/manager.rs` | `GlobalTokenBudget`, `gather_snapshot_inputs()`, `compute_snapshot_background()`, `check_pressure()` |
+| `crates/chatty-core/src/token_budget/summarizer.rs` | Stub — future conversation summarization |
+| `crates/chatty-core/src/settings/models/token_tracking_settings.rs` | `TokenTrackingSettings` GPUI global |
+| `crates/chatty-gpui/src/chatty/views/footer/token_context_bar_view.rs` | Footer bar and popover UI |
 
 ## Data Flow: Estimated Snapshot
 

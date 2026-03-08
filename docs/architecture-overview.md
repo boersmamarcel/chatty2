@@ -2,35 +2,48 @@
 
 A high-level guide to Chatty's module structure, data flow, and key design decisions for contributors.
 
-## Module Map
+## Workspace Structure
+
+Chatty is organized as a Cargo workspace with two crates:
 
 ```
-src/
-├── main.rs                      # Entry point: Tokio runtime, theme loading, global init
-├── assets.rs                    # Embedded assets (icons, fonts)
+Cargo.toml                       # Workspace root
+crates/
+├── chatty-core/                 # UI-agnostic: models, services, tools, settings
+│   └── src/
+│       ├── lib.rs               # Crate root, global singletons (repositories, MCP)
+│       ├── gpui_globals.rs      # impl Global for core types (behind gpui-globals feature)
+│       ├── auth/                # Azure AD authentication (OAuth2 flows, token cache)
+│       ├── exporters/           # Conversation export (ATIF, JSONL/SFT/DPO)
+│       ├── factories/           # LLM agent construction (per-provider)
+│       ├── models/              # Domain entities and global stores
+│       ├── repositories/        # Persistence layer (SQLite, in-memory)
+│       ├── sandbox/             # Docker sandbox for code execution
+│       ├── services/            # Business logic services
+│       ├── settings/            # Settings models, repositories, provider discovery
+│       ├── token_budget/        # Context window management (counting, summarization)
+│       └── tools/               # LLM tool implementations
 │
-├── auto_updater/                # Self-update system (download, install, UI)
-│
-├── chatty/                      # Core chat application
-│   ├── auth/                    # Azure AD authentication (OAuth2 flows, token cache)
-│   ├── controllers/             # Application logic hub (ChattyApp entity)
-│   ├── exporters/               # Conversation export (ATIF, JSONL/SFT/DPO)
-│   ├── factories/               # LLM agent construction (per-provider)
-│   ├── models/                  # Domain entities and global stores
-│   ├── repositories/            # Persistence layer (SQLite, in-memory)
-│   ├── services/                # Business logic services
-│   ├── token_budget/            # Context window management (counting, summarization)
-│   ├── tools/                   # LLM tool implementations
-│   └── views/                   # UI components (GPUI Render impls)
-│
-└── settings/                    # Settings subsystem
-    ├── controllers/             # Settings CRUD operations
-    ├── models/                  # Settings data models (providers, models, MCP, etc.)
-    ├── providers/               # Provider-specific logic (Ollama discovery/sync)
-    ├── repositories/            # JSON file persistence for settings
-    ├── utils/                   # Theme and window helpers
-    └── views/                   # Settings UI pages
+└── chatty-gpui/                 # GPUI desktop frontend
+    └── src/
+        ├── main.rs              # Entry point: Tokio runtime, theme loading, global init
+        ├── assets.rs            # Embedded assets (icons, fonts)
+        ├── auto_updater/        # Self-update system (download, install, UI)
+        ├── chatty/
+        │   ├── controllers/     # Application logic hub (ChattyApp entity)
+        │   ├── models/          # GPUI-specific models (StreamManager, ErrorNotifier)
+        │   ├── services/        # GPUI-specific services
+        │   ├── token_budget/    # GPUI token budget manager (UI integration)
+        │   └── views/           # UI components (GPUI Render impls)
+        └── settings/
+            ├── controllers/     # Settings CRUD operations
+            ├── models/          # GPUI-specific notifiers (ModelsNotifier, AgentConfigNotifier)
+            ├── providers/       # Provider-specific GPUI services (Ollama sync)
+            ├── utils/           # Theme and window helpers
+            └── views/           # Settings UI pages
 ```
+
+See [workspace-crate-split.md](workspace-crate-split.md) for full rationale and design patterns.
 
 ## Data Flow
 
@@ -159,27 +172,38 @@ See [token-tracking.md](token-tracking.md) for data flow details.
 ## Module Dependencies
 
 ```
-views ──────► controllers ──────► services
-  │               │                  │
-  │               ▼                  ▼
-  │           models/stores     repositories
-  │               │                  │
-  └───────────────┴──────────────────┘
-                  │
-              factories
+chatty-gpui                          chatty-core
+───────────                          ───────────
+views ──────► controllers ──────►    services
+  │               │                     │
+  │               ▼                     ▼
+  │           models (GPUI)         models/stores (core)
+  │               │                     │
+  │               ▼                     ▼
+  │           StreamManager         repositories
+  │                                     │
+  └─────────────────────────────────────┘
+                                        │
+                                    factories
 ```
 
-- **Views** render UI and emit events; they never call services directly
-- **Controllers** handle events, coordinate between services and stores
-- **Services** contain business logic (LLM streaming, MCP management, shell execution)
-- **Models/Stores** hold global state; updated via controllers
+**chatty-core** (no GPUI dependency):
+- **Models/Stores** hold global state (conversations, settings, approvals)
+- **Services** contain business logic (LLM streaming, MCP, shell, math rendering)
 - **Repositories** handle disk I/O (JSON files, SQLite)
 - **Factories** construct provider-specific LLM clients
+- **Tools** implement LLM-callable tool definitions
+
+**chatty-gpui** (depends on chatty-core with `gpui-globals` feature):
+- **Views** render UI and emit events; they never call services directly
+- **Controllers** handle events, coordinate between services and stores
+- **Models** hold GPUI-specific state (StreamManager, ErrorNotifier, notifiers)
 
 ## Adding a New Feature — Checklist
 
-1. **New setting?** → Add to the appropriate model in `settings/models/`, add JSON persistence in `settings/repositories/`, add UI in `settings/views/`
-2. **New LLM provider?** → Add variant to `ProviderType`, update `default_capabilities()`, add agent builder in `agent_factory.rs`
-3. **New tool?** → Implement in `chatty/tools/`, register in `agent_factory.rs`
-4. **New view component?** → Add in `chatty/views/`, emit events to `ChattyApp` if it needs to trigger actions
-5. **New service?** → Add in `chatty/services/`, call from controller
+1. **New setting?** → Add model in `chatty-core/src/settings/models/`, add JSON persistence in `chatty-core/src/settings/repositories/`, add UI in `chatty-gpui/src/settings/views/`
+2. **New LLM provider?** → Add variant to `ProviderType` in chatty-core, update `default_capabilities()`, add agent builder in `chatty-core/src/factories/agent_factory.rs`
+3. **New tool?** → Implement in `chatty-core/src/tools/`, register in `agent_factory.rs`
+4. **New view component?** → Add in `chatty-gpui/src/chatty/views/`, emit events to `ChattyApp` if it needs to trigger actions
+5. **New service?** → If UI-agnostic, add in `chatty-core/src/services/`. If GPUI-specific, add in `chatty-gpui/src/chatty/services/`
+6. **New global type?** → Define in chatty-core, add `impl Global` in `chatty-core/src/gpui_globals.rs` (behind `gpui-globals` feature)
