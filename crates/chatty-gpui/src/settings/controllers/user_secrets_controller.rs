@@ -1,4 +1,3 @@
-use crate::USER_SECRETS_REPOSITORY;
 use crate::settings::models::user_secrets_store::{UserSecret, UserSecretsModel};
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp};
@@ -27,7 +26,7 @@ fn notify_secrets_changed(cx: &mut App) {
 fn save_secrets_async(cx: &mut App) {
     let model = cx.global::<UserSecretsModel>().clone();
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = USER_SECRETS_REPOSITORY.clone();
+        let repo = chatty_core::user_secrets_repository();
         if let Err(e) = repo.save(model).await {
             error!(error = ?e, "Failed to save user secrets");
         }

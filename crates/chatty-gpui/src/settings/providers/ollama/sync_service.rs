@@ -2,7 +2,6 @@ use anyhow::Result;
 use gpui::{App, AsyncApp, BorrowAppContext};
 use tracing::{debug, info, warn};
 
-use crate::MODELS_REPOSITORY;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderType;
 
@@ -79,7 +78,7 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
                 .ok();
 
             if let Some(all_models) = all_models {
-                let models_repo = MODELS_REPOSITORY.clone();
+                let models_repo = chatty_core::models_repository();
                 if let Err(e) = models_repo.save_all(all_models).await {
                     warn!(error = ?e, "Failed to save discovered models");
                 } else {

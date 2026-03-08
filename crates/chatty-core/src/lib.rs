@@ -32,46 +32,113 @@ pub static MCP_UPDATE_SENDER: OnceLock<
 /// McpService instance accessible from tool context (no UI framework available there).
 pub static MCP_SERVICE: OnceLock<services::McpService> = OnceLock::new();
 
-lazy_static::lazy_static! {
-    pub static ref PROVIDER_REPOSITORY: Arc<dyn settings::repositories::ProviderRepository> = {
-        let repo = settings::repositories::JsonFileRepository::new()
-            .expect("Failed to initialize provider repository");
-        Arc::new(repo)
-    };
+// ── Repository singletons ────────────────────────────────────────────────────
+// Initialized via `init_repositories()` at startup. Access via accessor functions below.
 
-    pub static ref GENERAL_SETTINGS_REPOSITORY: Arc<dyn settings::repositories::GeneralSettingsRepository> = {
-        let repo = settings::repositories::GeneralSettingsJsonRepository::new()
-            .expect("Failed to initialize general settings repository");
-        Arc::new(repo)
-    };
+static PROVIDER_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ProviderRepository>> =
+    OnceLock::new();
+static GENERAL_SETTINGS_REPOSITORY: OnceLock<
+    Arc<dyn settings::repositories::GeneralSettingsRepository>,
+> = OnceLock::new();
+static MODELS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ModelsRepository>> =
+    OnceLock::new();
+static MCP_REPOSITORY: OnceLock<Arc<dyn settings::repositories::McpRepository>> = OnceLock::new();
+static EXECUTION_SETTINGS_REPOSITORY: OnceLock<
+    Arc<dyn settings::repositories::ExecutionSettingsRepository>,
+> = OnceLock::new();
+static TRAINING_SETTINGS_REPOSITORY: OnceLock<
+    Arc<dyn settings::repositories::TrainingSettingsRepository>,
+> = OnceLock::new();
+static USER_SECRETS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::UserSecretsRepository>> =
+    OnceLock::new();
 
-    pub static ref MODELS_REPOSITORY: Arc<dyn settings::repositories::ModelsRepository> = {
-        let repo = settings::repositories::JsonModelsRepository::new()
-            .expect("Failed to initialize models repository");
-        Arc::new(repo)
-    };
+/// Initialize all repository singletons. Must be called once at startup before
+/// any repository is accessed. Returns an error if the config directory cannot
+/// be determined (e.g., missing HOME), allowing the host to show a proper error
+/// dialog instead of panicking.
+pub fn init_repositories() -> anyhow::Result<()> {
+    use settings::repositories::*;
 
-    pub static ref MCP_REPOSITORY: Arc<dyn settings::repositories::McpRepository> = {
-        let repo = settings::repositories::JsonMcpRepository::new()
-            .expect("Failed to initialize MCP repository");
-        Arc::new(repo)
-    };
+    PROVIDER_REPOSITORY
+        .set(Arc::new(JsonFileRepository::new()?))
+        .ok();
+    GENERAL_SETTINGS_REPOSITORY
+        .set(Arc::new(GeneralSettingsJsonRepository::new()?))
+        .ok();
+    MODELS_REPOSITORY
+        .set(Arc::new(JsonModelsRepository::new()?))
+        .ok();
+    MCP_REPOSITORY
+        .set(Arc::new(JsonMcpRepository::new()?))
+        .ok();
+    EXECUTION_SETTINGS_REPOSITORY
+        .set(Arc::new(ExecutionSettingsJsonRepository::new()?))
+        .ok();
+    TRAINING_SETTINGS_REPOSITORY
+        .set(Arc::new(TrainingSettingsJsonRepository::new()?))
+        .ok();
+    USER_SECRETS_REPOSITORY
+        .set(Arc::new(UserSecretsJsonRepository::new()?))
+        .ok();
 
-    pub static ref EXECUTION_SETTINGS_REPOSITORY: Arc<dyn settings::repositories::ExecutionSettingsRepository> = {
-        let repo = settings::repositories::ExecutionSettingsJsonRepository::new()
-            .expect("Failed to initialize execution settings repository");
-        Arc::new(repo)
-    };
+    Ok(())
+}
 
-    pub static ref TRAINING_SETTINGS_REPOSITORY: Arc<dyn settings::repositories::TrainingSettingsRepository> = {
-        let repo = settings::repositories::TrainingSettingsJsonRepository::new()
-            .expect("Failed to initialize training settings repository");
-        Arc::new(repo)
-    };
+/// Returns a cloned Arc to the provider repository.
+/// Panics if `init_repositories()` was not called — this is a programming error.
+pub fn provider_repository() -> Arc<dyn settings::repositories::ProviderRepository> {
+    PROVIDER_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
 
-    pub static ref USER_SECRETS_REPOSITORY: Arc<dyn settings::repositories::UserSecretsRepository> = {
-        let repo = settings::repositories::UserSecretsJsonRepository::new()
-            .expect("Failed to initialize user secrets repository");
-        Arc::new(repo)
-    };
+/// Returns a cloned Arc to the general settings repository.
+pub fn general_settings_repository() -> Arc<dyn settings::repositories::GeneralSettingsRepository> {
+    GENERAL_SETTINGS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the models repository.
+pub fn models_repository() -> Arc<dyn settings::repositories::ModelsRepository> {
+    MODELS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the MCP repository.
+pub fn mcp_repository() -> Arc<dyn settings::repositories::McpRepository> {
+    MCP_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the execution settings repository.
+pub fn execution_settings_repository() -> Arc<dyn settings::repositories::ExecutionSettingsRepository>
+{
+    EXECUTION_SETTINGS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the training settings repository.
+pub fn training_settings_repository() -> Arc<dyn settings::repositories::TrainingSettingsRepository>
+{
+    TRAINING_SETTINGS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the user secrets repository.
+pub fn user_secrets_repository() -> Arc<dyn settings::repositories::UserSecretsRepository> {
+    USER_SECRETS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
 }

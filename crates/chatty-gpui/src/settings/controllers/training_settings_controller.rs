@@ -1,4 +1,3 @@
-use crate::TRAINING_SETTINGS_REPOSITORY;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use gpui::{App, AsyncApp};
 use tracing::{error, info};
@@ -23,7 +22,7 @@ pub fn toggle_atif_auto_export(cx: &mut App) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = TRAINING_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::training_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save training settings");
         }
@@ -51,7 +50,7 @@ pub fn toggle_jsonl_auto_export(cx: &mut App) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = TRAINING_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::training_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save training settings");
         }

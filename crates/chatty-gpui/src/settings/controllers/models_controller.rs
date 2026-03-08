@@ -65,10 +65,8 @@ pub fn delete_model(model_id: String, cx: &mut App) {
 
 /// Save models asynchronously to disk
 fn save_models_async(models: Vec<ModelConfig>, cx: &mut App) {
-    use crate::MODELS_REPOSITORY;
-
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = MODELS_REPOSITORY.clone();
+        let repo = chatty_core::models_repository();
         if let Err(e) = repo.save_all(models).await {
             error!(error = ?e, "Failed to save models, changes will be lost on restart");
         }

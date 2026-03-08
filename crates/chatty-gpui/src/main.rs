@@ -20,11 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Use global singletons from chatty-core
-use chatty_core::{
-    EXECUTION_SETTINGS_REPOSITORY, GENERAL_SETTINGS_REPOSITORY, MCP_REPOSITORY,
-    MCP_SERVICE, MCP_UPDATE_SENDER, MODELS_REPOSITORY, PROVIDER_REPOSITORY,
-    TRAINING_SETTINGS_REPOSITORY, USER_SECRETS_REPOSITORY,
-};
+use chatty_core::{MCP_SERVICE, MCP_UPDATE_SENDER};
 
 /// Flag to prevent theme observer from saving during initialization.
 /// This avoids a race condition where the default theme could overwrite
@@ -111,7 +107,7 @@ fn init_themes(cx: &mut App) {
             .global::<settings::models::general_model::GeneralSettingsModel>()
             .clone();
         cx.spawn(|_cx: &mut AsyncApp| async move {
-            let repo = GENERAL_SETTINGS_REPOSITORY.clone();
+            let repo = chatty_core::general_settings_repository();
             if let Err(e) = repo.save(settings).await {
                 warn!(error = ?e, "Failed to save theme preference");
             }
@@ -353,6 +349,11 @@ fn main() {
     // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
 
+    // Initialize all settings repositories (providers, models, MCP, etc.).
+    // This must happen before anything accesses the repository singletons.
+    chatty_core::init_repositories()
+        .expect("Failed to initialize settings repositories (is HOME set?)");
+
     // Initialize the SQLite conversation repository here, where the Tokio runtime is
     // explicitly set up, so the block_on call is clearly safe and in a known context.
     let conversation_repo: Arc<dyn ConversationRepository> = Arc::new(
@@ -379,7 +380,7 @@ fn main() {
 
         // Load general settings asynchronously without blocking startup
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = GENERAL_SETTINGS_REPOSITORY.clone();
+            let repo = chatty_core::general_settings_repository();
             match repo.load().await {
                 Ok(settings) => {
                     cx.update(|cx| {
@@ -602,9 +603,9 @@ fn main() {
         cx.spawn(async move |cx: &mut AsyncApp| {
             // Run all three I/O operations in parallel before touching global state
             let (providers_result, models_result, exec_settings_result) = tokio::join!(
-                PROVIDER_REPOSITORY.clone().load_all(),
-                MODELS_REPOSITORY.clone().load_all(),
-                EXECUTION_SETTINGS_REPOSITORY.clone().load(),
+                chatty_core::provider_repository().load_all(),
+                chatty_core::models_repository().load_all(),
+                chatty_core::execution_settings_repository().load(),
             );
 
             // Apply providers result
@@ -624,7 +625,7 @@ fn main() {
                                 .global::<settings::models::ProviderModel>()
                                 .providers()
                                 .to_vec();
-                            let repo_for_save = PROVIDER_REPOSITORY.clone();
+                            let repo_for_save = chatty_core::provider_repository();
                             cx.spawn(|_cx: &mut AsyncApp| async move {
                                 if let Err(e) = repo_for_save.save_all(providers_to_save).await {
                                     warn!(error = ?e, "Failed to persist default Ollama provider");
@@ -781,7 +782,7 @@ fn main() {
 
         // Load MCP server configurations asynchronously without blocking startup
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = MCP_REPOSITORY.clone();
+            let repo = chatty_core::mcp_repository();
             match repo.load_all().await {
                 Ok(servers) => {
                     let servers_clone = servers.clone();
@@ -814,7 +815,7 @@ fn main() {
 
         // Load training settings asynchronously (non-blocking, no dependencies)
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = TRAINING_SETTINGS_REPOSITORY.clone();
+            let repo = chatty_core::training_settings_repository();
             match repo.load().await {
                 Ok(settings) => {
                     cx.update(|cx| {
@@ -836,7 +837,7 @@ fn main() {
 
         // Load user secrets asynchronously
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = USER_SECRETS_REPOSITORY.clone();
+            let repo = chatty_core::user_secrets_repository();
             match repo.load().await {
                 Ok(secrets) => {
                     let count = secrets.secrets.len();

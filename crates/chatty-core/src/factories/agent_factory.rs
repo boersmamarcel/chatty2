@@ -632,17 +632,17 @@ impl AgentClient {
                 ) {
                     (Some(sender), Some(service)) => (
                         AddMcpTool::new_with_services(
-                            crate::MCP_REPOSITORY.clone(),
+                            crate::mcp_repository(),
                             sender.clone(),
                             service.clone(),
                         ),
                         DeleteMcpTool::new_with_services(
-                            crate::MCP_REPOSITORY.clone(),
+                            crate::mcp_repository(),
                             sender.clone(),
                             service.clone(),
                         ),
                         EditMcpTool::new_with_services(
-                            crate::MCP_REPOSITORY.clone(),
+                            crate::mcp_repository(),
                             sender,
                             service,
                         ),
@@ -653,9 +653,9 @@ impl AgentClient {
                              MCP tools created without live services"
                         );
                         (
-                            AddMcpTool::new(crate::MCP_REPOSITORY.clone()),
-                            DeleteMcpTool::new(crate::MCP_REPOSITORY.clone()),
-                            EditMcpTool::new(crate::MCP_REPOSITORY.clone()),
+                            AddMcpTool::new(crate::mcp_repository()),
+                            DeleteMcpTool::new(crate::mcp_repository()),
+                            EditMcpTool::new(crate::mcp_repository()),
                         )
                     }
                 };
@@ -663,7 +663,7 @@ impl AgentClient {
                     add: Some(add),
                     delete: Some(delete),
                     edit: Some(edit),
-                    list: Some(ListMcpTool::new(crate::MCP_REPOSITORY.clone())),
+                    list: Some(ListMcpTool::new(crate::mcp_repository())),
                 }
             } else {
                 tracing::info!("MCP management tools disabled by execution settings");

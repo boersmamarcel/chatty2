@@ -130,10 +130,8 @@ fn emit_rebuild_required(cx: &mut App) {
 
 /// Save servers asynchronously to disk
 fn save_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
-    use crate::MCP_REPOSITORY;
-
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = MCP_REPOSITORY.clone();
+        let repo = chatty_core::mcp_repository();
         if let Err(e) = repo.save_all(servers).await {
             error!(error = ?e, "Failed to save MCP servers, changes will be lost on restart");
         }

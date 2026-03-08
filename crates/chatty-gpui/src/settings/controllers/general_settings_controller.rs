@@ -1,4 +1,3 @@
-use crate::GENERAL_SETTINGS_REPOSITORY;
 use crate::settings::models::GeneralSettingsModel;
 use crate::settings::utils::find_theme_variant;
 use gpui::{App, AsyncApp, SharedString};
@@ -18,7 +17,7 @@ pub fn update_font_size(cx: &mut App, font_size: f32) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = GENERAL_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::general_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save general settings, changes will be lost on restart");
         }

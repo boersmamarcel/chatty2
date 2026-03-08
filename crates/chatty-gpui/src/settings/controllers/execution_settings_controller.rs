@@ -1,4 +1,3 @@
-use crate::EXECUTION_SETTINGS_REPOSITORY;
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp};
@@ -46,7 +45,7 @@ pub fn toggle_execution(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -70,7 +69,7 @@ pub fn set_workspace_dir(dir: Option<String>, cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -91,7 +90,7 @@ pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -119,7 +118,7 @@ pub fn toggle_filesystem_read(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -144,7 +143,7 @@ pub fn toggle_network_isolation(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -173,7 +172,7 @@ pub fn toggle_mcp_service_tool(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -198,7 +197,7 @@ pub fn toggle_fetch(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -226,7 +225,7 @@ pub fn toggle_docker_code_execution(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -251,7 +250,7 @@ pub fn toggle_git(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -276,7 +275,7 @@ pub fn set_timeout_seconds(seconds: u32, cx: &mut App) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -301,7 +300,7 @@ pub fn set_max_output_bytes(bytes: usize, cx: &mut App) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -323,7 +322,7 @@ pub fn set_max_agent_turns(turns: u32, cx: &mut App) {
 
     // 4. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
@@ -351,7 +350,7 @@ pub fn toggle_filesystem_write(cx: &mut App) {
 
     // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = EXECUTION_SETTINGS_REPOSITORY.clone();
+        let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save execution settings");
         }
