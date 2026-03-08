@@ -3,6 +3,10 @@ name = "chatty-gpui"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "chatty"
+path = "src/main.rs"
+
 [dependencies]
 chatty-core = { path = "../chatty-core", features = ["gpui-globals"] }
 

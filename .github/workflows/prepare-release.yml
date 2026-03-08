@@ -239,8 +239,8 @@ jobs:
           if [ -f Cargo.lock ]; then
             NEW="${{ steps.version.outputs.new }}"
             rustup default stable 2>/dev/null || true
-            cargo update --precise "$NEW" chatty
-            echo "Updated Cargo.lock for chatty=$NEW"
+            cargo update --precise "$NEW" chatty-gpui
+            echo "Updated Cargo.lock for chatty-gpui=$NEW"
           fi
 
       - name: Commit version bump
