@@ -23,13 +23,8 @@ static GLOBAL_WRITE_APPROVAL_MODE: std::sync::OnceLock<std::sync::Mutex<Approval
 
 /// Set the global write approval mode (call at startup)
 pub fn set_global_write_approval_mode(mode: ApprovalMode) {
-    GLOBAL_WRITE_APPROVAL_MODE
-        .get_or_init(|| std::sync::Mutex::new(ApprovalMode::AlwaysAsk));
-    *GLOBAL_WRITE_APPROVAL_MODE
-        .get()
-        .unwrap()
-        .lock()
-        .unwrap() = mode;
+    GLOBAL_WRITE_APPROVAL_MODE.get_or_init(|| std::sync::Mutex::new(ApprovalMode::AlwaysAsk));
+    *GLOBAL_WRITE_APPROVAL_MODE.get().unwrap().lock().unwrap() = mode;
 }
 
 /// Maximum characters to show in content preview

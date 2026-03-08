@@ -28,8 +28,8 @@ pub fn install_cli(cx: &mut App) {
 
 /// Find the bundled chatty-tui binary next to the running executable.
 fn find_bundled_binary() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("Cannot determine executable path: {}", e))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("Cannot determine executable path: {}", e))?;
     let dir = exe
         .parent()
         .ok_or_else(|| "Cannot determine executable directory".to_string())?;
