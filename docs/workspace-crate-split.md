@@ -1,29 +1,32 @@
 # Workspace Crate Split
 
-Rationale, design patterns, and guidelines for Chatty's two-crate workspace architecture.
+Rationale, design patterns, and guidelines for Chatty's three-crate workspace architecture.
 
-## Why Two Crates?
+## Why Three Crates?
 
-The codebase was split from a single `src/` tree into two workspace crates:
+The codebase is organized into three workspace crates:
 
 | Crate | Purpose | GPUI dependency? |
 |:------|:--------|:-----------------|
 | **chatty-core** | Models, services, tools, settings, repositories, factories | No |
 | **chatty-gpui** | Desktop UI: views, controllers, stream manager, notifiers | Yes |
+| **chatty-tui** | Terminal UI: single-session chat, headless/pipe mode | No |
 
 **Benefits:**
 - **Testability**: chatty-core's 500+ unit and 14 integration tests run without a display server or GPU — fast CI, no headless hacks
-- **Reusability**: chatty-core can power alternative frontends (TUI, web, headless agent) without pulling in GPUI
+- **Reusability**: chatty-core powers both frontends (GPUI desktop and Ratatui terminal) without duplication
 - **Compile-time boundaries**: prevents accidental UI coupling in business logic
 - **Faster incremental builds**: changes to views don't recompile the core
+- **Sub-agent ready**: chatty-tui's headless mode enables future programmatic LLM usage
 
 ## Dependency Direction
 
 ```
 chatty-gpui ──depends on──► chatty-core (with gpui-globals feature)
+chatty-tui  ──depends on──► chatty-core (without gpui-globals)
 ```
 
-chatty-core never depends on chatty-gpui. All GPUI-specific integration is opt-in via the `gpui-globals` feature flag.
+chatty-core never depends on either frontend crate. GPUI-specific integration is opt-in via the `gpui-globals` feature flag. chatty-tui does not use this feature — it uses chatty-core's services and models directly without GPUI globals.
 
 ## The `gpui-globals` Feature
 
@@ -52,11 +55,14 @@ impl Global for crate::models::ConversationsStore {}
 // ... all types that need cx.set_global()
 ```
 
-chatty-gpui always enables this feature:
+chatty-gpui always enables this feature; chatty-tui does not:
 
 ```toml
 # chatty-gpui/Cargo.toml
 chatty-core = { path = "../chatty-core", features = ["gpui-globals"] }
+
+# chatty-tui/Cargo.toml
+chatty-core = { path = "../chatty-core" }  # No gpui-globals
 ```
 
 ### Adding a New Global Type
@@ -102,11 +108,34 @@ chatty-core = { path = "../chatty-core", features = ["gpui-globals"] }
 | `settings/utils/` | Theme and window helpers |
 | `settings/views/` | Settings UI pages |
 
+### chatty-tui owns:
+
+| Module | Contents |
+|:-------|:---------|
+| `main.rs` | Entry point, CLI args (clap), Tokio runtime, settings loading, model resolution |
+| `app.rs` | Ratatui render loop, crossterm input, `tokio::select!` event multiplexing |
+| `engine.rs` | `ChatEngine` — single-conversation orchestrator, stream processing, approval flow |
+| `events.rs` | `AppEvent` enum — channel-based events (replaces GPUI's `EventEmitter`) |
+| `headless.rs` | Headless mode (single message → stdout) and pipe mode (stdin → stdout) |
+| `ui/` | Ratatui widgets: chat view, text input, status bar, approval prompt |
+
+### How chatty-tui differs from chatty-gpui
+
+| Aspect | chatty-gpui | chatty-tui |
+|:-------|:------------|:-----------|
+| UI framework | GPUI (GPU-accelerated) | Ratatui (terminal) |
+| Conversations | Multi-conversation, SQLite persistence | Single session, in-memory only |
+| Event system | `EventEmitter` / `cx.subscribe()` | `tokio::mpsc` channels (`AppEvent`) |
+| Stream management | `StreamManager` entity with typed events | `ChatEngine` handles events directly |
+| State management | GPUI globals (`cx.set_global()`) | Owned fields on `ChatEngine` |
+| Non-interactive | N/A | `--headless` and `--pipe` modes |
+
 ### Decision Criteria
 
 Ask: **"Does this code need GPUI's `Context`, `Window`, `Entity`, `Render`, or `EventEmitter`?"**
 
 - **Yes** → chatty-gpui
+- **No, but it's terminal UI or TUI-specific logic** → chatty-tui
 - **No** → chatty-core
 
 ## Re-exports in chatty-gpui
@@ -157,6 +186,9 @@ These require linking GPUI but don't need a live display connection.
 ```bash
 # Build entire workspace
 cargo build
+
+# Build only the TUI
+cargo build -p chatty-tui
 
 # Test only chatty-core (no display needed)
 cargo test -p chatty-core

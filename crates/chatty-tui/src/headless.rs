@@ -1,0 +1,62 @@
+use anyhow::Result;
+use tokio::sync::mpsc;
+
+use crate::engine::ChatEngine;
+use crate::events::AppEvent;
+
+/// Run in headless mode: send a message, collect the response, print to stdout.
+pub async fn run_headless(
+    mut engine: ChatEngine,
+    mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
+    message: String,
+) -> Result<()> {
+    // Initialize conversation
+    engine.init_conversation().await?;
+
+    // Send message
+    engine.send_message(message);
+
+    // Collect response
+    let mut response = String::new();
+
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            AppEvent::TextChunk(text) => {
+                response.push_str(&text);
+            }
+            AppEvent::StreamCompleted => break,
+            AppEvent::StreamError(error) => {
+                eprintln!("Error: {}", error);
+                std::process::exit(1);
+            }
+            AppEvent::StreamCancelled => break,
+            // Handle other events silently
+            _ => {
+                engine.handle_event(event);
+            }
+        }
+    }
+
+    // Print response to stdout
+    println!("{}", response);
+
+    Ok(())
+}
+
+/// Run in pipe mode: read stdin, send as message, print response to stdout.
+pub async fn run_pipe(
+    engine: ChatEngine,
+    event_rx: mpsc::UnboundedReceiver<AppEvent>,
+) -> Result<()> {
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let input = input.trim().to_string();
+
+    if input.is_empty() {
+        eprintln!("No input provided on stdin");
+        std::process::exit(1);
+    }
+
+    run_headless(engine, event_rx, input).await
+}
