@@ -1006,6 +1006,13 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             }
         }
 
+        // For execute_code: show language prefix + full code
+        if tool_call.tool_name == "execute_code" {
+            let language = json.get("language").and_then(|v| v.as_str()).unwrap_or("?");
+            let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            return format!("[{}] {}", language, code);
+        }
+
         // For other tools: try to extract a "query" or "path" or first string field
         if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
             return query.to_string();
@@ -1026,6 +1033,45 @@ fn format_tool_output(output: &str) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
         // If it's an object with common result fields, extract them
         if let Some(obj) = json.as_object() {
+            // execute_code output: show stdout + stderr + exit_code + port_mappings
+            if obj.contains_key("exit_code") && obj.contains_key("timed_out") {
+                let mut parts: Vec<String> = Vec::new();
+
+                if let Some(stdout) = obj.get("stdout").and_then(|v| v.as_str()) {
+                    if !stdout.is_empty() {
+                        parts.push(stdout.to_string());
+                    }
+                }
+                if let Some(stderr) = obj.get("stderr").and_then(|v| v.as_str()) {
+                    if !stderr.is_empty() {
+                        parts.push(format!("[stderr]\n{}", stderr));
+                    }
+                }
+                if let Some(true) = obj.get("timed_out").and_then(|v| v.as_bool()) {
+                    parts.push("[timed out]".to_string());
+                }
+                if let Some(code) = obj.get("exit_code").and_then(|v| v.as_i64()) {
+                    if code != 0 {
+                        parts.push(format!("[exit code: {}]", code));
+                    }
+                }
+                if let Some(ports) = obj.get("port_mappings").and_then(|v| v.as_object()) {
+                    if !ports.is_empty() {
+                        let mappings: Vec<String> = ports
+                            .iter()
+                            .filter_map(|(k, v)| v.as_u64().map(|hp| format!("{}→{}", k, hp)))
+                            .collect();
+                        parts.push(format!("[ports: {}]", mappings.join(", ")));
+                    }
+                }
+
+                return if parts.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    parts.join("\n")
+                };
+            }
+
             // Check for common output patterns (in order of priority)
             if let Some(stdout) = obj.get("stdout").and_then(|v| v.as_str()) {
                 return stdout.to_string();

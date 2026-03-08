@@ -58,6 +58,7 @@ impl ListToolsTool {
         has_pdf_extract_text: bool,
         has_data_query: bool,
         has_compile_typst: bool,
+        has_execute_code: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -322,6 +323,14 @@ impl ListToolsTool {
             });
         }
 
+        if has_execute_code {
+            native_tools.push(ToolInfo {
+                name: "execute_code".to_string(),
+                description: "Execute code in an isolated Docker sandbox. Supports python, javascript, typescript, rust, and bash. State persists throughout the conversation. No network access.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -340,6 +349,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,

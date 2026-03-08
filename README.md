@@ -68,6 +68,8 @@ Chatty can give your LLM access to the filesystem, a sandboxed shell, and MCP se
    - **Auto-approve** — tools run without prompting
    - **Deny all** — tools are visible but blocked
 
+Optionally, enable **Docker Code Execution** to run code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine.
+
 See [Tools & MCP](#tools--mcp) below for details.
 
 ---
@@ -200,7 +202,9 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `delete_file` | Delete files or directories | Yes |
 | `move_file` | Move or rename files | Yes |
 | `bash` | Execute shell commands (sandboxed, streaming output) | Yes |
+| `execute_code` | Execute code in an isolated Docker container. Supports Python, JavaScript, TypeScript, Rust, and Bash. Requires Docker enabled in Settings → Execution | Yes |
 | `add_attachment` | Display a generated image or PDF inline in the chat | No |
+| `create_chart` | Create and display a chart inline in the chat — supports bar, line, pie, donut, area, and candlestick chart types | No |
 | `read_excel` | Read Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods) as JSON with markdown table preview | No |
 | `write_excel` | Create a new Excel (.xlsx) file with data, formatting, formulas, merged cells, and auto-filters | Yes |
 | `edit_excel` | Edit an existing Excel file with targeted modifications (set cells, add sheets, delete rows, formulas, formatting) | Yes |
@@ -209,6 +213,7 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `pdf_extract_text` | Extract text content from PDF pages (up to 50 pages) | No |
 | `query_data` | Run SQL queries against local Parquet, CSV, and JSON files using DuckDB — results returned as a markdown table | No |
 | `describe_data` | Inspect the schema of a Parquet, CSV, or JSON file (column names, types, row count, file size) | No |
+| `compile_typst` | Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents | Yes |
 | `list_tools` | Lists all available tools and schemas | No |
 
 ### MCP Servers
