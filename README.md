@@ -211,6 +211,8 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | No |
 | `pdf_info` | Get metadata and structural information about a PDF file | No |
 | `pdf_extract_text` | Extract text content from PDF pages (up to 50 pages) | No |
+| `query_data` | Run SQL queries against local Parquet, CSV, and JSON files using DuckDB — results returned as a markdown table | No |
+| `describe_data` | Inspect the schema of a Parquet, CSV, or JSON file (column names, types, row count, file size) | No |
 | `compile_typst` | Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents | Yes |
 | `list_tools` | Lists all available tools and schemas | No |
 
