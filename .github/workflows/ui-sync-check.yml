@@ -1,0 +1,104 @@
+name: UI Sync Check
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  sync-check:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.user.login != 'github-actions[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-sync-check') &&
+      !contains(github.event.pull_request.labels.*.name, 'ui-sync')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Sanitize PR metadata
+        id: meta
+        run: |
+          TITLE=$(echo "${{ github.event.pull_request.title }}" | tr -cd '[:print:]' | cut -c1-200)
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Check UI sync
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --allowed-tools
+            "Read,Glob,Grep,
+            Bash(gh pr diff:*),Bash(gh pr view:*),
+            Bash(gh issue create:*),Bash(gh issue list:*)"
+          prompt: |
+            You are a sync-check agent for the Chatty project. The project has two
+            UI crates that should stay in behavioral sync:
+            - `crates/chatty-gpui/` — GPUI desktop app
+            - `crates/chatty-tui/` — Ratatui terminal app
+            Both consume `crates/chatty-core/`.
+
+            PR #${{ github.event.pull_request.number }} was just merged:
+            "${{ steps.meta.outputs.title }}"
+
+            ## Task
+
+            1. Run `gh pr diff ${{ github.event.pull_request.number }}` to see what changed.
+
+            2. Determine which crates were modified:
+               - Changes in `crates/chatty-gpui/` → GPUI was modified
+               - Changes in `crates/chatty-tui/` → TUI was modified
+               - Changes in `crates/chatty-core/` → Core was modified (may affect both)
+
+            3. If ONLY one UI crate was changed (not both), analyze whether the other
+               UI crate needs a corresponding change. Look for:
+               - New features (keybindings, conversation operations, message handling)
+               - New StreamChunk or event handling patterns
+               - New chatty-core API usage that should be mirrored
+               - Tool display or approval flow changes
+               - Model selection or provider changes
+
+            4. If BOTH UI crates were changed, or if NEITHER was changed (core-only
+               or CI/docs changes), or if the change is purely visual/framework-specific
+               (GPUI rendering details, Ratatui widget specifics, theme colors, font
+               sizes, window management): output "No sync issue detected." and STOP.
+               Do NOT create any branch or issue.
+
+            5. If a sync issue IS detected:
+               - Check for existing open issues: `gh issue list --label ui-sync --state open`
+               - If a related issue already exists, output "Existing issue covers this." and STOP.
+               - Otherwise, create a new issue:
+
+                 gh issue create \
+                   --title "UI Sync: <brief description>" \
+                   --label "ui-sync" \
+                   --body "## Sync Required
+
+                 PR #${{ github.event.pull_request.number }} changed \`chatty-[gpui|tui]\` but
+                 \`chatty-[tui|gpui]\` may need a corresponding update.
+
+                 ### What changed
+                 <Brief description of the feature/behavior added>
+
+                 ### What needs syncing
+                 <Specific files/functions that likely need equivalent changes>
+
+                 ### Reference
+                 - Source PR: #${{ github.event.pull_request.number }}
+                 - Changed crate: \`chatty-[gpui|tui]\`
+                 - Target crate: \`chatty-[tui|gpui]\`"
+
+            ## Important rules
+            - Do NOT create a PR — only create an issue if sync is needed.
+            - Do NOT create issues for cosmetic or framework-specific differences.
+            - Focus on behavioral parity: both UIs should handle the same conversations,
+              models, tools, streaming, and approval flows.
+            - If unsure, err on the side of NOT creating an issue.

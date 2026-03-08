@@ -8,6 +8,7 @@ use tracing::{debug, error, info, warn};
 mod assets;
 mod auto_updater;
 mod chatty;
+mod cli_installer;
 mod settings;
 
 use assets::ChattyAssets;
@@ -36,7 +37,8 @@ actions!(
         NewConversation,
         PreviousConversation,
         NextConversation,
-        DeleteActiveConversation
+        DeleteActiveConversation,
+        InstallCli
     ]
 );
 
@@ -306,6 +308,10 @@ fn register_actions(cx: &mut App) {
             });
         }
     });
+    cx.on_action(|_: &InstallCli, cx: &mut App| {
+        debug!("Install CLI action triggered");
+        cli_installer::install_cli(cx);
+    });
 }
 
 fn set_app_menus(cx: &mut App) {
@@ -316,6 +322,8 @@ fn set_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Settings", OpenSettings),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::separator(),
+            MenuItem::action("Install CLI\u{2026}", InstallCli),
             MenuItem::separator(),
             MenuItem::action("Quit", Quit),
         ],

@@ -4,7 +4,7 @@ A high-level guide to Chatty's module structure, data flow, and key design decis
 
 ## Workspace Structure
 
-Chatty is organized as a Cargo workspace with two crates:
+Chatty is organized as a Cargo workspace with three crates:
 
 ```
 Cargo.toml                       # Workspace root
@@ -24,23 +24,37 @@ crates/
 │       ├── token_budget/        # Context window management (counting, summarization)
 │       └── tools/               # LLM tool implementations
 │
-└── chatty-gpui/                 # GPUI desktop frontend
+├── chatty-gpui/                 # GPUI desktop frontend
+│   └── src/
+│       ├── main.rs              # Entry point: Tokio runtime, theme loading, global init
+│       ├── assets.rs            # Embedded assets (icons, fonts)
+│       ├── auto_updater/        # Self-update system (download, install, UI)
+│       ├── chatty/
+│       │   ├── controllers/     # Application logic hub (ChattyApp entity)
+│       │   ├── models/          # GPUI-specific models (StreamManager, ErrorNotifier)
+│       │   ├── services/        # GPUI-specific services
+│       │   ├── token_budget/    # GPUI token budget manager (UI integration)
+│       │   └── views/           # UI components (GPUI Render impls)
+│       └── settings/
+│           ├── controllers/     # Settings CRUD operations
+│           ├── models/          # GPUI-specific notifiers (ModelsNotifier, AgentConfigNotifier)
+│           ├── providers/       # Provider-specific GPUI services (Ollama sync)
+│           ├── utils/           # Theme and window helpers
+│           └── views/           # Settings UI pages
+│
+└── chatty-tui/                  # Terminal frontend (Ratatui)
     └── src/
-        ├── main.rs              # Entry point: Tokio runtime, theme loading, global init
-        ├── assets.rs            # Embedded assets (icons, fonts)
-        ├── auto_updater/        # Self-update system (download, install, UI)
-        ├── chatty/
-        │   ├── controllers/     # Application logic hub (ChattyApp entity)
-        │   ├── models/          # GPUI-specific models (StreamManager, ErrorNotifier)
-        │   ├── services/        # GPUI-specific services
-        │   ├── token_budget/    # GPUI token budget manager (UI integration)
-        │   └── views/           # UI components (GPUI Render impls)
-        └── settings/
-            ├── controllers/     # Settings CRUD operations
-            ├── models/          # GPUI-specific notifiers (ModelsNotifier, AgentConfigNotifier)
-            ├── providers/       # Provider-specific GPUI services (Ollama sync)
-            ├── utils/           # Theme and window helpers
-            └── views/           # Settings UI pages
+        ├── main.rs              # Entry point: CLI args (clap), Tokio runtime, settings load
+        ├── app.rs               # Ratatui render loop + crossterm input + event mux
+        ├── engine.rs            # ChatEngine: single-conversation logic, stream processing
+        ├── events.rs            # AppEvent enum (channel-based events)
+        ├── headless.rs          # Headless/pipe mode for non-interactive usage
+        └── ui/
+            ├── mod.rs           # Root layout (chat + status bar + input)
+            ├── chat_view.rs     # Message list rendering (scrollable)
+            ├── input.rs         # Text input widget (tui-textarea)
+            ├── status_bar.rs    # Model name, token count, streaming indicator
+            └── approval.rs      # Inline tool approval prompt [y/n]
 ```
 
 See [workspace-crate-split.md](workspace-crate-split.md) for full rationale and design patterns.
@@ -172,17 +186,17 @@ See [token-tracking.md](token-tracking.md) for data flow details.
 ## Module Dependencies
 
 ```
-chatty-gpui                          chatty-core
-───────────                          ───────────
-views ──────► controllers ──────►    services
-  │               │                     │
-  │               ▼                     ▼
-  │           models (GPUI)         models/stores (core)
-  │               │                     │
-  │               ▼                     ▼
-  │           StreamManager         repositories
-  │                                     │
-  └─────────────────────────────────────┘
+chatty-gpui                          chatty-core                    chatty-tui
+───────────                          ───────────                    ──────────
+views ──────► controllers ──────►    services    ◄──────────────── ui (Ratatui)
+  │               │                     │                              │
+  │               ▼                     ▼                              ▼
+  │           models (GPUI)         models/stores (core)          ChatEngine
+  │               │                     │                              │
+  │               ▼                     ▼                              │
+  │           StreamManager         repositories                      │
+  │                                     │                              │
+  └─────────────────────────────────────┘◄─────────────────────────────┘
                                         │
                                     factories
 ```
@@ -199,11 +213,18 @@ views ──────► controllers ──────►    services
 - **Controllers** handle events, coordinate between services and stores
 - **Models** hold GPUI-specific state (StreamManager, ErrorNotifier, notifiers)
 
+**chatty-tui** (depends on chatty-core without `gpui-globals`):
+- **ChatEngine** orchestrates a single conversation using chatty-core services directly
+- **UI** renders terminal widgets via Ratatui; receives state from ChatEngine
+- Uses `tokio::mpsc` channels instead of GPUI's `EventEmitter`/`cx.subscribe()`
+- Also supports headless/pipe mode for non-interactive and sub-agent usage
+
 ## Adding a New Feature — Checklist
 
 1. **New setting?** → Add model in `chatty-core/src/settings/models/`, add JSON persistence in `chatty-core/src/settings/repositories/`, add UI in `chatty-gpui/src/settings/views/`
 2. **New LLM provider?** → Add variant to `ProviderType` in chatty-core, update `default_capabilities()`, add agent builder in `chatty-core/src/factories/agent_factory.rs`
 3. **New tool?** → Implement in `chatty-core/src/tools/`, register in `agent_factory.rs`
-4. **New view component?** → Add in `chatty-gpui/src/chatty/views/`, emit events to `ChattyApp` if it needs to trigger actions
+4. **New view component?** → Add in `chatty-gpui/src/chatty/views/`, emit events to `ChattyApp` if it needs to trigger actions. Consider if chatty-tui also needs the feature (the `ui-sync-check` workflow will flag this).
 5. **New service?** → If UI-agnostic, add in `chatty-core/src/services/`. If GPUI-specific, add in `chatty-gpui/src/chatty/services/`
 6. **New global type?** → Define in chatty-core, add `impl Global` in `chatty-core/src/gpui_globals.rs` (behind `gpui-globals` feature)
+7. **New AppEvent/StreamChunk variant?** → If added in chatty-core, check if chatty-tui's `engine.rs` needs to handle it too

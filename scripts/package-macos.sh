@@ -35,9 +35,16 @@ rm -rf "${APP_BUNDLE}"
 mkdir -p "${MACOS_DIR}"
 mkdir -p "${RESOURCES_DIR}"
 
-# Copy binary
+# Copy binaries
 cp "${RELEASE_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
+
+# Copy chatty-tui CLI binary if available
+if [ -f "${RELEASE_DIR}/chatty-tui" ]; then
+    cp "${RELEASE_DIR}/chatty-tui" "${MACOS_DIR}/chatty-tui"
+    chmod +x "${MACOS_DIR}/chatty-tui"
+    echo "chatty-tui CLI bundled in app"
+fi
 
 # Copy icon if available
 if [ -f "assets/app_icon/icon.icns" ]; then
@@ -104,6 +111,14 @@ else
         --options runtime \
         --timestamp \
         "${MACOS_DIR}/${APP_NAME}"
+    # Sign chatty-tui CLI binary if bundled
+    if [ -f "${MACOS_DIR}/chatty-tui" ]; then
+        codesign --sign "${SIGNING_IDENTITY}" \
+            --force \
+            --options runtime \
+            --timestamp \
+            "${MACOS_DIR}/chatty-tui"
+    fi
     codesign --sign "${SIGNING_IDENTITY}" \
         --force \
         --options runtime \

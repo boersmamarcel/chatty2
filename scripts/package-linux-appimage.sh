@@ -60,9 +60,16 @@ mkdir -p "${APPDIR}/usr/share/icons/hicolor/128x128/apps"
 mkdir -p "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "${APPDIR}/usr/share/icons/hicolor/512x512/apps"
 
-# Copy binary
+# Copy binaries
 cp "${RELEASE_DIR}/${APP_NAME}" "${APPDIR}/usr/bin/"
 chmod +x "${APPDIR}/usr/bin/${APP_NAME}"
+
+# Copy chatty-tui CLI binary if available
+if [ -f "${RELEASE_DIR}/chatty-tui" ]; then
+    cp "${RELEASE_DIR}/chatty-tui" "${APPDIR}/usr/bin/chatty-tui"
+    chmod +x "${APPDIR}/usr/bin/chatty-tui"
+    echo "chatty-tui CLI bundled in AppImage"
+fi
 
 # Copy icons
 if [ -d "assets/app_icon" ]; then
