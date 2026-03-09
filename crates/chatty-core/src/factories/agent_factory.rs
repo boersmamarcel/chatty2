@@ -784,6 +784,7 @@ impl AgentClient {
                     .map(|s| s.network_isolation)
                     .unwrap_or(true),
                 workspace_path: exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
+                docker_host: exec_settings.as_ref().and_then(|s| s.docker_host.clone()),
                 ..SandboxConfig::default()
             };
             let manager = std::sync::Arc::new(SandboxManager::new(sandbox_config));

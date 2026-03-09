@@ -205,6 +205,30 @@ pub fn toggle_fetch(cx: &mut App) {
     .detach();
 }
 
+/// Update the Docker host setting and persist to disk.
+pub fn set_docker_host(host: Option<String>, cx: &mut App) {
+    // 1. Apply update immediately
+    cx.global_mut::<ExecutionSettingsModel>().docker_host = host;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately
+    cx.refresh_windows();
+
+    // 4. Notify so the active conversation's agent is rebuilt with the new docker host
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle Docker code execution enabled/disabled and persist to disk.
 pub fn toggle_docker_code_execution(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)

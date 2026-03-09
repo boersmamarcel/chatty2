@@ -31,6 +31,8 @@ pub struct SandboxConfig {
     pub workspace_path: Option<String>,
     /// Container ports to publish to the host (default: empty = no ports published)
     pub expose_ports: Vec<u16>,
+    /// Custom Docker host URI or socket path. When None, fallback discovery is used.
+    pub docker_host: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -43,6 +45,7 @@ impl Default for SandboxConfig {
             network: false,
             workspace_path: None,
             expose_ports: vec![],
+            docker_host: None,
         }
     }
 }
@@ -123,7 +126,7 @@ pub trait SandboxBackend: Send + Sync {
 
     /// Health check — is the backend available?
     #[allow(dead_code)]
-    async fn is_available() -> Result<bool>
+    async fn is_available(docker_host: Option<&str>) -> Result<bool>
     where
         Self: Sized;
 }
