@@ -1363,10 +1363,12 @@ impl AgentClient {
                 }
 
                 if is_reasoning_model || !model_config.supports_temperature {
+                    // Azure uses the Chat Completions API (not the Responses API),
+                    // so reasoning config is a top-level `reasoning_effort` param
+                    // instead of the nested `reasoning.summary` used by OpenAI's
+                    // Responses API.
                     builder = builder.additional_params(serde_json::json!({
-                        "reasoning": {
-                            "summary": "auto"
-                        }
+                        "reasoning_effort": "medium"
                     }));
                 }
 
