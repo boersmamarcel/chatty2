@@ -8,6 +8,7 @@ use crate::auth::{AzureTokenCache, azure_auth};
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
+use crate::services::memory_service::MemoryService;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
@@ -19,8 +20,8 @@ use crate::tools::{
     GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, SearchCodeTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
+    ReadBinaryTool, ReadExcelTool, ReadFileTool, RememberTool, SearchCodeTool, SearchMemoryTool,
+    ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -261,6 +262,8 @@ fn collect_tools(
     chart_tool: Option<CreateChartTool>,
     typst_tool: Option<CompileTypstTool>,
     execute_code_tool: Option<ExecuteCodeTool>,
+    remember_tool: Option<RememberTool>,
+    search_memory_tool: Option<SearchMemoryTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -344,6 +347,12 @@ fn collect_tools(
     if let Some(t) = execute_code_tool {
         tools.push(Box::new(t));
     }
+    if let Some(t) = remember_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = search_memory_tool {
+        tools.push(Box::new(t));
+    }
     tools
 }
 
@@ -372,6 +381,7 @@ impl AgentClient {
         shell_session: Option<std::sync::Arc<ShellSession>>,
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
+        memory_service: Option<MemoryService>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -745,6 +755,19 @@ impl AgentClient {
             None
         };
 
+        // Memory tools — gated on memory_enabled setting and MemoryService availability
+        let (remember_tool, search_memory_tool): (Option<RememberTool>, Option<SearchMemoryTool>) =
+            if let Some(ref mem_svc) = memory_service {
+                tracing::info!("Memory tools enabled");
+                (
+                    Some(RememberTool::new(mem_svc.clone())),
+                    Some(SearchMemoryTool::new(mem_svc.clone())),
+                )
+            } else {
+                tracing::info!("Memory tools disabled: no MemoryService provided");
+                (None, None)
+            };
+
         // Chart tool is always available (no service dependencies).
         // Pass workspace_dir so relative save_path values resolve correctly.
         // Pass theme_colors so saved PNG files match the inline chart appearance.
@@ -812,6 +835,7 @@ impl AgentClient {
             data_query_tools.is_some(),
             typst_tool.is_some(),
             execute_code_tool.is_some(),
+            remember_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -946,6 +970,15 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        if remember_tool.is_some() {
+            tool_sections.push(
+                "- **remember / search_memory**: Persistent cross-conversation memory. \
+                 Use `remember` to store important facts, decisions, or user preferences. \
+                 Use `search_memory` to recall previously stored information. \
+                 Be selective — only remember genuinely useful information."
+                    .to_string(),
+            );
+        }
         // Always present
         tool_sections.push(
             "- **list_tools**: Call this at any time to get the full, up-to-date list of \
@@ -1039,6 +1072,8 @@ impl AgentClient {
                     chart_tool.clone(),
                     typst_tool.clone(),
                     execute_code_tool.clone(),
+                    remember_tool.clone(),
+                    search_memory_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1108,6 +1143,8 @@ impl AgentClient {
                     chart_tool.clone(),
                     typst_tool.clone(),
                     execute_code_tool.clone(),
+                    remember_tool.clone(),
+                    search_memory_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1144,6 +1181,8 @@ impl AgentClient {
                     chart_tool.clone(),
                     typst_tool.clone(),
                     execute_code_tool.clone(),
+                    remember_tool.clone(),
+                    search_memory_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1183,6 +1222,8 @@ impl AgentClient {
                     chart_tool.clone(),
                     typst_tool.clone(),
                     execute_code_tool.clone(),
+                    remember_tool.clone(),
+                    search_memory_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1221,6 +1262,8 @@ impl AgentClient {
                     chart_tool.clone(),
                     typst_tool.clone(),
                     execute_code_tool.clone(),
+                    remember_tool.clone(),
+                    search_memory_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1397,6 +1440,8 @@ impl AgentClient {
                     chart_tool.clone(),
                     typst_tool.clone(),
                     execute_code_tool.clone(),
+                    remember_tool.clone(),
+                    search_memory_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);

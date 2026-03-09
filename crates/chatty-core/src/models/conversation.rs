@@ -12,6 +12,7 @@ use crate::factories::AgentClient;
 use crate::models::message_types::SystemTrace;
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
+use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
@@ -85,6 +86,7 @@ impl Conversation {
         pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
+        memory_service: Option<MemoryService>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -114,6 +116,7 @@ impl Conversation {
             None, // Factory creates session on-demand when execution is enabled
             user_secrets,
             theme_colors,
+            memory_service,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -153,6 +156,7 @@ impl Conversation {
         pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
+        memory_service: Option<MemoryService>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -180,6 +184,7 @@ impl Conversation {
             None, // Factory creates session on-demand
             user_secrets,
             theme_colors,
+            memory_service,
         )
         .await
         .context("Failed to create agent from config")?;

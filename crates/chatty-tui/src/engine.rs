@@ -257,6 +257,7 @@ impl ChatEngine {
             Some(pending_write_approvals),
             self.user_secrets.clone(),
             None, // no theme colors in TUI
+            None, // TODO: add memory_service to TUI
         )
         .await
         .context("Failed to create conversation")?;

@@ -57,6 +57,10 @@ pub struct ExecutionSettingsModel {
     /// Maximum number of agentic turns (tool-call rounds) per response
     #[serde(default = "default_max_agent_turns")]
     pub max_agent_turns: u32,
+    /// Enable persistent agent memory (remember/search_memory tools).
+    /// When enabled, the agent can store and recall information across conversations.
+    #[serde(default = "default_true")]
+    pub memory_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -84,6 +88,7 @@ impl Default for ExecutionSettingsModel {
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
             max_agent_turns: default_max_agent_turns(),
+            memory_enabled: true, // Enabled by default for cross-conversation recall
         }
     }
 }

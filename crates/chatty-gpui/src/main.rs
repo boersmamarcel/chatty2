@@ -428,6 +428,41 @@ fn main() {
         // Initialize user secrets with empty state - will be populated async
         cx.set_global(settings::models::UserSecretsModel::default());
 
+        // Initialize agent memory service asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            // Check if memory is enabled in settings
+            let memory_enabled = cx
+                .update(|cx| {
+                    cx.try_global::<settings::models::ExecutionSettingsModel>()
+                        .map(|s| s.memory_enabled)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true);
+
+            if memory_enabled {
+                if let Some(data_dir) = chatty_core::services::memory_service::memory_data_dir() {
+                    match chatty_core::services::MemoryService::open_or_create(&data_dir).await {
+                        Ok(service) => {
+                            cx.update(|cx| {
+                                cx.set_global(service);
+                                info!("Agent memory service initialized");
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to set MemoryService global"))
+                            .ok();
+                        }
+                        Err(e) => {
+                            warn!(error = ?e, "Failed to initialize agent memory service");
+                        }
+                    }
+                } else {
+                    warn!("Could not determine data directory for agent memory");
+                }
+            } else {
+                info!("Agent memory disabled by settings");
+            }
+        })
+        .detach();
+
         // Initialize execution approval store for tracking pending approvals
         cx.set_global(chatty::models::ExecutionApprovalStore::new());
 
