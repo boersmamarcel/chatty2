@@ -69,7 +69,7 @@ Chatty can give your LLM access to the filesystem, a sandboxed shell, and MCP se
    - **Auto-approve** — tools run without prompting
    - **Deny all** — tools are visible but blocked
 
-Optionally, enable **Docker Code Execution** to run code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine.
+Optionally, enable **Docker Code Execution** to run code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
 
 See [Tools & MCP](#tools--mcp) below for details.
 
