@@ -975,7 +975,11 @@ impl AgentClient {
                 "- **remember / search_memory**: Persistent cross-conversation memory. \
                  Use `remember` to store important facts, decisions, or user preferences. \
                  Use `search_memory` to recall previously stored information. \
-                 Be selective — only remember genuinely useful information."
+                 Be selective — only remember genuinely useful information. \
+                 **IMPORTANT**: At the start of every conversation, proactively call \
+                 `search_memory` with a broad query related to the user's first message \
+                 to recall any relevant context from previous conversations. Do this \
+                 before responding to the user's first message."
                     .to_string(),
             );
         }
@@ -1020,11 +1024,26 @@ impl AgentClient {
              Use thinking blocks for multi-step reasoning, planning, or working through a problem \
              before giving a final answer.";
 
+        // Memory recall instructions — only if memory tools are available.
+        let memory_instructions = if remember_tool.is_some() {
+            "\n\n## Memory\n\
+             You have persistent memory that survives across conversations and app restarts. \
+             **On the very first user message of every conversation**, you MUST call `search_memory` \
+             with a query derived from the user's message before you respond. This ensures you \
+             recall relevant context, preferences, and prior decisions. \
+             When the user explicitly asks you to remember something or search your memory, \
+             always use the corresponding tool — never say you cannot remember or that you \
+             don't have memory."
+        } else {
+            ""
+        };
+
         // Augment preamble with tool summary, formatting guide, and available secret key names.
         let preamble = {
             let mut p = model_config.preamble.clone();
             p.push_str(&tool_summary);
             p.push_str(formatting_guide);
+            p.push_str(memory_instructions);
             if !secret_key_names.is_empty() {
                 p.push_str(&format!(
                     "\n\nThe following environment variables with sensitive information are \

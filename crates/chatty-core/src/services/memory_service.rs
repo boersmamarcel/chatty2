@@ -178,3 +178,63 @@ fn make_search_request(query: &str, top_k: usize, snippet_chars: usize) -> Searc
 pub fn memory_data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("chatty"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_remember_and_search_within_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+
+        svc.remember("The user's favorite color is blue", Some("Favorite color"), &[])
+            .await
+            .unwrap();
+
+        let hits = svc.search("favorite color", None).await.unwrap();
+        assert!(!hits.is_empty(), "Should find the stored memory");
+        assert!(
+            hits[0].text.contains("blue"),
+            "Hit text should contain 'blue', got: {}",
+            hits[0].text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Session 1: store a memory
+        {
+            let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+            svc.remember(
+                "The project uses PostgreSQL for the database",
+                Some("Database choice"),
+                &[("project", "chatty")],
+            )
+            .await
+            .unwrap();
+        }
+        // MemoryService is dropped here, simulating app shutdown
+
+        // Verify the .mv2 file exists on disk
+        let mv2_path = dir.path().join("memory.mv2");
+        assert!(mv2_path.exists(), "memory.mv2 should exist after remember+commit");
+
+        // Session 2: reopen and search
+        {
+            let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+            let hits = svc.search("database", None).await.unwrap();
+            assert!(
+                !hits.is_empty(),
+                "Should find memory from previous session, but got 0 results"
+            );
+            assert!(
+                hits[0].text.contains("PostgreSQL"),
+                "Hit should contain 'PostgreSQL', got: {}",
+                hits[0].text
+            );
+        }
+    }
+}
