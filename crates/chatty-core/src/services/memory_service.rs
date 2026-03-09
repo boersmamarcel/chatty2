@@ -93,12 +93,23 @@ impl MemoryService {
     }
 
     /// Search memory by natural language query.
+    ///
+    /// Returns empty results gracefully if the memory store is empty or
+    /// if the search engine errors on an empty index.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<MemoryHit>> {
         let mut mem = self.memvid.lock().await;
 
         let request = make_search_request(query, top_k.unwrap_or(DEFAULT_TOP_K), SNIPPET_CHARS);
 
-        let response = mem.search(request).context("Memory search failed")?;
+        let response = match mem.search(request) {
+            Ok(resp) => resp,
+            Err(e) => {
+                // memvid-core may error when searching an empty store;
+                // treat this as "no results" rather than a hard failure.
+                warn!(error = ?e, "Memory search returned error, treating as empty");
+                return Ok(Vec::new());
+            }
+        };
 
         let hits = response
             .hits

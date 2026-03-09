@@ -11,7 +11,7 @@ use chatty_core::settings::models::ModelsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use clap::Parser;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use engine::ChatEngine;
 use events::AppEvent;
@@ -233,6 +233,28 @@ async fn main() -> Result<()> {
     // Load and start MCP servers
     let mcp_service = start_mcp_servers().await;
 
+    // Initialize agent memory service
+    let memory_service = if execution_settings.memory_enabled {
+        if let Some(data_dir) = chatty_core::services::memory_service::memory_data_dir() {
+            match chatty_core::services::MemoryService::open_or_create(&data_dir).await {
+                Ok(service) => {
+                    info!("Agent memory service initialized");
+                    Some(service)
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to initialize agent memory service");
+                    None
+                }
+            }
+        } else {
+            warn!("Could not determine data directory for agent memory");
+            None
+        }
+    } else {
+        info!("Agent memory disabled by settings");
+        None
+    };
+
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -244,6 +266,7 @@ async fn main() -> Result<()> {
         models,
         providers,
         mcp_service,
+        memory_service,
         user_secrets,
         event_tx,
     );
