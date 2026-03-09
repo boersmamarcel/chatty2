@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use super::providers_store::ProviderType;
 
 /// Default API version for Azure OpenAI
-pub const AZURE_DEFAULT_API_VERSION: &str = "2024-10-21";
+pub const AZURE_DEFAULT_API_VERSION: &str = "2025-03-01-preview";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelConfig {
