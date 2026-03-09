@@ -39,6 +39,23 @@ mkdir -p "${RESOURCES_DIR}"
 cp "${RELEASE_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
 
+# Copy pdfium dynamic library into Frameworks (required for PDF support)
+FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
+mkdir -p "${FRAMEWORKS_DIR}"
+PDFIUM_SRC=""
+for candidate in crates/chatty-core/libs/lib/libpdfium.dylib crates/chatty-gpui/libs/lib/libpdfium.dylib; do
+    if [ -f "$candidate" ]; then
+        PDFIUM_SRC="$candidate"
+        break
+    fi
+done
+if [ -n "$PDFIUM_SRC" ]; then
+    cp "$PDFIUM_SRC" "${FRAMEWORKS_DIR}/libpdfium.dylib"
+    echo "Bundled libpdfium.dylib from ${PDFIUM_SRC}"
+else
+    echo "Warning: libpdfium.dylib not found — PDF features will be unavailable"
+fi
+
 # Copy chatty-tui CLI binary if available
 if [ -f "${RELEASE_DIR}/chatty-tui" ]; then
     cp "${RELEASE_DIR}/chatty-tui" "${MACOS_DIR}/chatty-tui"
@@ -106,6 +123,14 @@ else
     # Sign with hardened runtime and timestamp for notarization compatibility
     # Note: --deep is deprecated; sign nested components individually first,
     # then sign the app bundle itself.
+    # Sign pdfium framework library if bundled
+    if [ -f "${FRAMEWORKS_DIR}/libpdfium.dylib" ]; then
+        codesign --sign "${SIGNING_IDENTITY}" \
+            --force \
+            --options runtime \
+            --timestamp \
+            "${FRAMEWORKS_DIR}/libpdfium.dylib"
+    fi
     codesign --sign "${SIGNING_IDENTITY}" \
         --force \
         --options runtime \
