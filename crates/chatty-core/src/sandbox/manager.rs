@@ -73,7 +73,9 @@ impl SandboxManager {
 
     /// Check if Docker is available on this system.
     #[allow(dead_code)]
-    pub async fn is_docker_available() -> bool {
-        DockerSandbox::is_available().await.unwrap_or(false)
+    pub async fn is_docker_available(docker_host: Option<&str>) -> bool {
+        DockerSandbox::is_available(docker_host)
+            .await
+            .unwrap_or(false)
     }
 }

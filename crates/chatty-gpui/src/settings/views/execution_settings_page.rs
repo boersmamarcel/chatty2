@@ -90,6 +90,30 @@ pub fn execution_settings_page() -> SettingPage {
                          TypeScript, Rust, and Bash. Requires Docker to be installed and running.",
                     ),
                     SettingItem::new(
+                        "Docker Host",
+                        SettingField::input(
+                            |cx: &App| {
+                                cx.global::<ExecutionSettingsModel>()
+                                    .docker_host
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into()
+                            },
+                            |val: SharedString, cx: &mut App| {
+                                let docker_host = if val.is_empty() {
+                                    None
+                                } else {
+                                    Some(val.to_string())
+                                };
+                                execution_settings_controller::set_docker_host(docker_host, cx);
+                            },
+                        ),
+                    )
+                    .description(
+                        "Custom Docker socket path or URI (e.g., /run/user/1000/docker.sock). \
+                         Leave empty to auto-detect common locations.",
+                    ),
+                    SettingItem::new(
                         "Approval Mode",
                         SettingField::render(|_options, _window, cx| {
                             let current_mode = cx.global::<ExecutionSettingsModel>().approval_mode.clone();

@@ -44,6 +44,10 @@ pub struct ExecutionSettingsModel {
     /// Requires Docker to be installed and running on the host.
     #[serde(default)]
     pub docker_code_execution_enabled: bool,
+    /// Custom Docker host URI or socket path (e.g., "/run/user/1000/docker.sock"
+    /// or "unix:///path/to/docker.sock"). When None, the app tries common default locations.
+    #[serde(default)]
+    pub docker_host: Option<String>,
     /// Maximum execution time in seconds
     pub timeout_seconds: u32,
     /// Maximum output size in bytes (prevents memory exhaustion)
@@ -75,6 +79,7 @@ impl Default for ExecutionSettingsModel {
             fetch_enabled: true, // Enabled by default for zero-config web access
             git_enabled: false,  // Opt-in: requires workspace with git repo
             docker_code_execution_enabled: false, // Opt-in: requires Docker
+            docker_host: None,
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,

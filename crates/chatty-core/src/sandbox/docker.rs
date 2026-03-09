@@ -10,11 +10,94 @@ use bollard::image::CreateImageOptions;
 use bollard::models::{HostConfig, PortBinding};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::debug;
 use uuid::Uuid;
 
 use super::backend::{ExecutionResult, Language, SandboxBackend, SandboxConfig};
+
+/// Build a list of common Docker socket paths to try as fallbacks.
+fn fallback_socket_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+
+    // XDG_RUNTIME_DIR/docker.sock (rootless Docker on Linux)
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        paths.push(format!("{}/docker.sock", xdg));
+    }
+
+    // Docker Desktop and other common paths
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(format!("{}/.docker/run/docker.sock", home));
+        paths.push(format!("{}/.docker/desktop/docker.sock", home));
+    }
+
+    paths
+}
+
+/// Try to connect to a Docker daemon at a specific socket path and verify with ping.
+async fn try_socket(path: &str) -> Result<Docker, String> {
+    let docker = Docker::connect_with_socket(path, 120, bollard::API_DEFAULT_VERSION)
+        .map_err(|e| format!("connect failed: {}", e))?;
+    docker
+        .ping()
+        .await
+        .map_err(|e| format!("ping failed: {}", e))?;
+    Ok(docker)
+}
+
+/// Connect to Docker, trying multiple strategies:
+/// 1. If `docker_host` is Some, use that explicitly
+/// 2. Try Bollard's `connect_with_local_defaults()` (checks DOCKER_HOST env + platform default)
+/// 3. Try common fallback socket paths (rootless Docker, Docker Desktop, etc.)
+async fn connect_docker(docker_host: Option<&str>) -> Result<Docker> {
+    // Strategy 1: User-configured docker host
+    if let Some(host) = docker_host {
+        let path = host.strip_prefix("unix://").unwrap_or(host);
+        return try_socket(path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot connect to Docker at configured host '{}': {}",
+                host,
+                e
+            )
+        });
+    }
+
+    // Strategy 2: Bollard defaults (DOCKER_HOST env + /var/run/docker.sock)
+    if let Ok(docker) = Docker::connect_with_local_defaults()
+        && docker.ping().await.is_ok()
+    {
+        return Ok(docker);
+    }
+    debug!("Docker connect_with_local_defaults failed, trying fallback socket paths");
+
+    // Strategy 3: Try common fallback socket paths
+    let fallbacks = fallback_socket_paths();
+    let mut tried = vec!["default (/var/run/docker.sock or DOCKER_HOST)".to_string()];
+
+    for path in &fallbacks {
+        if !Path::new(path).exists() {
+            tried.push(format!("{} (not found)", path));
+            continue;
+        }
+        match try_socket(path).await {
+            Ok(docker) => {
+                debug!(path, "Connected to Docker via fallback socket");
+                return Ok(docker);
+            }
+            Err(e) => {
+                tried.push(format!("{} ({})", path, e));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "Cannot connect to Docker. Tried:\n  - {}\n\
+         Tip: Set \"Docker Host\" in Settings → Execution to specify the socket path.",
+        tried.join("\n  - ")
+    )
+}
 
 /// Docker-based sandbox using bollard to manage containers.
 pub struct DockerSandbox {
@@ -28,8 +111,7 @@ pub struct DockerSandbox {
 impl DockerSandbox {
     /// Create a new Docker sandbox container with the given configuration.
     pub async fn create(config: SandboxConfig) -> Result<Self> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("Cannot connect to Docker. Is Docker Desktop running?")?;
+        let docker = connect_docker(config.docker_host.as_deref()).await?;
 
         Self::ensure_image(&docker, config.language.docker_image()).await?;
 
@@ -317,10 +399,7 @@ impl SandboxBackend for DockerSandbox {
         self.config.expose_ports.contains(&port)
     }
 
-    async fn is_available() -> Result<bool> {
-        match Docker::connect_with_local_defaults() {
-            Ok(docker) => Ok(docker.ping().await.is_ok()),
-            Err(_) => Ok(false),
-        }
+    async fn is_available(docker_host: Option<&str>) -> Result<bool> {
+        Ok(connect_docker(docker_host).await.is_ok())
     }
 }
