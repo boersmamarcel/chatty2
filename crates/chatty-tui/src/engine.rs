@@ -814,6 +814,7 @@ async fn run_stream(params: StreamParams) -> Result<()> {
         resolution_rx,
         max_agent_turns,
     } = params;
+    let tool_concurrency: usize = 4;
     let (mut stream, _user_message) = stream_prompt(
         &agent,
         &history,
@@ -821,6 +822,7 @@ async fn run_stream(params: StreamParams) -> Result<()> {
         Some(approval_rx),
         Some(resolution_rx),
         max_agent_turns,
+        tool_concurrency,
     )
     .await
     .context("Failed to start stream")?;

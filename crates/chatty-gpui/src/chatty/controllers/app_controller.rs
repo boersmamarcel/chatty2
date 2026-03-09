@@ -2856,6 +2856,10 @@ async fn run_llm_stream(
 
     // 3. Call stream_prompt
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
+    // Use concurrency > 1 to allow parallel tool execution when the LLM
+    // emits multiple tool_calls in a single assistant message.
+    let tool_concurrency: usize = 4;
+
     let (mut stream, user_message) = stream_prompt(
         &agent,
         &history,
@@ -2863,6 +2867,7 @@ async fn run_llm_stream(
         Some(approval_rx),
         Some(resolution_rx),
         max_agent_turns,
+        tool_concurrency,
     )
     .await?;
 

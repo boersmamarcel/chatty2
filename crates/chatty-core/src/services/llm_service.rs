@@ -325,6 +325,7 @@ pub async fn stream_prompt(
     approval_rx: Option<mpsc::UnboundedReceiver<ApprovalNotification>>,
     resolution_rx: Option<mpsc::UnboundedReceiver<ApprovalResolution>>,
     max_agent_turns: usize,
+    tool_concurrency: usize,
 ) -> Result<(ResponseStream, Message)> {
     let user_message = Message::User {
         content: OneOrMany::many(contents).context("Failed to create message from contents")?,
@@ -338,6 +339,7 @@ pub async fn stream_prompt(
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
                 .multi_turn(max_agent_turns)
+                .with_tool_concurrency(tool_concurrency)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -351,6 +353,7 @@ pub async fn stream_prompt(
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
                 .multi_turn(max_agent_turns)
+                .with_tool_concurrency(tool_concurrency)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -364,6 +367,7 @@ pub async fn stream_prompt(
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
                 .multi_turn(max_agent_turns)
+                .with_tool_concurrency(tool_concurrency)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -377,6 +381,7 @@ pub async fn stream_prompt(
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
                 .multi_turn(max_agent_turns)
+                .with_tool_concurrency(tool_concurrency)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -390,6 +395,7 @@ pub async fn stream_prompt(
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
                 .multi_turn(max_agent_turns)
+                .with_tool_concurrency(tool_concurrency)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
@@ -403,6 +409,7 @@ pub async fn stream_prompt(
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
                 .multi_turn(max_agent_turns)
+                .with_tool_concurrency(tool_concurrency)
                 .await;
 
             if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {

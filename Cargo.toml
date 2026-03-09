@@ -99,3 +99,6 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Unix-specific
 nix = { version = "0.29", features = ["signal"] }
+
+[patch.'https://github.com/0xPlaygrounds/rig']
+rig-core = { path = "vendor/rig-core" }
