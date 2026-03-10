@@ -59,6 +59,7 @@ impl ListToolsTool {
         has_data_query: bool,
         has_compile_typst: bool,
         has_execute_code: bool,
+        has_memory: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -331,6 +332,21 @@ impl ListToolsTool {
             });
         }
 
+        if has_memory {
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "remember".to_string(),
+                    description: "Store important information in persistent memory for future conversations. Use for key facts, decisions, user preferences, or project context.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "search_memory".to_string(),
+                    description: "Search persistent memory for previously stored information. Use to recall facts, decisions, or context from past conversations.".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
+        }
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -349,6 +365,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,

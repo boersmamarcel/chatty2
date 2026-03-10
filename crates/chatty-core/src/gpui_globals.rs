@@ -26,5 +26,8 @@ impl Global for crate::services::MathRendererService {}
 impl Global for crate::services::McpService {}
 impl Global for crate::services::MermaidRendererService {}
 
+// ── Memory ───────────────────────────────────────────────────────────────────
+impl Global for crate::services::MemoryService {}
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
 impl Global for crate::auth::AzureTokenCache {}

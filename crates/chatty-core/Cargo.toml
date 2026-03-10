@@ -73,6 +73,9 @@ usvg.workspace = true
 # Token counting
 tiktoken-rs.workspace = true
 
+# Agent memory
+memvid-core.workspace = true
+
 # Temporary: keeping these until we fully separate
 tempfile.workspace = true
 

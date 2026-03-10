@@ -305,6 +305,7 @@ impl ChattyApp {
         pending_write_approvals: crate::chatty::models::write_approval_store::PendingWriteApprovals,
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
+        memory_service: Option<crate::chatty::services::MemoryService>,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
@@ -348,6 +349,7 @@ impl ChattyApp {
             Some(pending_write_approvals),
             user_secrets,
             theme_colors,
+            memory_service,
         )
         .await
     }
@@ -596,6 +598,15 @@ impl ChattyApp {
                         )
                     })?;
 
+                    // Get memory service if available
+                    let memory_service = cx
+                        .update(|cx| {
+                            cx.try_global::<crate::chatty::services::MemoryService>()
+                                .cloned()
+                        })
+                        .ok()
+                        .flatten();
+
                     let conversation = Conversation::new(
                         conv_id.clone(),
                         title.clone(),
@@ -607,6 +618,7 @@ impl ChattyApp {
                         pending_write_approvals,
                         user_secrets,
                         theme_colors,
+                        memory_service,
                     )
                     .await?;
 
@@ -710,12 +722,17 @@ impl ChattyApp {
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
 
+                let memory_service = cx
+                    .update(|cx| cx.try_global::<crate::chatty::services::MemoryService>().cloned())
+                    .ok()
+                    .flatten();
+
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
                         match Self::restore_conversation_from_data(
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
-                            theme_colors,
+                            theme_colors, memory_service,
                         )
                         .await
                         {
@@ -1038,6 +1055,14 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+            // Get memory service if available
+            let memory_service = cx
+                .update(|cx| {
+                    cx.try_global::<crate::chatty::services::MemoryService>().cloned()
+                })
+                .ok()
+                .flatten();
+
             // Factory creates shell session on-demand if not provided
             let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
                 &model_config,
@@ -1050,6 +1075,7 @@ impl ChattyApp {
                 shell_session,
                 user_secrets,
                 theme_colors,
+                memory_service,
             )
             .await?;
 
@@ -1161,6 +1187,15 @@ impl ChattyApp {
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+                        // Get memory service if available
+                        let memory_service = cx
+                            .update(|cx| {
+                                cx.try_global::<crate::chatty::services::MemoryService>()
+                                    .cloned()
+                            })
+                            .ok()
+                            .flatten();
+
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session) =
                             AgentClient::from_model_config_with_tools(
@@ -1174,6 +1209,7 @@ impl ChattyApp {
                                 shell_session,
                                 user_secrets,
                                 theme_colors,
+                                memory_service,
                             )
                             .await?;
 
@@ -2853,6 +2889,60 @@ async fn run_llm_stream(
             });
         }
     }
+
+    // 2c. Auto-retrieve relevant memories and inject as context
+    let user_contents = {
+        let memory_service = cx
+            .update(|cx| {
+                cx.try_global::<crate::chatty::services::MemoryService>()
+                    .cloned()
+            })
+            .ok()
+            .flatten();
+
+        if let Some(mem_svc) = memory_service {
+            let query_text = extract_user_message_text(&user_contents);
+            if !query_text.is_empty() {
+                match mem_svc.search(&query_text, Some(3)).await {
+                    Ok(hits) if !hits.is_empty() => {
+                        let mut memory_context =
+                            String::from("[Relevant memories from past conversations]\n");
+                        for hit in &hits {
+                            if let Some(ref title) = hit.title {
+                                memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
+                            } else {
+                                memory_context.push_str(&format!("- {}\n", hit.text));
+                            }
+                        }
+                        memory_context.push_str("[End of memories]\n\n");
+
+                        // Prepend memory context to user contents
+                        let mut augmented = vec![rig::message::UserContent::Text(
+                            rig::completion::message::Text {
+                                text: memory_context,
+                            },
+                        )];
+                        augmented.extend(user_contents);
+                        debug!(
+                            conv_id = %conv_id,
+                            hit_count = hits.len(),
+                            "Injected memory context into user message"
+                        );
+                        augmented
+                    }
+                    Ok(_) => user_contents, // No relevant memories found
+                    Err(e) => {
+                        warn!(error = ?e, "Memory auto-retrieval failed (non-fatal)");
+                        user_contents
+                    }
+                }
+            } else {
+                user_contents
+            }
+        } else {
+            user_contents
+        }
+    };
 
     // 3. Call stream_prompt
     debug!(conv_id = %conv_id, "Calling stream_prompt()");

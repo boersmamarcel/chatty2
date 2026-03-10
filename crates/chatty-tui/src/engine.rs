@@ -8,7 +8,7 @@ use chatty_core::models::execution_approval_store::{
     ApprovalDecision, ApprovalNotification, ApprovalResolution, ExecutionApprovalStore,
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
-use chatty_core::services::{McpService, StreamChunk, stream_prompt};
+use chatty_core::services::{McpService, MemoryService, StreamChunk, stream_prompt};
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
@@ -150,6 +150,7 @@ pub struct ChatEngine {
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
+    pub memory_service: Option<MemoryService>,
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
@@ -179,6 +180,7 @@ impl ChatEngine {
         models: ModelsModel,
         providers: Vec<ProviderConfig>,
         mcp_service: Option<McpService>,
+        memory_service: Option<MemoryService>,
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
@@ -190,6 +192,7 @@ impl ChatEngine {
             models,
             providers,
             mcp_service,
+            memory_service,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
@@ -257,6 +260,7 @@ impl ChatEngine {
             Some(pending_write_approvals),
             self.user_secrets.clone(),
             None, // no theme colors in TUI
+            self.memory_service.clone(),
         )
         .await
         .context("Failed to create conversation")?;
@@ -289,6 +293,7 @@ impl ChatEngine {
         });
 
         // Build user content
+        let query_text = message.clone();
         let contents = vec![UserContent::text(message.clone())];
 
         // Add user message to conversation history
@@ -323,8 +328,47 @@ impl ChatEngine {
         let history = conversation.history().to_vec();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
+        let memory_service = self.memory_service.clone();
 
         tokio::spawn(async move {
+            // Auto-retrieve relevant memories and inject as context
+            let contents = if let Some(ref mem_svc) = memory_service {
+                if !query_text.is_empty() {
+                    match mem_svc.search(&query_text, Some(3)).await {
+                        Ok(hits) if !hits.is_empty() => {
+                            let mut memory_context =
+                                String::from("[Relevant memories from past conversations]\n");
+                            for hit in &hits {
+                                if let Some(ref title) = hit.title {
+                                    memory_context
+                                        .push_str(&format!("- {}: {}\n", title, hit.text));
+                                } else {
+                                    memory_context.push_str(&format!("- {}\n", hit.text));
+                                }
+                            }
+                            memory_context.push_str("[End of memories]\n\n");
+
+                            let mut augmented = vec![UserContent::text(memory_context)];
+                            augmented.extend(contents);
+                            info!(
+                                hit_count = hits.len(),
+                                "Injected memory context into user message"
+                            );
+                            augmented
+                        }
+                        Ok(_) => contents,
+                        Err(e) => {
+                            warn!(error = ?e, "Memory auto-retrieval failed (non-fatal)");
+                            contents
+                        }
+                    }
+                } else {
+                    contents
+                }
+            } else {
+                contents
+            };
+
             let result = run_stream(StreamParams {
                 agent,
                 history,

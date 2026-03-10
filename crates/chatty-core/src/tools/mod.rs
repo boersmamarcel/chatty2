@@ -17,6 +17,8 @@ mod path_utils;
 pub mod pdf_extract_text_tool;
 pub mod pdf_info_tool;
 pub mod pdf_to_image_tool;
+pub mod remember_tool;
+pub mod search_memory_tool;
 pub mod search_tool;
 pub mod shell_tool;
 #[cfg(test)]
@@ -45,6 +47,8 @@ pub use list_tools_tool::ListToolsTool;
 pub use pdf_extract_text_tool::PdfExtractTextTool;
 pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
+pub use remember_tool::RememberTool;
+pub use search_memory_tool::SearchMemoryTool;
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
 pub use typst_tool::CompileTypstTool;
