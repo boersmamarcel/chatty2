@@ -1,7 +1,8 @@
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
+use chatty_core::services::MemoryService;
 use gpui::{App, AsyncApp};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the current execution tool settings (bash, filesystem, MCP management).
@@ -352,6 +353,73 @@ pub fn set_max_agent_turns(turns: u32, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Toggle agent memory enabled/disabled and persist to disk.
+///
+/// When toggled ON, initializes the MemoryService global if not already present.
+/// When toggled OFF, removes the MemoryService global so memory tools are no longer injected.
+pub fn toggle_memory(cx: &mut App) {
+    let new_enabled = !cx.global::<ExecutionSettingsModel>().memory_enabled;
+    info!(new = new_enabled, "Toggling agent memory");
+    cx.global_mut::<ExecutionSettingsModel>().memory_enabled = new_enabled;
+
+    if new_enabled {
+        // Initialize MemoryService if not already present
+        if cx.try_global::<MemoryService>().is_none() {
+            cx.spawn(|cx: &mut AsyncApp| async move {
+                if let Some(data_dir) =
+                    chatty_core::services::memory_service::memory_data_dir()
+                {
+                    match MemoryService::open_or_create(&data_dir).await {
+                        Ok(service) => {
+                            cx.update(|cx| {
+                                cx.set_global(service);
+                                info!("Agent memory service initialized from settings toggle");
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to set MemoryService global"))
+                            .ok();
+                        }
+                        Err(e) => {
+                            warn!(error = ?e, "Failed to initialize memory service");
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Clear all agent memory (purge the memory store).
+pub fn purge_memory(cx: &mut App) {
+    let memory_service = cx.try_global::<MemoryService>().cloned();
+
+    if let Some(service) = memory_service {
+        info!("Purging all agent memory");
+        cx.spawn(|_cx: &mut AsyncApp| async move {
+            if let Err(e) = service.clear().await {
+                error!(error = ?e, "Failed to purge memory");
+            } else {
+                info!("Agent memory purged successfully");
+            }
+        })
+        .detach();
+    } else {
+        warn!("Cannot purge memory: MemoryService not initialized");
+    }
 }
 
 /// Toggle filesystem write tools enabled/disabled and persist to disk
