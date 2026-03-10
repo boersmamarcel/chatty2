@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
+use crate::MemoryInitSignal;
 use crate::chatty::exporters::atif_exporter::conversation_to_atif;
 use crate::chatty::exporters::jsonl_exporter::{
     SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
@@ -37,6 +38,39 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
+
+/// Wait for the memory service to finish initializing (with a timeout), then return it.
+///
+/// This prevents a race condition where conversations are created before the
+/// `MemoryService` global has been set, resulting in agents that lack memory tools.
+async fn await_memory_service(
+    cx: &gpui::AsyncApp,
+) -> Option<crate::chatty::services::MemoryService> {
+    // Grab the watch receiver (set synchronously in main.rs before the window opens)
+    let receiver = cx
+        .update(|cx| cx.try_global::<MemoryInitSignal>().map(|s| s.0.clone()))
+        .ok()
+        .flatten();
+
+    if let Some(mut rx) = receiver
+        && !*rx.borrow()
+    {
+        // Memory init hasn't completed yet — wait up to 5 seconds
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.wait_for(|ready| *ready),
+        )
+        .await;
+    }
+
+    // Now try to read the global (may still be None if init failed or was disabled)
+    cx.update(|cx| {
+        cx.try_global::<crate::chatty::services::MemoryService>()
+            .cloned()
+    })
+    .ok()
+    .flatten()
+}
 
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
@@ -598,14 +632,8 @@ impl ChattyApp {
                         )
                     })?;
 
-                    // Get memory service if available
-                    let memory_service = cx
-                        .update(|cx| {
-                            cx.try_global::<crate::chatty::services::MemoryService>()
-                                .cloned()
-                        })
-                        .ok()
-                        .flatten();
+                    // Wait for memory service init to complete before building the agent
+                    let memory_service = await_memory_service(cx).await;
 
                     let conversation = Conversation::new(
                         conv_id.clone(),
@@ -722,10 +750,7 @@ impl ChattyApp {
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
 
-                let memory_service = cx
-                    .update(|cx| cx.try_global::<crate::chatty::services::MemoryService>().cloned())
-                    .ok()
-                    .flatten();
+                let memory_service = await_memory_service(cx).await;
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
@@ -1055,13 +1080,8 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            // Get memory service if available
-            let memory_service = cx
-                .update(|cx| {
-                    cx.try_global::<crate::chatty::services::MemoryService>().cloned()
-                })
-                .ok()
-                .flatten();
+            // Wait for memory service init to complete before building the agent
+            let memory_service = await_memory_service(cx).await;
 
             // Factory creates shell session on-demand if not provided
             let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
@@ -1188,13 +1208,8 @@ impl ChattyApp {
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
                         // Get memory service if available
-                        let memory_service = cx
-                            .update(|cx| {
-                                cx.try_global::<crate::chatty::services::MemoryService>()
-                                    .cloned()
-                            })
-                            .ok()
-                            .flatten();
+                        // Wait for memory service init to complete before building the agent
+                        let memory_service = await_memory_service(cx).await;
 
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session) =
@@ -2892,13 +2907,7 @@ async fn run_llm_stream(
 
     // 2c. Auto-retrieve relevant memories and inject as context
     let user_contents = {
-        let memory_service = cx
-            .update(|cx| {
-                cx.try_global::<crate::chatty::services::MemoryService>()
-                    .cloned()
-            })
-            .ok()
-            .flatten();
+        let memory_service = await_memory_service(cx).await;
 
         if let Some(mem_svc) = memory_service {
             let query_text = extract_user_message_text(&user_contents);
