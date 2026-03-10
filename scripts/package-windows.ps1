@@ -42,6 +42,21 @@ New-Item -ItemType Directory -Path $PACKAGE_DIR | Out-Null
 # Copy binary
 Copy-Item "${RELEASE_DIR}\${BINARY}" "${PACKAGE_DIR}\"
 
+# Bundle pdfium.dll for PDF support
+$PDFIUM_SRC = $null
+foreach ($candidate in @("crates\chatty-core\libs\lib\pdfium.dll", "crates\chatty-gpui\libs\lib\pdfium.dll")) {
+    if (Test-Path $candidate) {
+        $PDFIUM_SRC = $candidate
+        break
+    }
+}
+if ($PDFIUM_SRC) {
+    Copy-Item $PDFIUM_SRC "${PACKAGE_DIR}\"
+    Write-Host "Bundled pdfium.dll from ${PDFIUM_SRC}"
+} else {
+    Write-Host "Warning: pdfium.dll not found, PDF support will be unavailable" -ForegroundColor Yellow
+}
+
 # Create a simple README
 $README_CONTENT = @"
 ${APP_NAME} v${VERSION}

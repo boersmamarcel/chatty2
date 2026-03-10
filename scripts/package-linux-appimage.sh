@@ -64,6 +64,23 @@ mkdir -p "${APPDIR}/usr/share/icons/hicolor/512x512/apps"
 cp "${RELEASE_DIR}/${APP_NAME}" "${APPDIR}/usr/bin/"
 chmod +x "${APPDIR}/usr/bin/${APP_NAME}"
 
+# Copy pdfium shared library (required for PDF support)
+mkdir -p "${APPDIR}/usr/lib"
+PDFIUM_SRC=""
+for candidate in crates/chatty-core/libs/lib/libpdfium.so crates/chatty-gpui/libs/lib/libpdfium.so; do
+    if [ -f "$candidate" ]; then
+        PDFIUM_SRC="$candidate"
+        break
+    fi
+done
+if [ -n "$PDFIUM_SRC" ]; then
+    cp "$PDFIUM_SRC" "${APPDIR}/usr/lib/libpdfium.so"
+    chmod +x "${APPDIR}/usr/lib/libpdfium.so"
+    echo "Bundled libpdfium.so from ${PDFIUM_SRC}"
+else
+    echo "Warning: libpdfium.so not found — PDF features will be unavailable"
+fi
+
 # Copy chatty-tui CLI binary if available
 if [ -f "${RELEASE_DIR}/chatty-tui" ]; then
     cp "${RELEASE_DIR}/chatty-tui" "${APPDIR}/usr/bin/chatty-tui"
@@ -169,6 +186,9 @@ integrate_desktop &
 
 # Set up environment for themes
 export CHATTY_DATA_DIR="${HERE}/usr/share/chatty"
+
+# Make bundled pdfium discoverable via LD_LIBRARY_PATH
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 
 # Run the application
 exec "${HERE}/usr/bin/chatty" "$@"
