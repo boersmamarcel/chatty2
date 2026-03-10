@@ -179,6 +179,12 @@ Enable auto-export in **Settings > Training Data**.
 
 Background update checks against GitHub releases with one-click install. Downloads are verified with SHA-256 checksums before installation. On macOS, the update replaces the app bundle and relaunches automatically.
 
+### Agent Memory
+
+Chatty includes a built-in persistent memory system. The agent can explicitly store facts with the `remember` tool and retrieve them later with `search_memory`. Before each LLM call, the top 3 most relevant memories are automatically injected as context — so the agent builds on past interactions without you having to repeat yourself.
+
+Memory is enabled by default and can be toggled in **Settings > General**.
+
 ### Environment Secrets
 
 Manage environment variables that are automatically injected into every shell session. Go to **Settings > Secrets** to add key-value pairs — the AI knows which variable names are available (e.g., `os.environ["API_KEY"]`) but never sees the actual values. Secrets are persisted locally and masked in tool output.
@@ -216,6 +222,8 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `describe_data` | Inspect the schema of a Parquet, CSV, or JSON file (column names, types, row count, file size) | No |
 | `compile_typst` | Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents | Yes |
 | `list_tools` | Lists all available tools and schemas | No |
+| `remember` | Store important information in persistent agent memory for use in future conversations | No |
+| `search_memory` | Search past memories by keyword to retrieve relevant stored information | No |
 
 ### MCP Servers
 
