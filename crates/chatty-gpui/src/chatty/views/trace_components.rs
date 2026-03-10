@@ -1021,6 +1021,20 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
         if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
             return path.to_string();
         }
+
+        // For remember tool: prefer title, fall back to truncated content
+        if tool_call.tool_name == "remember" {
+            if let Some(title) = json.get("title").and_then(|v| v.as_str()) {
+                return title.to_string();
+            }
+            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                let truncated: String = content.chars().take(80).collect();
+                if content.len() > 80 {
+                    return format!("{}...", truncated);
+                }
+                return truncated;
+            }
+        }
     }
 
     // Fallback to display_name if we can't extract anything

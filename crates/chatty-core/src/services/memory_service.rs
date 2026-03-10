@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use memvid_core::{Memvid, PutOptions, SearchRequest};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum number of search results returned by default
 const DEFAULT_TOP_K: usize = 5;
@@ -34,6 +35,9 @@ pub struct MemoryStats {
 pub struct MemoryService {
     memvid: Arc<Mutex<Memvid>>,
     path: PathBuf,
+    /// Tracks whether the store is known to be empty (newly created, no data committed yet).
+    /// Avoids noisy LexNotEnabled errors when searching an empty store.
+    is_empty: Arc<AtomicBool>,
 }
 
 impl MemoryService {
@@ -47,17 +51,24 @@ impl MemoryService {
 
         let path = data_dir.join("memory.mv2");
 
-        let memvid = if path.exists() {
+        let (memvid, is_empty) = if path.exists() {
             info!(path = %path.display(), "Opening existing memory file");
-            Memvid::open(&path).context("Failed to open memory file")?
+            let mut m = Memvid::open(&path).context("Failed to open memory file")?;
+            m.enable_lex()
+                .context("Failed to enable lexical search on existing memory file")?;
+            (m, false) // Existing file may have data; allow searches
         } else {
             info!(path = %path.display(), "Creating new memory file");
-            Memvid::create(&path).context("Failed to create memory file")?
+            let mut m = Memvid::create(&path).context("Failed to create memory file")?;
+            m.enable_lex()
+                .context("Failed to enable lexical search on new memory file")?;
+            (m, true) // Brand new store; skip searches until first remember()
         };
 
         Ok(Self {
             memvid: Arc::new(Mutex::new(memvid)),
             path,
+            is_empty: Arc::new(AtomicBool::new(is_empty)),
         })
     }
 
@@ -83,6 +94,8 @@ impl MemoryService {
             .context("Failed to store memory")?;
         mem.commit().context("Failed to commit memory")?;
 
+        self.is_empty.store(false, Ordering::Relaxed);
+
         info!(
             title = title.unwrap_or("<untitled>"),
             content_len = content.len(),
@@ -97,6 +110,11 @@ impl MemoryService {
     /// Returns empty results gracefully if the memory store is empty or
     /// if the search engine errors on an empty index.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<MemoryHit>> {
+        if self.is_empty.load(Ordering::Relaxed) {
+            debug!("Memory store is empty, skipping search");
+            return Ok(Vec::new());
+        }
+
         let mut mem = self.memvid.lock().await;
 
         let request = make_search_request(query, top_k.unwrap_or(DEFAULT_TOP_K), SNIPPET_CHARS);
@@ -104,8 +122,6 @@ impl MemoryService {
         let response = match mem.search(request) {
             Ok(resp) => resp,
             Err(e) => {
-                // memvid-core may error when searching an empty store;
-                // treat this as "no results" rather than a hard failure.
                 warn!(error = ?e, "Memory search returned error, treating as empty");
                 return Ok(Vec::new());
             }
@@ -129,6 +145,13 @@ impl MemoryService {
         let metadata = tokio::fs::metadata(&self.path).await;
         let file_size_bytes = metadata.map(|m| m.len()).unwrap_or(0);
 
+        if self.is_empty.load(Ordering::Relaxed) {
+            return Ok(MemoryStats {
+                entry_count: 0,
+                file_size_bytes,
+            });
+        }
+
         let mut mem = self.memvid.lock().await;
         let request = make_search_request("", 0, 0);
         let entry_count = mem.search(request).map(|r| r.total_hits).unwrap_or(0);
@@ -146,7 +169,12 @@ impl MemoryService {
         warn!(path = %self.path.display(), "Clearing all agent memory");
 
         // Drop old and create fresh
-        *mem = Memvid::create(&self.path).context("Failed to recreate memory file")?;
+        let mut fresh = Memvid::create(&self.path).context("Failed to recreate memory file")?;
+        fresh
+            .enable_lex()
+            .context("Failed to enable lexical search on cleared memory file")?;
+        *mem = fresh;
+        self.is_empty.store(true, Ordering::Relaxed);
 
         Ok(())
     }
