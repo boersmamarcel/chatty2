@@ -2,6 +2,8 @@ use pdfium_render::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use super::pdfium_utils::create_pdfium;
+
 const THUMBNAIL_SIZE: u32 = 64;
 
 lazy_static::lazy_static! {
@@ -42,12 +44,6 @@ impl From<image::ImageError> for PdfThumbnailError {
     fn from(err: image::ImageError) -> Self {
         PdfThumbnailError::Image(format!("{:?}", err))
     }
-}
-
-/// Get the path to the pdfium library set by build.rs
-fn pdfium_lib_path() -> Option<PathBuf> {
-    let lib_dir = option_env!("PDFIUM_LIB_DIR")?;
-    Some(PathBuf::from(lib_dir))
 }
 
 /// Get or create the session temp directory for PDF thumbnails
@@ -92,17 +88,8 @@ pub fn cleanup_thumbnails() {
 
 /// Render PDF first page to a temporary thumbnail PNG file
 pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailError> {
-    let lib_dir = pdfium_lib_path().ok_or_else(|| {
-        PdfThumbnailError::Pdfium("PDFIUM_LIB_DIR not set by build.rs".to_string())
-    })?;
-
-    // Construct full library path directly (avoids issues with special chars in path)
-    let lib_path = lib_dir.join(Pdfium::pdfium_platform_library_name());
-    let bindings = Pdfium::bind_to_library(&lib_path)
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| PdfThumbnailError::Pdfium(format!("Failed to bind pdfium: {:?}", e)))?;
-
-    let pdfium = Pdfium::new(bindings);
+    let pdfium = create_pdfium()
+        .map_err(|e| PdfThumbnailError::Pdfium(format!("Failed to bind pdfium: {}", e)))?;
 
     let document = pdfium.load_pdf_from_file(pdf_path, None)?;
     let page = document.pages().get(0)?;
