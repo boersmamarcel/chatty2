@@ -188,9 +188,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
 
-        svc.remember("The user's favorite color is blue", Some("Favorite color"), &[])
-            .await
-            .unwrap();
+        svc.remember(
+            "The user's favorite color is blue",
+            Some("Favorite color"),
+            &[],
+        )
+        .await
+        .unwrap();
 
         let hits = svc.search("favorite color", None).await.unwrap();
         assert!(!hits.is_empty(), "Should find the stored memory");
@@ -220,7 +224,10 @@ mod tests {
 
         // Verify the .mv2 file exists on disk
         let mv2_path = dir.path().join("memory.mv2");
-        assert!(mv2_path.exists(), "memory.mv2 should exist after remember+commit");
+        assert!(
+            mv2_path.exists(),
+            "memory.mv2 should exist after remember+commit"
+        );
 
         // Session 2: reopen and search
         {
