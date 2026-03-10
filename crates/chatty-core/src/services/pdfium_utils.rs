@@ -12,6 +12,7 @@ fn compile_time_lib_path() -> Option<PathBuf> {
 /// This handles packaged app bundles where the compile-time path no longer exists:
 /// - **macOS** `.app` bundle: `<exe>/../../Frameworks/` (`Contents/MacOS/../Frameworks/`)
 /// - **Linux** AppImage: `<exe>/../lib/` (`usr/bin/../lib/`)
+/// - **Windows** package: `<exe>/` (DLL next to the executable)
 fn exe_relative_lib_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
@@ -22,6 +23,11 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
         if frameworks.is_dir() {
             return Some(frameworks);
         }
+    }
+
+    if cfg!(target_os = "windows") {
+        // Windows: pdfium.dll lives next to the executable
+        return Some(exe_dir.to_path_buf());
     }
 
     // Linux AppImage: usr/bin/<exe> → usr/lib/
