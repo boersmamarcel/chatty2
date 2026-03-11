@@ -2,7 +2,6 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::info;
 
 use crate::services::memory_service::MemoryService;
 
@@ -19,11 +18,11 @@ pub struct RememberToolArgs {
     pub tags: Option<HashMap<String, String>>,
 }
 
-/// Error type for remember tool
+/// Shared error type for memory tools (remember + search_memory).
 #[derive(Debug, thiserror::Error)]
-pub enum RememberToolError {
-    #[error("Memory error: {0}")]
-    MemoryError(String),
+pub enum MemoryToolError {
+    #[error("Memory operation failed: {0}")]
+    OperationFailed(String),
 }
 
 /// Tool that allows the agent to store important information in persistent memory.
@@ -44,7 +43,7 @@ impl RememberTool {
 
 impl Tool for RememberTool {
     const NAME: &'static str = "remember";
-    type Error = RememberToolError;
+    type Error = MemoryToolError;
     type Args = RememberToolArgs;
     type Output = String;
 
@@ -87,17 +86,10 @@ impl Tool for RememberTool {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        info!(
-            title = args.title.as_deref().unwrap_or("<untitled>"),
-            content_len = args.content.len(),
-            tag_count = tag_refs.len(),
-            "Agent storing memory"
-        );
-
         self.memory_service
             .remember(&args.content, args.title.as_deref(), &tag_refs)
             .await
-            .map_err(|e| RememberToolError::MemoryError(e.to_string()))?;
+            .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
 
         Ok(format!(
             "Stored in memory: \"{}\"",

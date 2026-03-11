@@ -19,7 +19,7 @@ use crate::chatty::models::{
 };
 use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::services::{generate_title, simplify_memory_query, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
@@ -41,11 +41,26 @@ use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgent
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
 ///
-/// This prevents a race condition where conversations are created before the
-/// `MemoryService` global has been set, resulting in agents that lack memory tools.
+/// Returns `None` if memory is disabled in settings, if init failed, or if the
+/// timeout expires. This prevents a race condition where conversations are created
+/// before the `MemoryService` global has been set.
 async fn await_memory_service(
     cx: &gpui::AsyncApp,
 ) -> Option<crate::chatty::services::MemoryService> {
+    // Check if memory is enabled in settings — if not, short-circuit
+    let memory_enabled = cx
+        .update(|cx| {
+            cx.try_global::<crate::settings::models::ExecutionSettingsModel>()
+                .map(|s| s.memory_enabled)
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
+    if !memory_enabled {
+        info!("await_memory_service: memory disabled by settings");
+        return None;
+    }
+
     // Grab the watch receiver (set synchronously in main.rs before the window opens)
     let receiver = cx
         .update(|cx| cx.try_global::<MemoryInitSignal>().map(|s| s.0.clone()))
@@ -55,7 +70,9 @@ async fn await_memory_service(
     if let Some(mut rx) = receiver
         && !*rx.borrow()
     {
-        // Memory init hasn't completed yet — wait up to 5 seconds
+        info!("await_memory_service: waiting for memory init signal");
+        // Timeout is intentional: fail-open. If memory init stalls or fails,
+        // we proceed without memory tools rather than blocking the user.
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             rx.wait_for(|ready| *ready),
@@ -63,13 +80,22 @@ async fn await_memory_service(
         .await;
     }
 
-    // Now try to read the global (may still be None if init failed or was disabled)
-    cx.update(|cx| {
-        cx.try_global::<crate::chatty::services::MemoryService>()
-            .cloned()
-    })
-    .ok()
-    .flatten()
+    // Now try to read the global (may still be None if init failed)
+    let result = cx
+        .update(|cx| {
+            cx.try_global::<crate::chatty::services::MemoryService>()
+                .cloned()
+        })
+        .ok()
+        .flatten();
+
+    if result.is_some() {
+        info!("await_memory_service: MemoryService available");
+    } else {
+        warn!("await_memory_service: MemoryService NOT available (init failed or not set)");
+    }
+
+    result
 }
 
 /// Global state to hold the main ChattyApp entity
@@ -2910,7 +2936,14 @@ async fn run_llm_stream(
         let memory_service = await_memory_service(cx).await;
 
         if let Some(mem_svc) = memory_service {
-            let query_text = extract_user_message_text(&user_contents);
+            let raw_text = extract_user_message_text(&user_contents);
+            let query_text = simplify_memory_query(&raw_text);
+            info!(
+                conv_id = %conv_id,
+                raw_len = raw_text.len(),
+                query = %query_text,
+                "Memory auto-retrieval: searching"
+            );
             if !query_text.is_empty() {
                 match mem_svc.search(&query_text, Some(3)).await {
                     Ok(hits) if !hits.is_empty() => {

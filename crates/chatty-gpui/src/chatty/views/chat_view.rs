@@ -378,6 +378,8 @@ impl ChatView {
         };
 
         // Update live trace and create/update system_trace_view entity
+        let msg_count = self.messages.len();
+        let mut new_tool_idx: Option<usize> = None;
         if let Some(last) = self.messages.last_mut() {
             debug!(
                 has_last_message = true,
@@ -391,6 +393,7 @@ impl ChatView {
                     let index = trace.items.len();
                     trace.add_tool_call(tool_call);
                     trace.set_active_tool(index);
+                    new_tool_idx = Some(index);
 
                     // Create or update the trace view entity for rendering
                     let trace_clone = trace.clone();
@@ -430,6 +433,13 @@ impl ChatView {
             }
         } else {
             debug!("Last message is not streaming");
+        }
+
+        // Ensure new tool calls start collapsed (outside the mutable borrow of self.messages)
+        if let Some(idx) = new_tool_idx {
+            self.collapsed_tool_calls
+                .entry((msg_count - 1, idx))
+                .or_insert(true);
         }
 
         cx.notify();

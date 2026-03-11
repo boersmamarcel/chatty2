@@ -3,8 +3,8 @@ use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSetting
 use chatty_core::services::MemoryService;
 use gpui::{App, IntoElement, ParentElement, SharedString, Styled, div};
 use gpui_component::{
-    ActiveTheme, StyleSized,
-    button::{Button, ButtonVariant},
+    ActiveTheme, Disableable,
+    button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenuItem},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
@@ -267,8 +267,7 @@ pub fn execution_settings_page() -> SettingPage {
 
                             Button::new("purge-memory-btn")
                                 .label("Purge All Memory")
-                                .variant(ButtonVariant::Danger)
-                                .small()
+                                .danger()
                                 .disabled(!has_memory || !enabled)
                                 .on_click(|_, _, cx| {
                                     execution_settings_controller::purge_memory(cx);

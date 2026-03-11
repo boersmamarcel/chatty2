@@ -367,10 +367,8 @@ pub fn toggle_memory(cx: &mut App) {
     if new_enabled {
         // Initialize MemoryService if not already present
         if cx.try_global::<MemoryService>().is_none() {
-            cx.spawn(|cx: &mut AsyncApp| async move {
-                if let Some(data_dir) =
-                    chatty_core::services::memory_service::memory_data_dir()
-                {
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                if let Some(data_dir) = chatty_core::services::memory_service::memory_data_dir() {
                     match MemoryService::open_or_create(&data_dir).await {
                         Ok(service) => {
                             cx.update(|cx| {

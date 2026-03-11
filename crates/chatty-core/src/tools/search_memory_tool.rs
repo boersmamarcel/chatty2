@@ -1,9 +1,9 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
-use crate::services::memory_service::MemoryService;
+use super::remember_tool::MemoryToolError;
+use crate::services::memory_service::{MemoryHit, MemoryService};
 
 /// Arguments for the search_memory tool
 #[derive(Deserialize, Serialize)]
@@ -18,24 +18,7 @@ pub struct SearchMemoryToolArgs {
 /// Output from the search_memory tool
 #[derive(Debug, Serialize)]
 pub struct SearchMemoryToolOutput {
-    pub results: Vec<SearchMemoryResult>,
-    pub total_found: usize,
-}
-
-/// A single memory search result
-#[derive(Debug, Serialize)]
-pub struct SearchMemoryResult {
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    pub relevance_score: f32,
-}
-
-/// Error type for search_memory tool
-#[derive(Debug, thiserror::Error)]
-pub enum SearchMemoryToolError {
-    #[error("Memory search error: {0}")]
-    SearchError(String),
+    pub results: Vec<MemoryHit>,
 }
 
 /// Tool that allows the agent to search its persistent memory.
@@ -55,7 +38,7 @@ impl SearchMemoryTool {
 
 impl Tool for SearchMemoryTool {
     const NAME: &'static str = "search_memory";
-    type Error = SearchMemoryToolError;
+    type Error = MemoryToolError;
     type Args = SearchMemoryToolArgs;
     type Output = SearchMemoryToolOutput;
 
@@ -87,32 +70,12 @@ impl Tool for SearchMemoryTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        info!(
-            query = %args.query,
-            top_k = args.top_k.unwrap_or(5),
-            "Agent searching memory"
-        );
-
-        let hits = self
+        let results = self
             .memory_service
             .search(&args.query, args.top_k)
             .await
-            .map_err(|e| SearchMemoryToolError::SearchError(e.to_string()))?;
+            .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
 
-        let total_found = hits.len();
-
-        let results = hits
-            .into_iter()
-            .map(|hit| SearchMemoryResult {
-                text: hit.text,
-                title: hit.title,
-                relevance_score: hit.score,
-            })
-            .collect();
-
-        Ok(SearchMemoryToolOutput {
-            results,
-            total_found,
-        })
+        Ok(SearchMemoryToolOutput { results })
     }
 }
