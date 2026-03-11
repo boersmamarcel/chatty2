@@ -1024,12 +1024,17 @@ impl AgentClient {
              You have persistent memory that survives across conversations and app restarts. \
              **On the very first user message of every conversation**, you MUST call `search_memory` \
              with a query derived from the user's message before you respond. This ensures you \
-             recall relevant context, preferences, and prior decisions. \
+             recall relevant context, preferences, and prior decisions.\n\n\
              When the user explicitly asks you to remember, store, note, or keep in mind \
              any information, you MUST invoke the `remember` tool with the information as \
              the content parameter. Responding with text like \"I'll remember that\" or \
              \"I've noted that\" without calling the tool means the information is lost \
-             permanently. Always call the tool FIRST, then confirm to the user."
+             permanently. Always call the tool FIRST, then confirm to the user.\n\n\
+             **Keyword-rich storage**: Memory search uses keyword matching (not semantic similarity). \
+             When storing a memory, always include synonyms, related terms, and category words \
+             so the memory can be found by different search terms. For example, if the user says \
+             \"I like bananas\", store: \"User likes bananas. Categories: fruit, food, preference.\" \
+             This ensures a future search for \"fruit\" or \"food preferences\" will find this memory."
         } else {
             ""
         };

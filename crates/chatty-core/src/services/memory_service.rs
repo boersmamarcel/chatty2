@@ -325,7 +325,11 @@ fn handle_remember(
     title: Option<&str>,
     tags: &[(String, String)],
 ) -> Result<()> {
-    let mut builder = PutOptions::builder();
+    let mut builder = PutOptions::builder()
+        // Explicitly set search_text so tantivy indexes the content directly,
+        // bypassing the extraction pipeline which may silently produce empty text
+        // for short entries (< 2400 chars).
+        .search_text(content);
     if let Some(t) = title {
         builder = builder.title(t);
     }
@@ -416,6 +420,32 @@ mod tests {
             hits[0].text.contains("blue"),
             "Hit text should contain 'blue', got: {}",
             hits[0].text
+        );
+    }
+
+    /// BM25 lexical search requires word overlap — "fruits" won't find "bananas".
+    /// This test documents that limitation: without the `vec` feature (vector
+    /// similarity search), only keyword matches work.
+    #[tokio::test]
+    async fn test_lex_only_requires_keyword_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+
+        svc.remember("I like bananas", None, &[]).await.unwrap();
+
+        // Exact keyword match → should find it
+        let hits = svc.search("bananas", None).await.unwrap();
+        assert!(!hits.is_empty(), "Exact keyword 'bananas' should match");
+
+        // Partial keyword match → should find it (the word "like" appears)
+        let hits = svc.search("like", None).await.unwrap();
+        assert!(!hits.is_empty(), "Keyword 'like' should match");
+
+        // Semantic query with no word overlap → BM25 cannot match
+        let hits = svc.search("fruits", None).await.unwrap();
+        assert!(
+            hits.is_empty(),
+            "BM25 cannot match 'fruits' to 'bananas' — needs vec feature for semantic search"
         );
     }
 

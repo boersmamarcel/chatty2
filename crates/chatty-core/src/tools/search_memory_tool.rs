@@ -23,8 +23,8 @@ pub struct SearchMemoryToolOutput {
 
 /// Tool that allows the agent to search its persistent memory.
 ///
-/// Searches across all previously stored memories using combined vector similarity
-/// and full-text search for high-quality recall.
+/// Searches across all previously stored memories using full-text keyword search
+/// (BM25 ranking). Queries match on exact words, so use specific keywords.
 #[derive(Clone)]
 pub struct SearchMemoryTool {
     memory_service: MemoryService,
@@ -47,15 +47,17 @@ impl Tool for SearchMemoryTool {
             name: "search_memory".to_string(),
             description: "Search persistent memory for previously stored information. \
                          Use this when you need to recall facts, decisions, user preferences, \
-                         or context from past conversations. Returns the most relevant matches \
-                         ranked by similarity."
+                         or context from past conversations. Uses keyword matching (BM25), \
+                         so include specific words that are likely in the stored memory."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Natural language search query describing what you want to recall."
+                        "description": "Keyword query describing what you want to recall. \
+                            Use concrete nouns and terms likely present in stored memories. \
+                            Example: 'bananas fruit preference' rather than 'what foods does the user like'."
                     },
                     "top_k": {
                         "type": "integer",

@@ -61,7 +61,11 @@ impl Tool for RememberTool {
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The information to remember. Be concise but include enough context to be useful later."
+                        "description": "The information to remember. IMPORTANT: Memory search uses keyword matching, \
+                            so include synonyms, related terms, and category words to ensure future recall. \
+                            Example: instead of just 'I like bananas', write 'User likes bananas. \
+                            Categories: fruit, food preference, taste.' This ensures searching for \
+                            'fruit' or 'food' will find this memory."
                     },
                     "title": {
                         "type": "string",
