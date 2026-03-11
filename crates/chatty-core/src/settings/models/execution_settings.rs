@@ -1,3 +1,4 @@
+use crate::settings::models::providers_store::ProviderType;
 use serde::{Deserialize, Serialize};
 
 /// Approval mode for code execution requests
@@ -61,6 +62,18 @@ pub struct ExecutionSettingsModel {
     /// When enabled, the agent can store and recall information across conversations.
     #[serde(default = "default_true")]
     pub memory_enabled: bool,
+    /// Enable semantic (vector) search for memory.
+    /// Requires an embedding provider and model to be configured.
+    #[serde(default)]
+    pub embedding_enabled: bool,
+    /// Provider to use for computing embeddings.
+    /// Independent of the chat model provider — allows e.g. Anthropic users
+    /// to use OpenAI for embeddings while chatting with Claude.
+    #[serde(default)]
+    pub embedding_provider: Option<ProviderType>,
+    /// Embedding model identifier (e.g., "text-embedding-3-small").
+    #[serde(default)]
+    pub embedding_model: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -89,6 +102,9 @@ impl Default for ExecutionSettingsModel {
             network_isolation: false,
             max_agent_turns: default_max_agent_turns(),
             memory_enabled: true, // Enabled by default for cross-conversation recall
+            embedding_enabled: false, // Opt-in: requires embedding provider
+            embedding_provider: None,
+            embedding_model: None,
         }
     }
 }

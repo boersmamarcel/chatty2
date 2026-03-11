@@ -382,6 +382,7 @@ impl AgentClient {
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
         memory_service: Option<MemoryService>,
+        embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -758,10 +759,14 @@ impl AgentClient {
         // Memory tools — gated on memory_enabled setting and MemoryService availability
         let (remember_tool, search_memory_tool): (Option<RememberTool>, Option<SearchMemoryTool>) =
             if let Some(ref mem_svc) = memory_service {
-                tracing::info!("Memory tools enabled");
+                let has_embeddings = embedding_service.is_some();
+                tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
                 (
-                    Some(RememberTool::new(mem_svc.clone())),
-                    Some(SearchMemoryTool::new(mem_svc.clone())),
+                    Some(RememberTool::new(
+                        mem_svc.clone(),
+                        embedding_service.clone(),
+                    )),
+                    Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
                 )
             } else {
                 tracing::info!("Memory tools disabled: no MemoryService provided");

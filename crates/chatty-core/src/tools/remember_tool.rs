@@ -2,7 +2,9 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::warn;
 
+use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
 
 /// Arguments for the remember tool
@@ -33,11 +35,15 @@ pub enum MemoryToolError {
 #[derive(Clone)]
 pub struct RememberTool {
     memory_service: MemoryService,
+    embedding_service: Option<EmbeddingService>,
 }
 
 impl RememberTool {
-    pub fn new(memory_service: MemoryService) -> Self {
-        Self { memory_service }
+    pub fn new(memory_service: MemoryService, embedding_service: Option<EmbeddingService>) -> Self {
+        Self {
+            memory_service,
+            embedding_service,
+        }
     }
 }
 
@@ -48,6 +54,18 @@ impl Tool for RememberTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let content_description = if self.embedding_service.is_some() {
+            "The information to remember. Write naturally — semantic search \
+             handles conceptual matching automatically. No need to add extra \
+             keywords or categories."
+        } else {
+            "The information to remember. IMPORTANT: Memory search uses keyword matching, \
+             so include synonyms, related terms, and category words to ensure future recall. \
+             Example: instead of just 'I like bananas', write 'User likes bananas. \
+             Categories: fruit, food preference, taste.' This ensures searching for \
+             'fruit' or 'food' will find this memory."
+        };
+
         ToolDefinition {
             name: "remember".to_string(),
             description:
@@ -61,11 +79,7 @@ impl Tool for RememberTool {
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The information to remember. IMPORTANT: Memory search uses keyword matching, \
-                            so include synonyms, related terms, and category words to ensure future recall. \
-                            Example: instead of just 'I like bananas', write 'User likes bananas. \
-                            Categories: fruit, food preference, taste.' This ensures searching for \
-                            'fruit' or 'food' will find this memory."
+                        "description": content_description
                     },
                     "title": {
                         "type": "string",
@@ -90,10 +104,35 @@ impl Tool for RememberTool {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        self.memory_service
-            .remember(&args.content, args.title.as_deref(), &tag_refs)
-            .await
-            .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+        // If embedding service is available, compute embedding and store with vector
+        if let Some(ref embed_svc) = self.embedding_service {
+            match embed_svc.embed(&args.content).await {
+                Ok(embedding) => {
+                    self.memory_service
+                        .remember_with_embedding(
+                            &args.content,
+                            embedding,
+                            args.title.as_deref(),
+                            &tag_refs,
+                        )
+                        .await
+                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                }
+                Err(e) => {
+                    // Fall back to BM25-only storage if embedding fails
+                    warn!(error = ?e, "Embedding failed, falling back to BM25-only storage");
+                    self.memory_service
+                        .remember(&args.content, args.title.as_deref(), &tag_refs)
+                        .await
+                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                }
+            }
+        } else {
+            self.memory_service
+                .remember(&args.content, args.title.as_deref(), &tag_refs)
+                .await
+                .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+        }
 
         Ok(format!(
             "Stored in memory: \"{}\"",

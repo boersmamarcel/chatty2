@@ -151,6 +151,7 @@ pub struct ChatEngine {
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
     pub memory_service: Option<MemoryService>,
+    pub embedding_service: Option<chatty_core::services::EmbeddingService>,
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
@@ -181,6 +182,7 @@ impl ChatEngine {
         providers: Vec<ProviderConfig>,
         mcp_service: Option<McpService>,
         memory_service: Option<MemoryService>,
+        embedding_service: Option<chatty_core::services::EmbeddingService>,
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
@@ -193,6 +195,7 @@ impl ChatEngine {
             providers,
             mcp_service,
             memory_service,
+            embedding_service,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
@@ -261,6 +264,7 @@ impl ChatEngine {
             self.user_secrets.clone(),
             None, // no theme colors in TUI
             self.memory_service.clone(),
+            self.embedding_service.clone(),
         )
         .await
         .context("Failed to create conversation")?;
@@ -329,38 +333,61 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
         let memory_service = self.memory_service.clone();
+        let embedding_service = self.embedding_service.clone();
 
         tokio::spawn(async move {
             // Auto-retrieve relevant memories and inject as context
             let contents = if let Some(ref mem_svc) = memory_service {
                 if !query_text.is_empty() {
-                    match mem_svc.search(&query_text, Some(3)).await {
-                        Ok(hits) if !hits.is_empty() => {
-                            let mut memory_context =
-                                String::from("[Relevant memories from past conversations]\n");
-                            for hit in &hits {
-                                if let Some(ref title) = hit.title {
-                                    memory_context
-                                        .push_str(&format!("- {}: {}\n", title, hit.text));
-                                } else {
-                                    memory_context.push_str(&format!("- {}\n", hit.text));
-                                }
-                            }
-                            memory_context.push_str("[End of memories]\n\n");
-
-                            let mut augmented = vec![UserContent::text(memory_context)];
-                            augmented.extend(contents);
-                            info!(
-                                hit_count = hits.len(),
-                                "Injected memory context into user message"
-                            );
-                            augmented
-                        }
-                        Ok(_) => contents,
+                    // BM25 lexical search
+                    let bm25_hits = match mem_svc.search(&query_text, Some(3)).await {
+                        Ok(hits) => hits,
                         Err(e) => {
-                            warn!(error = ?e, "Memory auto-retrieval failed (non-fatal)");
-                            contents
+                            warn!(error = ?e, "Memory auto-retrieval BM25 failed (non-fatal)");
+                            Vec::new()
                         }
+                    };
+
+                    // Vector similarity search (if embedding service available)
+                    let vec_hits = if let Some(ref embed_svc) = embedding_service {
+                        match embed_svc.embed(&query_text).await {
+                            Ok(query_embedding) => mem_svc
+                                .search_vec(query_embedding, Some(3))
+                                .await
+                                .unwrap_or_default(),
+                            Err(e) => {
+                                warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Merge BM25 + vector results
+                    let hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
+
+                    if !hits.is_empty() {
+                        let mut memory_context =
+                            String::from("[Relevant memories from past conversations]\n");
+                        for hit in &hits {
+                            if let Some(ref title) = hit.title {
+                                memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
+                            } else {
+                                memory_context.push_str(&format!("- {}\n", hit.text));
+                            }
+                        }
+                        memory_context.push_str("[End of memories]\n\n");
+
+                        let mut augmented = vec![UserContent::text(memory_context)];
+                        augmented.extend(contents);
+                        info!(
+                            hit_count = hits.len(),
+                            "Injected memory context into user message"
+                        );
+                        augmented
+                    } else {
+                        contents
                     }
                 } else {
                     contents

@@ -48,7 +48,7 @@ pub use pdf_extract_text_tool::PdfExtractTextTool;
 pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use remember_tool::{MemoryToolError, RememberTool};
-pub use search_memory_tool::SearchMemoryTool;
+pub use search_memory_tool::{SearchMemoryTool, merge_search_results};
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
 pub use typst_tool::CompileTypstTool;

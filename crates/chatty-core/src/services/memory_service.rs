@@ -40,6 +40,25 @@ enum MemoryCommand {
         tags: Vec<(String, String)>,
         reply: oneshot::Sender<Result<()>>,
     },
+    RememberWithEmbedding {
+        content: String,
+        embedding: Vec<f32>,
+        title: Option<String>,
+        tags: Vec<(String, String)>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    EnableVec {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SetVecModel {
+        model: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SearchVec {
+        query_embedding: Vec<f32>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<MemoryHit>>>,
+    },
     Clear {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -171,6 +190,93 @@ impl MemoryService {
             .context("Memory thread dropped reply channel")?
     }
 
+    /// Store a memory entry with a pre-computed embedding vector.
+    ///
+    /// The embedding is stored alongside the text in the HNSW vector index,
+    /// enabling semantic similarity search via `search_vec()`.
+    pub async fn remember_with_embedding(
+        &self,
+        content: &str,
+        embedding: Vec<f32>,
+        title: Option<&str>,
+        tags: &[(&str, &str)],
+    ) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MemoryCommand::RememberWithEmbedding {
+                content: content.to_string(),
+                embedding,
+                title: title.map(|s| s.to_string()),
+                tags: tags
+                    .iter()
+                    .map(|&(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
+
+        reply_rx
+            .await
+            .context("Memory thread dropped reply channel")?
+    }
+
+    /// Enable the HNSW vector index on the memvid file.
+    pub async fn enable_vec(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MemoryCommand::EnableVec { reply: reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
+
+        reply_rx
+            .await
+            .context("Memory thread dropped reply channel")?
+    }
+
+    /// Bind the vector index to a specific embedding model identifier.
+    ///
+    /// Returns an error if the index is already bound to a different model
+    /// (model mismatch — the user must purge memory to switch models).
+    pub async fn set_vec_model(&self, model: &str) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MemoryCommand::SetVecModel {
+                model: model.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
+
+        reply_rx
+            .await
+            .context("Memory thread dropped reply channel")?
+    }
+
+    /// Search memory using a pre-computed query embedding vector (semantic search).
+    ///
+    /// Returns results ranked by vector similarity (L2 distance, lower = better).
+    /// The distance is converted to a score for consistency with BM25 results.
+    pub async fn search_vec(
+        &self,
+        query_embedding: Vec<f32>,
+        top_k: Option<usize>,
+    ) -> Result<Vec<MemoryHit>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MemoryCommand::SearchVec {
+                query_embedding,
+                limit: top_k.unwrap_or(DEFAULT_TOP_K),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
+
+        reply_rx
+            .await
+            .context("Memory thread dropped reply channel")?
+    }
+
     /// The path to the memory file on disk.
     pub fn path(&self) -> &Path {
         &self.path
@@ -214,6 +320,42 @@ fn run_memory_thread(
                 reply,
             } => {
                 let result = handle_remember(&mut memvid, &content, title.as_deref(), &tags);
+                let _ = reply.send(result);
+            }
+            MemoryCommand::RememberWithEmbedding {
+                content,
+                embedding,
+                title,
+                tags,
+                reply,
+            } => {
+                let result = handle_remember_with_embedding(
+                    &mut memvid,
+                    &content,
+                    embedding,
+                    title.as_deref(),
+                    &tags,
+                );
+                let _ = reply.send(result);
+            }
+            MemoryCommand::EnableVec { reply } => {
+                let result = memvid
+                    .enable_vec()
+                    .context("Failed to enable vector search");
+                let _ = reply.send(result);
+            }
+            MemoryCommand::SetVecModel { model, reply } => {
+                let result = memvid
+                    .set_vec_model(&model)
+                    .context("Failed to set vector model");
+                let _ = reply.send(result);
+            }
+            MemoryCommand::SearchVec {
+                query_embedding,
+                limit,
+                reply,
+            } => {
+                let result = handle_search_vec(&mut memvid, &query_embedding, limit);
                 let _ = reply.send(result);
             }
             MemoryCommand::Clear { reply } => {
@@ -261,6 +403,7 @@ fn init_memvid(path: &Path) -> Result<Memvid> {
             uri: None,
             scope: None,
             cursor: None,
+            temporal: None,
             as_of_frame: None,
             as_of_ts: None,
             no_sketch: false,
@@ -352,6 +495,81 @@ fn handle_remember(
     Ok(())
 }
 
+fn handle_remember_with_embedding(
+    memvid: &mut Memvid,
+    content: &str,
+    embedding: Vec<f32>,
+    title: Option<&str>,
+    tags: &[(String, String)],
+) -> Result<()> {
+    let mut builder = PutOptions::builder().search_text(content);
+    if let Some(t) = title {
+        builder = builder.title(t);
+    }
+    for (key, value) in tags {
+        builder = builder.tag(key, value);
+    }
+    let opts = builder.build();
+
+    memvid
+        .put_with_embedding_and_options(content.as_bytes(), embedding, opts)
+        .context("Failed to store memory with embedding")?;
+    memvid.commit().context("Failed to commit memory")?;
+
+    info!(
+        title = title.unwrap_or("<untitled>"),
+        content_len = content.len(),
+        "Stored new memory with embedding"
+    );
+
+    Ok(())
+}
+
+fn handle_search_vec(
+    memvid: &mut Memvid,
+    query_embedding: &[f32],
+    limit: usize,
+) -> Result<Vec<MemoryHit>> {
+    let vec_hits = match memvid.search_vec(query_embedding, limit) {
+        Ok(hits) => hits,
+        Err(e) => {
+            warn!(error = ?e, "Vector search returned error, treating as empty");
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut results = Vec::with_capacity(vec_hits.len());
+    for hit in vec_hits {
+        // Get text content and title from the frame
+        let text = match memvid.frame_text_by_id(hit.frame_id) {
+            Ok(text) => text,
+            Err(e) => {
+                warn!(
+                    frame_id = hit.frame_id,
+                    error = ?e,
+                    "Failed to read frame text for vec hit, skipping"
+                );
+                continue;
+            }
+        };
+
+        let title = memvid
+            .frame_by_id(hit.frame_id)
+            .ok()
+            .and_then(|f| f.title.clone());
+
+        // Convert L2 distance to a similarity score (1 / (1 + distance)).
+        // Lower distance = higher score, range (0, 1].
+        let score = 1.0 / (1.0 + hit.distance);
+
+        results.push(MemoryHit { text, title, score });
+    }
+
+    info!(hit_count = results.len(), "Vector search completed");
+
+    Ok(results)
+}
+
 fn handle_clear(memvid: &mut Memvid, path: &Path) -> Result<()> {
     warn!(path = %path.display(), "Clearing all agent memory");
 
@@ -384,6 +602,7 @@ fn make_search_request(query: &str, top_k: usize, snippet_chars: usize) -> Searc
         uri: None,
         scope: None,
         cursor: None,
+        temporal: None,
         as_of_frame: None,
         as_of_ts: None,
         no_sketch: false,

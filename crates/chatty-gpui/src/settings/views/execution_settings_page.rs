@@ -1,10 +1,9 @@
 use crate::settings::controllers::execution_settings_controller;
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
-use chatty_core::services::MemoryService;
 use gpui::{App, IntoElement, ParentElement, SharedString, Styled, div};
 use gpui_component::{
-    ActiveTheme, Disableable,
-    button::{Button, ButtonVariants},
+    ActiveTheme,
+    button::Button,
     menu::{DropdownMenu, PopupMenuItem},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
@@ -235,48 +234,6 @@ pub fn execution_settings_page() -> SettingPage {
                     .description(
                         "Maximum number of tool-call rounds the agent can perform per response. \
                          Applies to all agentic interactions, including code execution and MCP tool calls.",
-                    ),
-                ]),
-            SettingGroup::new()
-                .title("Memory")
-                .description(
-                    "Persistent agent memory across conversations. \
-                     The agent can store facts, preferences, and decisions, \
-                     then recall them in future conversations.",
-                )
-                .items(vec![
-                    SettingItem::new(
-                        "Enable Agent Memory",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<ExecutionSettingsModel>().memory_enabled,
-                            |_val: bool, cx: &mut App| {
-                                execution_settings_controller::toggle_memory(cx);
-                            },
-                        )
-                        .default_value(true),
-                    )
-                    .description(
-                        "When enabled, the agent can store and recall information across \
-                         conversations using remember and search_memory tools.",
-                    ),
-                    SettingItem::new(
-                        "Purge All Memory",
-                        SettingField::render(|_options, _window, cx| {
-                            let has_memory = cx.try_global::<MemoryService>().is_some();
-                            let enabled = cx.global::<ExecutionSettingsModel>().memory_enabled;
-
-                            Button::new("purge-memory-btn")
-                                .label("Purge All Memory")
-                                .danger()
-                                .disabled(!has_memory || !enabled)
-                                .on_click(|_, _, cx| {
-                                    execution_settings_controller::purge_memory(cx);
-                                })
-                                .into_any_element()
-                        }),
-                    )
-                    .description(
-                        "Permanently delete all stored memories. This cannot be undone.",
                     ),
                 ]),
             SettingGroup::new()
