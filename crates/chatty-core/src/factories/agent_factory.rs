@@ -972,14 +972,8 @@ impl AgentClient {
         }
         if remember_tool.is_some() {
             tool_sections.push(
-                "- **remember / search_memory**: Persistent cross-conversation memory. \
-                 Use `remember` to store important facts, decisions, or user preferences. \
-                 Use `search_memory` to recall previously stored information. \
-                 Be selective — only remember genuinely useful information. \
-                 **IMPORTANT**: At the start of every conversation, proactively call \
-                 `search_memory` with a broad query related to the user's first message \
-                 to recall any relevant context from previous conversations. Do this \
-                 before responding to the user's first message."
+                "- **remember**: Store important information in persistent cross-conversation memory.\n\
+                 - **search_memory**: Search previously stored memories by natural language query."
                     .to_string(),
             );
         }
@@ -1030,10 +1024,17 @@ impl AgentClient {
              You have persistent memory that survives across conversations and app restarts. \
              **On the very first user message of every conversation**, you MUST call `search_memory` \
              with a query derived from the user's message before you respond. This ensures you \
-             recall relevant context, preferences, and prior decisions. \
-             When the user explicitly asks you to remember something or search your memory, \
-             always use the corresponding tool — never say you cannot remember or that you \
-             don't have memory."
+             recall relevant context, preferences, and prior decisions.\n\n\
+             When the user explicitly asks you to remember, store, note, or keep in mind \
+             any information, you MUST invoke the `remember` tool with the information as \
+             the content parameter. Responding with text like \"I'll remember that\" or \
+             \"I've noted that\" without calling the tool means the information is lost \
+             permanently. Always call the tool FIRST, then confirm to the user.\n\n\
+             **Keyword-rich storage**: Memory search uses keyword matching (not semantic similarity). \
+             When storing a memory, always include synonyms, related terms, and category words \
+             so the memory can be found by different search terms. For example, if the user says \
+             \"I like bananas\", store: \"User likes bananas. Categories: fruit, food, preference.\" \
+             This ensures a future search for \"fruit\" or \"food preferences\" will find this memory."
         } else {
             ""
         };

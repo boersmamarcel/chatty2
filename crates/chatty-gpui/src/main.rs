@@ -20,6 +20,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Global signal that fires once the agent memory service has finished initializing
+/// (successfully or not). Conversation creation awaits this to avoid a race where the
+/// agent would be built without memory tools.
+///
+/// Uses a `watch` channel so that late subscribers (who arrive after init completes)
+/// can still observe the `true` state without missing the notification.
+pub struct MemoryInitSignal(pub tokio::sync::watch::Receiver<bool>);
+impl Global for MemoryInitSignal {}
+
 // Use global singletons from chatty-core
 use chatty_core::{MCP_SERVICE, MCP_UPDATE_SENDER};
 
@@ -428,7 +437,11 @@ fn main() {
         // Initialize user secrets with empty state - will be populated async
         cx.set_global(settings::models::UserSecretsModel::default());
 
-        // Initialize agent memory service asynchronously
+        // Initialize agent memory service asynchronously.
+        // A watch channel is stored as a global so that conversation creation can await
+        // completion, preventing a race where the agent would be built without memory tools.
+        let (memory_tx, memory_rx) = tokio::sync::watch::channel(false);
+        cx.set_global(MemoryInitSignal(memory_rx));
         cx.spawn(async move |cx: &mut AsyncApp| {
             // Check if memory is enabled in settings
             let memory_enabled = cx
@@ -460,6 +473,9 @@ fn main() {
             } else {
                 info!("Agent memory disabled by settings");
             }
+
+            // Signal that memory init is done (success, failure, or disabled)
+            let _ = memory_tx.send(true);
         })
         .detach();
 

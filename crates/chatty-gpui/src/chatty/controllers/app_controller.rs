@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
+use crate::MemoryInitSignal;
 use crate::chatty::exporters::atif_exporter::conversation_to_atif;
 use crate::chatty::exporters::jsonl_exporter::{
     SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
@@ -18,7 +19,7 @@ use crate::chatty::models::{
 };
 use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::services::{generate_title, simplify_memory_query, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
@@ -37,6 +38,65 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
+
+/// Wait for the memory service to finish initializing (with a timeout), then return it.
+///
+/// Returns `None` if memory is disabled in settings, if init failed, or if the
+/// timeout expires. This prevents a race condition where conversations are created
+/// before the `MemoryService` global has been set.
+async fn await_memory_service(
+    cx: &gpui::AsyncApp,
+) -> Option<crate::chatty::services::MemoryService> {
+    // Check if memory is enabled in settings — if not, short-circuit
+    let memory_enabled = cx
+        .update(|cx| {
+            cx.try_global::<crate::settings::models::ExecutionSettingsModel>()
+                .map(|s| s.memory_enabled)
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
+    if !memory_enabled {
+        info!("await_memory_service: memory disabled by settings");
+        return None;
+    }
+
+    // Grab the watch receiver (set synchronously in main.rs before the window opens)
+    let receiver = cx
+        .update(|cx| cx.try_global::<MemoryInitSignal>().map(|s| s.0.clone()))
+        .ok()
+        .flatten();
+
+    if let Some(mut rx) = receiver
+        && !*rx.borrow()
+    {
+        info!("await_memory_service: waiting for memory init signal");
+        // Timeout is intentional: fail-open. If memory init stalls or fails,
+        // we proceed without memory tools rather than blocking the user.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.wait_for(|ready| *ready),
+        )
+        .await;
+    }
+
+    // Now try to read the global (may still be None if init failed)
+    let result = cx
+        .update(|cx| {
+            cx.try_global::<crate::chatty::services::MemoryService>()
+                .cloned()
+        })
+        .ok()
+        .flatten();
+
+    if result.is_some() {
+        info!("await_memory_service: MemoryService available");
+    } else {
+        warn!("await_memory_service: MemoryService NOT available (init failed or not set)");
+    }
+
+    result
+}
 
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
@@ -598,14 +658,8 @@ impl ChattyApp {
                         )
                     })?;
 
-                    // Get memory service if available
-                    let memory_service = cx
-                        .update(|cx| {
-                            cx.try_global::<crate::chatty::services::MemoryService>()
-                                .cloned()
-                        })
-                        .ok()
-                        .flatten();
+                    // Wait for memory service init to complete before building the agent
+                    let memory_service = await_memory_service(cx).await;
 
                     let conversation = Conversation::new(
                         conv_id.clone(),
@@ -722,10 +776,7 @@ impl ChattyApp {
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
 
-                let memory_service = cx
-                    .update(|cx| cx.try_global::<crate::chatty::services::MemoryService>().cloned())
-                    .ok()
-                    .flatten();
+                let memory_service = await_memory_service(cx).await;
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
@@ -1055,13 +1106,8 @@ impl ChattyApp {
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            // Get memory service if available
-            let memory_service = cx
-                .update(|cx| {
-                    cx.try_global::<crate::chatty::services::MemoryService>().cloned()
-                })
-                .ok()
-                .flatten();
+            // Wait for memory service init to complete before building the agent
+            let memory_service = await_memory_service(cx).await;
 
             // Factory creates shell session on-demand if not provided
             let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
@@ -1188,13 +1234,8 @@ impl ChattyApp {
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
                         // Get memory service if available
-                        let memory_service = cx
-                            .update(|cx| {
-                                cx.try_global::<crate::chatty::services::MemoryService>()
-                                    .cloned()
-                            })
-                            .ok()
-                            .flatten();
+                        // Wait for memory service init to complete before building the agent
+                        let memory_service = await_memory_service(cx).await;
 
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session) =
@@ -2892,50 +2933,63 @@ async fn run_llm_stream(
 
     // 2c. Auto-retrieve relevant memories and inject as context
     let user_contents = {
-        let memory_service = cx
-            .update(|cx| {
-                cx.try_global::<crate::chatty::services::MemoryService>()
-                    .cloned()
-            })
-            .ok()
-            .flatten();
+        let memory_service = await_memory_service(cx).await;
 
         if let Some(mem_svc) = memory_service {
-            let query_text = extract_user_message_text(&user_contents);
-            if !query_text.is_empty() {
-                match mem_svc.search(&query_text, Some(3)).await {
-                    Ok(hits) if !hits.is_empty() => {
-                        let mut memory_context =
-                            String::from("[Relevant memories from past conversations]\n");
-                        for hit in &hits {
-                            if let Some(ref title) = hit.title {
-                                memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
-                            } else {
-                                memory_context.push_str(&format!("- {}\n", hit.text));
-                            }
-                        }
-                        memory_context.push_str("[End of memories]\n\n");
+            let raw_text = extract_user_message_text(&user_contents);
+            let query_text = simplify_memory_query(&raw_text);
+            info!(
+                conv_id = %conv_id,
+                raw_len = raw_text.len(),
+                query = %query_text,
+                "Memory auto-retrieval: searching"
+            );
 
-                        // Prepend memory context to user contents
-                        let mut augmented = vec![rig::message::UserContent::Text(
-                            rig::completion::message::Text {
-                                text: memory_context,
-                            },
-                        )];
-                        augmented.extend(user_contents);
-                        debug!(
-                            conv_id = %conv_id,
-                            hit_count = hits.len(),
-                            "Injected memory context into user message"
-                        );
-                        augmented
+            // Search with simplified query, then fall back to raw if 0 hits.
+            // An imperfect query often still returns useful results via vector
+            // similarity, while the simplified version may miss due to low
+            // lexical overlap with stored text.
+            let hits = if !query_text.is_empty() {
+                match mem_svc.search(&query_text, Some(3)).await {
+                    Ok(hits) if !hits.is_empty() => hits,
+                    Ok(_) if query_text != raw_text && !raw_text.is_empty() => {
+                        info!(conv_id = %conv_id, "Simplified query got 0 hits, retrying with raw text");
+                        mem_svc.search(&raw_text, Some(3)).await.unwrap_or_default()
                     }
-                    Ok(_) => user_contents, // No relevant memories found
+                    Ok(empty) => empty,
                     Err(e) => {
                         warn!(error = ?e, "Memory auto-retrieval failed (non-fatal)");
-                        user_contents
+                        Vec::new()
                     }
                 }
+            } else {
+                Vec::new()
+            };
+
+            if !hits.is_empty() {
+                let mut memory_context =
+                    String::from("[Relevant memories from past conversations]\n");
+                for hit in &hits {
+                    if let Some(ref title) = hit.title {
+                        memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
+                    } else {
+                        memory_context.push_str(&format!("- {}\n", hit.text));
+                    }
+                }
+                memory_context.push_str("[End of memories]\n\n");
+
+                let mut augmented = vec![rig::message::UserContent::Text(
+                    rig::completion::message::Text {
+                        text: memory_context,
+                    },
+                )];
+                augmented.extend(user_contents);
+                debug!(
+                    conv_id = %conv_id,
+                    hit_count = hits.len(),
+                    "Injected memory context into user message"
+                );
+                augmented
             } else {
                 user_contents
             }

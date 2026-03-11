@@ -269,6 +269,8 @@ pub fn friendly_tool_name(name: &str) -> String {
         "apply_diff" => "Applying diff".to_string(),
         "shell_execute" => "Running command".to_string(),
         "create_chart" => "Creating chart".to_string(),
+        "search_memory" => "Searching memory".to_string(),
+        "remember" => "Remembering".to_string(),
         other => other.to_string(),
     }
 }

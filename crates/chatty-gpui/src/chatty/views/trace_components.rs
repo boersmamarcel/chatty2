@@ -776,7 +776,7 @@ where
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(format!("$ {}", extract_command_display(tool_call))),
+                .child(format_tool_call_header(tool_call)),
         )
         .map(|this| {
             if is_running {
@@ -985,6 +985,22 @@ fn render_full_command_box(
         .into_any_element()
 }
 
+/// Format the inline header text for a tool call.
+///
+/// Most tools show `$ <command>` (shell-style), but memory tools use their
+/// friendly name as a prefix (e.g. "Remembering: user prefers dark mode").
+fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
+    let detail = extract_command_display(tool_call);
+
+    match tool_call.tool_name.as_str() {
+        "remember" | "search_memory" => {
+            // Use the friendly display_name (e.g. "Remembering", "Searching memory")
+            format!("{}: {}", tool_call.display_name, detail)
+        }
+        _ => format!("$ {}", detail),
+    }
+}
+
 /// Extract a user-friendly display string from tool call input (truncated for headers)
 fn extract_command_display(tool_call: &ToolCallBlock) -> String {
     let full = extract_full_command(tool_call);
@@ -1011,6 +1027,27 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             let language = json.get("language").and_then(|v| v.as_str()).unwrap_or("?");
             let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
             return format!("[{}] {}", language, code);
+        }
+
+        // For remember tool: prefer title, fall back to truncated content
+        if tool_call.tool_name == "remember" {
+            if let Some(title) = json.get("title").and_then(|v| v.as_str()) {
+                return title.to_string();
+            }
+            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                let truncated: String = content.chars().take(80).collect();
+                if content.len() > 80 {
+                    return format!("{}...", truncated);
+                }
+                return truncated;
+            }
+        }
+
+        // For search_memory: extract query
+        if tool_call.tool_name == "search_memory" {
+            if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
+                return query.to_string();
+            }
         }
 
         // For other tools: try to extract a "query" or "path" or first string field
