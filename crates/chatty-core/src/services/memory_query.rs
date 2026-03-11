@@ -5,24 +5,34 @@
 /// common question prefixes, filler words, and punctuation to extract the
 /// content words that actually matter for recall.
 ///
+/// Returns the raw input (truncated to 100 chars) as a fallback if simplification
+/// would produce an empty query — an imperfect query is better than no query.
+///
 /// Examples:
-///   "what do you remember about my preferences?" → "preferences"
+///   "what do you remember about my preferences?" → "my preferences"
 ///   "tell me about the project architecture"     → "project architecture"
 ///   "I like bananas"                             → "like bananas"
+///   "what do you know about me?"                 → "what do you know about me?"  (fallback)
 pub fn simplify_memory_query(raw: &str) -> String {
-    // Strip leading question patterns (case-insensitive)
     let lowered = raw.to_lowercase();
     let stripped = strip_question_prefix(&lowered);
 
-    // Remove stop words and punctuation, keep content words
     let content_words: Vec<&str> = stripped
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|w| !w.is_empty() && !is_stop_word(w))
-        .take(8) // Cap at 8 content words
+        .take(8)
         .collect();
 
-    content_words.join(" ")
+    if content_words.is_empty() {
+        // Fallback: return the raw input (truncated) rather than nothing.
+        // An imperfect query is better than skipping the search entirely.
+        let trimmed = raw.trim();
+        let truncated = &trimmed[..trimmed.len().min(100)];
+        truncated.to_string()
+    } else {
+        content_words.join(" ")
+    }
 }
 
 /// Strip common question/command prefixes from a lowercased string.
@@ -64,6 +74,8 @@ fn strip_question_prefix(s: &str) -> &str {
 }
 
 fn is_stop_word(word: &str) -> bool {
+    // Note: "my" is intentionally NOT a stop word — "my preferences" matches
+    // better than just "preferences" in vector/lexical search.
     matches!(
         word,
         "a" | "an"
@@ -91,7 +103,6 @@ fn is_stop_word(word: &str) -> bool {
             | "can"
             | "i"
             | "me"
-            | "my"
             | "you"
             | "your"
             | "we"
@@ -142,9 +153,10 @@ mod tests {
 
     #[test]
     fn strips_question_prefix() {
+        // "my" is kept (not a stop word) for better matching
         assert_eq!(
             simplify_memory_query("what do you remember about my preferences?"),
-            "preferences"
+            "my preferences"
         );
     }
 
@@ -169,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn handles_empty() {
+    fn empty_input_stays_empty() {
         assert_eq!(simplify_memory_query(""), "");
     }
 
@@ -182,7 +194,26 @@ mod tests {
     fn what_are_my() {
         assert_eq!(
             simplify_memory_query("what are my favorite colors?"),
-            "favorite colors"
+            "my favorite colors"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_raw_when_all_stop_words() {
+        // "what do you know about me?" → prefix strips to "me?" → "me" is stop → empty
+        // Falls back to the raw input
+        assert_eq!(
+            simplify_memory_query("what do you know about me?"),
+            "what do you know about me?"
+        );
+    }
+
+    #[test]
+    fn falls_back_for_only_pronouns() {
+        // After prefix strip: "me?" → all stop words → fallback to raw
+        assert_eq!(
+            simplify_memory_query("do you remember anything about me?"),
+            "do you remember anything about me?"
         );
     }
 }

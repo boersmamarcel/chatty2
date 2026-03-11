@@ -2944,40 +2944,52 @@ async fn run_llm_stream(
                 query = %query_text,
                 "Memory auto-retrieval: searching"
             );
-            if !query_text.is_empty() {
-                match mem_svc.search(&query_text, Some(3)).await {
-                    Ok(hits) if !hits.is_empty() => {
-                        let mut memory_context =
-                            String::from("[Relevant memories from past conversations]\n");
-                        for hit in &hits {
-                            if let Some(ref title) = hit.title {
-                                memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
-                            } else {
-                                memory_context.push_str(&format!("- {}\n", hit.text));
-                            }
-                        }
-                        memory_context.push_str("[End of memories]\n\n");
 
-                        // Prepend memory context to user contents
-                        let mut augmented = vec![rig::message::UserContent::Text(
-                            rig::completion::message::Text {
-                                text: memory_context,
-                            },
-                        )];
-                        augmented.extend(user_contents);
-                        debug!(
-                            conv_id = %conv_id,
-                            hit_count = hits.len(),
-                            "Injected memory context into user message"
-                        );
-                        augmented
+            // Search with simplified query, then fall back to raw if 0 hits.
+            // An imperfect query often still returns useful results via vector
+            // similarity, while the simplified version may miss due to low
+            // lexical overlap with stored text.
+            let hits = if !query_text.is_empty() {
+                match mem_svc.search(&query_text, Some(3)).await {
+                    Ok(hits) if !hits.is_empty() => hits,
+                    Ok(_) if query_text != raw_text && !raw_text.is_empty() => {
+                        info!(conv_id = %conv_id, "Simplified query got 0 hits, retrying with raw text");
+                        mem_svc.search(&raw_text, Some(3)).await.unwrap_or_default()
                     }
-                    Ok(_) => user_contents, // No relevant memories found
+                    Ok(empty) => empty,
                     Err(e) => {
                         warn!(error = ?e, "Memory auto-retrieval failed (non-fatal)");
-                        user_contents
+                        Vec::new()
                     }
                 }
+            } else {
+                Vec::new()
+            };
+
+            if !hits.is_empty() {
+                let mut memory_context =
+                    String::from("[Relevant memories from past conversations]\n");
+                for hit in &hits {
+                    if let Some(ref title) = hit.title {
+                        memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
+                    } else {
+                        memory_context.push_str(&format!("- {}\n", hit.text));
+                    }
+                }
+                memory_context.push_str("[End of memories]\n\n");
+
+                let mut augmented = vec![rig::message::UserContent::Text(
+                    rig::completion::message::Text {
+                        text: memory_context,
+                    },
+                )];
+                augmented.extend(user_contents);
+                debug!(
+                    conv_id = %conv_id,
+                    hit_count = hits.len(),
+                    "Injected memory context into user message"
+                );
+                augmented
             } else {
                 user_contents
             }
