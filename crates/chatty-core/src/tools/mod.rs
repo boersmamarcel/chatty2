@@ -20,6 +20,7 @@ pub mod pdf_to_image_tool;
 pub mod remember_tool;
 pub mod search_memory_tool;
 pub mod search_tool;
+pub mod search_web_tool;
 pub mod shell_tool;
 #[cfg(test)]
 pub mod test_helpers;
@@ -50,5 +51,6 @@ pub use pdf_to_image_tool::PdfToImageTool;
 pub use remember_tool::{MemoryToolError, RememberTool};
 pub use search_memory_tool::SearchMemoryTool;
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
+pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
 pub use typst_tool::CompileTypstTool;

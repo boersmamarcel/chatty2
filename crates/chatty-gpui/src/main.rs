@@ -431,6 +431,9 @@ fn main() {
         // Initialize execution settings with default - will be populated async
         cx.set_global(settings::models::ExecutionSettingsModel::default());
 
+        // Initialize search settings with default - will be populated async
+        cx.set_global(settings::models::SearchSettingsModel::default());
+
         // Initialize training settings with default - will be populated async
         cx.set_global(settings::models::TrainingSettingsModel::default());
 
@@ -661,10 +664,11 @@ fn main() {
         // Using tokio::join! makes the dependency graph explicit and eliminates AtomicBool polling.
         cx.spawn(async move |cx: &mut AsyncApp| {
             // Run all three I/O operations in parallel before touching global state
-            let (providers_result, models_result, exec_settings_result) = tokio::join!(
+            let (providers_result, models_result, exec_settings_result, search_settings_result) = tokio::join!(
                 chatty_core::provider_repository().load_all(),
                 chatty_core::models_repository().load_all(),
                 chatty_core::execution_settings_repository().load(),
+                chatty_core::search_settings_repository().load(),
             );
 
             // Apply providers result
@@ -818,6 +822,25 @@ fn main() {
                 Err(e) => {
                     warn!(error = ?e, "Failed to load execution settings, using defaults");
                     // Defaults will be used (enabled=false); conversations will still load
+                }
+            }
+
+            // Apply search settings result
+            match search_settings_result {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        info!(
+                            enabled = settings.enabled,
+                            provider = ?settings.active_provider,
+                            "Search settings loaded from disk"
+                        );
+                        cx.set_global(settings);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global search settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load search settings, using defaults");
                 }
             }
 

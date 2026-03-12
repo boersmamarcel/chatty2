@@ -3,6 +3,7 @@ pub mod general_settings_controller;
 pub mod mcp_controller;
 pub mod models_controller;
 pub mod providers_controller;
+pub mod search_settings_controller;
 pub mod settings_controller;
 pub mod training_settings_controller;
 pub mod user_secrets_controller;

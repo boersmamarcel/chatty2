@@ -87,6 +87,7 @@ impl Conversation {
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
         memory_service: Option<MemoryService>,
+        search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -117,6 +118,7 @@ impl Conversation {
             user_secrets,
             theme_colors,
             memory_service,
+            search_settings,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -157,6 +159,7 @@ impl Conversation {
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
         memory_service: Option<MemoryService>,
+        search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -185,6 +188,7 @@ impl Conversation {
             user_secrets,
             theme_colors,
             memory_service,
+            search_settings,
         )
         .await
         .context("Failed to create agent from config")?;

@@ -259,6 +259,15 @@ async fn main() -> Result<()> {
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
     // Create engine
+    // Load search settings
+    let search_settings = match chatty_core::search_settings_repository().load().await {
+        Ok(settings) => Some(settings),
+        Err(e) => {
+            tracing::warn!(error = ?e, "Failed to load search settings, using None");
+            None
+        }
+    };
+
     let mut engine = ChatEngine::new(
         model_config,
         provider_config,
@@ -267,6 +276,7 @@ async fn main() -> Result<()> {
         providers,
         mcp_service,
         memory_service,
+        search_settings,
         user_secrets,
         event_tx,
     );

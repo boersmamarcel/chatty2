@@ -151,6 +151,8 @@ pub struct ChatEngine {
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
     pub memory_service: Option<MemoryService>,
+    pub search_settings:
+        Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
@@ -181,6 +183,9 @@ impl ChatEngine {
         providers: Vec<ProviderConfig>,
         mcp_service: Option<McpService>,
         memory_service: Option<MemoryService>,
+        search_settings: Option<
+            chatty_core::settings::models::search_settings::SearchSettingsModel,
+        >,
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
@@ -193,6 +198,7 @@ impl ChatEngine {
             providers,
             mcp_service,
             memory_service,
+            search_settings,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
@@ -261,6 +267,7 @@ impl ChatEngine {
             self.user_secrets.clone(),
             None, // no theme colors in TUI
             self.memory_service.clone(),
+            self.search_settings.clone(),
         )
         .await
         .context("Failed to create conversation")?;
