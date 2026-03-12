@@ -254,7 +254,7 @@ impl Tool for SearchWebTool {
             ));
         }
 
-        let max_results = args.max_results.unwrap_or(self.default_max_results).min(20);
+        let max_results = args.max_results.unwrap_or(self.default_max_results).clamp(1, 20);
 
         info!(
             query = %query,
