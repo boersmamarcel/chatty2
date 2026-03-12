@@ -1,4 +1,5 @@
 pub mod chart_svg_renderer;
+pub mod embedding_service;
 pub mod error_collector_layer;
 pub mod filesystem_service;
 pub mod git_service;
@@ -16,6 +17,7 @@ pub mod shell_service;
 pub mod title_generator;
 pub mod typst_compiler_service;
 
+pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
 pub use llm_service::{StreamChunk, stream_prompt};
 pub use math_renderer_service::MathRendererService;

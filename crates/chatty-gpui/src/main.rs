@@ -477,6 +477,64 @@ fn main() {
                 info!("Agent memory disabled by settings");
             }
 
+            // Initialize embedding service for semantic memory search (if configured)
+            let embedding_settings = cx
+                .update(|cx| {
+                    cx.try_global::<settings::models::ExecutionSettingsModel>()
+                        .map(|s| (s.embedding_enabled, s.embedding_provider.clone(), s.embedding_model.clone()))
+                })
+                .ok()
+                .flatten();
+
+            if let Some((true, Some(embed_provider_type), Some(embed_model))) = embedding_settings {
+                let provider_config = cx
+                    .update(|cx| {
+                        cx.try_global::<settings::models::ProviderModel>()
+                            .and_then(|pm| {
+                                pm.providers()
+                                    .iter()
+                                    .find(|p| p.provider_type == embed_provider_type)
+                                    .cloned()
+                            })
+                    })
+                    .ok()
+                    .flatten();
+
+                let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
+                let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone());
+
+                if let Some(embed_svc) = chatty_core::services::embedding_service::try_create_embedding_service(
+                    &embed_provider_type,
+                    &embed_model,
+                    api_key.as_deref(),
+                    base_url.as_deref(),
+                ) {
+                    // Enable vector index on memory service
+                    let mem_svc = cx
+                        .update(|cx| {
+                            cx.try_global::<chatty_core::services::MemoryService>().cloned()
+                        })
+                        .ok()
+                        .flatten();
+
+                    if let Some(ref mem_svc) = mem_svc {
+                        if let Err(e) = mem_svc.enable_vec().await {
+                            warn!(error = ?e, "Failed to enable vector index on memory service");
+                        } else if let Err(e) = mem_svc.set_vec_model(&embed_svc.model_identifier()).await {
+                            warn!(error = ?e, "Failed to set vector model — falling back to BM25-only");
+                        } else {
+                            info!(model = %embed_svc.model_identifier(), "Vector search enabled for memory");
+                        }
+                    }
+
+                    cx.update(|cx| {
+                        cx.set_global(embed_svc);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to set EmbeddingService global"))
+                    .ok();
+                }
+            }
+
             // Signal that memory init is done (success, failure, or disabled)
             let _ = memory_tx.send(true);
         })

@@ -98,6 +98,16 @@ async fn await_memory_service(
     result
 }
 
+/// Read the EmbeddingService from globals if available.
+fn get_embedding_service(cx: &gpui::AsyncApp) -> Option<chatty_core::services::EmbeddingService> {
+    cx.update(|cx| {
+        cx.try_global::<chatty_core::services::EmbeddingService>()
+            .cloned()
+    })
+    .ok()
+    .flatten()
+}
+
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
 pub struct GlobalChattyApp {
@@ -367,6 +377,7 @@ impl ChattyApp {
         theme_colors: Option<[String; 5]>,
         memory_service: Option<crate::chatty::services::MemoryService>,
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
+        embedding_service: Option<chatty_core::services::EmbeddingService>,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
@@ -412,6 +423,7 @@ impl ChattyApp {
             theme_colors,
             memory_service,
             search_settings,
+            embedding_service,
         )
         .await
     }
@@ -667,6 +679,7 @@ impl ChattyApp {
 
                     // Wait for memory service init to complete before building the agent
                     let memory_service = await_memory_service(cx).await;
+                    let embedding_service = get_embedding_service(cx);
 
                     let conversation = Conversation::new(
                         conv_id.clone(),
@@ -681,6 +694,7 @@ impl ChattyApp {
                         theme_colors,
                         memory_service,
                         search_settings,
+                        embedding_service,
                     )
                     .await?;
 
@@ -791,10 +805,11 @@ impl ChattyApp {
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
+                        let embedding_service = get_embedding_service(cx);
                         match Self::restore_conversation_from_data(
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
-                            theme_colors, memory_service, search_settings,
+                            theme_colors, memory_service, search_settings, embedding_service,
                         )
                         .await
                         {
@@ -1122,6 +1137,7 @@ impl ChattyApp {
 
             // Wait for memory service init to complete before building the agent
             let memory_service = await_memory_service(cx).await;
+            let embedding_service = get_embedding_service(cx);
 
             // Factory creates shell session on-demand if not provided
             let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
@@ -1137,6 +1153,7 @@ impl ChattyApp {
                 theme_colors,
                 memory_service,
                 search_settings,
+                embedding_service,
             )
             .await?;
 
@@ -1256,6 +1273,7 @@ impl ChattyApp {
                         // Get memory service if available
                         // Wait for memory service init to complete before building the agent
                         let memory_service = await_memory_service(cx).await;
+                        let embedding_service = get_embedding_service(cx);
 
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session) =
@@ -1272,6 +1290,7 @@ impl ChattyApp {
                                 theme_colors,
                                 memory_service,
                                 search_settings,
+                                embedding_service,
                             )
                             .await?;
 
@@ -2955,6 +2974,7 @@ async fn run_llm_stream(
     // 2c. Auto-retrieve relevant memories and inject as context
     let user_contents = {
         let memory_service = await_memory_service(cx).await;
+        let embedding_service = get_embedding_service(cx);
 
         if let Some(mem_svc) = memory_service {
             let raw_text = extract_user_message_text(&user_contents);
@@ -2966,11 +2986,8 @@ async fn run_llm_stream(
                 "Memory auto-retrieval: searching"
             );
 
-            // Search with simplified query, then fall back to raw if 0 hits.
-            // An imperfect query often still returns useful results via vector
-            // similarity, while the simplified version may miss due to low
-            // lexical overlap with stored text.
-            let hits = if !query_text.is_empty() {
+            // BM25 lexical search (existing)
+            let bm25_hits = if !query_text.is_empty() {
                 match mem_svc.search(&query_text, Some(3)).await {
                     Ok(hits) if !hits.is_empty() => hits,
                     Ok(_) if query_text != raw_text && !raw_text.is_empty() => {
@@ -2979,13 +2996,41 @@ async fn run_llm_stream(
                     }
                     Ok(empty) => empty,
                     Err(e) => {
-                        warn!(error = ?e, "Memory auto-retrieval failed (non-fatal)");
+                        warn!(error = ?e, "Memory auto-retrieval BM25 failed (non-fatal)");
                         Vec::new()
                     }
                 }
             } else {
                 Vec::new()
             };
+
+            // Vector similarity search (if embedding service available)
+            let vec_hits = if let Some(ref embed_svc) = embedding_service {
+                let search_text = if query_text.is_empty() {
+                    &raw_text
+                } else {
+                    &query_text
+                };
+                if !search_text.is_empty() {
+                    match embed_svc.embed(search_text).await {
+                        Ok(query_embedding) => mem_svc
+                            .search_vec(query_embedding, Some(3))
+                            .await
+                            .unwrap_or_default(),
+                        Err(e) => {
+                            warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            // Merge BM25 + vector results
+            let hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
             if !hits.is_empty() {
                 let mut memory_context =

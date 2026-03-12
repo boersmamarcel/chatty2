@@ -183,7 +183,10 @@ Background update checks against GitHub releases with one-click install. Downloa
 
 Chatty includes a built-in persistent memory system. The agent can explicitly store facts with the `remember` tool and retrieve them later with `search_memory`. Before each LLM call, the top 3 most relevant memories are automatically injected as context — so the agent builds on past interactions without you having to repeat yourself.
 
-Memory is enabled by default and can be toggled in **Settings > General**.
+Memory is enabled by default and can be toggled in **Settings > Memory**. From that page you can also:
+
+- **Purge All Memory** — permanently delete all stored memories
+- **Semantic Search** — enable vector similarity search so the agent finds memories by meaning, not just keywords. Requires a configured embedding provider (any provider except Anthropic). Disabled by default.
 
 ### Environment Secrets
 

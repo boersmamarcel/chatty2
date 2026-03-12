@@ -255,6 +255,44 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Initialize embedding service for semantic memory search (if configured)
+    let embedding_service = if execution_settings.embedding_enabled {
+        if let (Some(embed_provider_type), Some(embed_model)) = (
+            execution_settings.embedding_provider.as_ref(),
+            execution_settings.embedding_model.as_ref(),
+        ) {
+            // Find the provider config for the embedding provider
+            let embed_provider_config = providers
+                .iter()
+                .find(|p| &p.provider_type == embed_provider_type);
+            let api_key = embed_provider_config.and_then(|p| p.api_key.as_deref());
+            let base_url = embed_provider_config.and_then(|p| p.base_url.as_deref());
+
+            let svc = chatty_core::services::embedding_service::try_create_embedding_service(
+                embed_provider_type,
+                embed_model,
+                api_key,
+                base_url,
+            );
+
+            // Enable vector index on memory service if embedding service is available
+            if let (Some(embed_svc), Some(mem_svc)) = (&svc, &memory_service) {
+                if let Err(e) = mem_svc.enable_vec().await {
+                    warn!(error = ?e, "Failed to enable vector index on memory service");
+                } else if let Err(e) = mem_svc.set_vec_model(&embed_svc.model_identifier()).await {
+                    warn!(error = ?e, "Failed to set vector model — falling back to BM25-only");
+                }
+            }
+
+            svc
+        } else {
+            info!("Semantic search enabled but no embedding provider/model configured");
+            None
+        }
+    } else {
+        None
+    };
+
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -277,6 +315,7 @@ async fn main() -> Result<()> {
         mcp_service,
         memory_service,
         search_settings,
+        embedding_service,
         user_secrets,
         event_tx,
     );

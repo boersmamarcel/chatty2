@@ -1,5 +1,6 @@
 pub mod execution_settings_page;
 pub mod mcp_tools_page;
+pub mod memory_settings_page;
 pub mod models_page;
 pub mod providers_view;
 pub mod search_settings_page;

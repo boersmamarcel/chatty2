@@ -3,7 +3,7 @@ members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.92"
+version = "0.1.93"
 edition = "2024"
 
 [workspace.dependencies]
@@ -87,7 +87,7 @@ ropey = "2.0.0-beta.1"
 tiktoken-rs = "0.9"
 
 # Agent memory
-memvid-core = { version = "2.0", default-features = false, features = ["lex"] }
+memvid-core = { version = "2.0", default-features = false, features = ["lex", "vec", "temporal_track"] }
 
 # GPUI (UI only)
 gpui = "0.2.2"

@@ -420,6 +420,183 @@ pub fn purge_memory(cx: &mut App) {
     }
 }
 
+/// Toggle semantic (vector) search for memory.
+/// Initializes or removes the EmbeddingService global accordingly.
+pub fn toggle_embedding(cx: &mut App) {
+    use chatty_core::services::embedding_service::{
+        EmbeddingService, try_create_embedding_service,
+    };
+
+    let new_enabled = !cx.global::<ExecutionSettingsModel>().embedding_enabled;
+    info!(new = new_enabled, "Toggling semantic search");
+    cx.global_mut::<ExecutionSettingsModel>().embedding_enabled = new_enabled;
+
+    if new_enabled {
+        // Try to initialize EmbeddingService if not already set
+        if cx.try_global::<EmbeddingService>().is_none() {
+            let settings = cx.global::<ExecutionSettingsModel>().clone();
+            if let (Some(provider_type), Some(model_name)) = (
+                settings.embedding_provider.as_ref(),
+                settings.embedding_model.as_ref(),
+            ) {
+                let provider_config = cx
+                    .try_global::<chatty_core::settings::models::ProviderModel>()
+                    .and_then(|pm| {
+                        pm.providers()
+                            .iter()
+                            .find(|p| &p.provider_type == provider_type)
+                            .cloned()
+                    });
+                let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
+                let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone());
+
+                if let Some(embed_svc) = try_create_embedding_service(
+                    provider_type,
+                    model_name,
+                    api_key.as_deref(),
+                    base_url.as_deref(),
+                ) {
+                    let model_id = embed_svc.model_identifier();
+                    cx.set_global(embed_svc);
+
+                    // Enable vector index on memory service
+                    let mem_svc = cx.try_global::<MemoryService>().cloned();
+                    if let Some(mem_svc) = mem_svc {
+                        cx.spawn(async move |_cx: &mut AsyncApp| {
+                            if let Err(e) = mem_svc.enable_vec().await {
+                                warn!(error = ?e, "Failed to enable vector index");
+                            } else if let Err(e) = mem_svc.set_vec_model(&model_id).await {
+                                warn!(error = ?e, "Failed to set vector model");
+                            } else {
+                                info!(model = %model_id, "Vector search enabled for memory");
+                            }
+                        })
+                        .detach();
+                    }
+                }
+            }
+        }
+    }
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Set the embedding provider and reinitialize the EmbeddingService.
+pub fn set_embedding_provider(
+    provider_type: chatty_core::settings::models::providers_store::ProviderType,
+    cx: &mut App,
+) {
+    use chatty_core::services::embedding_service::EmbeddingService;
+
+    info!(provider = ?provider_type, "Setting embedding provider");
+    cx.global_mut::<ExecutionSettingsModel>().embedding_provider = Some(provider_type.clone());
+
+    // Always update model to the new provider's default — the old model
+    // is almost certainly invalid for the new provider.
+    if let Some(default_model) = EmbeddingService::default_model_for_provider(&provider_type) {
+        cx.global_mut::<ExecutionSettingsModel>().embedding_model =
+            Some(default_model.to_string());
+    }
+
+    // Reinitialize embedding service if enabled
+    reinit_embedding_service(cx);
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Set the embedding model name and reinitialize the EmbeddingService.
+pub fn set_embedding_model(model: Option<String>, cx: &mut App) {
+    info!(model = ?model, "Setting embedding model");
+    cx.global_mut::<ExecutionSettingsModel>().embedding_model = model;
+
+    // Reinitialize embedding service if enabled
+    reinit_embedding_service(cx);
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Recreate the EmbeddingService global from current settings.
+fn reinit_embedding_service(cx: &mut App) {
+    use chatty_core::services::embedding_service::try_create_embedding_service;
+
+    let settings = cx.global::<ExecutionSettingsModel>();
+    if !settings.embedding_enabled {
+        return;
+    }
+
+    let (Some(provider_type), Some(model_name)) = (
+        settings.embedding_provider.clone(),
+        settings.embedding_model.clone(),
+    ) else {
+        return;
+    };
+
+    let provider_config = cx
+        .try_global::<chatty_core::settings::models::ProviderModel>()
+        .and_then(|pm| {
+            pm.providers()
+                .iter()
+                .find(|p| p.provider_type == provider_type)
+                .cloned()
+        });
+    let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
+    let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone());
+
+    if let Some(embed_svc) = try_create_embedding_service(
+        &provider_type,
+        &model_name,
+        api_key.as_deref(),
+        base_url.as_deref(),
+    ) {
+        let model_id = embed_svc.model_identifier();
+        cx.set_global(embed_svc);
+
+        let mem_svc = cx.try_global::<MemoryService>().cloned();
+        if let Some(mem_svc) = mem_svc {
+            cx.spawn(async move |_cx: &mut AsyncApp| {
+                if let Err(e) = mem_svc.enable_vec().await {
+                    warn!(error = ?e, "Failed to enable vector index");
+                } else if let Err(e) = mem_svc.set_vec_model(&model_id).await {
+                    warn!(error = ?e, "Failed to set vector model");
+                } else {
+                    info!(model = %model_id, "Vector search re-initialized with new model");
+                }
+            })
+            .detach();
+        }
+    }
+}
+
 /// Toggle filesystem write tools enabled/disabled and persist to disk
 pub fn toggle_filesystem_write(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)

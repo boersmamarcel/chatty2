@@ -88,6 +88,7 @@ impl Conversation {
         theme_colors: Option<[String; 5]>,
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
+        embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -119,6 +120,7 @@ impl Conversation {
             theme_colors,
             memory_service,
             search_settings,
+            embedding_service,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -160,6 +162,7 @@ impl Conversation {
         theme_colors: Option<[String; 5]>,
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
+        embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -189,6 +192,7 @@ impl Conversation {
             theme_colors,
             memory_service,
             search_settings,
+            embedding_service,
         )
         .await
         .context("Failed to create agent from config")?;
