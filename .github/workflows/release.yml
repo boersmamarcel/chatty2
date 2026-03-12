@@ -216,12 +216,6 @@ jobs:
             cargo-release-${{ runner.os }}-
 
       - name: Build release binary (TUI only — gpui does not support Windows)
-        env:
-          # esaxx-rs (via tokenizers/memvid-core) hardcodes .static_crt(true) → /MT
-          # The bundled DuckDB must also use /MT to avoid MSVC CRT mismatch (LNK2038).
-          # +crt-static makes the cc crate compile bundled DuckDB with /MT, keeping
-          # the entire binary on a single CRT.
-          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release -p chatty-tui
 
 
