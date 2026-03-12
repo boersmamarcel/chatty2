@@ -164,7 +164,7 @@ fn azure_endpoint(cx: &App) -> String {
 }
 
 /// Create a masked API key input field with an eye toggle for visibility.
-fn masked_api_key_field<V, S>(value: V, set_value: S) -> SettingField<SharedString>
+pub fn masked_api_key_field<V, S>(value: V, set_value: S) -> SettingField<SharedString>
 where
     V: Fn(&App) -> SharedString + 'static,
     S: Fn(SharedString, &mut App) + 'static,

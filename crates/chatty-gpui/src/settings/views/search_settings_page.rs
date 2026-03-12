@@ -1,5 +1,6 @@
 use crate::settings::controllers::search_settings_controller;
 use crate::settings::models::search_settings::{SearchProvider, SearchSettingsModel};
+use crate::settings::views::providers_view::masked_api_key_field;
 use gpui::{App, IntoElement, SharedString, Styled};
 use gpui_component::{
     button::Button,
@@ -108,7 +109,7 @@ pub fn search_settings_page() -> SettingPage {
                 .items(vec![
                     SettingItem::new(
                         "Tavily API Key",
-                        SettingField::input(
+                        masked_api_key_field(
                             |cx: &App| {
                                 cx.global::<SearchSettingsModel>()
                                     .tavily_api_key
@@ -124,7 +125,7 @@ pub fn search_settings_page() -> SettingPage {
                     .description("Get your API key from tavily.com"),
                     SettingItem::new(
                         "Brave API Key",
-                        SettingField::input(
+                        masked_api_key_field(
                             |cx: &App| {
                                 cx.global::<SearchSettingsModel>()
                                     .brave_api_key
