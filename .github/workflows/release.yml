@@ -217,19 +217,13 @@ jobs:
 
       - name: Build release binary (TUI only — gpui does not support Windows)
         env:
-          DUCKDB_DOWNLOAD_LIB: "1"
+          # esaxx-rs (via tokenizers/memvid-core) hardcodes .static_crt(true) → /MT
+          # The bundled DuckDB must also use /MT to avoid MSVC CRT mismatch (LNK2038).
+          # +crt-static makes the cc crate compile bundled DuckDB with /MT, keeping
+          # the entire binary on a single CRT.
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release -p chatty-tui
 
-      - name: Copy DuckDB DLL to release directory
-        run: |
-          $duckdbDll = Get-ChildItem -Path "target\duckdb-download" -Filter "duckdb.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($duckdbDll) {
-            Copy-Item $duckdbDll.FullName "target\release\duckdb.dll"
-            Write-Host "Copied $($duckdbDll.FullName) to target\release\duckdb.dll"
-          } else {
-            Write-Warning "duckdb.dll not found in target\duckdb-download — binary may require it at runtime"
-          }
-        shell: pwsh
 
       - name: Copy chatty-tui.exe as chatty.exe for installer
         run: copy target\release\chatty-tui.exe target\release\chatty.exe

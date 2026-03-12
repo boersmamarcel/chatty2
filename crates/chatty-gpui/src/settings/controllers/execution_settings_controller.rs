@@ -504,8 +504,7 @@ pub fn set_embedding_provider(
     // Always update model to the new provider's default — the old model
     // is almost certainly invalid for the new provider.
     if let Some(default_model) = EmbeddingService::default_model_for_provider(&provider_type) {
-        cx.global_mut::<ExecutionSettingsModel>().embedding_model =
-            Some(default_model.to_string());
+        cx.global_mut::<ExecutionSettingsModel>().embedding_model = Some(default_model.to_string());
     }
 
     // Reinitialize embedding service if enabled
