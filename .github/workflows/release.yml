@@ -216,7 +216,20 @@ jobs:
             cargo-release-${{ runner.os }}-
 
       - name: Build release binary (TUI only — gpui does not support Windows)
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
         run: cargo build --release -p chatty-tui
+
+      - name: Copy DuckDB DLL to release directory
+        run: |
+          $duckdbDll = Get-ChildItem -Path "target\duckdb-download" -Filter "duckdb.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($duckdbDll) {
+            Copy-Item $duckdbDll.FullName "target\release\duckdb.dll"
+            Write-Host "Copied $($duckdbDll.FullName) to target\release\duckdb.dll"
+          } else {
+            Write-Warning "duckdb.dll not found in target\duckdb-download — binary may require it at runtime"
+          }
+        shell: pwsh
 
       - name: Copy chatty-tui.exe as chatty.exe for installer
         run: copy target\release\chatty-tui.exe target\release\chatty.exe
