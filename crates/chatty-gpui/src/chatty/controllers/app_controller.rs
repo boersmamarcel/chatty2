@@ -376,6 +376,7 @@ impl ChattyApp {
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
         memory_service: Option<crate::chatty::services::MemoryService>,
+        search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
     ) -> anyhow::Result<Conversation> {
         // Look up model config by ID
@@ -421,6 +422,7 @@ impl ChattyApp {
             user_secrets,
             theme_colors,
             memory_service,
+            search_settings,
             embedding_service,
         )
         .await
@@ -647,6 +649,7 @@ impl ChattyApp {
                         pending_write_approvals,
                         user_secrets,
                         theme_colors,
+                        search_settings,
                     ) = cx.update(|cx| {
                         let settings = cx
                             .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -661,12 +664,16 @@ impl ChattyApp {
                             .global::<crate::settings::models::UserSecretsModel>()
                             .as_env_pairs();
                         let colors = extract_theme_chart_colors(cx);
+                        let search_cfg = cx
+                            .try_global::<crate::settings::models::SearchSettingsModel>()
+                            .cloned();
                         (
                             Some(settings),
                             Some(approvals),
                             Some(write_approvals),
                             secrets,
                             Some(colors),
+                            search_cfg,
                         )
                     })?;
 
@@ -686,6 +693,7 @@ impl ChattyApp {
                         user_secrets,
                         theme_colors,
                         memory_service,
+                        search_settings,
                         embedding_service,
                     )
                     .await?;
@@ -791,6 +799,9 @@ impl ChattyApp {
                 let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
 
                 let memory_service = await_memory_service(cx).await;
+                let search_settings = cx.update(|cx| {
+                    cx.try_global::<crate::settings::models::SearchSettingsModel>().cloned()
+                }).ok().flatten();
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
@@ -798,7 +809,7 @@ impl ChattyApp {
                         match Self::restore_conversation_from_data(
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
-                            theme_colors, memory_service, embedding_service,
+                            theme_colors, memory_service, search_settings, embedding_service,
                         )
                         .await
                         {
@@ -1083,7 +1094,7 @@ impl ChattyApp {
                 "Rebuilding agent with fresh MCP tools"
             );
 
-            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets, theme_colors) = cx
+            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets, theme_colors, search_settings) = cx
                 .update(|cx| {
                     let settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -1117,7 +1128,10 @@ impl ChattyApp {
                         .global::<crate::settings::models::UserSecretsModel>()
                         .as_env_pairs();
                     let colors = extract_theme_chart_colors(cx);
-                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session, secrets, Some(colors))
+                    let search_cfg = cx
+                        .try_global::<crate::settings::models::SearchSettingsModel>()
+                        .cloned();
+                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session, secrets, Some(colors), search_cfg)
                 })
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -1138,6 +1152,7 @@ impl ChattyApp {
                 user_secrets,
                 theme_colors,
                 memory_service,
+                search_settings,
                 embedding_service,
             )
             .await?;
@@ -1219,6 +1234,7 @@ impl ChattyApp {
                             shell_session,
                             user_secrets,
                             theme_colors,
+                            search_settings,
                         ) = cx
                             .update(|cx| {
                                 let settings = cx
@@ -1238,6 +1254,9 @@ impl ChattyApp {
                                     .global::<crate::settings::models::UserSecretsModel>()
                                     .as_env_pairs();
                                 let colors = extract_theme_chart_colors(cx);
+                                let search_cfg = cx
+                                    .try_global::<crate::settings::models::SearchSettingsModel>()
+                                    .cloned();
                                 (
                                     Some(settings),
                                     Some(approvals),
@@ -1246,6 +1265,7 @@ impl ChattyApp {
                                     session,
                                     secrets,
                                     Some(colors),
+                                    search_cfg,
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1269,6 +1289,7 @@ impl ChattyApp {
                                 user_secrets,
                                 theme_colors,
                                 memory_service,
+                                search_settings,
                                 embedding_service,
                             )
                             .await?;

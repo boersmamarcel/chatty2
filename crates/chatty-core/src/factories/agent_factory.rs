@@ -21,7 +21,8 @@ use crate::tools::{
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
     ReadBinaryTool, ReadExcelTool, ReadFileTool, RememberTool, SearchCodeTool, SearchMemoryTool,
-    ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
+    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool,
+    WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -264,6 +265,7 @@ fn collect_tools(
     execute_code_tool: Option<ExecuteCodeTool>,
     remember_tool: Option<RememberTool>,
     search_memory_tool: Option<SearchMemoryTool>,
+    search_web_tool: Option<SearchWebTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -353,6 +355,9 @@ fn collect_tools(
     if let Some(t) = search_memory_tool {
         tools.push(Box::new(t));
     }
+    if let Some(t) = search_web_tool {
+        tools.push(Box::new(t));
+    }
     tools
 }
 
@@ -382,6 +387,7 @@ impl AgentClient {
         user_secrets: Vec<(String, String)>,
         theme_colors: Option<[String; 5]>,
         memory_service: Option<MemoryService>,
+        search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
@@ -688,6 +694,31 @@ impl AgentClient {
             Some(FetchTool::new(workspace))
         } else {
             tracing::info!("Fetch tool disabled by execution settings");
+            None
+        };
+
+        // Create search web tool if enabled and API key is configured
+        let search_web_tool: Option<SearchWebTool> = if let Some(ref search_cfg) = search_settings
+            && search_cfg.enabled
+        {
+            use crate::settings::models::search_settings::SearchProvider;
+            let api_key = match search_cfg.active_provider {
+                SearchProvider::Tavily => search_cfg.tavily_api_key.clone(),
+                SearchProvider::Brave => search_cfg.brave_api_key.clone(),
+            };
+            if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+                tracing::info!(provider = %search_cfg.active_provider, "Search web tool enabled");
+                Some(SearchWebTool::new(
+                    search_cfg.active_provider.clone(),
+                    key,
+                    search_cfg.max_results,
+                ))
+            } else {
+                tracing::info!("Search web tool disabled: no API key for active provider");
+                None
+            }
+        } else {
+            tracing::info!("Search web tool disabled by search settings");
             None
         };
 
@@ -1099,6 +1130,7 @@ impl AgentClient {
                     execute_code_tool.clone(),
                     remember_tool.clone(),
                     search_memory_tool.clone(),
+                    search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1170,6 +1202,7 @@ impl AgentClient {
                     execute_code_tool.clone(),
                     remember_tool.clone(),
                     search_memory_tool.clone(),
+                    search_web_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1208,6 +1241,7 @@ impl AgentClient {
                     execute_code_tool.clone(),
                     remember_tool.clone(),
                     search_memory_tool.clone(),
+                    search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1249,6 +1283,7 @@ impl AgentClient {
                     execute_code_tool.clone(),
                     remember_tool.clone(),
                     search_memory_tool.clone(),
+                    search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1289,6 +1324,7 @@ impl AgentClient {
                     execute_code_tool.clone(),
                     remember_tool.clone(),
                     search_memory_tool.clone(),
+                    search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
 
@@ -1467,6 +1503,7 @@ impl AgentClient {
                     execute_code_tool.clone(),
                     remember_tool.clone(),
                     search_memory_tool.clone(),
+                    search_web_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);

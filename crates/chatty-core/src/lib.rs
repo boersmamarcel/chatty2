@@ -46,6 +46,9 @@ static MCP_REPOSITORY: OnceLock<Arc<dyn settings::repositories::McpRepository>> 
 static EXECUTION_SETTINGS_REPOSITORY: OnceLock<
     Arc<dyn settings::repositories::ExecutionSettingsRepository>,
 > = OnceLock::new();
+static SEARCH_SETTINGS_REPOSITORY: OnceLock<
+    Arc<dyn settings::repositories::SearchSettingsRepository>,
+> = OnceLock::new();
 static TRAINING_SETTINGS_REPOSITORY: OnceLock<
     Arc<dyn settings::repositories::TrainingSettingsRepository>,
 > = OnceLock::new();
@@ -71,6 +74,9 @@ pub fn init_repositories() -> anyhow::Result<()> {
     MCP_REPOSITORY.set(Arc::new(JsonMcpRepository::new()?)).ok();
     EXECUTION_SETTINGS_REPOSITORY
         .set(Arc::new(ExecutionSettingsJsonRepository::new()?))
+        .ok();
+    SEARCH_SETTINGS_REPOSITORY
+        .set(Arc::new(SearchSettingsJsonRepository::new()?))
         .ok();
     TRAINING_SETTINGS_REPOSITORY
         .set(Arc::new(TrainingSettingsJsonRepository::new()?))
@@ -119,6 +125,14 @@ pub fn mcp_repository() -> Arc<dyn settings::repositories::McpRepository> {
 pub fn execution_settings_repository()
 -> Arc<dyn settings::repositories::ExecutionSettingsRepository> {
     EXECUTION_SETTINGS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the search settings repository.
+pub fn search_settings_repository() -> Arc<dyn settings::repositories::SearchSettingsRepository> {
+    SEARCH_SETTINGS_REPOSITORY
         .get()
         .expect("init_repositories() not called")
         .clone()

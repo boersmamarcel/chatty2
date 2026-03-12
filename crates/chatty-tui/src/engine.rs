@@ -151,6 +151,8 @@ pub struct ChatEngine {
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
     pub memory_service: Option<MemoryService>,
+    pub search_settings:
+        Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
     pub embedding_service: Option<chatty_core::services::EmbeddingService>,
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
@@ -182,6 +184,9 @@ impl ChatEngine {
         providers: Vec<ProviderConfig>,
         mcp_service: Option<McpService>,
         memory_service: Option<MemoryService>,
+        search_settings: Option<
+            chatty_core::settings::models::search_settings::SearchSettingsModel,
+        >,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -195,6 +200,7 @@ impl ChatEngine {
             providers,
             mcp_service,
             memory_service,
+            search_settings,
             embedding_service,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
@@ -264,6 +270,7 @@ impl ChatEngine {
             self.user_secrets.clone(),
             None, // no theme colors in TUI
             self.memory_service.clone(),
+            self.search_settings.clone(),
             self.embedding_service.clone(),
         )
         .await

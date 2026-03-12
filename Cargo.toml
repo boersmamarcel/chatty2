@@ -30,7 +30,7 @@ anyhow = "1.0"
 regex = "1.10"
 base64 = "0.22"
 async-stream = "0.3"
-reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "query"] }
 glob = "0.3"
 similar = "2.2"
 

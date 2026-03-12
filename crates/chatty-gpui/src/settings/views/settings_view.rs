@@ -6,6 +6,7 @@ use crate::settings::views::mcp_tools_page::mcp_tools_page;
 use crate::settings::views::memory_settings_page::memory_settings_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::providers_view::providers_page;
+use crate::settings::views::search_settings_page::search_settings_page;
 use crate::settings::views::training_settings_page::training_settings_page;
 use crate::settings::views::user_secrets_page::user_secrets_page;
 
@@ -169,6 +170,7 @@ impl Render for SettingsView {
                 providers_page(),
                 mcp_tools_page(),
                 execution_settings_page(),
+                search_settings_page(),
                 memory_settings_page(),
                 training_settings_page(),
                 user_secrets_page(),
