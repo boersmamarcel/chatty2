@@ -697,28 +697,35 @@ impl AgentClient {
             None
         };
 
-        // Create search web tool if enabled and API key is configured
-        let search_web_tool: Option<SearchWebTool> = if let Some(ref search_cfg) = search_settings
-            && search_cfg.enabled
+        // Create search web tool — enabled whenever internet access (fetch) is on.
+        // If a search API key is configured, use that provider; otherwise fall back
+        // to DuckDuckGo lite HTML scraping so search always works without API keys.
+        let search_web_tool: Option<SearchWebTool> = if exec_settings
+            .as_ref()
+            .map(|s| s.fetch_enabled)
+            .unwrap_or(true)
         {
             use crate::settings::models::search_settings::SearchProvider;
-            let api_key = match search_cfg.active_provider {
-                SearchProvider::Tavily => search_cfg.tavily_api_key.clone(),
-                SearchProvider::Brave => search_cfg.brave_api_key.clone(),
-            };
-            if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-                tracing::info!(provider = %search_cfg.active_provider, "Search web tool enabled");
-                Some(SearchWebTool::new(
-                    search_cfg.active_provider.clone(),
-                    key,
-                    search_cfg.max_results,
-                ))
-            } else {
-                tracing::info!("Search web tool disabled: no API key for active provider");
-                None
-            }
+            let max_results = search_settings.as_ref().map(|s| s.max_results).unwrap_or(5);
+            // Try to use the configured search API provider if an API key is set
+            let api_tool = search_settings.as_ref().and_then(|search_cfg| {
+                let api_key = match search_cfg.active_provider {
+                    SearchProvider::Tavily => search_cfg.tavily_api_key.clone(),
+                    SearchProvider::Brave => search_cfg.brave_api_key.clone(),
+                };
+                api_key.filter(|k| !k.is_empty()).map(|key| {
+                    tracing::info!(provider = %search_cfg.active_provider, "Search web tool enabled with API provider");
+                    SearchWebTool::new(search_cfg.active_provider.clone(), key, max_results)
+                })
+            });
+            Some(api_tool.unwrap_or_else(|| {
+                tracing::info!(
+                    "Search web tool enabled with DuckDuckGo fallback (no API key configured)"
+                );
+                SearchWebTool::new_fallback(max_results)
+            }))
         } else {
-            tracing::info!("Search web tool disabled by search settings");
+            tracing::info!("Search web tool disabled (internet access is off)");
             None
         };
 
@@ -880,9 +887,27 @@ impl AgentClient {
         // to call list_tools first.
         let mut tool_sections: Vec<String> = Vec::new();
 
-        if fetch_tool.is_some() {
-            tool_sections
-                .push("- **fetch**: Fetch web URLs and return readable text content".to_string());
+        if fetch_tool.is_some() || search_web_tool.is_some() {
+            let has_search_api = search_web_tool.is_some()
+                && search_settings.as_ref().map_or(false, |s| {
+                    use crate::settings::models::search_settings::SearchProvider;
+                    let key = match s.active_provider {
+                        SearchProvider::Tavily => &s.tavily_api_key,
+                        SearchProvider::Brave => &s.brave_api_key,
+                    };
+                    key.as_ref().map_or(false, |k| !k.is_empty())
+                });
+            let search_note = if has_search_api {
+                "search API"
+            } else {
+                "DuckDuckGo fallback"
+            };
+            tool_sections.push(format!(
+                "- **search_web**: Search the web for up-to-date information ({search_note}). \
+                 Use this first when you need current information.\n\
+                 - **fetch**: Fetch any web URL and return its readable text content. \
+                 Use this to read specific pages, documentation, or articles."
+            ));
         }
         if shell_tools.is_some() {
             tool_sections.push(

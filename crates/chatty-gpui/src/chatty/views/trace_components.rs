@@ -987,14 +987,14 @@ fn render_full_command_box(
 
 /// Format the inline header text for a tool call.
 ///
-/// Most tools show `$ <command>` (shell-style), but memory tools use their
-/// friendly name as a prefix (e.g. "Remembering: user prefers dark mode").
+/// Most tools show `$ <command>` (shell-style), but internet and memory tools use their
+/// friendly name as a prefix (e.g. "Searching online: rust async patterns").
 fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 
     match tool_call.tool_name.as_str() {
-        "remember" | "search_memory" => {
-            // Use the friendly display_name (e.g. "Remembering", "Searching memory")
+        "remember" | "search_memory" | "search_web" | "fetch" => {
+            // Use the friendly display_name as prefix with the detail
             format!("{}: {}", tool_call.display_name, detail)
         }
         _ => format!("$ {}", detail),
@@ -1047,6 +1047,20 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
         if tool_call.tool_name == "search_memory" {
             if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
                 return query.to_string();
+            }
+        }
+
+        // For search_web: extract the search query
+        if tool_call.tool_name == "search_web" {
+            if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
+                return query.to_string();
+            }
+        }
+
+        // For fetch: extract the URL
+        if tool_call.tool_name == "fetch" {
+            if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
+                return url.to_string();
             }
         }
 

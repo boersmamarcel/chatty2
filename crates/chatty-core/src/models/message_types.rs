@@ -271,6 +271,8 @@ pub fn friendly_tool_name(name: &str) -> String {
         "create_chart" => "Creating chart".to_string(),
         "search_memory" => "Searching memory".to_string(),
         "remember" => "Remembering".to_string(),
+        "search_web" => "Searching online".to_string(),
+        "fetch" => "Fetching".to_string(),
         other => other.to_string(),
     }
 }
