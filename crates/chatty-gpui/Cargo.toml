@@ -66,9 +66,6 @@ image.workspace = true
 calamine.workspace = true
 rust_xlsxwriter.workspace = true
 
-# DuckDB
-duckdb.workspace = true
-
 # Math rendering
 typst.workspace = true
 typst-svg.workspace = true

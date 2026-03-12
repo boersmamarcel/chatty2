@@ -1567,7 +1567,6 @@ dependencies = [
  "chrono",
  "comemo 0.4.0",
  "dirs 5.0.1",
- "duckdb",
  "flate2",
  "futures",
  "glob",
