@@ -4,7 +4,7 @@ use crate::settings::views::providers_view::masked_api_key_field;
 use gpui::{App, IntoElement, SharedString, Styled};
 use gpui_component::{
     button::Button,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::PopupMenuItem,
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
 
