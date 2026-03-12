@@ -65,7 +65,7 @@ calamine = "0.33"
 rust_xlsxwriter = "0.93"
 
 # DuckDB
-duckdb = { version = "1.4", features = ["bundled", "parquet", "json"] }
+duckdb = { version = "1.4", features = ["parquet", "json"] }
 
 # Math rendering
 typst = "0.14.2"
