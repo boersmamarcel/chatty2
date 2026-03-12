@@ -82,11 +82,6 @@ tempfile.workspace = true
 [target."cfg(unix)".dependencies]
 nix.workspace = true
 
-[target."cfg(not(windows))".dependencies]
-# Enable bundled DuckDB on Linux/macOS (compiles from source)
-# On Windows, bundled fails with MSVC linker errors, so we use DUCKDB_DOWNLOAD_LIB=1 instead
-duckdb = { workspace = true, features = ["bundled"] }
-
 # Optional: GPUI integration (provides `impl Global` for core types)
 gpui = { workspace = true, optional = true }
 
