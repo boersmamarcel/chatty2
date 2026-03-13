@@ -35,13 +35,15 @@ impl EmbeddingService {
     /// # Arguments
     /// * `provider_type` — Which provider to use for embeddings
     /// * `model_name` — Embedding model identifier (e.g. "text-embedding-3-small")
-    /// * `api_key` — Provider API key (not needed for Ollama)
+    /// * `api_key` — Provider API key (not needed for Ollama or Azure Entra ID)
     /// * `base_url` — Custom endpoint URL (optional; required for Ollama non-default)
+    /// * `azure_token` — Bearer token for Azure Entra ID authentication (Azure only)
     pub fn new(
         provider_type: &ProviderType,
         model_name: &str,
         api_key: Option<&str>,
         base_url: Option<&str>,
+        azure_token: Option<String>,
     ) -> Result<Self> {
         let inner = match provider_type {
             ProviderType::OpenAI => {
@@ -75,14 +77,19 @@ impl EmbeddingService {
                 EmbeddingServiceInner::Mistral(model)
             }
             ProviderType::AzureOpenAI => {
-                let key = api_key
-                    .ok_or_else(|| anyhow!("API key required for Azure OpenAI embeddings"))?;
+                let auth = if let Some(token) = azure_token {
+                    rig::providers::azure::AzureOpenAIAuth::Token(token)
+                } else if let Some(key) = api_key {
+                    rig::providers::azure::AzureOpenAIAuth::ApiKey(key.to_string())
+                } else {
+                    return Err(anyhow!(
+                        "API key or Entra ID token required for Azure OpenAI embeddings"
+                    ));
+                };
                 let endpoint = base_url
                     .ok_or_else(|| anyhow!("Endpoint URL required for Azure OpenAI embeddings"))?;
                 let client = rig::providers::azure::Client::builder()
-                    .api_key(rig::providers::azure::AzureOpenAIAuth::ApiKey(
-                        key.to_string(),
-                    ))
+                    .api_key(auth)
                     .azure_endpoint(endpoint.to_string())
                     .build()
                     .map_err(|e| anyhow!("Failed to build Azure OpenAI client: {e}"))?;
@@ -167,13 +174,17 @@ impl EmbeddingService {
 
 /// Try to create an EmbeddingService, logging warnings on failure.
 /// Returns `None` if the service cannot be initialized.
+///
+/// Pass `azure_token` when using Azure OpenAI with Entra ID authentication.
+/// For API key authentication (all other providers and Azure API key), pass `None`.
 pub fn try_create_embedding_service(
     provider_type: &ProviderType,
     model_name: &str,
     api_key: Option<&str>,
     base_url: Option<&str>,
+    azure_token: Option<String>,
 ) -> Option<EmbeddingService> {
-    match EmbeddingService::new(provider_type, model_name, api_key, base_url) {
+    match EmbeddingService::new(provider_type, model_name, api_key, base_url, azure_token) {
         Ok(service) => Some(service),
         Err(e) => {
             warn!(
