@@ -198,7 +198,7 @@ Manage environment variables that are automatically injected into every shell se
 
 ### Built-in Tools
 
-When code execution is enabled in Settings, your LLM can use these tools (all scoped to your configured workspace directory):
+When code execution is enabled in Settings, your LLM can use these tools (most are scoped to your configured workspace directory; internet tools have a separate toggle in Settings > Execution):
 
 | Tool | What it does | Requires approval |
 |:-----|:-------------|:-:|
@@ -227,6 +227,8 @@ When code execution is enabled in Settings, your LLM can use these tools (all sc
 | `list_tools` | Lists all available tools and schemas | No |
 | `remember` | Store important information in persistent agent memory for use in future conversations | No |
 | `search_memory` | Search past memories by keyword to retrieve relevant stored information | No |
+| `search_web` | Search the web for current information. Uses DuckDuckGo by default (no API key needed); optionally configure Tavily or Brave in Settings > Internet for richer results. Controlled by the internet access toggle | No |
+| `fetch` | Fetch any web URL and return its readable text content. Controlled by the same internet access toggle as `search_web` | No |
 
 ### MCP Servers
 
