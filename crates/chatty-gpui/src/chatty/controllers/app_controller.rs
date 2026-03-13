@@ -3033,26 +3033,54 @@ async fn run_llm_stream(
             let hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
             if !hits.is_empty() {
-                let mut memory_context =
-                    String::from("[Relevant memories from past conversations]\n");
-                for hit in &hits {
-                    if let Some(ref title) = hit.title {
-                        memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
-                    } else {
-                        memory_context.push_str(&format!("- {}\n", hit.text));
+                // Partition hits: skills (title prefixed with "[SKILL] ") vs regular facts
+                let (skill_hits, fact_hits): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| {
+                    h.title
+                        .as_deref()
+                        .map(|t| t.starts_with(chatty_core::tools::SKILL_TITLE_PREFIX))
+                        .unwrap_or(false)
+                });
+
+                let mut context_block = String::new();
+
+                if !fact_hits.is_empty() {
+                    context_block.push_str("[Relevant memories from past conversations]\n");
+                    for hit in &fact_hits {
+                        if let Some(ref title) = hit.title {
+                            context_block.push_str(&format!("- {}: {}\n", title, hit.text));
+                        } else {
+                            context_block.push_str(&format!("- {}\n", hit.text));
+                        }
                     }
+                    context_block.push_str("[End of memories]\n\n");
                 }
-                memory_context.push_str("[End of memories]\n\n");
+
+                if !skill_hits.is_empty() {
+                    context_block.push_str("[Relevant skills/procedures you've saved]\n");
+                    for hit in &skill_hits {
+                        let display_name = hit
+                            .title
+                            .as_deref()
+                            .map(|t| t.trim_start_matches(chatty_core::tools::SKILL_TITLE_PREFIX))
+                            .unwrap_or("unnamed skill");
+                        context_block.push_str(&format!("- \"{}\":\n", display_name));
+                        for line in hit.text.lines() {
+                            context_block.push_str(&format!("  {}\n", line));
+                        }
+                    }
+                    context_block.push_str("[End of skills]\n\n");
+                }
 
                 let mut augmented = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
-                        text: memory_context,
+                        text: context_block,
                     },
                 )];
                 augmented.extend(user_contents);
                 debug!(
                     conv_id = %conv_id,
-                    hit_count = hits.len(),
+                    fact_count = fact_hits.len(),
+                    skill_count = skill_hits.len(),
                     "Injected memory context into user message"
                 );
                 augmented

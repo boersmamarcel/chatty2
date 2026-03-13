@@ -20,9 +20,9 @@ use crate::tools::{
     GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, RememberTool, SearchCodeTool, SearchMemoryTool,
-    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool,
-    WriteFileTool,
+    ReadBinaryTool, ReadExcelTool, ReadFileTool, RememberTool, SaveSkillTool, SearchCodeTool,
+    SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
+    ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -264,6 +264,7 @@ fn collect_tools(
     typst_tool: Option<CompileTypstTool>,
     execute_code_tool: Option<ExecuteCodeTool>,
     remember_tool: Option<RememberTool>,
+    save_skill_tool: Option<SaveSkillTool>,
     search_memory_tool: Option<SearchMemoryTool>,
     search_web_tool: Option<SearchWebTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
@@ -350,6 +351,9 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = remember_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = save_skill_tool {
         tools.push(Box::new(t));
     }
     if let Some(t) = search_memory_tool {
@@ -795,21 +799,25 @@ impl AgentClient {
         };
 
         // Memory tools — gated on memory_enabled setting and MemoryService availability
-        let (remember_tool, search_memory_tool): (Option<RememberTool>, Option<SearchMemoryTool>) =
-            if let Some(ref mem_svc) = memory_service {
-                let has_embeddings = embedding_service.is_some();
-                tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
-                (
-                    Some(RememberTool::new(
-                        mem_svc.clone(),
-                        embedding_service.clone(),
-                    )),
-                    Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
-                )
-            } else {
-                tracing::info!("Memory tools disabled: no MemoryService provided");
-                (None, None)
-            };
+        let (remember_tool, save_skill_tool, search_memory_tool): (
+            Option<RememberTool>,
+            Option<SaveSkillTool>,
+            Option<SearchMemoryTool>,
+        ) = if let Some(ref mem_svc) = memory_service {
+            let has_embeddings = embedding_service.is_some();
+            tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
+            (
+                Some(RememberTool::new(
+                    mem_svc.clone(),
+                    embedding_service.clone(),
+                )),
+                Some(SaveSkillTool::new(mem_svc.clone())),
+                Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
+            )
+        } else {
+            tracing::info!("Memory tools disabled: no MemoryService provided");
+            (None, None, None)
+        };
 
         // Chart tool is always available (no service dependencies).
         // Pass workspace_dir so relative save_path values resolve correctly.
@@ -1034,6 +1042,8 @@ impl AgentClient {
         if remember_tool.is_some() {
             tool_sections.push(
                 "- **remember**: Store important information in persistent cross-conversation memory.\n\
+                 - **save_skill**: Save a reusable multi-step procedure to persistent memory for \
+                 automatic recall in future conversations.\n\
                  - **search_memory**: Search previously stored memories by natural language query."
                     .to_string(),
             );
@@ -1083,14 +1093,21 @@ impl AgentClient {
         let memory_instructions = if remember_tool.is_some() {
             "\n\n## Memory\n\
              You have persistent memory that survives across conversations and app restarts. \
-             **On the very first user message of every conversation**, you MUST call `search_memory` \
-             with a query derived from the user's message before you respond. This ensures you \
-             recall relevant context, preferences, and prior decisions.\n\n\
+             Relevant memories are automatically injected as context before each of your responses — \
+             you do not need to call `search_memory` proactively on every message. \
+             Use `search_memory` only when you want to look up something specific that \
+             may not have appeared in the automatic context (e.g., a detail mentioned several \
+             conversations ago, or a narrow keyword search).\n\n\
              When the user explicitly asks you to remember, store, note, or keep in mind \
              any information, you MUST invoke the `remember` tool with the information as \
              the content parameter. Responding with text like \"I'll remember that\" or \
              \"I've noted that\" without calling the tool means the information is lost \
              permanently. Always call the tool FIRST, then confirm to the user.\n\n\
+             **Saving skills**: After successfully solving a new type of multi-step task \
+             (deployment, data analysis, build process, API integration, etc.), consider \
+             using `save_skill` to record the steps as a reusable procedure. Saved skills \
+             are automatically surfaced in future conversations when a similar task arises. \
+             Only save skills for tasks with clear, reproducible steps — not one-off actions.\n\n\
              **Keyword-rich storage**: Memory search uses keyword matching (not semantic similarity). \
              When storing a memory, always include synonyms, related terms, and category words \
              so the memory can be found by different search terms. For example, if the user says \
@@ -1154,6 +1171,7 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
                     search_web_tool.clone(),
                 );
@@ -1226,6 +1244,7 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
                     search_web_tool.clone(),
                 );
@@ -1265,6 +1284,7 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
                     search_web_tool.clone(),
                 );
@@ -1307,6 +1327,7 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
                     search_web_tool.clone(),
                 );
@@ -1348,6 +1369,7 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
                     search_web_tool.clone(),
                 );
@@ -1527,6 +1549,7 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
                     search_web_tool.clone(),
                 );
