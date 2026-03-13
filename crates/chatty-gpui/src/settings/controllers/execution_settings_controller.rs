@@ -438,7 +438,9 @@ async fn init_azure_entra_embedding(
 ) {
     use chatty_core::services::embedding_service::try_create_embedding_service;
 
-    info!("Fetching Entra ID token for Azure OpenAI embeddings — service will be available shortly");
+    info!(
+        "Fetching Entra ID token for Azure OpenAI embeddings — service will be available shortly"
+    );
     let azure_token = match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
         Ok(token) => Some(token),
         Err(e) => {
@@ -511,7 +513,14 @@ pub fn toggle_embedding(cx: &mut App) {
                     let model_name = model_name.clone();
                     let mem_svc = cx.try_global::<MemoryService>().cloned();
                     cx.spawn(async move |cx| {
-                        init_azure_entra_embedding(provider_type, model_name, base_url, mem_svc, cx).await;
+                        init_azure_entra_embedding(
+                            provider_type,
+                            model_name,
+                            base_url,
+                            mem_svc,
+                            cx,
+                        )
+                        .await;
                     })
                     .detach();
                 } else {
