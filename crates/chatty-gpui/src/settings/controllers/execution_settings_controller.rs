@@ -420,6 +420,59 @@ pub fn purge_memory(cx: &mut App) {
     }
 }
 
+/// Fetch an Entra ID bearer token, initialize the `EmbeddingService`, and wire up
+/// the memory vector index. Called from `cx.spawn()` in both `toggle_embedding` and
+/// `reinit_embedding_service` to avoid duplicating the async init logic.
+///
+/// # Token expiry
+/// The bearer token returned by `fetch_entra_id_token` is valid for ~1 hour.
+/// The `EmbeddingService` holds this token for its lifetime without refreshing it.
+/// TODO: Re-fetch the token on each embedding call or add expiry tracking so that
+/// long-running sessions (>1h) do not start producing authentication errors.
+async fn init_azure_entra_embedding(
+    provider_type: chatty_core::settings::models::providers_store::ProviderType,
+    model_name: String,
+    base_url: Option<String>,
+    mem_svc: Option<MemoryService>,
+    cx: &mut AsyncApp,
+) {
+    use chatty_core::services::embedding_service::try_create_embedding_service;
+
+    info!(
+        "Fetching Entra ID token for Azure OpenAI embeddings — service will be available shortly"
+    );
+    let azure_token = match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
+        Ok(token) => Some(token),
+        Err(e) => {
+            warn!(error = ?e, "Failed to fetch Entra ID token for Azure OpenAI embeddings");
+            None
+        }
+    };
+    // api_key is None for Entra ID; the bearer token handles auth
+    if let Some(embed_svc) = try_create_embedding_service(
+        &provider_type,
+        &model_name,
+        None,
+        base_url.as_deref(),
+        azure_token,
+    ) {
+        let model_id = embed_svc.model_identifier();
+        cx.update(|cx| cx.set_global(embed_svc))
+            .map_err(|e| warn!(error = ?e, "Failed to set EmbeddingService global"))
+            .ok();
+
+        if let Some(mem_svc) = mem_svc {
+            if let Err(e) = mem_svc.enable_vec().await {
+                warn!(error = ?e, "Failed to enable vector index");
+            } else if let Err(e) = mem_svc.set_vec_model(&model_id).await {
+                warn!(error = ?e, "Failed to set vector model");
+            } else {
+                info!(model = %model_id, "Vector search enabled for memory");
+            }
+        }
+    }
+}
+
 /// Toggle semantic (vector) search for memory.
 /// Initializes or removes the EmbeddingService global accordingly.
 pub fn toggle_embedding(cx: &mut App) {
@@ -434,6 +487,8 @@ pub fn toggle_embedding(cx: &mut App) {
     if new_enabled {
         // Try to initialize EmbeddingService if not already set
         if cx.try_global::<EmbeddingService>().is_none() {
+            use chatty_core::settings::models::providers_store::{AzureAuthMethod, ProviderType};
+
             let settings = cx.global::<ExecutionSettingsModel>().clone();
             if let (Some(provider_type), Some(model_name)) = (
                 settings.embedding_provider.as_ref(),
@@ -447,31 +502,54 @@ pub fn toggle_embedding(cx: &mut App) {
                             .find(|p| &p.provider_type == provider_type)
                             .cloned()
                     });
-                let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
                 let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone());
+                let is_azure_entra = *provider_type == ProviderType::AzureOpenAI
+                    && provider_config.as_ref().map(|p| p.azure_auth_method())
+                        == Some(AzureAuthMethod::EntraId);
 
-                if let Some(embed_svc) = try_create_embedding_service(
-                    provider_type,
-                    model_name,
-                    api_key.as_deref(),
-                    base_url.as_deref(),
-                ) {
-                    let model_id = embed_svc.model_identifier();
-                    cx.set_global(embed_svc);
-
-                    // Enable vector index on memory service
+                if is_azure_entra {
+                    // Entra ID requires async token fetch — spawn a task
+                    let provider_type = provider_type.clone();
+                    let model_name = model_name.clone();
                     let mem_svc = cx.try_global::<MemoryService>().cloned();
-                    if let Some(mem_svc) = mem_svc {
-                        cx.spawn(async move |_cx: &mut AsyncApp| {
-                            if let Err(e) = mem_svc.enable_vec().await {
-                                warn!(error = ?e, "Failed to enable vector index");
-                            } else if let Err(e) = mem_svc.set_vec_model(&model_id).await {
-                                warn!(error = ?e, "Failed to set vector model");
-                            } else {
-                                info!(model = %model_id, "Vector search enabled for memory");
-                            }
-                        })
-                        .detach();
+                    cx.spawn(async move |cx| {
+                        init_azure_entra_embedding(
+                            provider_type,
+                            model_name,
+                            base_url,
+                            mem_svc,
+                            cx,
+                        )
+                        .await;
+                    })
+                    .detach();
+                } else {
+                    // API key auth — initialize synchronously
+                    let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
+                    if let Some(embed_svc) = try_create_embedding_service(
+                        provider_type,
+                        model_name,
+                        api_key.as_deref(),
+                        base_url.as_deref(),
+                        None,
+                    ) {
+                        let model_id = embed_svc.model_identifier();
+                        cx.set_global(embed_svc);
+
+                        // Enable vector index on memory service
+                        let mem_svc = cx.try_global::<MemoryService>().cloned();
+                        if let Some(mem_svc) = mem_svc {
+                            cx.spawn(async move |_cx: &mut AsyncApp| {
+                                if let Err(e) = mem_svc.enable_vec().await {
+                                    warn!(error = ?e, "Failed to enable vector index");
+                                } else if let Err(e) = mem_svc.set_vec_model(&model_id).await {
+                                    warn!(error = ?e, "Failed to set vector model");
+                                } else {
+                                    info!(model = %model_id, "Vector search enabled for memory");
+                                }
+                            })
+                            .detach();
+                        }
                     }
                 }
             }
@@ -547,6 +625,7 @@ pub fn set_embedding_model(model: Option<String>, cx: &mut App) {
 /// Recreate the EmbeddingService global from current settings.
 fn reinit_embedding_service(cx: &mut App) {
     use chatty_core::services::embedding_service::try_create_embedding_service;
+    use chatty_core::settings::models::providers_store::{AzureAuthMethod, ProviderType};
 
     let settings = cx.global::<ExecutionSettingsModel>();
     if !settings.embedding_enabled {
@@ -570,12 +649,23 @@ fn reinit_embedding_service(cx: &mut App) {
         });
     let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
     let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone());
+    let is_azure_entra = provider_type == ProviderType::AzureOpenAI
+        && provider_config.as_ref().map(|p| p.azure_auth_method())
+            == Some(AzureAuthMethod::EntraId);
 
-    if let Some(embed_svc) = try_create_embedding_service(
+    if is_azure_entra {
+        // Entra ID requires async token fetch — spawn a task
+        let mem_svc = cx.try_global::<MemoryService>().cloned();
+        cx.spawn(async move |cx| {
+            init_azure_entra_embedding(provider_type, model_name, base_url, mem_svc, cx).await;
+        })
+        .detach();
+    } else if let Some(embed_svc) = try_create_embedding_service(
         &provider_type,
         &model_name,
-        api_key.as_deref(),
+        api_key.as_deref(), // api_key unused for Entra ID; only used in this API key branch
         base_url.as_deref(),
+        None,
     ) {
         let model_id = embed_svc.model_identifier();
         cx.set_global(embed_svc);
