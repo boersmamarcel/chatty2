@@ -1,7 +1,13 @@
+use crate::assets::CustomIcon;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
-use gpui_component::{ActiveTheme, Collapsible, Icon, IconName, Sizable, button::Button};
+use gpui_component::{
+    ActiveTheme, Collapsible, Icon, IconName, Sizable,
+    button::{Button, ButtonVariants},
+    h_flex,
+    kbd::Kbd,
+};
 use std::sync::Arc;
 
 /// Callback type for conversation actions
@@ -155,8 +161,8 @@ impl RenderOnce for ConversationItem {
             .when(
                 !self.is_collapsed && (on_delete.is_some() || on_export.is_some()),
                 |this| {
-                    // "…" button that opens a popover with Delete / Export actions
-                    let trigger = Button::new(format!("menu-{}", self.id))
+                    // "…" button that opens a popover with Download / Delete actions
+                    let trigger = Button::new(ElementId::Name(format!("menu-{}", self.id).into()))
                         .icon(Icon::new(IconName::Ellipsis))
                         .xsmall()
                         .ghost();
@@ -188,11 +194,31 @@ impl RenderOnce for ConversationItem {
                                     .min_w(px(120.))
                                     .when_some(on_export, |this, cb| {
                                         this.child(
-                                            Button::new(export_btn_id)
-                                                .label("Export")
-                                                .ghost()
-                                                .xsmall()
-                                                .w_full()
+                                             Button::new(export_btn_id)
+                                                 .ghost()
+                                                 .xsmall()
+                                                 .w_full()
+                                                 .justify_start()
+                                                 .child(
+                                                     h_flex()
+                                                         .w_full()
+                                                         .items_center()
+                                                          .gap_2()
+                                                          .child(
+                                                              h_flex()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .child(
+                                                                    Icon::new(CustomIcon::Download)
+                                                                        .size(px(12.0)),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .child("Download"),
+                                                                ),
+                                                        ),
+                                                )
                                                 .on_click(move |_event, _window, cx| {
                                                     cx.stop_propagation();
                                                     cb(&id_exp, cx);
@@ -201,11 +227,38 @@ impl RenderOnce for ConversationItem {
                                     })
                                     .when_some(on_delete, |this, cb| {
                                         this.child(
-                                            Button::new(delete_btn_id)
-                                                .label("Delete")
-                                                .ghost()
-                                                .xsmall()
-                                                .w_full()
+                                             Button::new(delete_btn_id)
+                                                 .ghost()
+                                                 .xsmall()
+                                                 .w_full()
+                                                 .justify_start()
+                                                 .child(
+                                                     h_flex()
+                                                         .w_full()
+                                                          .justify_between()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .child(
+                                                                    Icon::new(IconName::Close)
+                                                                        .size(px(12.0)),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .child("Delete"),
+                                                                ),
+                                                        )
+                                                        .child(Kbd::new(
+                                                            Keystroke::parse("alt-backspace")
+                                                                .expect(
+                                                                    "alt-backspace delete shortcut should parse",
+                                                                ),
+                                                        )),
+                                                )
                                                 .on_click(move |_event, _window, cx| {
                                                     cx.stop_propagation();
                                                     cb(&id_del, cx);

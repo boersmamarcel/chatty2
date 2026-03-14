@@ -45,6 +45,7 @@ pub enum CustomIcon {
     Brain,         // brain.svg - Thinking block header
     Paperclip,     // paperclip.svg - Non-image attachment
     Image,         // image.svg - Copy as image (PNG)
+    Download,      // download.svg - Conversation download action
 }
 
 impl IconNamed for CustomIcon {
@@ -66,6 +67,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::Brain => "icons/brain.svg",
             CustomIcon::Paperclip => "icons/paperclip.svg",
             CustomIcon::Image => "icons/image.svg",
+            CustomIcon::Download => "icons/download.svg",
         }
         .into()
     }

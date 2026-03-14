@@ -27,7 +27,8 @@ use crate::chatty::token_budget::{
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
-    ApprovalBlock, ApprovalState, ToolCallBlock, ToolCallState, friendly_tool_name,
+    ApprovalBlock, ApprovalState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
+    TraceItem, friendly_tool_name,
     is_denial_result,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
@@ -115,6 +116,101 @@ pub struct GlobalChattyApp {
 }
 
 impl Global for GlobalChattyApp {}
+
+fn push_markdown_code_block(md: &mut String, language: &str, body: &str) {
+    if body.trim().is_empty() {
+        return;
+    }
+
+    md.push_str(&format!("```{language}\n{body}\n```\n\n"));
+}
+
+fn push_system_trace_markdown(md: &mut String, trace_json: &serde_json::Value) {
+    match serde_json::from_value::<SystemTrace>(trace_json.clone()) {
+        Ok(trace) if trace.has_items() => {
+            md.push_str("### Trace\n\n");
+
+            for (index, item) in trace.items.iter().enumerate() {
+                match item {
+                    TraceItem::Thinking(thinking) => {
+                        let status = match thinking.state {
+                            ThinkingState::Processing => "running",
+                            ThinkingState::Completed => "completed",
+                        };
+                        md.push_str(&format!("{}. **Thinking** ({status})\n", index + 1));
+
+                        if !thinking.summary.trim().is_empty() {
+                            md.push_str(&format!("   - Summary: {}\n", thinking.summary.trim()));
+                        }
+
+                        if !thinking.content.trim().is_empty() {
+                            md.push_str("   - Details:\n\n");
+                            push_markdown_code_block(md, "text", thinking.content.trim());
+                        } else {
+                            md.push('\n');
+                        }
+                    }
+                    TraceItem::ToolCall(tool_call) => {
+                        let status = match &tool_call.state {
+                            ToolCallState::Running => "running".to_string(),
+                            ToolCallState::Success => "success".to_string(),
+                            ToolCallState::Error(err) => format!("error: {err}"),
+                        };
+
+                        md.push_str(&format!(
+                            "{}. **Tool:** `{}` ({status})\n",
+                            index + 1,
+                            tool_call.display_name
+                        ));
+
+                        if !tool_call.input.trim().is_empty() {
+                            md.push_str("   - Input:\n\n");
+                            push_markdown_code_block(md, "text", tool_call.input.trim());
+                        }
+
+                        if let Some(output) = tool_call.output.as_deref()
+                            && !output.trim().is_empty()
+                        {
+                            md.push_str("   - Output:\n\n");
+                            push_markdown_code_block(md, "text", output.trim());
+                        } else if let Some(output_preview) = tool_call.output_preview.as_deref()
+                            && !output_preview.trim().is_empty()
+                        {
+                            md.push_str("   - Output Preview:\n\n");
+                            push_markdown_code_block(md, "text", output_preview.trim());
+                        } else {
+                            md.push('\n');
+                        }
+                    }
+                    TraceItem::ApprovalPrompt(approval) => {
+                        let status = match approval.state {
+                            ApprovalState::Pending => "pending",
+                            ApprovalState::Approved => "approved",
+                            ApprovalState::Denied => "denied",
+                        };
+
+                        md.push_str(&format!(
+                            "{}. **Approval** ({status})\n   - Command: `{}`\n\n",
+                            index + 1,
+                            approval.command
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(error = ?error, "Failed to deserialize trace for markdown export");
+            md.push_str("### Trace (raw)\n\n");
+            match serde_json::to_string_pretty(trace_json) {
+                Ok(raw_json) => push_markdown_code_block(md, "json", &raw_json),
+                Err(error) => {
+                    warn!(error = ?error, "Failed to pretty-print raw trace JSON for export");
+                }
+            }
+        }
+    }
+}
 
 pub struct ChattyApp {
     pub chat_view: Entity<ChatView>,
@@ -1445,7 +1541,9 @@ impl ChattyApp {
             };
             let title = conv.title().to_string();
             let mut md = format!("# {title}\n\n");
-            for msg in conv.history() {
+            for (index, msg) in conv.history().iter().enumerate() {
+                let trace_json = conv.system_traces().get(index).and_then(|trace| trace.as_ref());
+
                 match msg {
                     rig::completion::Message::User { content, .. } => {
                         let text = content
@@ -1473,8 +1571,17 @@ impl ChattyApp {
                             })
                             .collect::<Vec<_>>()
                             .join("\n\n");
-                        if !text.is_empty() {
-                            md.push_str(&format!("---\n\n**Assistant**\n\n{text}\n\n"));
+                        if !text.is_empty() || trace_json.is_some() {
+                            md.push_str("---\n\n**Assistant**\n\n");
+
+                            if !text.is_empty() {
+                                md.push_str(&text);
+                                md.push_str("\n\n");
+                            }
+
+                            if let Some(trace_json) = trace_json {
+                                push_system_trace_markdown(&mut md, trace_json);
+                            }
                         }
                     }
                 }
@@ -1494,7 +1601,7 @@ impl ChattyApp {
         let home = dirs::home_dir()
             .unwrap_or_else(|| dirs::document_dir().unwrap_or_else(|| PathBuf::from(".")));
 
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |_weak, cx| {
             let receiver = cx
                 .update(|cx| cx.prompt_for_new_path(&home, Some(&suggested)))
                 .map_err(|e| warn!(error = ?e, "Failed to open save dialog"))

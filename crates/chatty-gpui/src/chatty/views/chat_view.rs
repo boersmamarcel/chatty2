@@ -1045,39 +1045,6 @@ impl ChatView {
         })
     }
 
-    /// Generate markdown export of the conversation.
-    ///
-    /// Produces a markdown document with a title heading followed by each
-    /// non-streaming message in `User` / `Assistant` sections.
-    pub fn export_to_markdown(&self, cx: &App) -> String {
-        use crate::chatty::models::ConversationsStore;
-
-        let title = self
-            .conversation_id
-            .as_ref()
-            .and_then(|id| {
-                cx.try_global::<ConversationsStore>()
-                    .and_then(|store| store.get_conversation(id))
-                    .map(|conv| conv.title().to_string())
-            })
-            .unwrap_or_else(|| "Conversation".to_string());
-
-        let mut md = format!("# {title}\n\n");
-
-        for msg in &self.messages {
-            if msg.is_streaming {
-                continue;
-            }
-            let role = match msg.role {
-                MessageRole::User => "**User**",
-                MessageRole::Assistant => "**Assistant**",
-            };
-            md.push_str(&format!("---\n\n{role}\n\n{}\n\n", msg.content));
-        }
-
-        md
-    }
-
     /// Render loading skeleton indicator
     fn render_loading_skeleton(&self) -> impl IntoElement {
         div()
