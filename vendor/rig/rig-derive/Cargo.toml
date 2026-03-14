@@ -1,0 +1,47 @@
+[package]
+name = "rig-derive"
+version = "0.1.10"
+edition = "2024"
+license = "MIT"
+description = "Internal crate that implements Rig derive macros."
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[lints.clippy]
+dbg_macro = "forbid"
+todo = "forbid"
+unimplemented = "forbid"
+
+[dependencies]
+convert_case = "0.8.0"
+deluxe = { version = "0.5.0", features = ["full"] }
+indoc = "2.0.6"
+proc-macro2 = { version = "1.0.95", features = ["proc-macro"] }
+quote = "1.0.40"
+serde_json = "1.0.140"
+syn = { version = "2.0.104", features = ["full"] }
+
+[lib]
+proc-macro = true
+
+[dev-dependencies]
+rig-core = { path = "../rig-core" }
+serde = "1.0.219"
+serde_json = "1.0.140"
+tokio = { version = "1.45.1", features = ["full"] }
+tracing-subscriber = "0.3.19"
+
+[[example]]
+name = "simple"
+path = "examples/rig_tool/simple.rs"
+
+[[example]]
+name = "with_description"
+path = "examples/rig_tool/with_description.rs"
+
+[[example]]
+name = "full"
+path = "examples/rig_tool/full.rs"
+
+[[example]]
+name = "async_tool"
+path = "examples/rig_tool/async_tool.rs"
