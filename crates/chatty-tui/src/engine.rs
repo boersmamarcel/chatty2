@@ -566,6 +566,10 @@ impl ChatEngine {
                 self.is_ready = true;
                 EngineAction::Redraw
             }
+            AppEvent::SubAgentFinished(message) => {
+                self.add_system_message(message);
+                EngineAction::Redraw
+            }
             AppEvent::TerminalInput(_) | AppEvent::Tick => {
                 // Handled by app.rs, not the engine
                 EngineAction::None
@@ -788,7 +792,8 @@ impl ChatEngine {
     }
 
     /// Launch a sub-agent by invoking chatty-tui in headless mode.
-    pub async fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
+    /// This is intentionally non-blocking: completion is delivered via `AppEvent::SubAgentFinished`.
+    pub fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
             bail!("Usage: /agent <prompt>");
@@ -801,46 +806,33 @@ impl ChatEngine {
             self.execution_settings.approval_mode,
             chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
         );
+        let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching sub-agent...".to_string());
 
-        let output = tokio::task::spawn_blocking(move || {
-            let mut command = ProcessCommand::new(executable);
-            command
-                .arg("--headless")
-                .arg("--model")
-                .arg(model_id)
-                .arg("--message")
-                .arg(prompt_owned);
-            if auto_approve {
-                command.arg("--auto-approve");
-            }
-            command.output()
-        })
-        .await
-        .context("Sub-agent task was cancelled")?
-        .context("Failed to launch sub-agent process")?;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                run_sub_agent_process(executable, model_id, prompt_owned, auto_approve)
+            })
+            .await;
 
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if stdout.is_empty() {
-                self.add_system_message("Sub-agent completed with no output.".to_string());
-            } else {
-                self.add_system_message(format!("Sub-agent response:\n{}", stdout));
-            }
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            bail!(
-                "Sub-agent failed (exit code {:?}): {}",
-                output.status.code(),
-                if stderr.is_empty() {
-                    "no stderr output".to_string()
-                } else {
-                    stderr
+            let message = match result {
+                Ok(Ok(stdout)) => {
+                    let stdout = stdout.trim().to_string();
+                    if stdout.is_empty() {
+                        "Sub-agent completed with no output.".to_string()
+                    } else {
+                        format!("Sub-agent response:\n{}", stdout)
+                    }
                 }
-            );
-        }
+                Ok(Err(e)) => format!("Sub-agent failed: {}", e),
+                Err(e) => format!("Sub-agent task failed: {}", e),
+            };
+
+            let _ = event_tx.send(AppEvent::SubAgentFinished(message));
+        });
+
+        Ok(())
     }
 
     fn resolve_directory(&self, directory: &str) -> Result<PathBuf> {
@@ -1289,6 +1281,43 @@ fn copy_via_command(program: &str, args: &[&str], text: &str) -> Result<()> {
         Ok(())
     } else {
         bail!("'{}' returned non-zero exit status", program)
+    }
+}
+
+fn run_sub_agent_process(
+    executable: PathBuf,
+    model_id: String,
+    prompt: String,
+    auto_approve: bool,
+) -> Result<String> {
+    let mut command = ProcessCommand::new(executable);
+    command
+        .arg("--headless")
+        .arg("--model")
+        .arg(model_id)
+        .arg("--message")
+        .arg(prompt);
+    if auto_approve {
+        command.arg("--auto-approve");
+    }
+
+    let output = command
+        .output()
+        .context("Failed to launch sub-agent process")?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "exit code {:?}: {}",
+            output.status.code(),
+            if stderr.is_empty() {
+                "no stderr output".to_string()
+            } else {
+                stderr
+            }
+        );
     }
 }
 

@@ -95,7 +95,7 @@ async fn run_loop(
                                 }
                             }
                             KeyAction::LaunchAgent(prompt) => {
-                                if let Err(e) = engine.launch_sub_agent(&prompt).await {
+                                if let Err(e) = engine.launch_sub_agent(&prompt) {
                                     engine.add_system_message(e.to_string());
                                 }
                             }
