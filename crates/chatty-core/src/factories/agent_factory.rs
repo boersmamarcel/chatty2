@@ -20,9 +20,9 @@ use crate::tools::{
     GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, RememberTool, SaveSkillTool, SearchCodeTool,
-    SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
-    ShellStatusTool, WriteExcelTool, WriteFileTool,
+    ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
+    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -266,6 +266,7 @@ fn collect_tools(
     remember_tool: Option<RememberTool>,
     save_skill_tool: Option<SaveSkillTool>,
     search_memory_tool: Option<SearchMemoryTool>,
+    read_skill_tool: ReadSkillTool,
     search_web_tool: Option<SearchWebTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
@@ -359,6 +360,7 @@ fn collect_tools(
     if let Some(t) = search_memory_tool {
         tools.push(Box::new(t));
     }
+    tools.push(Box::new(read_skill_tool));
     if let Some(t) = search_web_tool {
         tools.push(Box::new(t));
     }
@@ -822,6 +824,15 @@ impl AgentClient {
             (None, None, None)
         };
 
+        // read_skill tool — always available; loads full SKILL.md content on demand.
+        // This is the companion to the slim skill descriptions shown in context.
+        let read_skill_tool = ReadSkillTool::new(
+            exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+                .map(|d| std::path::Path::new(d).join(".claude").join("skills")),
+        );
+
         // Chart tool is always available (no service dependencies).
         // Pass workspace_dir so relative save_path values resolve correctly.
         // Pass theme_colors so saved PNG files match the inline chart appearance.
@@ -1051,6 +1062,14 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        // read_skill is always present — it's the on-demand companion to the slim
+        // skill descriptions that appear in the automatic context block.
+        tool_sections.push(
+            "- **read_skill**: Load the full step-by-step instructions for a skill by name. \
+             Skills are listed with a one-line description in the automatic context — \
+             call this tool to get the complete procedure before executing it."
+                .to_string(),
+        );
         // Always present
         tool_sections.push(
             "- **list_tools**: Call this at any time to get the full, up-to-date list of \
@@ -1120,12 +1139,22 @@ impl AgentClient {
             ""
         };
 
+        // Skills instructions — always injected because read_skill is always available.
+        let skills_instructions =
+            "\n\n## Skills\n\
+             When relevant skills are detected for your query, a `[Relevant skills available]` \
+             block is included in your context showing only the skill name and a \
+             one-line description — the full instructions are intentionally omitted to save \
+             context space. Call `read_skill` with the exact skill name before executing any \
+             skill procedure so you have the complete, up-to-date steps.";
+
         // Augment preamble with tool summary, formatting guide, and available secret key names.
         let preamble = {
             let mut p = model_config.preamble.clone();
             p.push_str(&tool_summary);
             p.push_str(formatting_guide);
             p.push_str(memory_instructions);
+            p.push_str(skills_instructions);
             if !secret_key_names.is_empty() {
                 p.push_str(&format!(
                     "\n\nThe following environment variables with sensitive information are \
@@ -1176,6 +1205,7 @@ impl AgentClient {
                     remember_tool.clone(),
                     save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1249,6 +1279,7 @@ impl AgentClient {
                     remember_tool.clone(),
                     save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
@@ -1289,6 +1320,7 @@ impl AgentClient {
                     remember_tool.clone(),
                     save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1332,6 +1364,7 @@ impl AgentClient {
                     remember_tool.clone(),
                     save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1374,6 +1407,7 @@ impl AgentClient {
                     remember_tool.clone(),
                     save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
@@ -1554,6 +1588,7 @@ impl AgentClient {
                     remember_tool.clone(),
                     save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
