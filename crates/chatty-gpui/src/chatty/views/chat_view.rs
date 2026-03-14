@@ -9,7 +9,6 @@ use gpui_component::skeleton::Skeleton;
 use gpui_component::{
     Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
-    h_flex,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1181,6 +1180,7 @@ impl Render for ChatView {
             .w_full()
             .flex()
             .flex_col()
+            .relative() // Enable absolute positioning for floating export button
             .bg(cx.theme().background)
             .overflow_hidden()
             // Add top padding on macOS for floating toggle button
@@ -1234,98 +1234,6 @@ impl Render for ChatView {
                         }
                     }
                 })
-            })
-            .child({
-                // Top toolbar — export button in the top-right corner.
-                // Collect export data here (in render with full cx access) so the
-                // on_click closure only needs cx for the file-save dialog.
-                use crate::chatty::models::ConversationsStore;
-                let export_title = self
-                    .conversation_id
-                    .as_ref()
-                    .and_then(|id| {
-                        cx.try_global::<ConversationsStore>()
-                            .and_then(|s| s.get_conversation(id))
-                            .map(|c| c.title().to_string())
-                    })
-                    .unwrap_or_else(|| "Conversation".to_string());
-                // Snapshot of messages captured at render time so the
-                // on_click closure is self-contained and needs cx only
-                // for the file-save dialog.
-                let export_markdown = {
-                    let mut md = format!("# {export_title}\n\n");
-                    for msg in self.messages.iter().filter(|m| !m.is_streaming) {
-                        let role = match msg.role {
-                            MessageRole::User => "**User**",
-                            MessageRole::Assistant => "**Assistant**",
-                        };
-                        md.push_str(&format!("---\n\n{role}\n\n{}\n\n", msg.content));
-                    }
-                    md
-                };
-
-                h_flex()
-                    .w_full()
-                    .px_3()
-                    .py_1()
-                    .justify_end()
-                    .child(
-                        Button::new("export-conversation")
-                            .icon(Icon::new(IconName::ArrowDown))
-                            .tooltip("Export as Markdown")
-                            .small()
-                            .ghost()
-                            .on_click(move |_event, _window, cx| {
-                                let suggested = format!(
-                                    "{}.md",
-                                    export_title.replace(
-                                        [
-                                            '/', '\\', ':', '*', '?', '"',
-                                            '<', '>', '|',
-                                        ],
-                                        "_"
-                                    )
-                                );
-                                let home = dirs::home_dir()
-                                    .unwrap_or_else(|| dirs::document_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
-                                let markdown = export_markdown.clone();
-                                cx.spawn(async move |cx| {
-                                    let receiver = cx
-                                        .update(|cx| {
-                                            cx.prompt_for_new_path(
-                                                &home,
-                                                Some(&suggested),
-                                            )
-                                        })
-                                        .map_err(|e| {
-                                            warn!(error = ?e, "Failed to open save dialog")
-                                        })
-                                        .ok()?;
-                                    match receiver.await {
-                                        Ok(Ok(Some(path))) => {
-                                            if let Err(e) =
-                                                tokio::fs::write(&path, markdown.as_bytes()).await
-                                            {
-                                                warn!(
-                                                    error = ?e,
-                                                    path = ?path,
-                                                    "Failed to write conversation export"
-                                                );
-                                            }
-                                        }
-                                        Ok(Ok(None)) => {} // user cancelled
-                                        Ok(Err(e)) => {
-                                            warn!(error = ?e, "Save dialog returned error")
-                                        }
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to receive save dialog result")
-                                        }
-                                    }
-                                    Some(())
-                                })
-                                .detach();
-                            }),
-                    )
             })
             .child(
                 // Message list - scrollable area
@@ -1528,5 +1436,87 @@ impl Render for ChatView {
                     .p_4()
                     .child(ChatInput::new(self.chat_input_state.clone())),
             )
+            // Floating export button — top-right corner, rendered last so it's on top
+            .child({
+                use crate::chatty::models::ConversationsStore;
+                let export_title = self
+                    .conversation_id
+                    .as_ref()
+                    .and_then(|id| {
+                        cx.try_global::<ConversationsStore>()
+                            .and_then(|s| s.get_conversation(id))
+                            .map(|c| c.title().to_string())
+                    })
+                    .unwrap_or_else(|| "Conversation".to_string());
+                // Build markdown snapshot at render time so the on_click closure
+                // only needs cx for the file-save dialog.
+                let export_markdown = {
+                    let mut md = format!("# {export_title}\n\n");
+                    for msg in self.messages.iter().filter(|m| !m.is_streaming) {
+                        let role = match msg.role {
+                            MessageRole::User => "**User**",
+                            MessageRole::Assistant => "**Assistant**",
+                        };
+                        md.push_str(&format!("---\n\n{role}\n\n{}\n\n", msg.content));
+                    }
+                    md
+                };
+                div().absolute().top(px(8.)).right(px(8.)).child(
+                    Button::new("export-conversation")
+                        .icon(Icon::new(IconName::ArrowDown))
+                        .tooltip("Export as Markdown")
+                        .small()
+                        .ghost()
+                        .on_click(move |_event, _window, cx| {
+                            let suggested = format!(
+                                "{}.md",
+                                export_title.replace(
+                                    ['/', '\\', ':', '*', '?', '"', '<', '>', '|'],
+                                    "_"
+                                )
+                            );
+                            let home = dirs::home_dir().unwrap_or_else(|| {
+                                dirs::document_dir()
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            });
+                            let markdown = export_markdown.clone();
+                            cx.spawn(async move |cx| {
+                                let receiver = cx
+                                    .update(|cx| {
+                                        cx.prompt_for_new_path(&home, Some(&suggested))
+                                    })
+                                    .map_err(|e| {
+                                        warn!(error = ?e, "Failed to open save dialog")
+                                    })
+                                    .ok()?;
+                                match receiver.await {
+                                    Ok(Ok(Some(path))) => {
+                                        if let Err(e) =
+                                            tokio::fs::write(&path, markdown.as_bytes()).await
+                                        {
+                                            warn!(
+                                                error = ?e,
+                                                path = ?path,
+                                                "Failed to write conversation export"
+                                            );
+                                        }
+                                    }
+                                    Ok(Ok(None)) => {} // user cancelled
+                                    Ok(Err(e)) => {
+                                        warn!(error = ?e, "Save dialog returned error")
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = ?e,
+                                            "Failed to receive save dialog result"
+                                        )
+                                    }
+                                }
+                                Some(())
+                            })
+                            .detach();
+                        }),
+                )
+            })
     }
 }
