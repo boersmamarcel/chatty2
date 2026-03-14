@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::tool::ToolDyn;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use crate::auth::{AzureTokenCache, azure_auth};
@@ -20,9 +21,9 @@ use crate::tools::{
     GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, RememberTool, SearchCodeTool, SearchMemoryTool,
-    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, WriteExcelTool,
-    WriteFileTool,
+    ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
+    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -105,10 +106,9 @@ impl McpTools {
 /// deduplicates by keeping the first occurrence of each tool name and logging skipped duplicates.
 fn deduplicate_mcp_tools(
     mcp_tools: Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>,
+    reserved_tool_names: &HashSet<String>,
 ) -> Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)> {
-    use std::collections::HashSet;
-
-    let mut seen_tool_names = HashSet::new();
+    let mut seen_tool_names = reserved_tool_names.clone();
     let mut result = Vec::new();
 
     for (server_name, tools, sink) in mcp_tools {
@@ -117,7 +117,7 @@ fn deduplicate_mcp_tools(
         let total_tools = tools.len();
 
         for tool in tools {
-            if seen_tool_names.insert(tool.name.clone()) {
+            if seen_tool_names.insert(tool.name.to_string()) {
                 // New tool name, keep it
                 deduped_tools.push(tool);
             } else {
@@ -125,7 +125,7 @@ fn deduplicate_mcp_tools(
                 tracing::warn!(
                     server = %server_name,
                     tool_name = %tool.name,
-                    "Skipping duplicate tool name from MCP server"
+                    "Skipping duplicate MCP tool name"
                 );
                 skipped_count += 1;
             }
@@ -149,11 +149,165 @@ fn deduplicate_mcp_tools(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
+fn active_native_tool_names(
+    has_fs_read: bool,
+    has_fs_write: bool,
+    has_add_mcp: bool,
+    has_fetch: bool,
+    has_shell: bool,
+    has_git: bool,
+    has_search: bool,
+    has_add_attachment: bool,
+    has_excel_read: bool,
+    has_excel_write: bool,
+    has_pdf_to_image: bool,
+    has_pdf_info: bool,
+    has_pdf_extract_text: bool,
+    has_data_query: bool,
+    has_compile_typst: bool,
+    has_execute_code: bool,
+    has_memory: bool,
+    has_search_web: bool,
+) -> HashSet<String> {
+    let mut names = HashSet::from([String::from("list_tools")]);
+
+    if has_add_mcp {
+        names.extend(
+            [
+                "list_mcp_services",
+                "add_mcp_service",
+                "delete_mcp_service",
+                "edit_mcp_service",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+    }
+    if has_fetch {
+        names.insert(String::from("fetch"));
+    }
+    if has_fs_read {
+        names.extend(
+            ["read_file", "read_binary", "list_directory", "glob_search"]
+                .into_iter()
+                .map(String::from),
+        );
+    }
+    if has_fs_write {
+        names.extend(
+            [
+                "write_file",
+                "create_directory",
+                "delete_file",
+                "move_file",
+                "apply_diff",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+    }
+    if has_shell {
+        names.extend(
+            ["shell_execute", "shell_set_env", "shell_cd", "shell_status"]
+                .into_iter()
+                .map(String::from),
+        );
+    }
+    if has_git {
+        names.extend(
+            [
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_add",
+                "git_create_branch",
+                "git_switch_branch",
+                "git_commit",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+    }
+    if has_search {
+        names.extend(
+            ["search_code", "find_files", "find_definition"]
+                .into_iter()
+                .map(String::from),
+        );
+    }
+    if has_add_attachment {
+        names.insert(String::from("add_attachment"));
+    }
+    if has_excel_read {
+        names.insert(String::from("read_excel"));
+    }
+    if has_excel_write {
+        names.extend(["write_excel", "edit_excel"].into_iter().map(String::from));
+    }
+    if has_pdf_to_image {
+        names.insert(String::from("pdf_to_image"));
+    }
+    if has_pdf_info {
+        names.insert(String::from("pdf_info"));
+    }
+    if has_pdf_extract_text {
+        names.insert(String::from("pdf_extract_text"));
+    }
+    if has_data_query {
+        names.extend(
+            ["query_data", "describe_data"]
+                .into_iter()
+                .map(String::from),
+        );
+    }
+    if has_compile_typst {
+        names.insert(String::from("compile_typst"));
+    }
+    if has_execute_code {
+        names.insert(String::from("execute_code"));
+    }
+    if has_memory {
+        names.extend(
+            ["remember", "save_skill", "search_memory"]
+                .into_iter()
+                .map(String::from),
+        );
+    }
+    if has_search_web {
+        names.insert(String::from("search_web"));
+    }
+
+    names
+}
+
+fn filter_mcp_tool_info(
+    mcp_tool_info: Vec<(String, String, String)>,
+    reserved_tool_names: &HashSet<String>,
+) -> Vec<(String, String, String)> {
+    let mut seen_tool_names = reserved_tool_names.clone();
+    let mut filtered = Vec::new();
+
+    for (server_name, tool_name, tool_description) in mcp_tool_info {
+        if seen_tool_names.insert(tool_name.clone()) {
+            filtered.push((server_name, tool_name, tool_description));
+        } else {
+            tracing::warn!(
+                server = %server_name,
+                tool_name = %tool_name,
+                "Skipping duplicate MCP tool from list_tools inventory"
+            );
+        }
+    }
+
+    filtered
+}
+
 macro_rules! build_with_mcp_tools {
-    ($builder:expr, $mcp_tools:expr) => {{
+    ($builder:expr, $mcp_tools:expr, $reserved_tool_names:expr) => {{
         match $mcp_tools {
             Some(tools_list) => {
-                let deduped = deduplicate_mcp_tools(tools_list);
+                let deduped = deduplicate_mcp_tools(tools_list, $reserved_tool_names);
                 let mut iter = deduped
                     .into_iter()
                     .filter(|(_name, t, _sink)| !t.is_empty());
@@ -264,7 +418,9 @@ fn collect_tools(
     typst_tool: Option<CompileTypstTool>,
     execute_code_tool: Option<ExecuteCodeTool>,
     remember_tool: Option<RememberTool>,
+    save_skill_tool: Option<SaveSkillTool>,
     search_memory_tool: Option<SearchMemoryTool>,
+    read_skill_tool: ReadSkillTool,
     search_web_tool: Option<SearchWebTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
@@ -352,9 +508,13 @@ fn collect_tools(
     if let Some(t) = remember_tool {
         tools.push(Box::new(t));
     }
+    if let Some(t) = save_skill_tool {
+        tools.push(Box::new(t));
+    }
     if let Some(t) = search_memory_tool {
         tools.push(Box::new(t));
     }
+    tools.push(Box::new(read_skill_tool));
     if let Some(t) = search_web_tool {
         tools.push(Box::new(t));
     }
@@ -795,21 +955,37 @@ impl AgentClient {
         };
 
         // Memory tools — gated on memory_enabled setting and MemoryService availability
-        let (remember_tool, search_memory_tool): (Option<RememberTool>, Option<SearchMemoryTool>) =
-            if let Some(ref mem_svc) = memory_service {
-                let has_embeddings = embedding_service.is_some();
-                tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
-                (
-                    Some(RememberTool::new(
-                        mem_svc.clone(),
-                        embedding_service.clone(),
-                    )),
-                    Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
-                )
-            } else {
-                tracing::info!("Memory tools disabled: no MemoryService provided");
-                (None, None)
-            };
+        let (remember_tool, save_skill_tool, search_memory_tool): (
+            Option<RememberTool>,
+            Option<SaveSkillTool>,
+            Option<SearchMemoryTool>,
+        ) = if let Some(ref mem_svc) = memory_service {
+            let has_embeddings = embedding_service.is_some();
+            tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
+            (
+                Some(RememberTool::new(
+                    mem_svc.clone(),
+                    embedding_service.clone(),
+                )),
+                Some(SaveSkillTool::new(
+                    mem_svc.clone(),
+                    embedding_service.clone(),
+                )),
+                Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
+            )
+        } else {
+            tracing::info!("Memory tools disabled: no MemoryService provided");
+            (None, None, None)
+        };
+
+        // read_skill tool — always available; loads full SKILL.md content on demand.
+        // This is the companion to the slim skill descriptions shown in context.
+        let read_skill_tool = ReadSkillTool::new(
+            exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+                .map(|d| std::path::Path::new(d).join(".claude").join("skills")),
+        );
 
         // Chart tool is always available (no service dependencies).
         // Pass workspace_dir so relative save_path values resolve correctly.
@@ -860,6 +1036,28 @@ impl AgentClient {
             None
         };
 
+        let native_tool_names = active_native_tool_names(
+            fs_read_tools.is_some(),
+            fs_write_tools.is_some(),
+            mcp_mgmt_tools.is_enabled(),
+            fetch_tool.is_some(),
+            shell_tools.is_some(),
+            git_tools.is_some(),
+            search_tools.is_some(),
+            add_attachment_tool.is_some(),
+            excel_read_tool.is_some(),
+            excel_write_tools.is_some(),
+            pdf_to_image_tool.is_some(),
+            pdf_info_tool.is_some(),
+            pdf_extract_text_tool.is_some(),
+            data_query_tools.is_some(),
+            typst_tool.is_some(),
+            execute_code_tool.is_some(),
+            remember_tool.is_some(),
+            search_web_tool.is_some(),
+        );
+        let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
+
         // Create list_tools tool (always available, shows native + MCP tools)
         let list_tools = ListToolsTool::new_with_config(
             fs_read_tools.is_some(),
@@ -889,13 +1087,13 @@ impl AgentClient {
 
         if fetch_tool.is_some() || search_web_tool.is_some() {
             let has_search_api = search_web_tool.is_some()
-                && search_settings.as_ref().map_or(false, |s| {
+                && search_settings.as_ref().is_some_and(|s| {
                     use crate::settings::models::search_settings::SearchProvider;
                     let key = match s.active_provider {
                         SearchProvider::Tavily => &s.tavily_api_key,
                         SearchProvider::Brave => &s.brave_api_key,
                     };
-                    key.as_ref().map_or(false, |k| !k.is_empty())
+                    key.as_ref().is_some_and(|k| !k.is_empty())
                 });
             let search_note = if has_search_api {
                 "search API"
@@ -1034,10 +1232,20 @@ impl AgentClient {
         if remember_tool.is_some() {
             tool_sections.push(
                 "- **remember**: Store important information in persistent cross-conversation memory.\n\
+                 - **save_skill**: Save a reusable multi-step procedure to persistent memory for \
+                 automatic recall in future conversations.\n\
                  - **search_memory**: Search previously stored memories by natural language query."
                     .to_string(),
             );
         }
+        // read_skill is always present — it's the on-demand companion to the slim
+        // skill descriptions that appear in the automatic context block.
+        tool_sections.push(
+            "- **read_skill**: Load the full step-by-step instructions for a skill by name. \
+             Skills are listed with a one-line description in the automatic context — \
+             call this tool to get the complete procedure before executing it."
+                .to_string(),
+        );
         // Always present
         tool_sections.push(
             "- **list_tools**: Call this at any time to get the full, up-to-date list of \
@@ -1083,14 +1291,28 @@ impl AgentClient {
         let memory_instructions = if remember_tool.is_some() {
             "\n\n## Memory\n\
              You have persistent memory that survives across conversations and app restarts. \
-             **On the very first user message of every conversation**, you MUST call `search_memory` \
-             with a query derived from the user's message before you respond. This ensures you \
-             recall relevant context, preferences, and prior decisions.\n\n\
+             Relevant memories are automatically injected as context before each of your responses — \
+             you do not need to call `search_memory` proactively on every message. \
+             Use `search_memory` only when you want to look up something specific that \
+             may not have appeared in the automatic context (e.g., a detail mentioned several \
+             conversations ago, or a narrow keyword search).\n\n\
              When the user explicitly asks you to remember, store, note, or keep in mind \
              any information, you MUST invoke the `remember` tool with the information as \
              the content parameter. Responding with text like \"I'll remember that\" or \
              \"I've noted that\" without calling the tool means the information is lost \
              permanently. Always call the tool FIRST, then confirm to the user.\n\n\
+             **Saving skills**: After successfully solving a new type of multi-step task \
+             (deployment, data analysis, build process, API integration, etc.), consider \
+             using `save_skill` to record the steps as a reusable procedure. Saved skills \
+             are automatically surfaced in future conversations when a similar task arises. \
+             Only save skills for tasks with clear, reproducible steps — not one-off actions. \
+             Skills created with `save_skill` live in persistent memory and can be found again \
+             with `search_memory`. User-provided `SKILL.md` files are a separate filesystem-backed \
+             source; when those appear in context, rely on the source hints in the injected skill \
+             block and use normal file-reading tools if you need to revisit the file contents.\n\n\
+             **Python in skills**: When following a skill that needs Python package management in \
+             the shell, prefer `uv` over `pip`. If the `execute_code` tool is available and an \
+             isolated environment is helpful, prefer Docker-backed `execute_code` for the Python run.\n\n\
              **Keyword-rich storage**: Memory search uses keyword matching (not semantic similarity). \
              When storing a memory, always include synonyms, related terms, and category words \
              so the memory can be found by different search terms. For example, if the user says \
@@ -1100,12 +1322,21 @@ impl AgentClient {
             ""
         };
 
+        // Skills instructions — always injected because read_skill is always available.
+        let skills_instructions = "\n\n## Skills\n\
+             When relevant skills are detected for your query, a `[Relevant skills available]` \
+             block is included in your context showing only the skill name and a \
+             one-line description — the full instructions are intentionally omitted to save \
+             context space. Call `read_skill` with the exact skill name before executing any \
+             skill procedure so you have the complete, up-to-date steps.";
+
         // Augment preamble with tool summary, formatting guide, and available secret key names.
         let preamble = {
             let mut p = model_config.preamble.clone();
             p.push_str(&tool_summary);
             p.push_str(formatting_guide);
             p.push_str(memory_instructions);
+            p.push_str(skills_instructions);
             if !secret_key_names.is_empty() {
                 p.push_str(&format!(
                     "\n\nThe following environment variables with sensitive information are \
@@ -1154,10 +1385,13 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
-                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
                 Ok((AgentClient::Anthropic(agent), shell_session_out))
             }
@@ -1226,11 +1460,14 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
                 Ok((AgentClient::OpenAI(agent), shell_session_out))
             }
@@ -1265,10 +1502,13 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
-                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
                 Ok((AgentClient::Gemini(agent), shell_session_out))
             }
@@ -1307,10 +1547,13 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
-                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
                 Ok((AgentClient::Mistral(agent), shell_session_out))
             }
@@ -1348,10 +1591,13 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
-                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
                 Ok((AgentClient::Ollama(agent), shell_session_out))
             }
@@ -1527,11 +1773,14 @@ impl AgentClient {
                     typst_tool.clone(),
                     execute_code_tool.clone(),
                     remember_tool.clone(),
+                    save_skill_tool.clone(),
                     search_memory_tool.clone(),
+                    read_skill_tool.clone(),
                     search_web_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-                let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools);
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
                 Ok((AgentClient::AzureOpenAI(agent), shell_session_out))
             }
@@ -1554,6 +1803,7 @@ impl AgentClient {
 
 #[cfg(test)]
 mod tests {
+    use super::{active_native_tool_names, filter_mcp_tool_info};
 
     /// Helper function to normalize Azure endpoint URL (extracted from agent creation logic)
     fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
@@ -1647,6 +1897,52 @@ mod tests {
             normalize_azure_endpoint("https://test.openai.azure.com/openai/deployments/"),
             "https://test.openai.azure.com"
         );
+    }
+
+    #[test]
+    fn active_native_tool_names_includes_search_tools() {
+        let names = active_native_tool_names(
+            false, false, false, false, false, false, true, false, false, false, false, false,
+            false, false, false, false, false, false,
+        );
+
+        assert!(names.contains("list_tools"));
+        assert!(names.contains("search_code"));
+        assert!(names.contains("find_files"));
+        assert!(names.contains("find_definition"));
+    }
+
+    #[test]
+    fn filter_mcp_tool_info_skips_native_and_mcp_duplicates() {
+        let reserved = active_native_tool_names(
+            false, false, false, false, false, false, true, false, false, false, false, false,
+            false, false, false, false, false, false,
+        );
+
+        let filtered = filter_mcp_tool_info(
+            vec![
+                (
+                    "server-a".to_string(),
+                    "search_code".to_string(),
+                    "Conflicts with native tool".to_string(),
+                ),
+                (
+                    "server-a".to_string(),
+                    "custom_lookup".to_string(),
+                    "Unique MCP tool".to_string(),
+                ),
+                (
+                    "server-b".to_string(),
+                    "custom_lookup".to_string(),
+                    "Duplicate MCP tool".to_string(),
+                ),
+            ],
+            &reserved,
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "server-a");
+        assert_eq!(filtered[0].1, "custom_lookup");
     }
 
     #[test]

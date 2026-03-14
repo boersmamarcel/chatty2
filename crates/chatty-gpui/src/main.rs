@@ -545,9 +545,11 @@ fn main() {
                     }
 
                     cx.update(|cx| {
+                        let skill_service = chatty_core::services::SkillService::new(Some(embed_svc.clone()));
                         cx.set_global(embed_svc);
+                        cx.set_global(skill_service);
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to set EmbeddingService global"))
+                    .map_err(|e| warn!(error = ?e, "Failed to set EmbeddingService and SkillService globals"))
                     .ok();
                 }
             }
@@ -562,6 +564,10 @@ fn main() {
 
         // Initialize write approval store for tracking filesystem write approvals
         cx.set_global(chatty::models::WriteApprovalStore::new());
+
+        // Initialize SkillService global (no embedding initially — keyword-only scoring).
+        // Replaced by a version with embedding once EmbeddingService is initialised above.
+        cx.set_global(chatty_core::services::SkillService::new(None));
 
         // Initialize token tracking settings with defaults
         cx.set_global(settings::models::TokenTrackingSettings::default());

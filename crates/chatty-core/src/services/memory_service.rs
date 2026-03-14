@@ -10,6 +10,14 @@ const DEFAULT_TOP_K: usize = 5;
 /// Snippet length for search results
 const SNIPPET_CHARS: usize = 500;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryHitSource {
+    Memory,
+    WorkspaceSkillFile,
+    GlobalSkillFile,
+}
+
 /// A single memory search result
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryHit {
@@ -18,6 +26,8 @@ pub struct MemoryHit {
     pub title: Option<String>,
     #[serde(rename = "relevance_score")]
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<MemoryHitSource>,
 }
 
 /// Statistics about the memory store
@@ -448,6 +458,7 @@ fn handle_search(memvid: &mut Memvid, query: &str, top_k: usize) -> Result<Vec<M
             text: hit.text,
             title: hit.title,
             score: hit.score.unwrap_or(0.0),
+            source: Some(MemoryHitSource::Memory),
         })
         .collect();
 
@@ -562,7 +573,12 @@ fn handle_search_vec(
         // Lower distance = higher score, range (0, 1].
         let score = 1.0 / (1.0 + hit.distance);
 
-        results.push(MemoryHit { text, title, score });
+        results.push(MemoryHit {
+            text,
+            title,
+            score,
+            source: Some(MemoryHitSource::Memory),
+        });
     }
 
     info!(hit_count = results.len(), "Vector search completed");

@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use tracing::warn;
 
 use super::remember_tool::MemoryToolError;
+use super::save_skill_tool::SKILL_TITLE_PREFIX;
 use crate::services::embedding_service::EmbeddingService;
-use crate::services::memory_service::{MemoryHit, MemoryService};
+use crate::services::memory_service::{MemoryHit, MemoryHitSource, MemoryService};
 
 /// Arguments for the search_memory tool
 #[derive(Deserialize, Serialize)]
@@ -128,6 +129,89 @@ impl Tool for SearchMemoryTool {
     }
 }
 
+/// Build a context block string from memory hits, partitioned into facts and skills.
+///
+/// Hits whose title starts with `SKILL_TITLE_PREFIX` are formatted in a separate
+/// "skills" block showing only a short description per skill. Filesystem skills
+/// can be expanded with `read_skill`; memory-backed skills should be revisited
+/// with `search_memory`.
+/// Returns `None` when there are no hits to display.
+pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
+    if hits.is_empty() {
+        return None;
+    }
+
+    let (skill_hits, fact_hits): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| {
+        h.title
+            .as_deref()
+            .map(|t| t.starts_with(SKILL_TITLE_PREFIX))
+            .unwrap_or(false)
+    });
+
+    let mut block = String::new();
+
+    if !fact_hits.is_empty() {
+        block.push_str("[Relevant memories from past conversations]\n");
+        for hit in &fact_hits {
+            if let Some(ref title) = hit.title {
+                block.push_str(&format!("- {}: {}\n", title, hit.text));
+            } else {
+                block.push_str(&format!("- {}\n", hit.text));
+            }
+        }
+        block.push_str("[End of memories]\n\n");
+    }
+
+    if !skill_hits.is_empty() {
+        block.push_str("[Relevant skills available]\n");
+        block.push_str(
+            "For filesystem skills, call `read_skill` with the skill name to get full instructions. For memory-backed skills, use `search_memory` to recall the saved procedure.\n",
+        );
+        block.push_str(
+            "For Python-oriented skills, prefer `uv` for shell package management, or use `execute_code` when you want Docker-isolated execution.\n",
+        );
+        for hit in &skill_hits {
+            let display_name = hit
+                .title
+                .as_deref()
+                .map(|t| t.trim_start_matches(SKILL_TITLE_PREFIX))
+                .unwrap_or("unnamed skill");
+            let source_hint = match hit.source {
+                Some(MemoryHitSource::Memory) => "memory-backed; use `search_memory`",
+                Some(MemoryHitSource::WorkspaceSkillFile) => {
+                    "workspace skill file; call `read_skill`"
+                }
+                Some(MemoryHitSource::GlobalSkillFile) => "global skill file; call `read_skill`",
+                None => "source unknown",
+            };
+            let description = skill_description_line(&hit.text);
+            block.push_str(&format!(
+                "- \"{}\" [{}]: {}\n",
+                display_name, source_hint, description
+            ));
+        }
+        block.push_str("[End of skills]\n\n");
+    }
+
+    Some(block)
+}
+
+/// Extract a single-line description from a skill's stored text.
+///
+/// For filesystem skills the text is already just the description string.
+/// For memory-stored skills (created via `save_skill`) the format is:
+/// `Description: <desc>\n1. first step\n…` — strip the prefix and take the first line.
+fn skill_description_line(text: &str) -> &str {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("Description:") {
+        // Take only the first line of the description value
+        rest.trim().lines().next().unwrap_or("")
+    } else {
+        // Already a plain description (filesystem skill)
+        text.lines().next().unwrap_or(text)
+    }
+}
+
 /// Merge BM25 and vector search results, deduplicating by text content.
 ///
 /// For duplicates (same text from both sources), keeps the higher score.
@@ -160,6 +244,9 @@ pub fn merge_search_results(
                 && hit.score > existing.score
             {
                 existing.score = hit.score;
+                if existing.source.is_none() {
+                    existing.source = hit.source;
+                }
             }
         } else {
             seen_texts.insert(key);
@@ -175,4 +262,166 @@ pub fn merge_search_results(
     });
     merged.truncate(limit);
     merged
+}
+
+fn is_skill_hit(hit: &MemoryHit) -> bool {
+    hit.title
+        .as_deref()
+        .map(|t| t.starts_with(SKILL_TITLE_PREFIX))
+        .unwrap_or(false)
+}
+
+fn sort_by_score_desc(hits: &mut [MemoryHit]) {
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+pub fn select_context_hits(
+    merged_memory_hits: Vec<MemoryHit>,
+    filesystem_skill_hits: Vec<MemoryHit>,
+    limit: usize,
+) -> Vec<MemoryHit> {
+    let (mut skill_hits, mut fact_hits): (Vec<_>, Vec<_>) =
+        merged_memory_hits.into_iter().partition(is_skill_hit);
+    skill_hits.extend(filesystem_skill_hits);
+
+    sort_by_score_desc(&mut fact_hits);
+    sort_by_score_desc(&mut skill_hits);
+
+    let mut selected = Vec::with_capacity(limit);
+    let prioritized_fact_count = fact_hits.len().min(limit.min(3));
+    let prioritized_skill_count = if fact_hits.is_empty() {
+        limit.min(skill_hits.len())
+    } else {
+        (limit - prioritized_fact_count).min(skill_hits.len().min(2))
+    };
+
+    let mut remaining_facts = fact_hits.into_iter();
+    let mut remaining_skills = skill_hits.into_iter();
+
+    selected.extend(remaining_facts.by_ref().take(prioritized_fact_count));
+    selected.extend(remaining_skills.by_ref().take(prioritized_skill_count));
+
+    if selected.len() < limit {
+        selected.extend(remaining_facts.by_ref().take(limit - selected.len()));
+    }
+    if selected.len() < limit {
+        selected.extend(remaining_skills.by_ref().take(limit - selected.len()));
+    }
+
+    selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::memory_service::MemoryHit;
+
+    fn fact(title: &str, score: f32) -> MemoryHit {
+        MemoryHit {
+            text: format!("fact:{title}"),
+            title: Some(title.to_string()),
+            score,
+            source: Some(MemoryHitSource::Memory),
+        }
+    }
+
+    fn saved_skill(name: &str, score: f32) -> MemoryHit {
+        MemoryHit {
+            text: format!("Description: {name}"),
+            title: Some(format!("{SKILL_TITLE_PREFIX}{name}")),
+            score,
+            source: Some(MemoryHitSource::Memory),
+        }
+    }
+
+    fn file_skill(name: &str, score: f32) -> MemoryHit {
+        MemoryHit {
+            text: format!("# {name}"),
+            title: Some(format!("{SKILL_TITLE_PREFIX}{name}")),
+            score,
+            source: Some(MemoryHitSource::WorkspaceSkillFile),
+        }
+    }
+
+    #[test]
+    fn select_context_hits_prioritizes_facts_before_extra_skills() {
+        let selected = select_context_hits(
+            vec![
+                fact("Fact A", 0.91),
+                fact("Fact B", 0.87),
+                fact("Fact C", 0.81),
+                fact("Fact D", 0.75),
+                saved_skill("Saved skill", 0.99),
+            ],
+            vec![
+                file_skill("File skill", 0.95),
+                file_skill("File skill 2", 0.93),
+            ],
+            5,
+        );
+
+        let titles: Vec<_> = selected
+            .iter()
+            .map(|hit| hit.title.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Fact A",
+                "Fact B",
+                "Fact C",
+                "[SKILL] Saved skill",
+                "[SKILL] File skill"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_memory_context_block_includes_skill_source_hints() {
+        let block =
+            build_memory_context_block(vec![saved_skill("deploy", 0.9), file_skill("lint", 0.8)])
+                .expect("context block");
+
+        assert!(block.contains("memory-backed; use `search_memory`"));
+        assert!(block.contains("workspace skill file; call `read_skill`"));
+        assert!(block.contains("prefer `uv` for shell package management"));
+    }
+
+    #[test]
+    fn context_block_extracts_description_from_memory_skill() {
+        // Memory-stored skills have "Description: <desc>\n1. step…" format
+        let hits = vec![saved_skill("deploy", 0.9)];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("\"deploy\" [memory-backed; use `search_memory`]: deploy"));
+        // Steps should not appear in the context block
+        assert!(!block.contains("1. Build."));
+    }
+
+    #[test]
+    fn context_block_still_shows_facts() {
+        let hits = vec![fact("user pref", 0.8)];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("[Relevant memories from past conversations]"));
+        assert!(block.contains("fact:user pref"));
+    }
+
+    #[test]
+    fn skill_description_line_strips_prefix_from_memory_format() {
+        let text = "Description: Short desc.\n1. Step one.\n2. Step two.";
+        assert_eq!(skill_description_line(text), "Short desc.");
+    }
+
+    #[test]
+    fn skill_description_line_passthrough_for_plain_text() {
+        // Filesystem skill already has just a description
+        let text = "Runs the full build pipeline.";
+        assert_eq!(
+            skill_description_line(text),
+            "Runs the full build pipeline."
+        );
+    }
 }

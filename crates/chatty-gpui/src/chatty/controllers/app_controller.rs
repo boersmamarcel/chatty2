@@ -108,6 +108,24 @@ fn get_embedding_service(cx: &gpui::AsyncApp) -> Option<chatty_core::services::E
     .flatten()
 }
 
+/// Read the SkillService from globals.
+///
+/// The global is set at startup (keyword-only) and replaced with an embedding-aware
+/// version once the EmbeddingService is initialised.  Falls back to constructing a
+/// keyword-only service if the global is absent (e.g. in tests).
+fn get_skill_service(cx: &gpui::AsyncApp) -> chatty_core::services::SkillService {
+    cx.update(|cx| {
+        cx.try_global::<chatty_core::services::SkillService>()
+            .cloned()
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| {
+        warn!("SkillService global not found, falling back to keyword-only service");
+        chatty_core::services::SkillService::new(None)
+    })
+}
+
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
 pub struct GlobalChattyApp {
@@ -3095,10 +3113,14 @@ async fn run_llm_stream(
     .map_err(|e| warn!(error = ?e, "Failed to update approval store with notifiers"))
     .ok();
 
-    // 2. Get max agent turns
+    // 2. Get max agent turns and workspace dir
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
+    let workspace_dir = cx
+        .update(|cx| cx.global::<ExecutionSettingsModel>().workspace_dir.clone())
+        .ok()
+        .flatten();
 
     // 2b. Compute token budget snapshot in parallel with the LLM call.
     //
@@ -3168,6 +3190,7 @@ async fn run_llm_stream(
     let user_contents = {
         let memory_service = await_memory_service(cx).await;
         let embedding_service = get_embedding_service(cx);
+        let skill_service = get_skill_service(cx);
 
         if let Some(mem_svc) = memory_service {
             let raw_text = extract_user_message_text(&user_contents);
@@ -3179,75 +3202,28 @@ async fn run_llm_stream(
                 "Memory auto-retrieval: searching"
             );
 
-            // BM25 lexical search (existing)
-            let bm25_hits = if !query_text.is_empty() {
-                match mem_svc.search(&query_text, Some(3)).await {
-                    Ok(hits) if !hits.is_empty() => hits,
-                    Ok(_) if query_text != raw_text && !raw_text.is_empty() => {
-                        info!(conv_id = %conv_id, "Simplified query got 0 hits, retrying with raw text");
-                        mem_svc.search(&raw_text, Some(3)).await.unwrap_or_default()
-                    }
-                    Ok(empty) => empty,
-                    Err(e) => {
-                        warn!(error = ?e, "Memory auto-retrieval BM25 failed (non-fatal)");
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-
-            // Vector similarity search (if embedding service available)
-            let vec_hits = if let Some(ref embed_svc) = embedding_service {
-                let search_text = if query_text.is_empty() {
-                    &raw_text
-                } else {
-                    &query_text
-                };
-                if !search_text.is_empty() {
-                    match embed_svc.embed(search_text).await {
-                        Ok(query_embedding) => mem_svc
-                            .search_vec(query_embedding, Some(3))
-                            .await
-                            .unwrap_or_default(),
-                        Err(e) => {
-                            warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
-                            Vec::new()
-                        }
-                    }
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
-            // Merge BM25 + vector results
-            let hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
-
-            if !hits.is_empty() {
-                let mut memory_context =
-                    String::from("[Relevant memories from past conversations]\n");
-                for hit in &hits {
-                    if let Some(ref title) = hit.title {
-                        memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
-                    } else {
-                        memory_context.push_str(&format!("- {}\n", hit.text));
-                    }
-                }
-                memory_context.push_str("[End of memories]\n\n");
-
+            let workspace_skills_dir = workspace_dir
+                .as_deref()
+                .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
+            if let Some(context_block) = chatty_core::services::load_auto_context_block(
+                chatty_core::services::AutoContextRequest {
+                    memory_service: &mem_svc,
+                    embedding_service: embedding_service.as_ref(),
+                    skill_service: &skill_service,
+                    query_text: &query_text,
+                    fallback_query_text: Some(&raw_text),
+                    workspace_skills_dir: workspace_skills_dir.as_deref(),
+                },
+            )
+            .await
+            {
                 let mut augmented = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
-                        text: memory_context,
+                        text: context_block,
                     },
                 )];
                 augmented.extend(user_contents);
-                debug!(
-                    conv_id = %conv_id,
-                    hit_count = hits.len(),
-                    "Injected memory context into user message"
-                );
+                debug!(conv_id = %conv_id, "Injected memory context into user message");
                 augmented
             } else {
                 user_contents

@@ -1,3 +1,4 @@
+pub mod auto_context;
 pub mod chart_svg_renderer;
 pub mod embedding_service;
 pub mod error_collector_layer;
@@ -14,9 +15,11 @@ pub mod pdf_thumbnail;
 pub mod pdfium_utils;
 pub mod search_service;
 pub mod shell_service;
+pub mod skill_service;
 pub mod title_generator;
 pub mod typst_compiler_service;
 
+pub use auto_context::{AutoContextRequest, load_auto_context_block};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
 pub use llm_service::{StreamChunk, stream_prompt};
@@ -26,4 +29,5 @@ pub use memory_query::simplify_memory_query;
 pub use memory_service::MemoryService;
 pub use mermaid_renderer_service::MermaidRendererService;
 pub use pdf_thumbnail::cleanup_thumbnails;
+pub use skill_service::SkillService;
 pub use title_generator::generate_title;

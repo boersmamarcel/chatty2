@@ -362,11 +362,16 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
         // Find the href attribute within this anchor tag regardless of
         // attribute ordering, e.g. either `class=... href=...` or `href=... class=...`.
         let tag_start = html[..link_start].rfind('<').unwrap_or(link_start);
-        let Some(tag_end_offset) = html[link_start..].find('>') else {
+        let Some(_tag_end_offset) = html[link_start..].find('>') else {
             pos = link_start + link_marker.len();
             continue;
         };
-        let tag_end = link_start + tag_end_offset;
+
+        // Search for href in the full anchor tag (up to >) so attribute order doesn't matter
+        let tag_end = html[tag_start..]
+            .find('>')
+            .map(|p| tag_start + p)
+            .unwrap_or(link_start + link_marker.len());
 
         // Extract href value
         let href_marker = "href=\"";

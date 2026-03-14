@@ -174,6 +174,7 @@ pub struct ChatEngine {
     pub search_settings:
         Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
     pub embedding_service: Option<chatty_core::services::EmbeddingService>,
+    pub skill_service: chatty_core::services::SkillService,
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
@@ -211,6 +212,7 @@ impl ChatEngine {
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
+        let skill_service = chatty_core::services::SkillService::new(embedding_service.clone());
         Self {
             conversation: None,
             model_config,
@@ -222,6 +224,7 @@ impl ChatEngine {
             memory_service,
             search_settings,
             embedding_service,
+            skill_service,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
@@ -359,59 +362,33 @@ impl ChatEngine {
         let history = conversation.history().to_vec();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
+        let workspace_dir = self.execution_settings.workspace_dir.clone();
         let memory_service = self.memory_service.clone();
         let embedding_service = self.embedding_service.clone();
+        let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
             // Auto-retrieve relevant memories and inject as context
             let contents = if let Some(ref mem_svc) = memory_service {
                 if !query_text.is_empty() {
-                    // BM25 lexical search
-                    let bm25_hits = match mem_svc.search(&query_text, Some(3)).await {
-                        Ok(hits) => hits,
-                        Err(e) => {
-                            warn!(error = ?e, "Memory auto-retrieval BM25 failed (non-fatal)");
-                            Vec::new()
-                        }
-                    };
-
-                    // Vector similarity search (if embedding service available)
-                    let vec_hits = if let Some(ref embed_svc) = embedding_service {
-                        match embed_svc.embed(&query_text).await {
-                            Ok(query_embedding) => mem_svc
-                                .search_vec(query_embedding, Some(3))
-                                .await
-                                .unwrap_or_default(),
-                            Err(e) => {
-                                warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
-                                Vec::new()
-                            }
-                        }
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Merge BM25 + vector results
-                    let hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
-
-                    if !hits.is_empty() {
-                        let mut memory_context =
-                            String::from("[Relevant memories from past conversations]\n");
-                        for hit in &hits {
-                            if let Some(ref title) = hit.title {
-                                memory_context.push_str(&format!("- {}: {}\n", title, hit.text));
-                            } else {
-                                memory_context.push_str(&format!("- {}\n", hit.text));
-                            }
-                        }
-                        memory_context.push_str("[End of memories]\n\n");
-
-                        let mut augmented = vec![UserContent::text(memory_context)];
+                    let workspace_skills_dir = workspace_dir
+                        .as_deref()
+                        .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
+                    if let Some(context_block) = chatty_core::services::load_auto_context_block(
+                        chatty_core::services::AutoContextRequest {
+                            memory_service: mem_svc,
+                            embedding_service: embedding_service.as_ref(),
+                            skill_service: &skill_service,
+                            query_text: &query_text,
+                            fallback_query_text: None,
+                            workspace_skills_dir: workspace_skills_dir.as_deref(),
+                        },
+                    )
+                    .await
+                    {
+                        let mut augmented = vec![UserContent::text(context_block)];
                         augmented.extend(contents);
-                        info!(
-                            hit_count = hits.len(),
-                            "Injected memory context into user message"
-                        );
+                        info!("Injected memory context into user message");
                         augmented
                     } else {
                         contents
