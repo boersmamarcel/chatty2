@@ -3036,15 +3036,15 @@ async fn run_llm_stream(
             // Merge BM25 + vector results, then extend with local skill files
             let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
-            let local_skill_hits = workspace_dir
-                .as_deref()
-                .map(|d| {
-                    chatty_core::tools::load_local_skill_hits(
-                        &std::path::Path::new(d).join(".claude").join("skills"),
-                        &query_text,
-                    )
-                })
-                .unwrap_or_default();
+            let local_skill_hits = if let Some(d) = workspace_dir.as_deref() {
+                chatty_core::tools::load_local_skill_hits(
+                    &std::path::Path::new(d).join(".claude").join("skills"),
+                    &query_text,
+                )
+                .await
+            } else {
+                Vec::new()
+            };
             hits.extend(local_skill_hits);
             hits.sort_by(|a, b| {
                 b.score

@@ -190,7 +190,9 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
 /// (length > 2, case-insensitive) found anywhere in the skill name or content.
 /// This score is compatible with BM25/vector scores so all hits can be ranked together
 /// and capped to the same limit.
-pub fn load_local_skill_hits(skills_dir: &Path, query: &str) -> Vec<MemoryHit> {
+///
+/// Uses `tokio::fs` throughout to avoid blocking Tokio worker threads.
+pub async fn load_local_skill_hits(skills_dir: &Path, query: &str) -> Vec<MemoryHit> {
     let query_words: HashSet<String> = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() > 2)
@@ -199,25 +201,35 @@ pub fn load_local_skill_hits(skills_dir: &Path, query: &str) -> Vec<MemoryHit> {
 
     let mut hits = Vec::new();
 
-    let entries = match std::fs::read_dir(skills_dir) {
-        Ok(e) => e,
+    let mut dir = match tokio::fs::read_dir(skills_dir).await {
+        Ok(d) => d,
         Err(_) => return hits,
     };
 
-    for entry in entries.flatten() {
+    while let Ok(Some(entry)) = dir.next_entry().await {
         let path = entry.path();
-        if !path.is_dir() {
+
+        let is_dir = tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        if !is_dir {
             continue;
         }
 
         // Try SKILL.md then skill.md
-        let content = ["SKILL.md", "skill.md"]
-            .iter()
-            .find_map(|name| std::fs::read_to_string(path.join(name)).ok());
-
+        let mut content: Option<String> = None;
+        for name in &["SKILL.md", "skill.md"] {
+            if let Ok(c) = tokio::fs::read_to_string(path.join(name)).await {
+                if !c.trim().is_empty() {
+                    content = Some(c);
+                    break;
+                }
+            }
+        }
         let content = match content {
-            Some(c) if !c.trim().is_empty() => c,
-            _ => continue,
+            Some(c) => c,
+            None => continue,
         };
 
         let skill_name = path
