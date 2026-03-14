@@ -6,6 +6,11 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::skeleton::Skeleton;
+use gpui_component::{
+    Icon, IconName, Sizable,
+    button::{Button, ButtonVariants},
+    h_flex,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
@@ -1045,6 +1050,39 @@ impl ChatView {
         })
     }
 
+    /// Generate markdown export of the conversation.
+    ///
+    /// Produces a markdown document with a title heading followed by each
+    /// non-streaming message in `User` / `Assistant` sections.
+    pub fn export_to_markdown(&self, cx: &App) -> String {
+        use crate::chatty::models::ConversationsStore;
+
+        let title = self
+            .conversation_id
+            .as_ref()
+            .and_then(|id| {
+                cx.try_global::<ConversationsStore>()
+                    .and_then(|store| store.get_conversation(id))
+                    .map(|conv| conv.title().to_string())
+            })
+            .unwrap_or_else(|| "Conversation".to_string());
+
+        let mut md = format!("# {title}\n\n");
+
+        for msg in &self.messages {
+            if msg.is_streaming {
+                continue;
+            }
+            let role = match msg.role {
+                MessageRole::User => "**User**",
+                MessageRole::Assistant => "**Assistant**",
+            };
+            md.push_str(&format!("---\n\n{role}\n\n{}\n\n", msg.content));
+        }
+
+        md
+    }
+
     /// Render loading skeleton indicator
     fn render_loading_skeleton(&self) -> impl IntoElement {
         div()
@@ -1196,6 +1234,94 @@ impl Render for ChatView {
                         }
                     }
                 })
+            })
+            .child({
+                // Top toolbar — export button in the top-right corner.
+                // Collect export data here (in render with full cx access) so the
+                // on_click closure only needs cx for the file-save dialog.
+                use crate::chatty::models::ConversationsStore;
+                let export_title = self
+                    .conversation_id
+                    .as_ref()
+                    .and_then(|id| {
+                        cx.try_global::<ConversationsStore>()
+                            .and_then(|s| s.get_conversation(id))
+                            .map(|c| c.title().to_string())
+                    })
+                    .unwrap_or_else(|| "Conversation".to_string());
+                let export_messages: Vec<(bool, String, String)> = self
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let role = match m.role {
+                            MessageRole::User => "**User**".to_string(),
+                            MessageRole::Assistant => "**Assistant**".to_string(),
+                        };
+                        (m.is_streaming, role, m.content.clone())
+                    })
+                    .collect();
+
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .justify_end()
+                    .child(
+                        Button::new("export-conversation")
+                            .icon(Icon::new(IconName::ArrowDown))
+                            .tooltip("Export as Markdown")
+                            .small()
+                            .ghost()
+                            .on_click(move |_event, _window, cx| {
+                                let mut markdown =
+                                    format!("# {export_title}\n\n");
+                                for (is_streaming, role, content) in &export_messages
+                                {
+                                    if *is_streaming {
+                                        continue;
+                                    }
+                                    markdown.push_str(&format!(
+                                        "---\n\n{role}\n\n{content}\n\n"
+                                    ));
+                                }
+                                let suggested = format!(
+                                    "{}.md",
+                                    export_title.replace(
+                                        [
+                                            '/', '\\', ':', '*', '?', '"',
+                                            '<', '>', '|',
+                                        ],
+                                        "_"
+                                    )
+                                );
+                                let home = dirs::home_dir()
+                                    .unwrap_or_else(|| {
+                                        std::path::PathBuf::from(".")
+                                    });
+                                cx.spawn(async move |cx| {
+                                    let receiver = cx
+                                        .update(|cx| {
+                                            cx.prompt_for_new_path(
+                                                &home,
+                                                Some(&suggested),
+                                            )
+                                        })
+                                        .ok()?;
+                                    if let Ok(Some(path)) =
+                                        receiver.await.ok()?
+                                    {
+                                        tokio::fs::write(
+                                            &path,
+                                            markdown.as_bytes(),
+                                        )
+                                        .await
+                                        .ok()?;
+                                    }
+                                    Some(())
+                                })
+                                .detach();
+                            }),
+                    )
             })
             .child(
                 // Message list - scrollable area
