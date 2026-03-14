@@ -3040,36 +3040,22 @@ async fn run_llm_stream(
             };
 
             // Merge BM25 + vector results, then extend with local skill files.
-            // Skills are scored by cosine similarity (cached on disk) or keyword
-            // overlap, and loaded from both the workspace and the global OS dir.
+            // SkillService handles both the workspace and global OS directories,
+            // and caches embeddings on disk alongside each SKILL.md file.
             let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
-            let workspace_skill_hits = if let Some(d) = workspace_dir.as_deref() {
-                chatty_core::tools::load_local_skill_hits(
-                    &std::path::Path::new(d).join(".claude").join("skills"),
+            let workspace_skills_dir = workspace_dir
+                .as_deref()
+                .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
+            let skill_service = chatty_core::services::SkillService::new(embedding_service.clone());
+            let skill_hits = skill_service
+                .load_hits(
                     &query_text,
                     query_embedding_opt.as_deref(),
-                    embedding_service.as_ref(),
+                    workspace_skills_dir.as_deref(),
                 )
-                .await
-            } else {
-                Vec::new()
-            };
-            let global_skill_hits = if let Some(global_dir) =
-                dirs::data_dir().map(|d| d.join("chatty").join("skills"))
-            {
-                chatty_core::tools::load_local_skill_hits(
-                    &global_dir,
-                    &query_text,
-                    query_embedding_opt.as_deref(),
-                    embedding_service.as_ref(),
-                )
-                .await
-            } else {
-                Vec::new()
-            };
-            hits.extend(workspace_skill_hits);
-            hits.extend(global_skill_hits);
+                .await;
+            hits.extend(skill_hits);
             hits.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
