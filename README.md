@@ -124,6 +124,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 
 - Persistent conversations saved locally in a SQLite database — nothing is stored remotely
 - Auto-generated conversation titles
+- **Export to Markdown** — click the `…` menu on any sidebar conversation and choose **Download** to save it as a `.md` file via your OS file picker
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
