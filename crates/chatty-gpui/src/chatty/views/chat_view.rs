@@ -81,15 +81,32 @@ impl ChatView {
 
         // Subscribe to input events to handle Enter key
         let state_for_enter = chat_input_state.clone();
+        let state_for_change = chat_input_state.clone();
         cx.subscribe(&input, move |_input_state, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter { secondary } = event {
-                // Only send on plain Enter (not Shift+Enter)
-                if !secondary {
-                    tracing::debug!("Enter key pressed, calling send_message");
-                    state_for_enter.update(cx, |state, cx| {
-                        state.send_message(cx);
+            match event {
+                InputEvent::PressEnter { secondary } => {
+                    // Only send on plain Enter (not Shift+Enter)
+                    if !secondary {
+                        tracing::debug!("Enter key pressed");
+                        state_for_enter.update(cx, |state, cx| {
+                            // If the slash-command menu is open, apply the selected
+                            // command instead of sending the message as a chat turn.
+                            if state.is_slash_menu_open(cx) {
+                                state.apply_slash_command(cx);
+                            } else {
+                                state.send_message(cx);
+                            }
+                        });
+                    }
+                }
+                InputEvent::Change => {
+                    // Reset the slash-menu selection whenever the input text changes
+                    // so the first item is always highlighted after each keystroke.
+                    state_for_change.update(cx, |state, _cx| {
+                        state.reset_slash_menu_selection();
                     });
                 }
+                _ => {}
             }
         })
         .detach();
@@ -118,6 +135,11 @@ impl ChatView {
     /// Get the chat input state entity (for wiring callbacks)
     pub fn chat_input_state(&self) -> &Entity<ChatInputState> {
         &self.chat_input_state
+    }
+
+    /// Get a reference to all displayed messages (for slash-command handlers, etc.).
+    pub fn messages(&self) -> &[DisplayMessage] {
+        &self.messages
     }
 
     /// Set the conversation ID for this view
@@ -857,6 +879,24 @@ impl ChatView {
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         cx.notify();
+    }
+
+    /// Add an informational message that appears as an assistant response.
+    /// Used for slash-command output such as /context and /cwd.
+    pub fn add_info_message(&mut self, text: String, cx: &mut Context<Self>) {
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: text,
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: None,
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        });
+        cx.notify();
+        self.activate_sticky_scroll();
     }
 
     /// Load message history from a conversation

@@ -13,6 +13,109 @@ use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
+// ---------------------------------------------------------------------------
+// Slash command menu
+// ---------------------------------------------------------------------------
+
+/// A single entry in the slash-command picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlashCommand {
+    pub command: &'static str,
+    pub description: &'static str,
+    /// Text that is inserted into the input when the command is selected.
+    pub insert_text: &'static str,
+    /// When true the command is sent immediately on selection; when false
+    /// the insert_text is placed into the input so the user can add args.
+    pub execute_immediately: bool,
+}
+
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        command: "/add-dir",
+        description: "Add a directory to allowed workspace access",
+        insert_text: "/add-dir ",
+        execute_immediately: false,
+    },
+    SlashCommand {
+        command: "/agent",
+        description: "Launch a sub-agent with a prompt",
+        insert_text: "/agent ",
+        execute_immediately: false,
+    },
+    SlashCommand {
+        command: "/clear",
+        description: "Clear conversation history",
+        insert_text: "/clear",
+        execute_immediately: true,
+    },
+    SlashCommand {
+        command: "/new",
+        description: "Start a new conversation",
+        insert_text: "/new",
+        execute_immediately: true,
+    },
+    SlashCommand {
+        command: "/compact",
+        description: "Summarize conversation history to reduce context",
+        insert_text: "/compact",
+        execute_immediately: true,
+    },
+    SlashCommand {
+        command: "/context",
+        description: "Show context window usage",
+        insert_text: "/context",
+        execute_immediately: true,
+    },
+    SlashCommand {
+        command: "/copy",
+        description: "Copy latest response to clipboard",
+        insert_text: "/copy",
+        execute_immediately: true,
+    },
+    SlashCommand {
+        command: "/cwd",
+        description: "Show current working directory",
+        insert_text: "/cwd",
+        execute_immediately: true,
+    },
+    SlashCommand {
+        command: "/cd",
+        description: "Change working directory",
+        insert_text: "/cd ",
+        execute_immediately: false,
+    },
+];
+
+/// Returns the slash commands that match the current `input_text`.
+/// The menu is active only when `input_text` starts with `/` and contains
+/// no whitespace (once there is a space the user is typing arguments).
+pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
+    let trimmed = input_text.trim();
+    if !trimmed.starts_with('/') {
+        return Vec::new();
+    }
+    // Once the user has typed a space (argument separator) close the menu.
+    if trimmed.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = trimmed[1..].to_ascii_lowercase();
+    SLASH_COMMANDS
+        .iter()
+        .filter(|cmd| {
+            query.is_empty()
+                || cmd
+                    .command
+                    .trim_start_matches('/')
+                    .to_ascii_lowercase()
+                    .starts_with(&query)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
 /// Events emitted by ChatInputState for entity-to-entity communication
 #[derive(Clone, Debug)]
 pub enum ChatInputEvent {
@@ -22,6 +125,8 @@ pub enum ChatInputEvent {
     },
     ModelChanged(String),
     Stop,
+    /// A slash command that should be executed immediately (no args required).
+    SlashCommandSelected(String),
 }
 
 impl EventEmitter<ChatInputEvent> for ChatInputState {}
@@ -40,6 +145,11 @@ pub struct ChatInputState {
     supports_pdf: bool,
     thumbnail_cache: ThumbnailCache,
     is_streaming: bool,
+    /// Index of the highlighted item in the slash-command picker.
+    slash_menu_selected: usize,
+    /// When set, the value is written into the input on the next render frame
+    /// (requires Window access, deferred from the subscription closure).
+    pending_slash_insert: Option<String>,
 }
 
 impl ChatInputState {
@@ -54,6 +164,8 @@ impl ChatInputState {
             supports_images: false,
             supports_pdf: false,
             is_streaming: false,
+            slash_menu_selected: 0,
+            pending_slash_insert: None,
         }
     }
 
@@ -222,6 +334,79 @@ impl ChatInputState {
             });
             self.should_clear = false;
         }
+        // Apply a pending slash-command text insert (for commands that need arguments).
+        if let Some(text) = self.pending_slash_insert.take() {
+            self.input.update(cx, |input, cx| {
+                input.set_value(&text, window, cx);
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Slash-command menu helpers
+    // -----------------------------------------------------------------------
+
+    /// Whether the slash-command picker should be shown given the current input.
+    pub fn is_slash_menu_open(&self, cx: &mut Context<Self>) -> bool {
+        let text = self.input.read(cx).text().to_string();
+        !slash_menu_items_for(&text).is_empty()
+    }
+
+    /// Current highlighted index in the picker.
+    pub fn slash_menu_selected(&self) -> usize {
+        self.slash_menu_selected
+    }
+
+    /// Reset the selection to 0 (called when input text changes).
+    pub fn reset_slash_menu_selection(&mut self) {
+        self.slash_menu_selected = 0;
+    }
+
+    /// Move selection up (wraps to last item).
+    pub fn move_slash_menu_up(&mut self, num_items: usize) {
+        if num_items == 0 {
+            return;
+        }
+        if self.slash_menu_selected == 0 {
+            self.slash_menu_selected = num_items - 1;
+        } else {
+            self.slash_menu_selected -= 1;
+        }
+    }
+
+    /// Move selection down (wraps to first item).
+    pub fn move_slash_menu_down(&mut self, num_items: usize) {
+        if num_items == 0 {
+            return;
+        }
+        self.slash_menu_selected = (self.slash_menu_selected + 1) % num_items;
+    }
+
+    /// Apply the currently highlighted slash command.
+    ///
+    /// * For immediate commands (no args needed) the command is emitted via
+    ///   `ChatInputEvent::SlashCommandSelected` and the input is cleared.
+    /// * For argument commands the `insert_text` is written into the input on
+    ///   the next render frame via `pending_slash_insert`.
+    pub fn apply_slash_command(&mut self, cx: &mut Context<Self>) {
+        let input_text = self.input.read(cx).text().to_string();
+        let items = slash_menu_items_for(&input_text);
+        if items.is_empty() {
+            return;
+        }
+        let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
+        let cmd = items[selected];
+        self.slash_menu_selected = 0;
+
+        if cmd.execute_immediately {
+            cx.emit(ChatInputEvent::SlashCommandSelected(
+                cmd.command.to_string(),
+            ));
+            self.should_clear = true;
+        } else {
+            // Insert command text (with trailing space) so user can type args.
+            self.pending_slash_insert = Some(cmd.insert_text.to_string());
+        }
     }
 
     /// Get the selected model ID
@@ -376,6 +561,11 @@ impl RenderOnce for ChatInput {
         // Model display name
         let model_display = self.state.read(cx).get_selected_model_display_name();
         let _no_models = self.state.read(cx).available_models.is_empty();
+
+        // --- Slash menu ---
+        let input_text = input_entity.read(cx).text().to_string();
+        let menu_items = slash_menu_items_for(&input_text);
+        let slash_menu_selected = self.state.read(cx).slash_menu_selected();
 
         // Model dropdown button
         let model_button = Button::new("model-select").label(model_display.clone());
@@ -546,82 +736,204 @@ impl RenderOnce for ChatInput {
             None
         };
 
+        // The outer wrapper uses flex-col so the slash menu appears above the input box.
         div()
-            .border_1()
-            .px_3()
-            .py_3()
-            .rounded_2xl()
-            .border_color(rgb(0xe5e7eb))
-            .bg(cx.theme().secondary)
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_1()
+            // Slash-command menu (visible when input starts with "/")
+            .when(!menu_items.is_empty(), |d| {
+                let state_for_menu = self.state.clone();
+                d.child(render_slash_menu(
+                    &menu_items,
+                    slash_menu_selected,
+                    &state_for_menu,
+                    cx,
+                ))
+            })
+            // Main input box
             .child(
                 div()
+                    .border_1()
+                    .px_3()
+                    .py_3()
+                    .rounded_2xl()
+                    .border_color(rgb(0xe5e7eb))
+                    .bg(cx.theme().secondary)
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .child(Input::new(&input_entity).appearance(false)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .when_some(attachment_popover, |d, popover| d.child(popover))
-                            .child(div().flex_grow())
-                            .child(model_popover)
                             .child(
-                                // Send/Stop button (conditional based on streaming state)
                                 div()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .when(is_streaming, |div| {
-                                        // Stop button when streaming
-                                        div.bg(rgb(0xff4444))
-                                            .hover(|style| style.bg(rgb(0xff2222)))
-                                            .child("Stop")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_event, _window, cx| {
-                                                    state_for_stop.update(cx, |state, cx| {
-                                                        state.stop_stream(cx);
-                                                    });
-                                                },
-                                            )
-                                    })
-                                    .when(!is_streaming, |div| {
-                                        // Send button when not streaming
-                                        div.bg(rgb(0xffa033))
-                                            .hover(|style| style.bg(rgb(0xff8c1a)))
-                                            .child("Send")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_event, _window, cx| {
-                                                    state_for_send.update(cx, |state, cx| {
-                                                        state.send_message(cx);
-                                                    });
-                                                },
-                                            )
-                                    }),
-                            ),
-                    )
-                    .when(!attachments.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_2()
-                                .p_2()
-                                .mt_2()
-                                .rounded_lg()
-                                .children(attachments.iter().enumerate().map(|(index, path)| {
-                                    render_file_chip(path, index, &self.state, &thumbnail_cache)
-                                })),
-                        )
-                    }),
+                                    .flex()
+                                    .flex_row()
+                                    .child(Input::new(&input_entity).appearance(false)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .when_some(attachment_popover, |d, popover| d.child(popover))
+                                    .child(div().flex_grow())
+                                    .child(model_popover)
+                                    .child(
+                                        // Send/Stop button (conditional based on streaming state)
+                                        div()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .when(is_streaming, |div| {
+                                                // Stop button when streaming
+                                                div.bg(rgb(0xff4444))
+                                                    .hover(|style| style.bg(rgb(0xff2222)))
+                                                    .child("Stop")
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_event, _window, cx| {
+                                                            state_for_stop.update(
+                                                                cx,
+                                                                |state, cx| {
+                                                                    state.stop_stream(cx);
+                                                                },
+                                                            );
+                                                        },
+                                                    )
+                                            })
+                                            .when(!is_streaming, |div| {
+                                                // Send button when not streaming
+                                                div.bg(rgb(0xffa033))
+                                                    .hover(|style| style.bg(rgb(0xff8c1a)))
+                                                    .child("Send")
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_event, _window, cx| {
+                                                            state_for_send.update(
+                                                                cx,
+                                                                |state, cx| {
+                                                                    state.send_message(cx);
+                                                                },
+                                                            );
+                                                        },
+                                                    )
+                                            }),
+                                    ),
+                            )
+                            .when(!attachments.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_2()
+                                        .p_2()
+                                        .mt_2()
+                                        .rounded_lg()
+                                        .children(attachments.iter().enumerate().map(
+                                            |(index, path)| {
+                                                render_file_chip(
+                                                    path,
+                                                    index,
+                                                    &self.state,
+                                                    &thumbnail_cache,
+                                                )
+                                            },
+                                        )),
+                                )
+                            }),
+                    ),
             )
     }
 }
+
+// ---------------------------------------------------------------------------
+// Slash-command menu renderer
+// ---------------------------------------------------------------------------
+
+/// Renders the slash-command picker above the input.
+fn render_slash_menu(
+    items: &[&'static SlashCommand],
+    selected: usize,
+    state: &Entity<ChatInputState>,
+    cx: &App,
+) -> impl IntoElement {
+    let theme_bg = cx.theme().background;
+    let theme_border = cx.theme().border;
+    let theme_secondary = cx.theme().secondary;
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .bg(theme_bg)
+        .border_1()
+        .border_color(theme_border)
+        .rounded_lg()
+        .shadow_md()
+        .p_1()
+        .children(items.iter().enumerate().map(|(idx, cmd)| {
+            let state_for_click = state.clone();
+            let cmd_command = cmd.command;
+            let cmd_description = cmd.description;
+            let is_selected = idx == selected.min(items.len().saturating_sub(1));
+
+            div()
+                .id(ElementId::Name(format!("slash-cmd-{}", cmd_command).into()))
+                .px_3()
+                .py_2()
+                .rounded_sm()
+                .cursor_pointer()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .when(is_selected, |d| d.bg(theme_secondary))
+                .hover(|style| style.bg(theme_secondary))
+                // Highlight on hover to update selected index
+                .on_mouse_move({
+                    let state = state.clone();
+                    move |_event, _window, cx| {
+                        state.update(cx, |s, cx| {
+                            if s.slash_menu_selected != idx {
+                                s.slash_menu_selected = idx;
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    state_for_click.update(cx, |s, cx| {
+                        s.slash_menu_selected = idx;
+                        s.apply_slash_command(cx);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x3b82f6))
+                        .child(cmd_command),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x6b7280))
+                        .child(cmd_description),
+                )
+        }))
+        .child(
+            // Help footer
+            div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(rgb(0x9ca3af))
+                .child("↑↓ navigate  ·  Enter to apply  ·  Esc to dismiss"),
+        )
+}
+
+#[cfg(test)]
+#[path = "chat_input_test.rs"]
+mod tests;

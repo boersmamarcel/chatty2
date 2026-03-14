@@ -396,6 +396,10 @@ impl ChattyApp {
                     debug!("ChatInputEvent::Stop received");
                     app.stop_stream(cx);
                 }
+                ChatInputEvent::SlashCommandSelected(command) => {
+                    debug!(command = %command, "ChatInputEvent::SlashCommandSelected received");
+                    app.handle_slash_command(command.clone(), cx);
+                }
             },
         )
         .detach();
@@ -2271,7 +2275,209 @@ impl ChattyApp {
         cx.notify();
     }
 
-    /// Handle the finalization of a successfully completed stream.
+    // -----------------------------------------------------------------------
+    // Slash-command handlers
+    // -----------------------------------------------------------------------
+
+    /// Dispatch a slash command that was selected from the picker.
+    fn handle_slash_command(&mut self, command: String, cx: &mut Context<Self>) {
+        debug!(command = %command, "handle_slash_command");
+        match command.as_str() {
+            "/clear" | "/new" => {
+                info!("Slash command: start new conversation");
+                self.start_new_conversation(cx);
+            }
+            "/compact" => {
+                info!("Slash command: compact conversation");
+                self.compact_conversation(cx);
+            }
+            "/context" => {
+                info!("Slash command: show context usage");
+                self.show_context_info(cx);
+            }
+            "/copy" => {
+                info!("Slash command: copy last response");
+                self.copy_last_response(cx);
+            }
+            "/cwd" => {
+                info!("Slash command: show working directory");
+                self.show_working_directory(cx);
+            }
+            other => {
+                warn!(command = %other, "Unknown slash command received");
+            }
+        }
+    }
+
+    /// `/compact` — summarize the oldest half of the conversation history.
+    fn compact_conversation(&mut self, cx: &mut Context<Self>) {
+        let conv_id = match cx
+            .try_global::<ConversationsStore>()
+            .and_then(|s| s.active_id().cloned())
+        {
+            Some(id) => id,
+            None => {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message("No active conversation to compact.".to_string(), cx);
+                });
+                return;
+            }
+        };
+
+        let data = cx.try_global::<ConversationsStore>().and_then(|store| {
+            store
+                .get_conversation(&conv_id)
+                .map(|conv| (conv.agent().clone(), conv.history().to_vec()))
+        });
+
+        let Some((agent, history)) = data else {
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message("Conversation not found.".to_string(), cx);
+            });
+            return;
+        };
+
+        if history.len() < 4 {
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(
+                    "Conversation is too short to compact (need at least 4 messages).".to_string(),
+                    cx,
+                );
+            });
+            return;
+        }
+
+        let chat_view = self.chat_view.clone();
+        let conv_id_clone = conv_id.clone();
+        let midpoint = history.len() / 2;
+        cx.spawn(
+            async move |_weak, cx| match summarize_oldest_half(&agent, &history).await {
+                Ok(result) => {
+                    let msg = format!(
+                        "Compacted conversation: summarized {} messages (~{} tokens freed).",
+                        result.messages_summarized, result.estimated_tokens_freed
+                    );
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id_clone) {
+                            conv.replace_history(result.new_history, midpoint);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to apply compact"))
+                    .ok();
+                    chat_view
+                        .update(cx, |view, cx| view.add_info_message(msg, cx))
+                        .map_err(|e| warn!(error = ?e, "Failed to show compact result"))
+                        .ok();
+                }
+                Err(e) => {
+                    let msg = format!("Failed to compact conversation: {e}");
+                    chat_view
+                        .update(cx, |view, cx| view.add_info_message(msg, cx))
+                        .map_err(|e| warn!(error = ?e, "Failed to show compact error"))
+                        .ok();
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// `/context` — show token-usage statistics in the chat.
+    fn show_context_info(&mut self, cx: &mut Context<Self>) {
+        let snapshot = cx
+            .try_global::<GlobalTokenBudget>()
+            .and_then(|budget| budget.receiver.borrow().clone());
+
+        let cwd = cx
+            .try_global::<ExecutionSettingsModel>()
+            .and_then(|s| s.workspace_dir.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string())
+            });
+
+        let msg = if let Some(snap) = snapshot {
+            let used = snap.estimated_total();
+            let max = snap.model_context_limit;
+            let pct = if max > 0 {
+                (used as f64 / max as f64 * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            let filled = ((pct / 100.0) * 20.0).round() as usize;
+            let bar = format!(
+                "[{}{}]",
+                "█".repeat(filled.min(20)),
+                "░".repeat(20usize.saturating_sub(filled.min(20)))
+            );
+            format!(
+                "**Context usage:** {used} / {max} tokens ({pct:.1}%) {bar}\n\
+                 **Working directory:** {cwd}"
+            )
+        } else {
+            format!("**Context:** No snapshot available yet.\n**Working directory:** {cwd}")
+        };
+
+        self.chat_view.update(cx, |view, cx| {
+            view.add_info_message(msg, cx);
+        });
+    }
+
+    /// `/copy` — copy the last assistant response to the system clipboard.
+    fn copy_last_response(&mut self, cx: &mut Context<Self>) {
+        // Walk chat_view messages in reverse to find the last non-empty assistant message.
+        let last_text = self
+            .chat_view
+            .read(cx)
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| {
+                matches!(
+                    m.role,
+                    crate::chatty::views::message_component::MessageRole::Assistant
+                ) && !m.content.trim().is_empty()
+                    && !m.is_streaming
+            })
+            .map(|m| m.content.clone());
+
+        match last_text {
+            Some(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(
+                        "Copied latest assistant response to clipboard.".to_string(),
+                        cx,
+                    );
+                });
+            }
+            None => {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(
+                        "No assistant response available to copy.".to_string(),
+                        cx,
+                    );
+                });
+            }
+        }
+    }
+
+    /// `/cwd` — show the current working directory.
+    fn show_working_directory(&mut self, cx: &mut Context<Self>) {
+        let cwd = cx
+            .try_global::<ExecutionSettingsModel>()
+            .and_then(|s| s.workspace_dir.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string())
+            });
+
+        self.chat_view.update(cx, |view, cx| {
+            view.add_info_message(format!("**Working directory:** {cwd}"), cx);
+        });
+    }
+
     /// Called from handle_stream_manager_event when StreamEnded with Completed status.
     ///
     /// Reads the accumulated response text from `ConversationsStore.streaming_message`

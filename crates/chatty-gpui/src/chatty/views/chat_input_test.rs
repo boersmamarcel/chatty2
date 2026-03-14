@@ -1,11 +1,63 @@
 #[cfg(test)]
 mod tests {
-    use super::super::chat_input::{ChatInputState, MAX_FILE_SIZE, IMAGE_EXTENSIONS, PDF_EXTENSION};
+    use super::super::chat_input::{ChatInputState, IMAGE_EXTENSIONS, MAX_FILE_SIZE, PDF_EXTENSION, slash_menu_items_for};
     use gpui::{App, Context, Entity, TestWindow};
     use gpui_component::input::InputState;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+
+    // -----------------------------------------------------------------------
+    // Slash-command menu tests (pure, no GPUI context required)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_slash_menu_empty_when_no_slash() {
+        assert!(slash_menu_items_for("").is_empty());
+        assert!(slash_menu_items_for("hello").is_empty());
+        assert!(slash_menu_items_for("say /clear").is_empty());
+    }
+
+    #[test]
+    fn test_slash_menu_all_commands_when_just_slash() {
+        let items = slash_menu_items_for("/");
+        assert!(!items.is_empty(), "Should show all commands for bare '/'");
+    }
+
+    #[test]
+    fn test_slash_menu_filters_by_prefix() {
+        let items = slash_menu_items_for("/cl");
+        let commands: Vec<&str> = items.iter().map(|c| c.command).collect();
+        assert!(commands.contains(&"/clear"), "should match /clear");
+        assert!(!commands.contains(&"/copy"), "should not match /copy");
+    }
+
+    #[test]
+    fn test_slash_menu_exact_match() {
+        let items = slash_menu_items_for("/clear");
+        let commands: Vec<&str> = items.iter().map(|c| c.command).collect();
+        assert!(commands.contains(&"/clear"));
+    }
+
+    #[test]
+    fn test_slash_menu_closes_when_space_follows() {
+        // Once the user types a space (argument separator), close the menu.
+        assert!(slash_menu_items_for("/clear ").is_empty());
+        assert!(slash_menu_items_for("/add-dir /some/path").is_empty());
+    }
+
+    #[test]
+    fn test_slash_menu_case_insensitive() {
+        let items = slash_menu_items_for("/CL");
+        let commands: Vec<&str> = items.iter().map(|c| c.command).collect();
+        assert!(commands.contains(&"/clear"), "filter should be case-insensitive");
+    }
+
+    #[test]
+    fn test_slash_menu_no_match() {
+        let items = slash_menu_items_for("/zzz");
+        assert!(items.is_empty(), "Unknown prefix should return no items");
+    }
 
     /// Helper to create a test file of a specific size
     fn create_test_file(path: &PathBuf, size: u64, extension: &str) -> std::io::Result<()> {
