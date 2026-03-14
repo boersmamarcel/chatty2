@@ -810,26 +810,23 @@ impl ChatEngine {
 
         self.add_system_message("Launching sub-agent...".to_string());
 
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                run_sub_agent_process(executable, model_id, prompt_owned, auto_approve)
-            })
-            .await;
-
-            let message = match result {
-                Ok(Ok(stdout)) => {
-                    let stdout = stdout.trim().to_string();
-                    if stdout.is_empty() {
-                        "Sub-agent completed with no output.".to_string()
-                    } else {
-                        format!("Sub-agent response:\n{}", stdout)
+        tokio::task::spawn_blocking(move || {
+            let message =
+                match run_sub_agent_process(executable, model_id, prompt_owned, auto_approve) {
+                    Ok(stdout) => {
+                        let stdout = stdout.trim().to_string();
+                        if stdout.is_empty() {
+                            "Sub-agent completed with no output.".to_string()
+                        } else {
+                            format!("Sub-agent response:\n{}", stdout)
+                        }
                     }
-                }
-                Ok(Err(e)) => format!("Sub-agent failed: {}", e),
-                Err(e) => format!("Sub-agent task failed: {}", e),
-            };
+                    Err(e) => format!("Sub-agent failed: {}", e),
+                };
 
-            let _ = event_tx.send(AppEvent::SubAgentFinished(message));
+            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+                warn!(error = ?e, "Failed to deliver sub-agent completion event");
+            }
         });
 
         Ok(())
