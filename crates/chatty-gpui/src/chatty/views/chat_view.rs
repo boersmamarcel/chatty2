@@ -1249,17 +1249,20 @@ impl Render for ChatView {
                             .map(|c| c.title().to_string())
                     })
                     .unwrap_or_else(|| "Conversation".to_string());
-                let export_messages: Vec<(bool, String, String)> = self
-                    .messages
-                    .iter()
-                    .map(|m| {
-                        let role = match m.role {
-                            MessageRole::User => "**User**".to_string(),
-                            MessageRole::Assistant => "**Assistant**".to_string(),
+                // Snapshot of messages captured at render time so the
+                // on_click closure is self-contained and needs cx only
+                // for the file-save dialog.
+                let export_markdown = {
+                    let mut md = format!("# {export_title}\n\n");
+                    for msg in self.messages.iter().filter(|m| !m.is_streaming) {
+                        let role = match msg.role {
+                            MessageRole::User => "**User**",
+                            MessageRole::Assistant => "**Assistant**",
                         };
-                        (m.is_streaming, role, m.content.clone())
-                    })
-                    .collect();
+                        md.push_str(&format!("---\n\n{role}\n\n{}\n\n", msg.content));
+                    }
+                    md
+                };
 
                 h_flex()
                     .w_full()
@@ -1273,17 +1276,6 @@ impl Render for ChatView {
                             .small()
                             .ghost()
                             .on_click(move |_event, _window, cx| {
-                                let mut markdown =
-                                    format!("# {export_title}\n\n");
-                                for (is_streaming, role, content) in &export_messages
-                                {
-                                    if *is_streaming {
-                                        continue;
-                                    }
-                                    markdown.push_str(&format!(
-                                        "---\n\n{role}\n\n{content}\n\n"
-                                    ));
-                                }
                                 let suggested = format!(
                                     "{}.md",
                                     export_title.replace(
@@ -1295,9 +1287,8 @@ impl Render for ChatView {
                                     )
                                 );
                                 let home = dirs::home_dir()
-                                    .unwrap_or_else(|| {
-                                        std::path::PathBuf::from(".")
-                                    });
+                                    .unwrap_or_else(|| dirs::document_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+                                let markdown = export_markdown.clone();
                                 cx.spawn(async move |cx| {
                                     let receiver = cx
                                         .update(|cx| {
@@ -1306,16 +1297,29 @@ impl Render for ChatView {
                                                 Some(&suggested),
                                             )
                                         })
+                                        .map_err(|e| {
+                                            warn!(error = ?e, "Failed to open save dialog")
+                                        })
                                         .ok()?;
-                                    if let Ok(Some(path)) =
-                                        receiver.await.ok()?
-                                    {
-                                        tokio::fs::write(
-                                            &path,
-                                            markdown.as_bytes(),
-                                        )
-                                        .await
-                                        .ok()?;
+                                    match receiver.await {
+                                        Ok(Ok(Some(path))) => {
+                                            if let Err(e) =
+                                                tokio::fs::write(&path, markdown.as_bytes()).await
+                                            {
+                                                warn!(
+                                                    error = ?e,
+                                                    path = ?path,
+                                                    "Failed to write conversation export"
+                                                );
+                                            }
+                                        }
+                                        Ok(Ok(None)) => {} // user cancelled
+                                        Ok(Err(e)) => {
+                                            warn!(error = ?e, "Save dialog returned error")
+                                        }
+                                        Err(e) => {
+                                            warn!(error = ?e, "Failed to receive save dialog result")
+                                        }
                                     }
                                     Some(())
                                 })
