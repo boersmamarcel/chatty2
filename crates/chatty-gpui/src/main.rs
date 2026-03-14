@@ -194,6 +194,7 @@ fn register_actions(cx: &mut App) {
         KeyBinding::new("cmd-n", NewConversation, None),
         KeyBinding::new("cmd-up", PreviousConversation, None),
         KeyBinding::new("cmd-down", NextConversation, None),
+        KeyBinding::new("alt-backspace", DeleteActiveConversation, None),
         KeyBinding::new("cmd-backspace", DeleteActiveConversation, None),
     ]);
 

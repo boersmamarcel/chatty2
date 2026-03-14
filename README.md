@@ -124,6 +124,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 
 - Persistent conversations saved locally in a SQLite database — nothing is stored remotely
 - Auto-generated conversation titles
+- **Export to Markdown** — click the `…` menu on any sidebar conversation and choose **Download** to save it as a `.md` file via your OS file picker
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
 - Cost calculations use your model's actual pricing (cost per million input/output tokens)
@@ -384,13 +385,26 @@ cargo install --path crates/chatty-tui
 | Key | Action |
 |:----|:-------|
 | `Enter` | Send message |
-| `/model` | Open model picker |
-| `/tools` | Open tool picker |
+| `/` | Open slash-command picker (use `↑/↓` to select, `Tab` or `Enter` to apply) |
 | `--enable tool1,tool2` / `--disable tool1,tool2` | Override tool availability at launch |
 | `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` | Scroll chat view |
 | `y` / `n` | Approve / deny a tool execution prompt |
 | `Ctrl+C` | Stop streaming response (or quit if idle) |
 | `Ctrl+Q` | Quit immediately |
+
+### Slash commands
+
+| Command | Action |
+|:--------|:-------|
+| `/model [query]` | Switch model (`/model` opens picker) |
+| `/tools [name]` | Toggle tool groups (`/tools` opens picker) |
+| `/add-dir <directory>` | Expand workspace access to include a directory |
+| `/agent <prompt>` | Launch a headless `chatty-tui` sub-agent with a prompt |
+| `/clear`, `/new` | Clear conversation history and start fresh |
+| `/compact` | Summarize older messages to reduce context usage |
+| `/context` | Show token/context usage and current working directory |
+| `/copy` | Copy the latest assistant response to system clipboard |
+| `/cwd`, `/cd [directory]` | Show or change the working directory |
 
 > **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere.
 

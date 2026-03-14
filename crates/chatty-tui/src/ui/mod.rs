@@ -2,6 +2,7 @@ mod approval;
 mod chat_view;
 mod input;
 mod model_picker;
+mod slash_menu;
 mod status_bar;
 mod tool_picker;
 
@@ -44,5 +45,14 @@ pub fn render(frame: &mut Frame, engine: &ChatEngine, input_state: &InputState) 
     // Tool picker overlay
     if let Some(ref picker) = engine.tool_picker {
         tool_picker::render_tool_picker(frame, frame.area(), picker);
+    }
+
+    // Slash command menu overlay (only while typing a slash command)
+    if engine.model_picker.is_none()
+        && engine.tool_picker.is_none()
+        && engine.pending_approval.is_none()
+        && input_state.is_slash_menu_open()
+    {
+        slash_menu::render_slash_menu(frame, frame.area(), input_state);
     }
 }
