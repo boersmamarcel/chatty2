@@ -1535,59 +1535,57 @@ impl ChattyApp {
         let conv_id = id.to_string();
 
         // Build markdown from ConversationsStore (works for any conversation, not just active)
-        let (title, markdown) = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            let Some(conv) = store.get_conversation(&conv_id) else {
-                return (String::from("Conversation"), String::new());
-            };
-            let title = conv.title().to_string();
-            let mut md = format!("# {title}\n\n");
-            for (index, msg) in conv.history().iter().enumerate() {
-                let trace_json = conv.system_traces().get(index).and_then(|trace| trace.as_ref());
+        let store = cx.global::<ConversationsStore>();
+        let Some(conv) = store.get_conversation(&conv_id) else {
+            warn!(conv_id = %conv_id, "Cannot export: conversation not found or has no messages");
+            return;
+        };
 
-                match msg {
-                    rig::completion::Message::User { content, .. } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|c| match c {
-                                rig::completion::message::UserContent::Text(t) => {
-                                    Some(t.text.as_str())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        if !text.is_empty() {
-                            md.push_str(&format!("---\n\n**User**\n\n{text}\n\n"));
-                        }
+        let title = conv.title().to_string();
+        let mut markdown = format!("# {title}\n\n");
+        for (index, msg) in conv.history().iter().enumerate() {
+            let trace_json = conv.system_traces().get(index).and_then(|trace| trace.as_ref());
+
+            match msg {
+                rig::completion::Message::User { content, .. } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            rig::completion::message::UserContent::Text(t) => Some(t.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if !text.is_empty() {
+                        markdown.push_str(&format!("---\n\n**User**\n\n{text}\n\n"));
                     }
-                    rig::completion::Message::Assistant { content, .. } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|c| match c {
-                                rig::completion::message::AssistantContent::Text(t) => {
-                                    Some(t.text.as_str())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        if !text.is_empty() || trace_json.is_some() {
-                            md.push_str("---\n\n**Assistant**\n\n");
-
-                            if !text.is_empty() {
-                                md.push_str(&text);
-                                md.push_str("\n\n");
+                }
+                rig::completion::Message::Assistant { content, .. } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            rig::completion::message::AssistantContent::Text(t) => {
+                                Some(t.text.as_str())
                             }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if !text.is_empty() || trace_json.is_some() {
+                        markdown.push_str("---\n\n**Assistant**\n\n");
 
-                            if let Some(trace_json) = trace_json {
-                                push_system_trace_markdown(&mut md, trace_json);
-                            }
+                        if !text.is_empty() {
+                            markdown.push_str(&text);
+                            markdown.push_str("\n\n");
+                        }
+
+                        if let Some(trace_json) = trace_json {
+                            push_system_trace_markdown(&mut markdown, trace_json);
                         }
                     }
                 }
             }
-            (title, md)
-        });
+        }
 
         if markdown.is_empty() {
             warn!(conv_id = %conv_id, "Cannot export: conversation not found or has no messages");
