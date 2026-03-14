@@ -371,62 +371,20 @@ impl ChatEngine {
             // Auto-retrieve relevant memories and inject as context
             let contents = if let Some(ref mem_svc) = memory_service {
                 if !query_text.is_empty() {
-                    // BM25 lexical search
-                    let bm25_hits = match mem_svc.search(&query_text, Some(3)).await {
-                        Ok(hits) => hits,
-                        Err(e) => {
-                            warn!(error = ?e, "Memory auto-retrieval BM25 failed (non-fatal)");
-                            Vec::new()
-                        }
-                    };
-
-                    // Vector similarity search (if embedding service available).
-                    // The query embedding is saved for skill scoring below.
-                    let mut query_embedding_opt: Option<Vec<f32>> = None;
-                    let vec_hits = if let Some(ref embed_svc) = embedding_service {
-                        match embed_svc.embed(&query_text).await {
-                            Ok(query_embedding) => {
-                                let hits = mem_svc
-                                    .search_vec(query_embedding.clone(), Some(3))
-                                    .await
-                                    .unwrap_or_default();
-                                query_embedding_opt = Some(query_embedding);
-                                hits
-                            }
-                            Err(e) => {
-                                warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
-                                Vec::new()
-                            }
-                        }
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Merge BM25 + vector results, then extend with filesystem skill files.
-                    // skill_service was constructed once at ChatEngine initialisation and
-                    // handles both the workspace and global OS skill directories.
-                    let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
-
                     let workspace_skills_dir = workspace_dir
                         .as_deref()
                         .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
-                    let skill_hits = skill_service
-                        .load_hits(
-                            &query_text,
-                            query_embedding_opt.as_deref(),
-                            workspace_skills_dir.as_deref(),
-                        )
-                        .await;
-                    hits.extend(skill_hits);
-                    hits.sort_by(|a, b| {
-                        b.score
-                            .partial_cmp(&a.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    hits.truncate(5);
-
-                    if let Some(context_block) =
-                        chatty_core::tools::build_memory_context_block(hits)
+                    if let Some(context_block) = chatty_core::services::load_auto_context_block(
+                        chatty_core::services::AutoContextRequest {
+                            memory_service: mem_svc,
+                            embedding_service: embedding_service.as_ref(),
+                            skill_service: &skill_service,
+                            query_text: &query_text,
+                            fallback_query_text: None,
+                            workspace_skills_dir: workspace_skills_dir.as_deref(),
+                        },
+                    )
+                    .await
                     {
                         let mut augmented = vec![UserContent::text(context_block)];
                         augmented.extend(contents);

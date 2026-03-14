@@ -7,7 +7,7 @@ use tracing::warn;
 use super::remember_tool::MemoryToolError;
 use super::save_skill_tool::SKILL_TITLE_PREFIX;
 use crate::services::embedding_service::EmbeddingService;
-use crate::services::memory_service::{MemoryHit, MemoryService};
+use crate::services::memory_service::{MemoryHit, MemoryHitSource, MemoryService};
 
 /// Arguments for the search_memory tool
 #[derive(Deserialize, Serialize)]
@@ -162,13 +162,29 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
 
     if !skill_hits.is_empty() {
         block.push_str("[Relevant skills/procedures you've saved]\n");
+        block.push_str(
+            "Memory-backed skills can be found again with `search_memory`. Filesystem skills come from injected `SKILL.md` files; use normal file-reading tools if you need to reopen them.\n",
+        );
+        block.push_str(
+            "For Python-oriented skills, prefer `uv` for shell package management, or use `execute_code` when you want Docker-isolated execution.\n",
+        );
         for hit in &skill_hits {
             let display_name = hit
                 .title
                 .as_deref()
                 .map(|t| t.trim_start_matches(SKILL_TITLE_PREFIX))
                 .unwrap_or("unnamed skill");
-            block.push_str(&format!("- \"{}\":\n", display_name));
+            let source_hint = match hit.source {
+                Some(MemoryHitSource::Memory) => "memory-backed; use `search_memory`",
+                Some(MemoryHitSource::WorkspaceSkillFile) => {
+                    "workspace skill file (`.claude/skills/.../SKILL.md`)"
+                }
+                Some(MemoryHitSource::GlobalSkillFile) => {
+                    "global skill file (`chatty/skills/.../SKILL.md`)"
+                }
+                None => "source unknown",
+            };
+            block.push_str(&format!("- \"{}\" [{}]:\n", display_name, source_hint));
             for line in hit.text.lines() {
                 block.push_str(&format!("  {}\n", line));
             }
@@ -211,6 +227,9 @@ pub fn merge_search_results(
                 && hit.score > existing.score
             {
                 existing.score = hit.score;
+                if existing.source.is_none() {
+                    existing.source = hit.source;
+                }
             }
         } else {
             seen_texts.insert(key);
@@ -226,4 +245,131 @@ pub fn merge_search_results(
     });
     merged.truncate(limit);
     merged
+}
+
+fn is_skill_hit(hit: &MemoryHit) -> bool {
+    hit.title
+        .as_deref()
+        .map(|t| t.starts_with(SKILL_TITLE_PREFIX))
+        .unwrap_or(false)
+}
+
+fn sort_by_score_desc(hits: &mut [MemoryHit]) {
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+pub fn select_context_hits(
+    merged_memory_hits: Vec<MemoryHit>,
+    filesystem_skill_hits: Vec<MemoryHit>,
+    limit: usize,
+) -> Vec<MemoryHit> {
+    let (mut skill_hits, mut fact_hits): (Vec<_>, Vec<_>) =
+        merged_memory_hits.into_iter().partition(is_skill_hit);
+    skill_hits.extend(filesystem_skill_hits);
+
+    sort_by_score_desc(&mut fact_hits);
+    sort_by_score_desc(&mut skill_hits);
+
+    let mut selected = Vec::with_capacity(limit);
+    let prioritized_fact_count = fact_hits.len().min(limit.min(3));
+    let prioritized_skill_count = if fact_hits.is_empty() {
+        limit.min(skill_hits.len())
+    } else {
+        (limit - prioritized_fact_count).min(skill_hits.len().min(2))
+    };
+
+    let mut remaining_facts = fact_hits.into_iter();
+    let mut remaining_skills = skill_hits.into_iter();
+
+    selected.extend(remaining_facts.by_ref().take(prioritized_fact_count));
+    selected.extend(remaining_skills.by_ref().take(prioritized_skill_count));
+
+    if selected.len() < limit {
+        selected.extend(remaining_facts.by_ref().take(limit - selected.len()));
+    }
+    if selected.len() < limit {
+        selected.extend(remaining_skills.by_ref().take(limit - selected.len()));
+    }
+
+    selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fact(title: &str, score: f32) -> MemoryHit {
+        MemoryHit {
+            text: format!("fact:{title}"),
+            title: Some(title.to_string()),
+            score,
+            source: Some(MemoryHitSource::Memory),
+        }
+    }
+
+    fn saved_skill(name: &str, score: f32) -> MemoryHit {
+        MemoryHit {
+            text: format!("Description: {name}"),
+            title: Some(format!("{SKILL_TITLE_PREFIX}{name}")),
+            score,
+            source: Some(MemoryHitSource::Memory),
+        }
+    }
+
+    fn file_skill(name: &str, score: f32) -> MemoryHit {
+        MemoryHit {
+            text: format!("# {name}"),
+            title: Some(format!("{SKILL_TITLE_PREFIX}{name}")),
+            score,
+            source: Some(MemoryHitSource::WorkspaceSkillFile),
+        }
+    }
+
+    #[test]
+    fn select_context_hits_prioritizes_facts_before_extra_skills() {
+        let selected = select_context_hits(
+            vec![
+                fact("Fact A", 0.91),
+                fact("Fact B", 0.87),
+                fact("Fact C", 0.81),
+                fact("Fact D", 0.75),
+                saved_skill("Saved skill", 0.99),
+            ],
+            vec![
+                file_skill("File skill", 0.95),
+                file_skill("File skill 2", 0.93),
+            ],
+            5,
+        );
+
+        let titles: Vec<_> = selected
+            .iter()
+            .map(|hit| hit.title.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Fact A",
+                "Fact B",
+                "Fact C",
+                "[SKILL] Saved skill",
+                "[SKILL] File skill"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_memory_context_block_includes_skill_source_hints() {
+        let block =
+            build_memory_context_block(vec![saved_skill("deploy", 0.9), file_skill("lint", 0.8)])
+                .expect("context block");
+
+        assert!(block.contains("memory-backed; use `search_memory`"));
+        assert!(block.contains("workspace skill file (`.claude/skills/.../SKILL.md`)"));
+        assert!(block.contains("prefer `uv` for shell package management"));
+    }
 }

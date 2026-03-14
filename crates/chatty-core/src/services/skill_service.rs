@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use super::embedding_service::EmbeddingService;
-use super::memory_service::MemoryHit;
+use super::memory_service::{MemoryHit, MemoryHitSource};
 use crate::tools::save_skill_tool::SKILL_TITLE_PREFIX;
 
 // ── Embedding cache ──────────────────────────────────────────────────────────
@@ -235,10 +235,17 @@ impl SkillService {
                 keyword_overlap_score(&query_words, skill_name, &content)
             };
 
+            let source = if skills_dir == self.global_skills_dir.as_path() {
+                MemoryHitSource::GlobalSkillFile
+            } else {
+                MemoryHitSource::WorkspaceSkillFile
+            };
+
             hits.push(MemoryHit {
                 text: content,
                 title: Some(format!("{}{}", SKILL_TITLE_PREFIX, skill_name)),
                 score,
+                source: Some(source),
             });
         }
 

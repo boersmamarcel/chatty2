@@ -3202,79 +3202,21 @@ async fn run_llm_stream(
                 "Memory auto-retrieval: searching"
             );
 
-            // BM25 lexical search (existing)
-            let bm25_hits = if !query_text.is_empty() {
-                match mem_svc.search(&query_text, Some(3)).await {
-                    Ok(hits) if !hits.is_empty() => hits,
-                    Ok(_) if query_text != raw_text && !raw_text.is_empty() => {
-                        info!(conv_id = %conv_id, "Simplified query got 0 hits, retrying with raw text");
-                        mem_svc.search(&raw_text, Some(3)).await.unwrap_or_default()
-                    }
-                    Ok(empty) => empty,
-                    Err(e) => {
-                        warn!(error = ?e, "Memory auto-retrieval BM25 failed (non-fatal)");
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-
-            // Vector similarity search (if embedding service available).
-            // The query embedding is saved for skill scoring below.
-            let mut query_embedding_opt: Option<Vec<f32>> = None;
-            let vec_hits = if let Some(ref embed_svc) = embedding_service {
-                let search_text = if query_text.is_empty() {
-                    &raw_text
-                } else {
-                    &query_text
-                };
-                if !search_text.is_empty() {
-                    match embed_svc.embed(search_text).await {
-                        Ok(query_embedding) => {
-                            let hits = mem_svc
-                                .search_vec(query_embedding.clone(), Some(3))
-                                .await
-                                .unwrap_or_default();
-                            query_embedding_opt = Some(query_embedding);
-                            hits
-                        }
-                        Err(e) => {
-                            warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
-                            Vec::new()
-                        }
-                    }
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
-            // Merge BM25 + vector results, then extend with filesystem skill files.
-            // skill_service was read from the global set at startup (keyword-only) or
-            // replaced with an embedding-aware version when EmbeddingService initialised.
-            let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
-
             let workspace_skills_dir = workspace_dir
                 .as_deref()
                 .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
-            let skill_hits = skill_service
-                .load_hits(
-                    &query_text,
-                    query_embedding_opt.as_deref(),
-                    workspace_skills_dir.as_deref(),
-                )
-                .await;
-            hits.extend(skill_hits);
-            hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            hits.truncate(5);
-
-            if let Some(context_block) = chatty_core::tools::build_memory_context_block(hits) {
+            if let Some(context_block) = chatty_core::services::load_auto_context_block(
+                chatty_core::services::AutoContextRequest {
+                    memory_service: &mem_svc,
+                    embedding_service: embedding_service.as_ref(),
+                    skill_service: &skill_service,
+                    query_text: &query_text,
+                    fallback_query_text: Some(&raw_text),
+                    workspace_skills_dir: workspace_skills_dir.as_deref(),
+                },
+            )
+            .await
+            {
                 let mut augmented = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
                         text: context_block,

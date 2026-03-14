@@ -51,7 +51,9 @@ pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use remember_tool::{MemoryToolError, RememberTool};
 pub use save_skill_tool::{SKILL_TITLE_PREFIX, SaveSkillTool};
-pub use search_memory_tool::{SearchMemoryTool, build_memory_context_block, merge_search_results};
+pub use search_memory_tool::{
+    SearchMemoryTool, build_memory_context_block, merge_search_results, select_context_hits,
+};
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
