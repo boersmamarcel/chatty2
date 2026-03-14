@@ -132,7 +132,8 @@ impl Tool for SearchMemoryTool {
 /// Build a context block string from memory hits, partitioned into facts and skills.
 ///
 /// Hits whose title starts with `SKILL_TITLE_PREFIX` are formatted in a separate
-/// "skills" block; all other hits go into the "memories" block.
+/// "skills" block showing only a short description per skill.  The agent can call
+/// `read_skill` to load the full instructions for any skill listed here.
 /// Returns `None` when there are no hits to display.
 pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
     if hits.is_empty() {
@@ -161,22 +162,42 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
     }
 
     if !skill_hits.is_empty() {
-        block.push_str("[Relevant skills/procedures you've saved]\n");
+        block.push_str(
+            "[Relevant skills available — call read_skill with the skill name to get full instructions]\n",
+        );
         for hit in &skill_hits {
             let display_name = hit
                 .title
                 .as_deref()
                 .map(|t| t.trim_start_matches(SKILL_TITLE_PREFIX))
                 .unwrap_or("unnamed skill");
-            block.push_str(&format!("- \"{}\":\n", display_name));
-            for line in hit.text.lines() {
-                block.push_str(&format!("  {}\n", line));
-            }
+            // Show a single-line description.
+            // For filesystem skills `text` is already just the description.
+            // For memory-stored skills (save_skill) the text starts with
+            // "Description: <desc>\n1. step…" — extract only the first line.
+            let description = skill_description_line(&hit.text);
+            block.push_str(&format!("- \"{}\": {}\n", display_name, description));
         }
         block.push_str("[End of skills]\n\n");
     }
 
     Some(block)
+}
+
+/// Extract a single-line description from a skill's stored text.
+///
+/// For filesystem skills the text is already just the description string.
+/// For memory-stored skills (created via `save_skill`) the format is:
+/// `Description: <desc>\n1. first step\n…` — strip the prefix and take the first line.
+fn skill_description_line(text: &str) -> &str {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("Description:") {
+        // Take only the first line of the description value
+        rest.trim().lines().next().unwrap_or("")
+    } else {
+        // Already a plain description (filesystem skill)
+        text.lines().next().unwrap_or(text)
+    }
 }
 
 /// Merge BM25 and vector search results, deduplicating by text content.
@@ -226,4 +247,70 @@ pub fn merge_search_results(
     });
     merged.truncate(limit);
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::memory_service::MemoryHit;
+    use crate::tools::save_skill_tool::SKILL_TITLE_PREFIX;
+
+    fn make_skill_hit(name: &str, text: &str) -> MemoryHit {
+        MemoryHit {
+            text: text.to_string(),
+            title: Some(format!("{}{}", SKILL_TITLE_PREFIX, name)),
+            score: 0.9,
+        }
+    }
+
+    fn make_memory_hit(title: &str, text: &str) -> MemoryHit {
+        MemoryHit {
+            text: text.to_string(),
+            title: Some(title.to_string()),
+            score: 0.8,
+        }
+    }
+
+    #[test]
+    fn context_block_shows_one_line_description_for_filesystem_skill() {
+        // Filesystem skills already have just the description in `text`
+        let hits = vec![make_skill_hit("build-and-check", "Runs the full build pipeline.")];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("\"build-and-check\": Runs the full build pipeline."));
+        assert!(block.contains("read_skill"));
+        // Must NOT contain a multi-line indented dump
+        assert!(!block.contains("  Runs"));
+    }
+
+    #[test]
+    fn context_block_extracts_description_from_memory_skill() {
+        // Memory-stored skills have "Description: <desc>\n1. step…" format
+        let text = "Description: Use when deploying.\n1. Build.\n2. Push.";
+        let hits = vec![make_skill_hit("deploy", text)];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("\"deploy\": Use when deploying."));
+        // Steps should not appear in the context block
+        assert!(!block.contains("1. Build."));
+    }
+
+    #[test]
+    fn context_block_still_shows_facts() {
+        let hits = vec![make_memory_hit("user pref", "User likes dark mode.")];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("[Relevant memories from past conversations]"));
+        assert!(block.contains("User likes dark mode."));
+    }
+
+    #[test]
+    fn skill_description_line_strips_prefix_from_memory_format() {
+        let text = "Description: Short desc.\n1. Step one.\n2. Step two.";
+        assert_eq!(skill_description_line(text), "Short desc.");
+    }
+
+    #[test]
+    fn skill_description_line_passthrough_for_plain_text() {
+        // Filesystem skill already has just a description
+        let text = "Runs the full build pipeline.";
+        assert_eq!(skill_description_line(text), "Runs the full build pipeline.");
+    }
 }

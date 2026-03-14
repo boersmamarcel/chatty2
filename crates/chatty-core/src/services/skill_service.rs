@@ -6,6 +6,45 @@ use super::embedding_service::EmbeddingService;
 use super::memory_service::MemoryHit;
 use crate::tools::save_skill_tool::SKILL_TITLE_PREFIX;
 
+// ── Frontmatter helpers ──────────────────────────────────────────────────────
+
+/// Extract the `description` field from a SKILL.md YAML frontmatter block.
+///
+/// The frontmatter is a `---`-delimited YAML block at the top of the file.
+/// Returns `None` if the file has no frontmatter or no `description` key.
+pub fn extract_frontmatter_description(content: &str) -> Option<String> {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return None;
+    }
+    let rest = &content[3..];
+    // Frontmatter ends at the next `---` that starts on its own line.
+    // Accept `\n---\n`, `\n---\r\n`, and `\n---` at end-of-string.
+    let end = rest.find("\n---").filter(|&pos| {
+        let after = &rest[pos + 4..]; // skip "\n---"
+        after.is_empty() || after.starts_with('\n') || after.starts_with('\r')
+    })?;
+    let frontmatter = &rest[..end];
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("description:") {
+            let value = value.trim();
+            // Strip optional surrounding quotes
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .or_else(|| {
+                    value
+                        .strip_prefix('\'')
+                        .and_then(|v| v.strip_suffix('\''))
+                })
+                .unwrap_or(value);
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 // ── Embedding cache ──────────────────────────────────────────────────────────
 
 /// FNV-1a hash of `s`, returned as a 16-char hex string.
@@ -235,13 +274,85 @@ impl SkillService {
                 keyword_overlap_score(&query_words, skill_name, &content)
             };
 
+            // Store only the description so the context block stays slim.
+            // The full content is still used above for scoring (embedding + keyword).
+            // Agents that need the complete skill instructions call `read_skill`.
+            let summary = extract_frontmatter_description(&content).unwrap_or_else(|| {
+                // Fall back to the first non-empty, non-heading content line when
+                // there is no frontmatter description.
+                content
+                    .lines()
+                    .find(|l| {
+                        let l = l.trim();
+                        !l.is_empty() && !l.starts_with('#')
+                    })
+                    .unwrap_or("")
+                    .to_string()
+            });
+
             hits.push(MemoryHit {
-                text: content,
+                text: summary,
                 title: Some(format!("{}{}", SKILL_TITLE_PREFIX, skill_name)),
                 score,
             });
         }
 
         hits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_description_from_standard_frontmatter() {
+        let content = "---\nname: build-and-check\ndescription: Runs the full build pipeline.\nallowed-tools: Bash\n---\n\n# Body";
+        assert_eq!(
+            extract_frontmatter_description(content),
+            Some("Runs the full build pipeline.".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_description_with_quoted_value() {
+        let content = "---\nname: my-skill\ndescription: \"A quoted description.\"\n---\n";
+        assert_eq!(
+            extract_frontmatter_description(content),
+            Some("A quoted description.".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_frontmatter() {
+        let content = "# Just a markdown file\nNo frontmatter here.";
+        assert!(extract_frontmatter_description(content).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_no_description_key() {
+        let content = "---\nname: my-skill\nallowed-tools: Bash\n---\n# Body";
+        assert!(extract_frontmatter_description(content).is_none());
+    }
+
+    #[tokio::test]
+    async fn load_hits_returns_description_not_full_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("my-skill");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        let content = "---\nname: my-skill\ndescription: Short description.\n---\n\n# Heading\n\nLong content that should NOT be in context.";
+        tokio::fs::write(skill_dir.join("SKILL.md"), content)
+            .await
+            .unwrap();
+
+        let service = SkillService::new(None);
+        let hits = service
+            .load_hits("my skill query", None, Some(tmp.path()))
+            .await;
+
+        assert_eq!(hits.len(), 1);
+        // Only the description should be in `text`, not the full content
+        assert_eq!(hits[0].text, "Short description.");
+        assert!(!hits[0].text.contains("Long content"));
     }
 }
