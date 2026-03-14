@@ -154,6 +154,7 @@ pub struct ChatEngine {
     pub search_settings:
         Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
     pub embedding_service: Option<chatty_core::services::EmbeddingService>,
+    pub skill_service: chatty_core::services::SkillService,
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
@@ -191,6 +192,7 @@ impl ChatEngine {
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
+        let skill_service = chatty_core::services::SkillService::new(embedding_service.clone());
         Self {
             conversation: None,
             model_config,
@@ -202,6 +204,7 @@ impl ChatEngine {
             memory_service,
             search_settings,
             embedding_service,
+            skill_service,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
@@ -342,6 +345,7 @@ impl ChatEngine {
         let workspace_dir = self.execution_settings.workspace_dir.clone();
         let memory_service = self.memory_service.clone();
         let embedding_service = self.embedding_service.clone();
+        let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
             // Auto-retrieve relevant memories and inject as context
@@ -378,16 +382,14 @@ impl ChatEngine {
                         Vec::new()
                     };
 
-                    // Merge BM25 + vector results, then extend with local skill files.
-                    // SkillService handles both the workspace and global OS directories,
-                    // and caches embeddings on disk alongside each SKILL.md file.
+                    // Merge BM25 + vector results, then extend with filesystem skill files.
+                    // skill_service was constructed once at ChatEngine initialisation and
+                    // handles both the workspace and global OS skill directories.
                     let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
                     let workspace_skills_dir = workspace_dir
                         .as_deref()
                         .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
-                    let skill_service =
-                        chatty_core::services::SkillService::new(embedding_service.clone());
                     let skill_hits = skill_service
                         .load_hits(
                             &query_text,

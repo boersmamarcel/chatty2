@@ -188,11 +188,11 @@ impl SkillService {
             // Try SKILL.md then skill.md
             let mut content: Option<String> = None;
             for name in &["SKILL.md", "skill.md"] {
-                if let Ok(c) = tokio::fs::read_to_string(path.join(name)).await {
-                    if !c.trim().is_empty() {
-                        content = Some(c);
-                        break;
-                    }
+                if let Ok(c) = tokio::fs::read_to_string(path.join(name)).await
+                    && !c.trim().is_empty()
+                {
+                    content = Some(c);
+                    break;
                 }
             }
             let content = match content {

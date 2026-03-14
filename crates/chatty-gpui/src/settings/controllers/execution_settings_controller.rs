@@ -457,9 +457,13 @@ async fn init_azure_entra_embedding(
         azure_token,
     ) {
         let model_id = embed_svc.model_identifier();
-        cx.update(|cx| cx.set_global(embed_svc))
-            .map_err(|e| warn!(error = ?e, "Failed to set EmbeddingService global"))
-            .ok();
+        cx.update(|cx| {
+            let skill_service = chatty_core::services::SkillService::new(Some(embed_svc.clone()));
+            cx.set_global(embed_svc);
+            cx.set_global(skill_service);
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to set EmbeddingService and SkillService globals"))
+        .ok();
 
         if let Some(mem_svc) = mem_svc {
             if let Err(e) = mem_svc.enable_vec().await {
@@ -534,7 +538,10 @@ pub fn toggle_embedding(cx: &mut App) {
                         None,
                     ) {
                         let model_id = embed_svc.model_identifier();
+                        let skill_service =
+                            chatty_core::services::SkillService::new(Some(embed_svc.clone()));
                         cx.set_global(embed_svc);
+                        cx.set_global(skill_service);
 
                         // Enable vector index on memory service
                         let mem_svc = cx.try_global::<MemoryService>().cloned();
@@ -668,7 +675,9 @@ fn reinit_embedding_service(cx: &mut App) {
         None,
     ) {
         let model_id = embed_svc.model_identifier();
+        let skill_service = chatty_core::services::SkillService::new(Some(embed_svc.clone()));
         cx.set_global(embed_svc);
+        cx.set_global(skill_service);
 
         let mem_svc = cx.try_global::<MemoryService>().cloned();
         if let Some(mem_svc) = mem_svc {

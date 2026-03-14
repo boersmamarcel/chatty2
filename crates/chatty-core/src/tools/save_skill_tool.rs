@@ -26,6 +26,25 @@ pub struct SaveSkillArgs {
 ///
 /// Saved skills are distinguished from regular memories by a `[SKILL] ` title prefix,
 /// allowing the memory injection code to display them in a separate context block.
+///
+/// ## Two skill storage backends
+///
+/// Skills can reach the agent's context via two independent paths that are both
+/// displayed under the same `[Relevant skills/procedures you've saved]` block:
+///
+/// 1. **`save_skill` tool** (this type) — agent-authored skills stored inside the
+///    memvid memory store (BM25 + optional vector search).  The agent creates and
+///    owns these entries; they travel with the user's memory database.
+///
+/// 2. **`SKILL.md` files** — manually maintained Markdown files placed by the user
+///    in `<workspace>/.claude/skills/<name>/SKILL.md` (project-local) or
+///    `<data_dir>/chatty/skills/<name>/SKILL.md` (global).  These are outside the
+///    memory store and cannot be created or deleted by the agent.
+///
+/// Both paths produce `MemoryHit` objects and are merged before injection.  If the
+/// same skill exists in both backends (e.g. the agent saved it *and* the user has a
+/// handcrafted `SKILL.md`), both entries will appear — no automatic deduplication is
+/// performed because they may contain different, complementary information.
 #[derive(Clone)]
 pub struct SaveSkillTool {
     memory_service: MemoryService,
@@ -55,7 +74,12 @@ impl Tool for SaveSkillTool {
                          steps for future reuse. Saved skills are automatically surfaced at the \
                          start of future conversations when a similar task is detected. \
                          Good candidates: deployment workflows, data analysis pipelines, \
-                         build/test procedures, API integration patterns."
+                         build/test procedures, API integration patterns. \
+                         Note: users can also provide skills as SKILL.md files in \
+                         <workspace>/.claude/skills/<name>/ (project-local) or \
+                         <data_dir>/chatty/skills/<name>/ (global). Both sources are merged \
+                         into the same context block; calling save_skill is the agent-managed \
+                         alternative for skills that should travel with the memory database."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

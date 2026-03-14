@@ -900,13 +900,13 @@ impl AgentClient {
 
         if fetch_tool.is_some() || search_web_tool.is_some() {
             let has_search_api = search_web_tool.is_some()
-                && search_settings.as_ref().map_or(false, |s| {
+                && search_settings.as_ref().is_some_and(|s| {
                     use crate::settings::models::search_settings::SearchProvider;
                     let key = match s.active_provider {
                         SearchProvider::Tavily => &s.tavily_api_key,
                         SearchProvider::Brave => &s.brave_api_key,
                     };
-                    key.as_ref().map_or(false, |k| !k.is_empty())
+                    key.as_ref().is_some_and(|k| !k.is_empty())
                 });
             let search_note = if has_search_api {
                 "search API"
