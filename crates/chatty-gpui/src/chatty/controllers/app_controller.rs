@@ -2902,10 +2902,14 @@ async fn run_llm_stream(
     .map_err(|e| warn!(error = ?e, "Failed to update approval store with notifiers"))
     .ok();
 
-    // 2. Get max agent turns
+    // 2. Get max agent turns and workspace dir
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
+    let workspace_dir = cx
+        .update(|cx| cx.global::<ExecutionSettingsModel>().workspace_dir.clone())
+        .ok()
+        .flatten();
 
     // 2b. Compute token budget snapshot in parallel with the LLM call.
     //
@@ -3029,60 +3033,27 @@ async fn run_llm_stream(
                 Vec::new()
             };
 
-            // Merge BM25 + vector results
-            let hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
+            // Merge BM25 + vector results, then extend with local skill files
+            let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
-            if !hits.is_empty() {
-                // Partition hits: skills (title prefixed with "[SKILL] ") vs regular facts
-                let (skill_hits, fact_hits): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| {
-                    h.title
-                        .as_deref()
-                        .map(|t| t.starts_with(chatty_core::tools::SKILL_TITLE_PREFIX))
-                        .unwrap_or(false)
-                });
+            let local_skill_hits = workspace_dir
+                .as_deref()
+                .map(|d| {
+                    chatty_core::tools::load_local_skill_hits(
+                        &std::path::Path::new(d).join(".claude").join("skills"),
+                    )
+                })
+                .unwrap_or_default();
+            hits.extend(local_skill_hits);
 
-                let mut context_block = String::new();
-
-                if !fact_hits.is_empty() {
-                    context_block.push_str("[Relevant memories from past conversations]\n");
-                    for hit in &fact_hits {
-                        if let Some(ref title) = hit.title {
-                            context_block.push_str(&format!("- {}: {}\n", title, hit.text));
-                        } else {
-                            context_block.push_str(&format!("- {}\n", hit.text));
-                        }
-                    }
-                    context_block.push_str("[End of memories]\n\n");
-                }
-
-                if !skill_hits.is_empty() {
-                    context_block.push_str("[Relevant skills/procedures you've saved]\n");
-                    for hit in &skill_hits {
-                        let display_name = hit
-                            .title
-                            .as_deref()
-                            .map(|t| t.trim_start_matches(chatty_core::tools::SKILL_TITLE_PREFIX))
-                            .unwrap_or("unnamed skill");
-                        context_block.push_str(&format!("- \"{}\":\n", display_name));
-                        for line in hit.text.lines() {
-                            context_block.push_str(&format!("  {}\n", line));
-                        }
-                    }
-                    context_block.push_str("[End of skills]\n\n");
-                }
-
+            if let Some(context_block) = chatty_core::tools::build_memory_context_block(hits) {
                 let mut augmented = vec![rig::message::UserContent::Text(
                     rig::completion::message::Text {
                         text: context_block,
                     },
                 )];
                 augmented.extend(user_contents);
-                debug!(
-                    conv_id = %conv_id,
-                    fact_count = fact_hits.len(),
-                    skill_count = skill_hits.len(),
-                    "Injected memory context into user message"
-                );
+                debug!(conv_id = %conv_id, "Injected memory context into user message");
                 augmented
             } else {
                 user_contents

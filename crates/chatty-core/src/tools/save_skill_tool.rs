@@ -90,7 +90,7 @@ impl Tool for SaveSkillTool {
         let title = format!("{}{}", SKILL_TITLE_PREFIX, args.name);
 
         self.memory_service
-            .remember(&content, Some(&title), &[("skill", "true")])
+            .remember(&content, Some(&title), &[])
             .await
             .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
 

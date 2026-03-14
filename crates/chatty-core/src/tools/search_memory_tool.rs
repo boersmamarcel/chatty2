@@ -2,9 +2,11 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 use tracing::warn;
 
 use super::remember_tool::MemoryToolError;
+use super::save_skill_tool::SKILL_TITLE_PREFIX;
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::{MemoryHit, MemoryService};
 
@@ -126,6 +128,104 @@ impl Tool for SearchMemoryTool {
 
         Ok(SearchMemoryToolOutput { results })
     }
+}
+
+/// Build a context block string from memory hits, partitioned into facts and skills.
+///
+/// Hits whose title starts with `SKILL_TITLE_PREFIX` are formatted in a separate
+/// "skills" block; all other hits go into the "memories" block.
+/// Returns `None` when there are no hits to display.
+pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
+    if hits.is_empty() {
+        return None;
+    }
+
+    let (skill_hits, fact_hits): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| {
+        h.title
+            .as_deref()
+            .map(|t| t.starts_with(SKILL_TITLE_PREFIX))
+            .unwrap_or(false)
+    });
+
+    if skill_hits.is_empty() && fact_hits.is_empty() {
+        return None;
+    }
+
+    let mut block = String::new();
+
+    if !fact_hits.is_empty() {
+        block.push_str("[Relevant memories from past conversations]\n");
+        for hit in &fact_hits {
+            if let Some(ref title) = hit.title {
+                block.push_str(&format!("- {}: {}\n", title, hit.text));
+            } else {
+                block.push_str(&format!("- {}\n", hit.text));
+            }
+        }
+        block.push_str("[End of memories]\n\n");
+    }
+
+    if !skill_hits.is_empty() {
+        block.push_str("[Relevant skills/procedures you've saved]\n");
+        for hit in &skill_hits {
+            let display_name = hit
+                .title
+                .as_deref()
+                .map(|t| t.trim_start_matches(SKILL_TITLE_PREFIX))
+                .unwrap_or("unnamed skill");
+            block.push_str(&format!("- \"{}\":\n", display_name));
+            for line in hit.text.lines() {
+                block.push_str(&format!("  {}\n", line));
+            }
+        }
+        block.push_str("[End of skills]\n\n");
+    }
+
+    Some(block)
+}
+
+/// Load `SKILL.md` files from `skills_dir` as `MemoryHit` objects (in-memory, not persisted).
+///
+/// Scans each immediate subdirectory of `skills_dir` for a `SKILL.md` (or `skill.md`) file.
+/// The subdirectory name becomes the skill name, prefixed with `SKILL_TITLE_PREFIX`.
+/// Missing or unreadable directories are silently skipped.
+pub fn load_local_skill_hits(skills_dir: &Path) -> Vec<MemoryHit> {
+    let mut hits = Vec::new();
+
+    let entries = match std::fs::read_dir(skills_dir) {
+        Ok(e) => e,
+        Err(_) => return hits,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Try SKILL.md then skill.md
+        let content = ["SKILL.md", "skill.md"]
+            .iter()
+            .find_map(|name| std::fs::read_to_string(path.join(name)).ok());
+
+        let content = match content {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => continue,
+        };
+
+        let skill_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        hits.push(MemoryHit {
+            text: content,
+            title: Some(format!("{}{}", SKILL_TITLE_PREFIX, skill_name)),
+            score: 1.0,
+        });
+    }
+
+    hits
 }
 
 /// Merge BM25 and vector search results, deduplicating by text content.
