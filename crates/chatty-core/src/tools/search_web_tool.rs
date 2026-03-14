@@ -362,11 +362,15 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
         // Find the href attribute within this anchor (search backward for <a)
         let tag_start = html[..link_start].rfind('<').unwrap_or(link_start);
 
+        // Search for href in the full anchor tag (up to >) so attribute order doesn't matter
+        let tag_end = html[tag_start..]
+            .find('>')
+            .map(|p| tag_start + p)
+            .unwrap_or(link_start + link_marker.len());
+
         // Extract href value
         let href_marker = "href=\"";
-        let url = if let Some(href_pos) =
-            html[tag_start..link_start + link_marker.len()].find(href_marker)
-        {
+        let url = if let Some(href_pos) = html[tag_start..tag_end].find(href_marker) {
             let href_value_start = tag_start + href_pos + href_marker.len();
             if let Some(href_end) = html[href_value_start..].find('"') {
                 html[href_value_start..href_value_start + href_end].to_string()
