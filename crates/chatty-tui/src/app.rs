@@ -250,6 +250,27 @@ fn handle_key_event(
         }
     }
 
+    // Slash command menu is open while typing `/...` in input
+    if input_state.is_slash_menu_open() {
+        match key.code {
+            KeyCode::Up => {
+                input_state.move_slash_menu_up();
+                return KeyAction::None;
+            }
+            KeyCode::Down => {
+                input_state.move_slash_menu_down();
+                return KeyAction::None;
+            }
+            KeyCode::Tab => {
+                return apply_selected_slash_command(input_state, engine);
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                return apply_selected_slash_command(input_state, engine);
+            }
+            _ => {}
+        }
+    }
+
     // If there's a pending approval, handle y/n first
     if engine.pending_approval.is_some() {
         match key.code {
@@ -303,29 +324,8 @@ fn handle_key_event(
                 // Check for slash commands
                 if let Some(cmd) = engine.try_handle_command(&text) {
                     input_state.take_input(); // consume the input
-                    match cmd {
-                        Command::Model(Some(query)) => return KeyAction::SwitchModel(query),
-                        Command::Model(None) => return KeyAction::OpenModelPicker,
-                        Command::Tools(Some(name)) => return KeyAction::ToggleTool(name),
-                        Command::Tools(None) => return KeyAction::OpenToolPicker,
-                        Command::AddDir(Some(directory)) => {
-                            return KeyAction::AddDirectory(directory);
-                        }
-                        Command::AddDir(None) => {
-                            engine.add_system_message("Usage: /add-dir <directory>".to_string());
-                        }
-                        Command::Agent(Some(prompt)) => return KeyAction::LaunchAgent(prompt),
-                        Command::Agent(None) => {
-                            engine.add_system_message("Usage: /agent <prompt>".to_string());
-                        }
-                        Command::Clear => return KeyAction::ClearConversation,
-                        Command::Compact => return KeyAction::CompactConversation,
-                        Command::Context => return KeyAction::ShowContext,
-                        Command::Copy => return KeyAction::CopyLastResponse,
-                        Command::Cwd(Some(directory)) => {
-                            return KeyAction::ChangeWorkingDirectory(directory);
-                        }
-                        Command::Cwd(None) => return KeyAction::ShowWorkingDirectory,
+                    if let Some(action) = map_command_to_action(cmd, engine) {
+                        return action;
                     }
                 }
                 let text = input_state.take_input();
@@ -339,5 +339,52 @@ fn handle_key_event(
             input_state.textarea.input(key);
             KeyAction::None
         }
+    }
+}
+
+fn apply_selected_slash_command(
+    input_state: &mut InputState,
+    engine: &mut ChatEngine,
+) -> KeyAction {
+    let Some(item) = input_state.selected_slash_menu_item() else {
+        return KeyAction::None;
+    };
+
+    input_state.set_input_text(item.insert_text);
+
+    if item.execute_immediately
+        && let Some(cmd) = engine.try_handle_command(&input_state.peek_input())
+    {
+        input_state.take_input();
+        if let Some(action) = map_command_to_action(cmd, engine) {
+            return action;
+        }
+    }
+
+    KeyAction::None
+}
+
+fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAction> {
+    match cmd {
+        Command::Model(Some(query)) => Some(KeyAction::SwitchModel(query)),
+        Command::Model(None) => Some(KeyAction::OpenModelPicker),
+        Command::Tools(Some(name)) => Some(KeyAction::ToggleTool(name)),
+        Command::Tools(None) => Some(KeyAction::OpenToolPicker),
+        Command::AddDir(Some(directory)) => Some(KeyAction::AddDirectory(directory)),
+        Command::AddDir(None) => {
+            engine.add_system_message("Usage: /add-dir <directory>".to_string());
+            None
+        }
+        Command::Agent(Some(prompt)) => Some(KeyAction::LaunchAgent(prompt)),
+        Command::Agent(None) => {
+            engine.add_system_message("Usage: /agent <prompt>".to_string());
+            None
+        }
+        Command::Clear => Some(KeyAction::ClearConversation),
+        Command::Compact => Some(KeyAction::CompactConversation),
+        Command::Context => Some(KeyAction::ShowContext),
+        Command::Copy => Some(KeyAction::CopyLastResponse),
+        Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
+        Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
     }
 }

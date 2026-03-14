@@ -86,6 +86,8 @@ MCP servers configured in the desktop app are also available in chatty-tui.
 
 ## Slash commands
 
+Typing `/` in the input opens an inline slash-command menu. Use `↑/↓` to select and `Tab` or `Enter` to apply.
+
 | Command | Action |
 |:--------|:-------|
 | `/model [query]` | Switch model (`/model` opens picker) |
