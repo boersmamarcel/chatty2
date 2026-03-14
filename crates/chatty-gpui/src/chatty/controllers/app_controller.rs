@@ -1040,8 +1040,9 @@ impl ChattyApp {
                     // Set this BEFORE restoring the message so the UI is in correct state
                     state.set_streaming(has_active_stream, cx);
 
-                    // Restore the per-conversation working directory override (without emitting event)
-                    state.working_dir = conversation_working_dir;
+                    // Restore the per-conversation working directory override without emitting
+                    // a WorkingDirChanged event (which would trigger an unnecessary agent rebuild)
+                    state.set_working_dir_silent(conversation_working_dir);
                 });
 
                 // Restore in-progress streaming message from Conversation model if it exists
@@ -1221,6 +1222,9 @@ impl ChattyApp {
 
             let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets, theme_colors, search_settings) = cx
                 .update(|cx| {
+                    // Clone the global settings and apply a per-conversation workspace_dir override
+                    // if one is set. This is an intentional local copy — the global settings are
+                    // not modified; only the agent being built for this conversation uses the override.
                     let mut settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
                         .clone();
@@ -1238,19 +1242,31 @@ impl ChattyApp {
                         settings.workspace_dir = Some(working_dir.to_string_lossy().to_string());
                     }
                     let artifacts = conv.map(|c| c.pending_artifacts());
-                    // Drop the existing shell session if network_isolation changed — it was
-                    // spawned with the old setting and cannot be reconfigured in place.
-                    // Passing None lets the factory create a fresh session with the new setting.
-                    // Also drop the session if workspace_dir changed (to pick up the new working dir).
+                    // Drop the existing shell session if network_isolation or workspace_dir changed
+                    // — it was spawned with the old settings and cannot be reconfigured in place.
+                    // Passing None lets the factory create a fresh session with the new settings.
+                    // The session must be replaced if *either* setting changes, as an existing session
+                    // cannot be reconfigured after creation.
+                    let isolation_changed = conv
+                        .and_then(|c| c.shell_session())
+                        .map(|s| s.network_isolation() != settings.network_isolation)
+                        .unwrap_or(false);
+                    let workspace_changed = conv
+                        .and_then(|c| c.shell_session())
+                        .map(|sess| {
+                            sess.workspace_dir().map(|ws| ws.as_str())
+                                != settings.workspace_dir.as_deref()
+                        })
+                        .unwrap_or(false);
                     let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
-                        if s.network_isolation() == settings.network_isolation
-                            && s.workspace_dir().as_deref() == settings.workspace_dir.as_deref()
-                        {
+                        if !isolation_changed && !workspace_changed {
                             Some(s)
                         } else {
                             info!(
                                 conv_id = %conv_id,
-                                "Shell session replaced due to settings change (isolation or workspace)"
+                                isolation_changed,
+                                workspace_changed,
+                                "Shell session replaced due to settings change"
                             );
                             None
                         }

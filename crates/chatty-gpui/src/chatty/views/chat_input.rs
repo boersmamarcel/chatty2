@@ -115,6 +115,11 @@ impl ChatInputState {
         cx.notify();
     }
 
+    /// Set the working directory without emitting an event (for restoring state on conversation load)
+    pub fn set_working_dir_silent(&mut self, dir: Option<PathBuf>) {
+        self.working_dir = dir;
+    }
+
     /// Add file attachments with validation
     pub fn add_attachments(&mut self, paths: Vec<PathBuf>, _cx: &mut Context<Self>) {
         for path in paths {
@@ -694,12 +699,17 @@ impl RenderOnce for ChatInput {
                                                     .on_mouse_down(
                                                         MouseButton::Left,
                                                         move |_event, _window, cx| {
-                                                            state_for_dir_reset.update(
-                                                                cx,
-                                                                |state, cx| {
+                                                            state_for_dir_reset
+                                                                .update(cx, |state, cx| {
                                                                     state.set_working_dir(None, cx);
-                                                                },
-                                                            );
+                                                                })
+                                                                .map_err(|e| {
+                                                                    warn!(
+                                                                        error = ?e,
+                                                                        "Failed to reset working directory"
+                                                                    )
+                                                                })
+                                                                .ok();
                                                         },
                                                     ),
                                             )

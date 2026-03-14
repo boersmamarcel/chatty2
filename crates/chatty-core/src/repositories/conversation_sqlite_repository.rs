@@ -35,7 +35,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (
         2,
-        "ALTER TABLE conversations ADD COLUMN working_dir TEXT DEFAULT NULL;",
+        "ALTER TABLE conversations ADD COLUMN working_dir TEXT;",
     ),
 ];
 
