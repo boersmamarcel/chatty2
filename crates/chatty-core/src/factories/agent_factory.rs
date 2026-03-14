@@ -811,7 +811,10 @@ impl AgentClient {
                     mem_svc.clone(),
                     embedding_service.clone(),
                 )),
-                Some(SaveSkillTool::new(mem_svc.clone())),
+                Some(SaveSkillTool::new(
+                    mem_svc.clone(),
+                    embedding_service.clone(),
+                )),
                 Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
             )
         } else {

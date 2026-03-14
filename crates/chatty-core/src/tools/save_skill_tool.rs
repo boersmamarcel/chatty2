@@ -1,7 +1,9 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
+use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
 use crate::tools::remember_tool::MemoryToolError;
 
@@ -27,11 +29,15 @@ pub struct SaveSkillArgs {
 #[derive(Clone)]
 pub struct SaveSkillTool {
     memory_service: MemoryService,
+    embedding_service: Option<EmbeddingService>,
 }
 
 impl SaveSkillTool {
-    pub fn new(memory_service: MemoryService) -> Self {
-        Self { memory_service }
+    pub fn new(memory_service: MemoryService, embedding_service: Option<EmbeddingService>) -> Self {
+        Self {
+            memory_service,
+            embedding_service,
+        }
     }
 }
 
@@ -89,10 +95,28 @@ impl Tool for SaveSkillTool {
         let content = format!("Description: {}\n{}", args.description, steps_text);
         let title = format!("{}{}", SKILL_TITLE_PREFIX, args.name);
 
-        self.memory_service
-            .remember(&content, Some(&title), &[])
-            .await
-            .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+        if let Some(ref embed_svc) = self.embedding_service {
+            match embed_svc.embed(&content).await {
+                Ok(embedding) => {
+                    self.memory_service
+                        .remember_with_embedding(&content, embedding, Some(&title), &[])
+                        .await
+                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Embedding failed, falling back to BM25-only storage");
+                    self.memory_service
+                        .remember(&content, Some(&title), &[])
+                        .await
+                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                }
+            }
+        } else {
+            self.memory_service
+                .remember(&content, Some(&title), &[])
+                .await
+                .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+        }
 
         Ok(format!("Skill saved: \"{}\"", args.name))
     }
