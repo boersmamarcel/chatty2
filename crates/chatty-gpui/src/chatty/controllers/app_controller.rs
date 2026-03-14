@@ -220,6 +220,9 @@ impl ChattyApp {
                 SidebarEvent::DeleteConversation(conv_id) => {
                     app.delete_conversation(conv_id, cx);
                 }
+                SidebarEvent::ExportConversation(conv_id) => {
+                    app.export_conversation_markdown(conv_id, cx);
+                }
                 SidebarEvent::ToggleCollapsed(collapsed) => {
                     // Optional: Could save collapsed state to settings here
                     debug!(collapsed = collapsed, "Sidebar toggled");
@@ -1424,6 +1427,89 @@ impl ChattyApp {
                 warn!(error = ?e, conv_id = %conv_id, "Failed to delete conversation from disk");
             }
             Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    /// Export a conversation as Markdown with an OS file-save dialog.
+    ///
+    /// Builds markdown from the conversation history in `ConversationsStore`,
+    /// prompts the user for a save location, and writes the file asynchronously.
+    fn export_conversation_markdown(&self, id: &str, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+
+        // Build markdown from ConversationsStore (works for any conversation, not just active)
+        let (title, markdown) = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            let Some(conv) = store.get_conversation(&conv_id) else {
+                return (String::from("Conversation"), String::new());
+            };
+            let title = conv.title().to_string();
+            let mut md = format!("# {title}\n\n");
+            for msg in conv.history() {
+                match msg {
+                    rig::completion::Message::User { content, .. } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|c| match c {
+                                rig::completion::message::UserContent::Text(t) => {
+                                    Some(t.text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if !text.is_empty() {
+                            md.push_str(&format!("---\n\n**User**\n\n{text}\n\n"));
+                        }
+                    }
+                    rig::completion::Message::Assistant { content, .. } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|c| match c {
+                                rig::completion::message::AssistantContent::Text(t) => {
+                                    Some(t.text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if !text.is_empty() {
+                            md.push_str(&format!("---\n\n**Assistant**\n\n{text}\n\n"));
+                        }
+                    }
+                }
+            }
+            (title, md)
+        });
+
+        if markdown.is_empty() {
+            warn!(conv_id = %conv_id, "Cannot export: conversation not found or has no messages");
+            return;
+        }
+
+        let suggested = format!(
+            "{}.md",
+            title.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+        );
+        let home = dirs::home_dir()
+            .unwrap_or_else(|| dirs::document_dir().unwrap_or_else(|| PathBuf::from(".")));
+
+        cx.spawn(async move |cx| {
+            let receiver = cx
+                .update(|cx| cx.prompt_for_new_path(&home, Some(&suggested)))
+                .map_err(|e| warn!(error = ?e, "Failed to open save dialog"))
+                .ok()?;
+            match receiver.await {
+                Ok(Ok(Some(path))) => {
+                    if let Err(e) = tokio::fs::write(&path, markdown.as_bytes()).await {
+                        warn!(error = ?e, path = ?path, "Failed to write markdown export");
+                    }
+                }
+                Ok(Ok(None)) => {} // user cancelled
+                Ok(Err(e)) => warn!(error = ?e, "Save dialog returned error"),
+                Err(e) => warn!(error = ?e, "Failed to receive save dialog result"),
+            }
+            Some(())
         })
         .detach();
     }

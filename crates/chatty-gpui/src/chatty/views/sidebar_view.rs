@@ -13,6 +13,7 @@ pub enum SidebarEvent {
     OpenSettings,
     SelectConversation(String),
     DeleteConversation(String),
+    ExportConversation(String),
     ToggleCollapsed(bool),
     LoadMore,
 }
@@ -199,6 +200,15 @@ impl Render for SidebarView {
                                                         move |_conv_id, cx| {
                                                             entity.update(cx, |_, cx| {
                                                                 cx.emit(SidebarEvent::DeleteConversation(id.clone()));
+                                                            });
+                                                        }
+                                                    })
+                                                    .on_export({
+                                                        let entity = sidebar_entity.clone();
+                                                        let id = id.clone();
+                                                        move |_conv_id, cx| {
+                                                            entity.update(cx, |_, cx| {
+                                                                cx.emit(SidebarEvent::ExportConversation(id.clone()));
                                                             });
                                                         }
                                                     }),

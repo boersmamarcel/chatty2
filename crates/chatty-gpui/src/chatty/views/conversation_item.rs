@@ -1,6 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{ActiveTheme, Collapsible};
+use gpui_component::popover::Popover;
+use gpui_component::{ActiveTheme, Collapsible, Icon, IconName, Sizable, button::Button};
 use std::sync::Arc;
 
 /// Callback type for conversation actions
@@ -14,6 +15,7 @@ pub struct ConversationItem {
     is_active: bool,
     on_click: Option<ConversationActionCallback>,
     on_delete: Option<ConversationActionCallback>,
+    on_export: Option<ConversationActionCallback>,
     is_collapsed: bool,
     cost_usd: Option<f64>,
 }
@@ -26,6 +28,7 @@ impl ConversationItem {
             is_active: false,
             on_click: None,
             on_delete: None,
+            on_export: None,
             is_collapsed: false,
             cost_usd: None,
         }
@@ -56,6 +59,14 @@ impl ConversationItem {
         self.on_delete = Some(Arc::new(callback));
         self
     }
+
+    pub fn on_export<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, &mut App) + Send + Sync + 'static,
+    {
+        self.on_export = Some(Arc::new(callback));
+        self
+    }
 }
 
 impl Collapsible for ConversationItem {
@@ -73,8 +84,10 @@ impl RenderOnce for ConversationItem {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id_for_click = self.id.clone();
         let id_for_delete = self.id.clone();
+        let id_for_export = self.id.clone();
         let on_click = self.on_click.clone();
         let on_delete = self.on_delete.clone();
+        let on_export = self.on_export.clone();
 
         let bg_color = if self.is_active {
             cx.theme().secondary
@@ -139,27 +152,69 @@ impl RenderOnce for ConversationItem {
                         )
                     }),
             )
-            .when(!self.is_collapsed && on_delete.is_some(), |this| {
-                this.child(
-                    // Delete button (visible on hover)
-                    div()
-                        .w_5()
-                        .h_5()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_sm()
-                        .text_xs()
-                        .text_color(rgb(0x666666))
-                        .hover(|style| style.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                        .child("×")
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            cx.stop_propagation();
-                            if let Some(callback) = &on_delete {
-                                callback(&id_for_delete, cx);
-                            }
-                        }),
-                )
-            })
+            .when(
+                !self.is_collapsed && (on_delete.is_some() || on_export.is_some()),
+                |this| {
+                    // "…" button that opens a popover with Delete / Export actions
+                    let trigger = Button::new(format!("menu-{}", self.id))
+                        .icon(Icon::new(IconName::Ellipsis))
+                        .xsmall()
+                        .ghost();
+
+                    let export_btn_id = SharedString::from(format!("export-{}", self.id));
+                    let delete_btn_id = SharedString::from(format!("delete-{}", self.id));
+
+                    this.child(
+                        Popover::new(SharedString::from(format!("conv-menu-{}", self.id)))
+                            .trigger(trigger)
+                            .appearance(false)
+                            .content(move |_, _window, cx| {
+                                let on_delete = on_delete.clone();
+                                let on_export = on_export.clone();
+                                let id_del = id_for_delete.clone();
+                                let id_exp = id_for_export.clone();
+                                let export_btn_id = export_btn_id.clone();
+                                let delete_btn_id = delete_btn_id.clone();
+
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .bg(cx.theme().background)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .rounded_md()
+                                    .shadow_md()
+                                    .p_1()
+                                    .min_w(px(120.))
+                                    .when_some(on_export, |this, cb| {
+                                        this.child(
+                                            Button::new(export_btn_id)
+                                                .label("Export")
+                                                .ghost()
+                                                .xsmall()
+                                                .w_full()
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    cb(&id_exp, cx);
+                                                }),
+                                        )
+                                    })
+                                    .when_some(on_delete, |this, cb| {
+                                        this.child(
+                                            Button::new(delete_btn_id)
+                                                .label("Delete")
+                                                .ghost()
+                                                .xsmall()
+                                                .w_full()
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    cb(&id_del, cx);
+                                                }),
+                                        )
+                                    })
+                            }),
+                    )
+                },
+            )
     }
 }
