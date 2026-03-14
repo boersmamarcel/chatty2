@@ -356,13 +356,19 @@ impl ChatEngine {
                         }
                     };
 
-                    // Vector similarity search (if embedding service available)
+                    // Vector similarity search (if embedding service available).
+                    // The query embedding is saved for skill scoring below.
+                    let mut query_embedding_opt: Option<Vec<f32>> = None;
                     let vec_hits = if let Some(ref embed_svc) = embedding_service {
                         match embed_svc.embed(&query_text).await {
-                            Ok(query_embedding) => mem_svc
-                                .search_vec(query_embedding, Some(3))
-                                .await
-                                .unwrap_or_default(),
+                            Ok(query_embedding) => {
+                                let hits = mem_svc
+                                    .search_vec(query_embedding.clone(), Some(3))
+                                    .await
+                                    .unwrap_or_default();
+                                query_embedding_opt = Some(query_embedding);
+                                hits
+                            }
                             Err(e) => {
                                 warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
                                 Vec::new()
@@ -372,19 +378,37 @@ impl ChatEngine {
                         Vec::new()
                     };
 
-                    // Merge BM25 + vector results, then extend with local skill files
+                    // Merge BM25 + vector results, then extend with local skill files.
+                    // Skills are scored by cosine similarity (cached on disk) or keyword
+                    // overlap, and loaded from both the workspace and the global OS dir.
                     let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
-                    let local_skill_hits = if let Some(d) = workspace_dir.as_deref() {
+                    let workspace_skill_hits = if let Some(d) = workspace_dir.as_deref() {
                         chatty_core::tools::load_local_skill_hits(
                             &std::path::Path::new(d).join(".claude").join("skills"),
                             &query_text,
+                            query_embedding_opt.as_deref(),
+                            embedding_service.as_ref(),
                         )
                         .await
                     } else {
                         Vec::new()
                     };
-                    hits.extend(local_skill_hits);
+                    let global_skill_hits = if let Some(global_dir) =
+                        dirs::data_dir().map(|d| d.join("chatty").join("skills"))
+                    {
+                        chatty_core::tools::load_local_skill_hits(
+                            &global_dir,
+                            &query_text,
+                            query_embedding_opt.as_deref(),
+                            embedding_service.as_ref(),
+                        )
+                        .await
+                    } else {
+                        Vec::new()
+                    };
+                    hits.extend(workspace_skill_hits);
+                    hits.extend(global_skill_hits);
                     hits.sort_by(|a, b| {
                         b.score
                             .partial_cmp(&a.score)
