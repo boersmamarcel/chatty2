@@ -117,6 +117,11 @@ impl ShellSession {
         self.network_isolation
     }
 
+    /// Return the workspace directory this session was created with
+    pub fn workspace_dir(&self) -> Option<&String> {
+        self.workspace_dir.as_ref()
+    }
+
     /// Check if the current session process is running inside a sandbox
     pub async fn is_sandboxed(&self) -> bool {
         let process = self.process.lock().await;

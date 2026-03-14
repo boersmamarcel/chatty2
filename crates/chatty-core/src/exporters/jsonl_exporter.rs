@@ -390,6 +390,7 @@ mod tests {
             regeneration_records: serde_json::to_string(&regeneration_records).unwrap(),
             created_at: 1700000000,
             updated_at: 1700000100,
+            working_dir: None,
         }
     }
 
@@ -821,6 +822,7 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 0,
             updated_at: 0,
+            working_dir: None,
         };
         let opts = SftExportOptions::default();
         assert!(conversation_to_sft_jsonl(&conv, None, &opts).is_err());

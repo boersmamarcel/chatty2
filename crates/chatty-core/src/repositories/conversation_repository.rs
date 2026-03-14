@@ -32,6 +32,11 @@ fn default_empty_regeneration_records() -> String {
     "[]".to_string()
 }
 
+/// Default None working directory for backward compatibility
+fn default_none_working_dir() -> Option<String> {
+    None
+}
+
 /// Lightweight conversation metadata used for the sidebar.
 /// Loaded at startup without deserializing full message history.
 #[derive(Debug, Clone)]
@@ -62,6 +67,8 @@ pub struct ConversationData {
     pub regeneration_records: String, // JSON-serialized Vec<RegenerationRecord> (DPO preference pairs)
     pub created_at: i64, // Unix timestamp
     pub updated_at: i64, // Unix timestamp
+    #[serde(default = "default_none_working_dir")]
+    pub working_dir: Option<String>, // Per-conversation working directory override
 }
 
 impl ConversationData {

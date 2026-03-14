@@ -101,9 +101,8 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            working_dir: None,
         };
-
-        repo.save("test-1", data.clone()).await.unwrap();
 
         let loaded = repo.load_all().await.unwrap();
         assert_eq!(loaded.len(), 1);
@@ -128,6 +127,7 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            working_dir: None,
         };
 
         repo.save("test-1", data).await.unwrap();
@@ -154,6 +154,7 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            working_dir: None,
         };
 
         let data2 = ConversationData {
@@ -169,6 +170,7 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 2000,
             updated_at: 2000,
+            working_dir: None,
         };
 
         repo.save("test-1", data1).await.unwrap();

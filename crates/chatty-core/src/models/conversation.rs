@@ -70,6 +70,8 @@ pub struct Conversation {
     pending_artifacts: PendingArtifacts,
     /// Persistent shell session for this conversation (lazily initialized)
     shell_session: Option<std::sync::Arc<ShellSession>>,
+    /// Per-conversation working directory override (overrides the global workspace_dir setting)
+    working_dir: Option<PathBuf>,
 }
 
 impl Conversation {
@@ -145,6 +147,7 @@ impl Conversation {
             streaming_trace: None,
             pending_artifacts,
             shell_session,
+            working_dir: None,
         })
     }
 
@@ -256,6 +259,7 @@ impl Conversation {
             streaming_trace: None,
             pending_artifacts,
             shell_session,
+            working_dir: data.working_dir.map(PathBuf::from),
         })
     }
 
@@ -587,6 +591,17 @@ impl Conversation {
     /// Set or replace the shell session for this conversation
     pub fn set_shell_session(&mut self, session: Option<std::sync::Arc<ShellSession>>) {
         self.shell_session = session;
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Get the per-conversation working directory override
+    pub fn working_dir(&self) -> Option<&PathBuf> {
+        self.working_dir.as_ref()
+    }
+
+    /// Set or clear the per-conversation working directory override
+    pub fn set_working_dir(&mut self, dir: Option<PathBuf>) {
+        self.working_dir = dir;
         self.updated_at = SystemTime::now();
     }
 

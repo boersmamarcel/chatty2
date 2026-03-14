@@ -396,6 +396,10 @@ impl ChattyApp {
                     debug!("ChatInputEvent::Stop received");
                     app.stop_stream(cx);
                 }
+                ChatInputEvent::WorkingDirChanged(dir) => {
+                    debug!(dir = ?dir, "ChatInputEvent::WorkingDirChanged received");
+                    app.change_conversation_working_dir(dir.clone(), cx);
+                }
             },
         )
         .detach();
@@ -853,6 +857,7 @@ impl ChattyApp {
                         regeneration_records: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
+                        working_dir: None,
                     };
 
                     repo.save(&conv_id, data)
@@ -981,10 +986,11 @@ impl ChattyApp {
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                     conv.streaming_trace().cloned(),
+                    conv.working_dir().cloned(),
                 )
             });
 
-        if let Some((model_id, streaming_content, streaming_trace)) = minimal_data {
+        if let Some((model_id, streaming_content, streaming_trace, conversation_working_dir)) = minimal_data {
             // Check if this conversation has an active stream via StreamManager
             let has_active_stream = cx
                 .try_global::<GlobalStreamManager>()
@@ -1033,6 +1039,9 @@ impl ChattyApp {
                     // Restore streaming state if conversation has active stream
                     // Set this BEFORE restoring the message so the UI is in correct state
                     state.set_streaming(has_active_stream, cx);
+
+                    // Restore the per-conversation working directory override (without emitting event)
+                    state.working_dir = conversation_working_dir;
                 });
 
                 // Restore in-progress streaming message from Conversation model if it exists
@@ -1212,7 +1221,7 @@ impl ChattyApp {
 
             let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets, theme_colors, search_settings) = cx
                 .update(|cx| {
-                    let settings = cx
+                    let mut settings = cx
                         .global::<crate::settings::models::ExecutionSettingsModel>()
                         .clone();
                     let approvals = cx
@@ -1224,18 +1233,24 @@ impl ChattyApp {
                     let conv = cx
                         .global::<ConversationsStore>()
                         .get_conversation(&conv_id);
+                    // Apply per-conversation working directory override if set
+                    if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
+                        settings.workspace_dir = Some(working_dir.to_string_lossy().to_string());
+                    }
                     let artifacts = conv.map(|c| c.pending_artifacts());
                     // Drop the existing shell session if network_isolation changed — it was
                     // spawned with the old setting and cannot be reconfigured in place.
                     // Passing None lets the factory create a fresh session with the new setting.
+                    // Also drop the session if workspace_dir changed (to pick up the new working dir).
                     let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
-                        if s.network_isolation() == settings.network_isolation {
+                        if s.network_isolation() == settings.network_isolation
+                            && s.workspace_dir().as_deref() == settings.workspace_dir.as_deref()
+                        {
                             Some(s)
                         } else {
                             info!(
                                 conv_id = %conv_id,
-                                new_isolation = settings.network_isolation,
-                                "Network isolation changed — replacing shell session"
+                                "Shell session replaced due to settings change (isolation or workspace)"
                             );
                             None
                         }
@@ -1469,6 +1484,9 @@ impl ChattyApp {
                                             .as_secs()
                                             as i64,
                                         updated_at: now,
+                                        working_dir: conv
+                                            .working_dir()
+                                            .map(|p| p.to_string_lossy().to_string()),
                                     })
                                 })
                             });
@@ -1490,6 +1508,32 @@ impl ChattyApp {
                 error!("Model not found");
             }
         }
+    }
+
+    /// Change the working directory for the active conversation
+    fn change_conversation_working_dir(
+        &mut self,
+        dir: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let conv_id = cx
+            .global::<ConversationsStore>()
+            .active_id()
+            .map(|s| s.to_string());
+
+        let Some(conv_id) = conv_id else { return };
+
+        info!(conv_id = %conv_id, dir = ?dir, "Changing conversation working directory");
+
+        // Update the working dir on the active conversation
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                conv.set_working_dir(dir.clone());
+            }
+        });
+
+        // Rebuild the agent so the new workspace_dir takes effect for tools and shell
+        self.rebuild_active_agent(cx);
     }
 
     /// Delete a conversation
@@ -3071,6 +3115,9 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
             .unwrap()
             .as_secs() as i64,
         updated_at: now,
+        working_dir: conv
+            .working_dir()
+            .map(|p| p.to_string_lossy().to_string()),
     })
 }
 
@@ -3117,8 +3164,17 @@ async fn run_llm_stream(
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
+    // Use per-conversation workspace dir override if set, fall back to global setting
     let workspace_dir = cx
-        .update(|cx| cx.global::<ExecutionSettingsModel>().workspace_dir.clone())
+        .update(|cx| {
+            // Check per-conversation override first
+            let per_conv = cx
+                .global::<ConversationsStore>()
+                .get_conversation(&conv_id)
+                .and_then(|c| c.working_dir().map(|p| p.to_string_lossy().to_string()));
+            // Fall back to global workspace_dir
+            per_conv.or_else(|| cx.global::<ExecutionSettingsModel>().workspace_dir.clone())
+        })
         .ok()
         .flatten();
 
