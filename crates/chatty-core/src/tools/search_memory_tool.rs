@@ -132,7 +132,9 @@ impl Tool for SearchMemoryTool {
 /// Build a context block string from memory hits, partitioned into facts and skills.
 ///
 /// Hits whose title starts with `SKILL_TITLE_PREFIX` are formatted in a separate
-/// "skills" block; all other hits go into the "memories" block.
+/// "skills" block showing only a short description per skill. Filesystem skills
+/// can be expanded with `read_skill`; memory-backed skills should be revisited
+/// with `search_memory`.
 /// Returns `None` when there are no hits to display.
 pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
     if hits.is_empty() {
@@ -161,9 +163,9 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
     }
 
     if !skill_hits.is_empty() {
-        block.push_str("[Relevant skills/procedures you've saved]\n");
+        block.push_str("[Relevant skills available]\n");
         block.push_str(
-            "Memory-backed skills can be found again with `search_memory`. Filesystem skills come from injected `SKILL.md` files; use normal file-reading tools if you need to reopen them.\n",
+            "For filesystem skills, call `read_skill` with the skill name to get full instructions. For memory-backed skills, use `search_memory` to recall the saved procedure.\n",
         );
         block.push_str(
             "For Python-oriented skills, prefer `uv` for shell package management, or use `execute_code` when you want Docker-isolated execution.\n",
@@ -177,22 +179,37 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
             let source_hint = match hit.source {
                 Some(MemoryHitSource::Memory) => "memory-backed; use `search_memory`",
                 Some(MemoryHitSource::WorkspaceSkillFile) => {
-                    "workspace skill file (`.claude/skills/.../SKILL.md`)"
+                    "workspace skill file; call `read_skill`"
                 }
-                Some(MemoryHitSource::GlobalSkillFile) => {
-                    "global skill file (`chatty/skills/.../SKILL.md`)"
-                }
+                Some(MemoryHitSource::GlobalSkillFile) => "global skill file; call `read_skill`",
                 None => "source unknown",
             };
-            block.push_str(&format!("- \"{}\" [{}]:\n", display_name, source_hint));
-            for line in hit.text.lines() {
-                block.push_str(&format!("  {}\n", line));
-            }
+            let description = skill_description_line(&hit.text);
+            block.push_str(&format!(
+                "- \"{}\" [{}]: {}\n",
+                display_name, source_hint, description
+            ));
         }
         block.push_str("[End of skills]\n\n");
     }
 
     Some(block)
+}
+
+/// Extract a single-line description from a skill's stored text.
+///
+/// For filesystem skills the text is already just the description string.
+/// For memory-stored skills (created via `save_skill`) the format is:
+/// `Description: <desc>\n1. first step\n…` — strip the prefix and take the first line.
+fn skill_description_line(text: &str) -> &str {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("Description:") {
+        // Take only the first line of the description value
+        rest.trim().lines().next().unwrap_or("")
+    } else {
+        // Already a plain description (filesystem skill)
+        text.lines().next().unwrap_or(text)
+    }
 }
 
 /// Merge BM25 and vector search results, deduplicating by text content.
@@ -301,6 +318,7 @@ pub fn select_context_hits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::memory_service::MemoryHit;
 
     fn fact(title: &str, score: f32) -> MemoryHit {
         MemoryHit {
@@ -369,7 +387,41 @@ mod tests {
                 .expect("context block");
 
         assert!(block.contains("memory-backed; use `search_memory`"));
-        assert!(block.contains("workspace skill file (`.claude/skills/.../SKILL.md`)"));
+        assert!(block.contains("workspace skill file; call `read_skill`"));
         assert!(block.contains("prefer `uv` for shell package management"));
+    }
+
+    #[test]
+    fn context_block_extracts_description_from_memory_skill() {
+        // Memory-stored skills have "Description: <desc>\n1. step…" format
+        let hits = vec![saved_skill("deploy", 0.9)];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("\"deploy\" [memory-backed; use `search_memory`]: deploy"));
+        // Steps should not appear in the context block
+        assert!(!block.contains("1. Build."));
+    }
+
+    #[test]
+    fn context_block_still_shows_facts() {
+        let hits = vec![fact("user pref", 0.8)];
+        let block = build_memory_context_block(hits).unwrap();
+        assert!(block.contains("[Relevant memories from past conversations]"));
+        assert!(block.contains("fact:user pref"));
+    }
+
+    #[test]
+    fn skill_description_line_strips_prefix_from_memory_format() {
+        let text = "Description: Short desc.\n1. Step one.\n2. Step two.";
+        assert_eq!(skill_description_line(text), "Short desc.");
+    }
+
+    #[test]
+    fn skill_description_line_passthrough_for_plain_text() {
+        // Filesystem skill already has just a description
+        let text = "Runs the full build pipeline.";
+        assert_eq!(
+            skill_description_line(text),
+            "Runs the full build pipeline."
+        );
     }
 }

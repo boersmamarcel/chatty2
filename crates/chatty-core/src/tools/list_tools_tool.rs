@@ -347,6 +347,17 @@ impl ListToolsTool {
             ]);
         }
 
+        // read_skill is always available — it's the on-demand companion to the slim
+        // skill descriptions shown in the automatic context block.
+        native_tools.push(ToolInfo {
+            name: "read_skill".to_string(),
+            description: "Load the full step-by-step instructions for a skill by name. \
+                          Skills are listed with a one-line description in automatic context — \
+                          call this before executing any skill to get the complete procedure."
+                .to_string(),
+            source: "native".to_string(),
+        });
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
