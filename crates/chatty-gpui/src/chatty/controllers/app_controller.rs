@@ -28,8 +28,7 @@ use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
-    TraceItem, friendly_tool_name,
-    is_denial_result,
+    TraceItem, friendly_tool_name, is_denial_result,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
@@ -1544,7 +1543,10 @@ impl ChattyApp {
         let title = conv.title().to_string();
         let mut markdown = format!("# {title}\n\n");
         for (index, msg) in conv.history().iter().enumerate() {
-            let trace_json = conv.system_traces().get(index).and_then(|trace| trace.as_ref());
+            let trace_json = conv
+                .system_traces()
+                .get(index)
+                .and_then(|trace| trace.as_ref());
 
             match msg {
                 rig::completion::Message::User { content, .. } => {
