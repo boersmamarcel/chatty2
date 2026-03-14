@@ -108,6 +108,24 @@ fn get_embedding_service(cx: &gpui::AsyncApp) -> Option<chatty_core::services::E
     .flatten()
 }
 
+/// Read the SkillService from globals.
+///
+/// The global is set at startup (keyword-only) and replaced with an embedding-aware
+/// version once the EmbeddingService is initialised.  Falls back to constructing a
+/// keyword-only service if the global is absent (e.g. in tests).
+fn get_skill_service(cx: &gpui::AsyncApp) -> chatty_core::services::SkillService {
+    cx.update(|cx| {
+        cx.try_global::<chatty_core::services::SkillService>()
+            .cloned()
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| {
+        warn!("SkillService global not found, falling back to keyword-only service");
+        chatty_core::services::SkillService::new(None)
+    })
+}
+
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
 pub struct GlobalChattyApp {
@@ -2979,6 +2997,7 @@ async fn run_llm_stream(
     let user_contents = {
         let memory_service = await_memory_service(cx).await;
         let embedding_service = get_embedding_service(cx);
+        let skill_service = get_skill_service(cx);
 
         if let Some(mem_svc) = memory_service {
             let raw_text = extract_user_message_text(&user_contents);
@@ -3039,15 +3058,14 @@ async fn run_llm_stream(
                 Vec::new()
             };
 
-            // Merge BM25 + vector results, then extend with local skill files.
-            // SkillService handles both the workspace and global OS directories,
-            // and caches embeddings on disk alongside each SKILL.md file.
+            // Merge BM25 + vector results, then extend with filesystem skill files.
+            // skill_service was read from the global set at startup (keyword-only) or
+            // replaced with an embedding-aware version when EmbeddingService initialised.
             let mut hits = chatty_core::tools::merge_search_results(bm25_hits, vec_hits, 5);
 
             let workspace_skills_dir = workspace_dir
                 .as_deref()
                 .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
-            let skill_service = chatty_core::services::SkillService::new(embedding_service.clone());
             let skill_hits = skill_service
                 .load_hits(
                     &query_text,
