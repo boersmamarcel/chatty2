@@ -147,10 +147,6 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
             .unwrap_or(false)
     });
 
-    if skill_hits.is_empty() && fact_hits.is_empty() {
-        return None;
-    }
-
     let mut block = String::new();
 
     if !fact_hits.is_empty() {
@@ -189,7 +185,18 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
 /// Scans each immediate subdirectory of `skills_dir` for a `SKILL.md` (or `skill.md`) file.
 /// The subdirectory name becomes the skill name, prefixed with `SKILL_TITLE_PREFIX`.
 /// Missing or unreadable directories are silently skipped.
-pub fn load_local_skill_hits(skills_dir: &Path) -> Vec<MemoryHit> {
+///
+/// Each skill is scored by keyword overlap with `query`: the fraction of query words
+/// (length > 2, case-insensitive) found anywhere in the skill name or content.
+/// This score is compatible with BM25/vector scores so all hits can be ranked together
+/// and capped to the same limit.
+pub fn load_local_skill_hits(skills_dir: &Path, query: &str) -> Vec<MemoryHit> {
+    let query_words: HashSet<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(|w| w.to_lowercase())
+        .collect();
+
     let mut hits = Vec::new();
 
     let entries = match std::fs::read_dir(skills_dir) {
@@ -218,10 +225,21 @@ pub fn load_local_skill_hits(skills_dir: &Path) -> Vec<MemoryHit> {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
+        let score = if query_words.is_empty() {
+            0.5
+        } else {
+            let haystack = format!("{} {}", skill_name, content).to_lowercase();
+            let matches = query_words
+                .iter()
+                .filter(|w| haystack.contains(w.as_str()))
+                .count();
+            matches as f32 / query_words.len() as f32
+        };
+
         hits.push(MemoryHit {
             text: content,
             title: Some(format!("{}{}", SKILL_TITLE_PREFIX, skill_name)),
-            score: 1.0,
+            score,
         });
     }
 

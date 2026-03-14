@@ -3041,10 +3041,17 @@ async fn run_llm_stream(
                 .map(|d| {
                     chatty_core::tools::load_local_skill_hits(
                         &std::path::Path::new(d).join(".claude").join("skills"),
+                        &query_text,
                     )
                 })
                 .unwrap_or_default();
             hits.extend(local_skill_hits);
+            hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            hits.truncate(5);
 
             if let Some(context_block) = chatty_core::tools::build_memory_context_block(hits) {
                 let mut augmented = vec![rig::message::UserContent::Text(
