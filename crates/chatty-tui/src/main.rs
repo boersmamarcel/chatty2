@@ -28,8 +28,9 @@ chatty-tui provides three operating modes:
   INTERACTIVE (default):  Full TUI with message history, streaming responses,
                           tool approval prompts, and inline model/tool switching.
                           Keybindings: Enter=send, Ctrl+C=stop/quit, Ctrl+Q=quit,
-                          y/n=approve/deny tool calls. Slash commands: /model to
-                          switch models, /tools to toggle tool groups.
+                          y/n=approve/deny tool calls. Slash commands: /model,
+                          /tools, /add-dir, /agent, /clear(/new), /compact,
+                          /context, /copy, /cwd(/cd).
 
   HEADLESS (--headless):  Send a single message via --message, print the full
                           response to stdout, then exit. Useful for scripting

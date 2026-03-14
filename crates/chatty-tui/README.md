@@ -84,6 +84,20 @@ MCP servers configured in the desktop app are also available in chatty-tui.
 | `Ctrl+Q` | Quit immediately |
 | `y` / `n` | Approve / deny tool execution (during approval prompt) |
 
+## Slash commands
+
+| Command | Action |
+|:--------|:-------|
+| `/model [query]` | Switch model (`/model` opens picker) |
+| `/tools [name]` | Toggle tool groups (`/tools` opens picker) |
+| `/add-dir <directory>` | Expand workspace access to include a directory |
+| `/agent <prompt>` | Launch a headless `chatty-tui` sub-agent with a prompt |
+| `/clear`, `/new` | Clear conversation history and start fresh |
+| `/compact` | Summarize older messages to reduce context usage |
+| `/context` | Show token/context usage and current working directory |
+| `/copy` | Copy the latest assistant response to system clipboard |
+| `/cwd`, `/cd [directory]` | Show or change the working directory |
+
 ## Architecture
 
 ```

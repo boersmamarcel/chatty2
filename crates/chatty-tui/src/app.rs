@@ -82,6 +82,60 @@ async fn run_loop(
                                     );
                                 }
                             }
+                            KeyAction::AddDirectory(directory) => {
+                                match engine.add_allowed_directory(&directory) {
+                                    Ok(_) => {
+                                        if let Err(e) = engine.init_conversation().await {
+                                            engine.add_system_message(
+                                                format!("Failed to initialize: {}", e),
+                                            );
+                                        }
+                                    }
+                                    Err(e) => engine.add_system_message(e.to_string()),
+                                }
+                            }
+                            KeyAction::LaunchAgent(prompt) => {
+                                if let Err(e) = engine.launch_sub_agent(&prompt).await {
+                                    engine.add_system_message(e.to_string());
+                                }
+                            }
+                            KeyAction::ClearConversation => {
+                                engine.clear_conversation();
+                                if let Err(e) = engine.init_conversation().await {
+                                    engine.add_system_message(
+                                        format!("Failed to initialize: {}", e),
+                                    );
+                                }
+                            }
+                            KeyAction::CompactConversation => {
+                                if let Err(e) = engine.compact_conversation().await {
+                                    engine.add_system_message(e.to_string());
+                                }
+                            }
+                            KeyAction::ShowContext => {
+                                engine.add_system_message(engine.context_summary());
+                            }
+                            KeyAction::CopyLastResponse => {
+                                if let Err(e) = engine.copy_last_response_to_clipboard() {
+                                    engine.add_system_message(e.to_string());
+                                }
+                            }
+                            KeyAction::ShowWorkingDirectory => {
+                                let cwd = engine.current_working_directory();
+                                engine.add_system_message(format!("Working directory: {}", cwd));
+                            }
+                            KeyAction::ChangeWorkingDirectory(directory) => {
+                                match engine.set_working_directory(&directory) {
+                                    Ok(_) => {
+                                        if let Err(e) = engine.init_conversation().await {
+                                            engine.add_system_message(
+                                                format!("Failed to initialize: {}", e),
+                                            );
+                                        }
+                                    }
+                                    Err(e) => engine.add_system_message(e.to_string()),
+                                }
+                            }
                             KeyAction::None => {}
                         }
                     }
@@ -116,6 +170,14 @@ enum KeyAction {
     OpenToolPicker,
     ToggleTool(String),
     ApplyToolChanges,
+    AddDirectory(String),
+    LaunchAgent(String),
+    ClearConversation,
+    CompactConversation,
+    ShowContext,
+    CopyLastResponse,
+    ShowWorkingDirectory,
+    ChangeWorkingDirectory(String),
 }
 
 fn handle_terminal_event(
@@ -246,6 +308,24 @@ fn handle_key_event(
                         Command::Model(None) => return KeyAction::OpenModelPicker,
                         Command::Tools(Some(name)) => return KeyAction::ToggleTool(name),
                         Command::Tools(None) => return KeyAction::OpenToolPicker,
+                        Command::AddDir(Some(directory)) => {
+                            return KeyAction::AddDirectory(directory);
+                        }
+                        Command::AddDir(None) => {
+                            engine.add_system_message("Usage: /add-dir <directory>".to_string());
+                        }
+                        Command::Agent(Some(prompt)) => return KeyAction::LaunchAgent(prompt),
+                        Command::Agent(None) => {
+                            engine.add_system_message("Usage: /agent <prompt>".to_string());
+                        }
+                        Command::Clear => return KeyAction::ClearConversation,
+                        Command::Compact => return KeyAction::CompactConversation,
+                        Command::Context => return KeyAction::ShowContext,
+                        Command::Copy => return KeyAction::CopyLastResponse,
+                        Command::Cwd(Some(directory)) => {
+                            return KeyAction::ChangeWorkingDirectory(directory);
+                        }
+                        Command::Cwd(None) => return KeyAction::ShowWorkingDirectory,
                     }
                 }
                 let text = input_state.take_input();

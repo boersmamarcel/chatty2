@@ -1,7 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    io::Write,
+    path::{Component, Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chatty_core::factories::AgentClient;
 use chatty_core::models::Conversation;
 use chatty_core::models::execution_approval_store::{
@@ -62,11 +67,26 @@ pub struct DisplayMessage {
 }
 
 /// Parsed slash command from user input
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// /model [query] — switch model or list models if query is None
     Model(Option<String>),
     /// /tools [name] — open tool picker or toggle by name
     Tools(Option<String>),
+    /// /add-dir <directory> — expand file-access workspace to include a directory
+    AddDir(Option<String>),
+    /// /agent [prompt] — launch a sub-agent in headless mode
+    Agent(Option<String>),
+    /// /clear, /new — clear conversation and start fresh
+    Clear,
+    /// /compact — summarize older conversation turns
+    Compact,
+    /// /context — show context usage stats
+    Context,
+    /// /copy — copy latest assistant response to clipboard
+    Copy,
+    /// /cwd, /cd [directory] — show or change working directory
+    Cwd(Option<String>),
 }
 
 /// Interactive model picker state
@@ -586,22 +606,264 @@ impl ChatEngine {
 
     /// Try to handle a slash command. Returns true if the input was a command.
     pub fn try_handle_command(&self, input: &str) -> Option<Command> {
+        Self::parse_command(input)
+    }
+
+    fn parse_command(input: &str) -> Option<Command> {
         let trimmed = input.trim();
         if !trimmed.starts_with('/') {
             return None;
         }
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        let arg = parts
+            .get(1)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         match parts[0] {
-            "/model" => {
-                let query = parts.get(1).map(|s| s.trim().to_string());
-                Some(Command::Model(query))
-            }
-            "/tools" => {
-                let name = parts.get(1).map(|s| s.trim().to_string());
-                Some(Command::Tools(name))
-            }
+            "/model" => Some(Command::Model(arg)),
+            "/tools" => Some(Command::Tools(arg)),
+            "/add-dir" => Some(Command::AddDir(arg)),
+            "/agent" => Some(Command::Agent(arg)),
+            "/clear" | "/new" => Some(Command::Clear),
+            "/compact" => Some(Command::Compact),
+            "/context" => Some(Command::Context),
+            "/copy" => Some(Command::Copy),
+            "/cwd" | "/cd" => Some(Command::Cwd(arg)),
             _ => None,
         }
+    }
+
+    /// Clear all display and conversation state so a fresh conversation can be initialized.
+    pub fn clear_conversation(&mut self) {
+        self.messages.clear();
+        self.title = "New Chat".to_string();
+        self.total_input_tokens = 0;
+        self.total_output_tokens = 0;
+        self.scroll_offset = 0;
+        self.pending_approval = None;
+        self.model_picker = None;
+        self.tool_picker = None;
+        self.conversation = None;
+        self.is_ready = false;
+        self.add_system_message("Started a new conversation.".to_string());
+    }
+
+    /// Show current context usage and working directory.
+    pub fn context_summary(&self) -> String {
+        let used_tokens = self
+            .total_input_tokens
+            .saturating_add(self.total_output_tokens);
+        let workspace = self.current_working_directory();
+        if let Some(max_context) = self.model_config.max_context_window
+            && max_context > 0
+        {
+            let max_context_u32 = max_context as u32;
+            let pct = (used_tokens as f64 / max_context_u32 as f64 * 100.0).clamp(0.0, 100.0);
+            let filled = ((pct / 100.0) * 20.0).round() as usize;
+            let bar = format!(
+                "[{}{}]",
+                "█".repeat(filled.min(20)),
+                "░".repeat(20usize.saturating_sub(filled.min(20)))
+            );
+            format!(
+                "Context usage: {} / {} tokens ({:.1}%) {}\nInput: {} tokens, Output: {} tokens\nWorking directory: {}",
+                used_tokens,
+                max_context_u32,
+                pct,
+                bar,
+                self.total_input_tokens,
+                self.total_output_tokens,
+                workspace,
+            )
+        } else {
+            format!(
+                "Context usage: {} tokens (model max context window unknown)\nInput: {} tokens, Output: {} tokens\nWorking directory: {}",
+                used_tokens, self.total_input_tokens, self.total_output_tokens, workspace
+            )
+        }
+    }
+
+    /// Return the active working directory for tool execution.
+    pub fn current_working_directory(&self) -> String {
+        if let Some(dir) = &self.execution_settings.workspace_dir {
+            return dir.clone();
+        }
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// Change workspace directory and reset conversation so tools are reinitialized.
+    pub fn set_working_directory(&mut self, directory: &str) -> Result<String> {
+        let canonical = self.resolve_directory(directory)?;
+        let canonical_str = canonical.to_string_lossy().to_string();
+        self.execution_settings.workspace_dir = Some(canonical_str.clone());
+        self.conversation = None;
+        self.is_ready = false;
+        self.add_system_message(format!(
+            "Working directory changed to '{}'. Conversation context was reset.",
+            canonical_str
+        ));
+        Ok(canonical_str)
+    }
+
+    /// Expand workspace access to include a directory by broadening to a common ancestor.
+    pub fn add_allowed_directory(&mut self, directory: &str) -> Result<String> {
+        let added_dir = self.resolve_directory(directory)?;
+        let new_workspace = match self.execution_settings.workspace_dir.as_deref() {
+            Some(current) => {
+                let current = std::fs::canonicalize(current)
+                    .with_context(|| format!("Current workspace '{}' no longer exists", current))?;
+                if added_dir.starts_with(&current) {
+                    current
+                } else if current.starts_with(&added_dir) {
+                    added_dir.clone()
+                } else {
+                    common_ancestor(&current, &added_dir).unwrap_or(added_dir.clone())
+                }
+            }
+            None => added_dir.clone(),
+        };
+
+        let workspace_str = new_workspace.to_string_lossy().to_string();
+        self.execution_settings.workspace_dir = Some(workspace_str.clone());
+        self.conversation = None;
+        self.is_ready = false;
+        self.add_system_message(format!(
+            "Added directory '{}'. Workspace expanded to '{}'. Conversation context was reset.",
+            added_dir.to_string_lossy(),
+            workspace_str
+        ));
+        Ok(workspace_str)
+    }
+
+    /// Summarize older conversation history to reduce context usage.
+    pub async fn compact_conversation(&mut self) -> Result<()> {
+        let (agent, history) = match self.conversation.as_ref() {
+            Some(conv) => (conv.agent().clone(), conv.history().to_vec()),
+            None => {
+                self.add_system_message("No active conversation to compact.".to_string());
+                return Ok(());
+            }
+        };
+
+        if history.len() < 4 {
+            self.add_system_message(
+                "Conversation is too short to compact (need at least 4 messages).".to_string(),
+            );
+            return Ok(());
+        }
+
+        let midpoint = history.len() / 2;
+        let result = chatty_core::token_budget::summarize_oldest_half(&agent, &history)
+            .await
+            .context("Failed to summarize conversation")?;
+
+        if let Some(conv) = self.conversation.as_mut() {
+            conv.replace_history(result.new_history, midpoint);
+        }
+
+        self.add_system_message(format!(
+            "Compacted conversation: summarized {} messages (estimated {} tokens freed).",
+            result.messages_summarized, result.estimated_tokens_freed
+        ));
+        Ok(())
+    }
+
+    /// Copy the latest assistant message to the system clipboard.
+    pub fn copy_last_response_to_clipboard(&mut self) -> Result<()> {
+        let Some(message) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Assistant) && !m.text.trim().is_empty())
+        else {
+            bail!("No assistant response available to copy");
+        };
+        copy_text_to_clipboard(&message.text)?;
+        self.add_system_message("Copied latest assistant response to clipboard.".to_string());
+        Ok(())
+    }
+
+    /// Launch a sub-agent by invoking chatty-tui in headless mode.
+    pub async fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            bail!("Usage: /agent <prompt>");
+        }
+
+        let executable = std::env::current_exe().context("Failed to resolve chatty-tui binary")?;
+        let model_id = self.model_config.id.clone();
+        let prompt_owned = prompt.to_string();
+        let auto_approve = matches!(
+            self.execution_settings.approval_mode,
+            chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+        );
+
+        self.add_system_message("Launching sub-agent...".to_string());
+
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = ProcessCommand::new(executable);
+            command
+                .arg("--headless")
+                .arg("--model")
+                .arg(model_id)
+                .arg("--message")
+                .arg(prompt_owned);
+            if auto_approve {
+                command.arg("--auto-approve");
+            }
+            command.output()
+        })
+        .await
+        .context("Sub-agent task was cancelled")?
+        .context("Failed to launch sub-agent process")?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout.is_empty() {
+                self.add_system_message("Sub-agent completed with no output.".to_string());
+            } else {
+                self.add_system_message(format!("Sub-agent response:\n{}", stdout));
+            }
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "Sub-agent failed (exit code {:?}): {}",
+                output.status.code(),
+                if stderr.is_empty() {
+                    "no stderr output".to_string()
+                } else {
+                    stderr
+                }
+            );
+        }
+    }
+
+    fn resolve_directory(&self, directory: &str) -> Result<PathBuf> {
+        let candidate = Path::new(directory);
+        let resolved = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            let base = self
+                .execution_settings
+                .workspace_dir
+                .as_ref()
+                .map(PathBuf::from)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            base.join(candidate)
+        };
+
+        let canonical = std::fs::canonicalize(&resolved)
+            .with_context(|| format!("Directory '{}' does not exist", resolved.display()))?;
+        if !canonical.is_dir() {
+            bail!("'{}' is not a directory", canonical.display());
+        }
+        Ok(canonical)
     }
 
     /// Prepare to switch models: resolve the model, update config, mark not ready.
@@ -960,4 +1222,126 @@ async fn run_stream(params: StreamParams) -> Result<()> {
 
     let _ = event_tx.send(AppEvent::StreamCompleted);
     Ok(())
+}
+
+fn common_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
+    let mut ancestor = PathBuf::new();
+    for (l, r) in left.components().zip(right.components()) {
+        if l == r {
+            match l {
+                Component::RootDir => ancestor.push(Path::new("/")),
+                _ => ancestor.push(l.as_os_str()),
+            }
+        } else {
+            break;
+        }
+    }
+    if ancestor.as_os_str().is_empty() {
+        None
+    } else {
+        Some(ancestor)
+    }
+}
+
+fn copy_text_to_clipboard(text: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return copy_via_command("pbcopy", &[], text);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return copy_via_command("clip", &[], text);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if copy_via_command("wl-copy", &[], text).is_ok() {
+            return Ok(());
+        }
+        if copy_via_command("xclip", &["-selection", "clipboard"], text).is_ok() {
+            return Ok(());
+        }
+        bail!("No clipboard utility found. Install wl-clipboard or xclip.")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = text;
+        bail!("Clipboard copy is not supported on this platform")
+    }
+}
+
+fn copy_via_command(program: &str, args: &[&str], text: &str) -> Result<()> {
+    let mut child = ProcessCommand::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("Failed to launch '{}'", program))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(text.as_bytes())
+            .context("Failed to write clipboard contents")?;
+    }
+
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("'{}' returned non-zero exit status", program)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, common_ancestor};
+    use std::path::Path;
+
+    #[test]
+    fn parses_new_slash_commands() {
+        assert_eq!(
+            super::ChatEngine::parse_command("/add-dir ./src"),
+            Some(Command::AddDir(Some("./src".to_string())))
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/agent summarize this"),
+            Some(Command::Agent(Some("summarize this".to_string())))
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/clear"),
+            Some(Command::Clear)
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/new"),
+            Some(Command::Clear)
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/compact"),
+            Some(Command::Compact)
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/context"),
+            Some(Command::Context)
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/copy"),
+            Some(Command::Copy)
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/cwd"),
+            Some(Command::Cwd(None))
+        );
+        assert_eq!(
+            super::ChatEngine::parse_command("/cd ../workspace"),
+            Some(Command::Cwd(Some("../workspace".to_string())))
+        );
+    }
+
+    #[test]
+    fn computes_common_ancestor_for_paths() {
+        let left = Path::new("/home/user/project/src");
+        let right = Path::new("/home/user/project/docs");
+        let ancestor = common_ancestor(left, right).unwrap();
+        assert_eq!(ancestor, Path::new("/home/user/project"));
+    }
 }
