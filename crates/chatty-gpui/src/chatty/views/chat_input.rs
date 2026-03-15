@@ -335,9 +335,13 @@ impl ChatInputState {
             self.should_clear = false;
         }
         // Apply a pending slash-command text insert (for commands that need arguments).
+        // Use set_value("") + insert(text) instead of set_value(text) so that the
+        // cursor lands at the END of the inserted text (set_value resets to offset 0
+        // in multi-line/auto_grow mode).
         if let Some(text) = self.pending_slash_insert.take() {
             self.input.update(cx, |input, cx| {
-                input.set_value(&text, window, cx);
+                input.set_value("", window, cx); // clear → cursor at offset 0
+                input.insert(&text, window, cx); // insert and move cursor to end
             });
         }
     }

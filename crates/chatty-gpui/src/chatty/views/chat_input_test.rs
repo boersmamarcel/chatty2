@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use super::super::chat_input::{ChatInputState, IMAGE_EXTENSIONS, MAX_FILE_SIZE, PDF_EXTENSION, slash_menu_items_for};
+    use super::super::chat_input::{
+        ChatInputState, IMAGE_EXTENSIONS, MAX_FILE_SIZE, PDF_EXTENSION, slash_menu_items_for,
+    };
     use gpui::{App, Context, Entity, TestWindow};
     use gpui_component::input::InputState;
     use std::fs;
@@ -50,7 +52,10 @@ mod tests {
     fn test_slash_menu_case_insensitive() {
         let items = slash_menu_items_for("/CL");
         let commands: Vec<&str> = items.iter().map(|c| c.command).collect();
-        assert!(commands.contains(&"/clear"), "filter should be case-insensitive");
+        assert!(
+            commands.contains(&"/clear"),
+            "filter should be case-insensitive"
+        );
     }
 
     #[test]
@@ -59,11 +64,49 @@ mod tests {
         assert!(items.is_empty(), "Unknown prefix should return no items");
     }
 
+    // -----------------------------------------------------------------------
+    // Arg-based slash-command extraction tests (pure, no GPUI context)
+    // -----------------------------------------------------------------------
+
+    /// Verify that the /agent command prefix extraction used by
+    /// `try_handle_arg_slash_command` works correctly.
+    #[test]
+    fn test_agent_prefix_extraction() {
+        let msg = "/agent summarize this file";
+        assert_eq!(
+            msg.strip_prefix("/agent "),
+            Some("summarize this file"),
+            "/agent prefix should be strippable"
+        );
+        // No-arg case: `/agent` alone (no trailing space) should NOT match.
+        assert!(
+            "/agent".strip_prefix("/agent ").is_none(),
+            "bare /agent without space should not match"
+        );
+        // Empty arg case.
+        assert_eq!("/agent  ".strip_prefix("/agent "), Some(" "));
+    }
+
+    /// Verify /cd prefix extraction.
+    #[test]
+    fn test_cd_prefix_extraction() {
+        let msg = "/cd /tmp/myproject";
+        assert_eq!(msg.strip_prefix("/cd "), Some("/tmp/myproject"));
+        assert!("/cd".strip_prefix("/cd ").is_none());
+    }
+
+    /// Verify /add-dir prefix extraction.
+    #[test]
+    fn test_add_dir_prefix_extraction() {
+        let msg = "/add-dir ./src";
+        assert_eq!(msg.strip_prefix("/add-dir "), Some("./src"));
+    }
+
     /// Helper to create a test file of a specific size
     fn create_test_file(path: &PathBuf, size: u64, extension: &str) -> std::io::Result<()> {
         let full_path = path.with_extension(extension);
         let mut file = fs::File::create(&full_path)?;
-        
+
         // Write dummy data
         let data = vec![0u8; size as usize];
         file.write_all(&data)?;
@@ -80,14 +123,14 @@ mod tests {
     fn test_add_valid_image_attachment(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let image_path = temp_dir.join("test_image.png");
-        
+
         // Create a small valid image file
         create_test_file(&image_path, 1024, "png").expect("Failed to create test image");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![image_path.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 1,
@@ -108,14 +151,14 @@ mod tests {
     fn test_add_valid_pdf_attachment(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("test_document.pdf");
-        
+
         // Create a small valid PDF file
         create_test_file(&pdf_path, 2048, "pdf").expect("Failed to create test PDF");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![pdf_path.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 1,
@@ -131,7 +174,7 @@ mod tests {
     fn test_reject_file_too_large(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let large_file_path = temp_dir.join("large_image.jpg");
-        
+
         // Create a file larger than MAX_FILE_SIZE (5MB)
         create_test_file(&large_file_path, MAX_FILE_SIZE + 1, "jpg")
             .expect("Failed to create large file");
@@ -139,7 +182,7 @@ mod tests {
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![large_file_path.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 0,
@@ -155,15 +198,14 @@ mod tests {
     fn test_reject_unsupported_extension(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let unsupported_path = temp_dir.join("test_file.txt");
-        
+
         // Create a text file (unsupported)
-        create_test_file(&unsupported_path, 1024, "txt")
-            .expect("Failed to create test file");
+        create_test_file(&unsupported_path, 1024, "txt").expect("Failed to create test file");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![unsupported_path.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 0,
@@ -179,16 +221,16 @@ mod tests {
     fn test_reject_duplicate_attachment(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let image_path = temp_dir.join("test_duplicate.png");
-        
+
         create_test_file(&image_path, 1024, "png").expect("Failed to create test image");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
-            
+
             // Add the same file twice
             state.add_attachments(vec![image_path.clone()], cx);
             state.add_attachments(vec![image_path.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 1,
@@ -204,7 +246,7 @@ mod tests {
     fn test_reject_file_without_extension(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let no_ext_path = temp_dir.join("no_extension_file");
-        
+
         // Create file without extension
         let mut file = fs::File::create(&no_ext_path).expect("Failed to create file");
         file.write_all(b"test data").expect("Failed to write");
@@ -213,7 +255,7 @@ mod tests {
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![no_ext_path.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 0,
@@ -229,14 +271,14 @@ mod tests {
     fn test_reject_nonexistent_file(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let nonexistent_path = temp_dir.join("nonexistent_file.png");
-        
+
         // Ensure file doesn't exist
         let _ = fs::remove_file(&nonexistent_path);
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![nonexistent_path], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 0,
@@ -251,7 +293,7 @@ mod tests {
         let image1 = temp_dir.join("image1.png");
         let image2 = temp_dir.join("image2.jpg");
         let pdf = temp_dir.join("document.pdf");
-        
+
         create_test_file(&image1, 1024, "png").expect("Failed to create image1");
         create_test_file(&image2, 2048, "jpg").expect("Failed to create image2");
         create_test_file(&pdf, 3072, "pdf").expect("Failed to create PDF");
@@ -259,7 +301,7 @@ mod tests {
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![image1.clone(), image2.clone(), pdf.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 3,
@@ -279,18 +321,19 @@ mod tests {
         let valid_image = temp_dir.join("valid.png");
         let invalid_txt = temp_dir.join("invalid.txt");
         let too_large = temp_dir.join("toolarge.jpg");
-        
+
         create_test_file(&valid_image, 1024, "png").expect("Failed to create valid image");
         create_test_file(&invalid_txt, 1024, "txt").expect("Failed to create txt");
-        create_test_file(&too_large, MAX_FILE_SIZE + 1, "jpg").expect("Failed to create large file");
+        create_test_file(&too_large, MAX_FILE_SIZE + 1, "jpg")
+            .expect("Failed to create large file");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(
                 vec![valid_image.clone(), invalid_txt.clone(), too_large.clone()],
-                cx
+                cx,
             );
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 1,
@@ -314,19 +357,19 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let image1 = temp_dir.join("remove1.png");
         let image2 = temp_dir.join("remove2.jpg");
-        
+
         create_test_file(&image1, 1024, "png").expect("Failed to create image1");
         create_test_file(&image2, 1024, "jpg").expect("Failed to create image2");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![image1.clone(), image2.clone()], cx);
-            
+
             assert_eq!(state.get_attachments().len(), 2);
-            
+
             // Remove first attachment
             state.remove_attachment(0);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 1,
@@ -348,17 +391,17 @@ mod tests {
     fn test_clear_all_attachments(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let image = temp_dir.join("clear.png");
-        
+
         create_test_file(&image, 1024, "png").expect("Failed to create image");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![image.clone()], cx);
-            
+
             assert_eq!(state.get_attachments().len(), 1);
-            
+
             state.clear_attachments();
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 0,
@@ -374,7 +417,7 @@ mod tests {
     fn test_file_size_exactly_at_limit(cx: &mut TestWindow) {
         let temp_dir = std::env::temp_dir();
         let max_size_file = temp_dir.join("max_size.png");
-        
+
         // Create a file exactly at MAX_FILE_SIZE
         create_test_file(&max_size_file, MAX_FILE_SIZE, "png")
             .expect("Failed to create max size file");
@@ -382,7 +425,7 @@ mod tests {
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![max_size_file.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 1,
@@ -409,7 +452,7 @@ mod tests {
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(paths.clone(), cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 IMAGE_EXTENSIONS.len(),
@@ -428,14 +471,14 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let uppercase_png = temp_dir.join("test.PNG");
         let mixedcase_jpg = temp_dir.join("test.JpG");
-        
+
         create_test_file(&uppercase_png, 1024, "PNG").expect("Failed to create PNG");
         create_test_file(&mixedcase_jpg, 1024, "JpG").expect("Failed to create JPG");
 
         cx.update(|cx| {
             let mut state = create_test_chat_input(cx);
             state.add_attachments(vec![uppercase_png.clone(), mixedcase_jpg.clone()], cx);
-            
+
             assert_eq!(
                 state.get_attachments().len(),
                 2,

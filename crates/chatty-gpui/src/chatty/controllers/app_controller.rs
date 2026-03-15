@@ -370,6 +370,10 @@ impl ChattyApp {
                     attachments,
                 } => {
                     debug!(message = %message, attachment_count = attachments.len(), "ChatInputEvent::Send received");
+                    // Intercept arg-based slash commands before sending to LLM.
+                    if app.try_handle_arg_slash_command(message.trim(), cx) {
+                        return;
+                    }
                     app.send_message(message.clone(), attachments.clone(), cx);
                 }
                 ChatInputEvent::ModelChanged(model_id) => {
@@ -2478,6 +2482,234 @@ impl ChattyApp {
         });
     }
 
+    // -----------------------------------------------------------------------
+    // Arg-based slash command dispatch (called from ChatInputEvent::Send)
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` when the message was handled as an arg-based slash command
+    /// (so the caller should NOT forward it to the LLM).
+    fn try_handle_arg_slash_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if let Some(prompt) = text.strip_prefix("/agent ") {
+            let prompt = prompt.trim().to_string();
+            if prompt.is_empty() {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(
+                        "Usage: `/agent <prompt>` — provide a prompt for the sub-agent."
+                            .to_string(),
+                        cx,
+                    );
+                });
+            } else {
+                self.launch_agent(prompt, cx);
+            }
+            return true;
+        }
+        if let Some(path) = text.strip_prefix("/cd ") {
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                self.show_working_directory(cx);
+            } else {
+                self.change_working_dir(path, cx);
+            }
+            return true;
+        }
+        if let Some(path) = text.strip_prefix("/add-dir ") {
+            let path = path.trim().to_string();
+            if !path.is_empty() {
+                self.add_directory(path, cx);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// `/agent <prompt>` — launch chatty-tui in headless mode with the given prompt.
+    fn launch_agent(&mut self, prompt: String, cx: &mut Context<Self>) {
+        info!(prompt = %prompt, "Slash command: launch sub-agent");
+
+        // Resolve the active model ID so the sub-agent uses the same model.
+        let model_id = cx
+            .try_global::<ConversationsStore>()
+            .and_then(|store| {
+                store
+                    .active_id()
+                    .and_then(|id| store.get_conversation(id))
+                    .map(|conv| conv.model_id().to_string())
+            })
+            .unwrap_or_default();
+
+        let auto_approve = cx
+            .try_global::<ExecutionSettingsModel>()
+            .map(|s| {
+                matches!(
+                    s.approval_mode,
+                    crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+                )
+            })
+            .unwrap_or(false);
+
+        let chat_view = self.chat_view.clone();
+
+        // Show immediate feedback.
+        self.chat_view.update(cx, |view, cx| {
+            view.add_info_message(
+                "**Sub-agent:** launching… (this may take a while)".to_string(),
+                cx,
+            );
+        });
+
+        cx.spawn(async move |_weak, cx| {
+            let result = tokio::task::spawn_blocking(move || {
+                // Look for chatty-tui in the same directory as this binary first,
+                // then fall back to letting the OS resolve from PATH.
+                let exe = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("chatty-tui")))
+                    .filter(|p| p.exists())
+                    .unwrap_or_else(|| std::path::PathBuf::from("chatty-tui"));
+
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.arg("--headless").arg("--message").arg(&prompt);
+                if !model_id.is_empty() {
+                    cmd.arg("--model").arg(&model_id);
+                }
+                if auto_approve {
+                    cmd.arg("--auto-approve");
+                }
+
+                match cmd.output() {
+                    Ok(out) if out.status.success() => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if stdout.is_empty() {
+                            "**Sub-agent:** completed with no output.".to_string()
+                        } else {
+                            format!("**Sub-agent response:**\n\n{stdout}")
+                        }
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                        format!(
+                            "**Sub-agent failed** (exit {:?}): {}",
+                            out.status.code(),
+                            if stderr.is_empty() {
+                                "no stderr output".to_string()
+                            } else {
+                                stderr
+                            }
+                        )
+                    }
+                    Err(e) => format!("**Sub-agent failed to launch:** {e}"),
+                }
+            })
+            .await;
+
+            let msg = match result {
+                Ok(m) => m,
+                Err(e) => format!("**Sub-agent task panicked:** {e}"),
+            };
+
+            chat_view
+                .update(cx, |view, cx| view.add_info_message(msg, cx))
+                .map_err(|e| warn!(error = ?e, "Failed to show sub-agent result"))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// `/cd <path>` — change the working directory stored in `ExecutionSettingsModel`.
+    fn change_working_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        use std::path::Path;
+
+        let resolved = {
+            let base = cx
+                .try_global::<ExecutionSettingsModel>()
+                .and_then(|s| s.workspace_dir.clone())
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let candidate = Path::new(&path);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base.join(candidate)
+            }
+        };
+
+        match std::fs::canonicalize(&resolved) {
+            Ok(canonical) if canonical.is_dir() => {
+                let new_dir = canonical.to_string_lossy().to_string();
+                cx.update_global::<ExecutionSettingsModel, _>(|s, _| {
+                    s.workspace_dir = Some(new_dir.clone());
+                });
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(
+                        format!("**Working directory changed to:** {new_dir}"),
+                        cx,
+                    );
+                });
+            }
+            Ok(_) => {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(format!("`{path}` is not a directory."), cx);
+                });
+            }
+            Err(e) => {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(format!("Cannot change directory to `{path}`: {e}"), cx);
+                });
+            }
+        }
+    }
+
+    /// `/add-dir <path>` — validate and register a directory in the workspace.
+    ///
+    /// If `ExecutionSettingsModel.workspace_dir` is not yet set, this path becomes
+    /// the workspace root.  Shows confirmation or an error message in the chat.
+    fn add_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        use std::path::Path;
+
+        let resolved = {
+            let base = cx
+                .try_global::<ExecutionSettingsModel>()
+                .and_then(|s| s.workspace_dir.clone())
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let candidate = Path::new(&path);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base.join(candidate)
+            }
+        };
+
+        match std::fs::canonicalize(&resolved) {
+            Ok(canonical) if canonical.is_dir() => {
+                let dir = canonical.to_string_lossy().to_string();
+                // If no workspace_dir is set yet, use the provided path as workspace root.
+                cx.update_global::<ExecutionSettingsModel, _>(|s, _| {
+                    if s.workspace_dir.is_none() {
+                        s.workspace_dir = Some(dir.clone());
+                    }
+                });
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(format!("**Directory added to context:** {dir}"), cx);
+                });
+            }
+            Ok(_) => {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(format!("`{path}` is not a directory."), cx);
+                });
+            }
+            Err(e) => {
+                self.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(format!("Cannot add directory `{path}`: {e}"), cx);
+                });
+            }
+        }
+    }
+
+    /// Handle the finalization of a successfully completed stream.
     /// Called from handle_stream_manager_event when StreamEnded with Completed status.
     ///
     /// Reads the accumulated response text from `ConversationsStore.streaming_message`
