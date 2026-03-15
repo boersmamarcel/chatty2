@@ -60,6 +60,7 @@ impl ListToolsTool {
         has_compile_typst: bool,
         has_execute_code: bool,
         has_memory: bool,
+        has_search_web: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -340,11 +341,24 @@ impl ListToolsTool {
                     source: "native".to_string(),
                 },
                 ToolInfo {
+                    name: "save_skill".to_string(),
+                    description: "Save a reusable multi-step procedure to persistent memory for automatic recall in future conversations. Use after successfully solving a new type of multi-step task.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
                     name: "search_memory".to_string(),
                     description: "Search persistent memory for previously stored information. Use to recall facts, decisions, or context from past conversations.".to_string(),
                     source: "native".to_string(),
                 },
             ]);
+        }
+
+        if has_search_web {
+            native_tools.push(ToolInfo {
+                name: "search_web".to_string(),
+                description: "Search the web for up-to-date information. Use this first when you need current information, recent events, or anything not in your training data.".to_string(),
+                source: "native".to_string(),
+            });
         }
 
         // read_skill is always available — it's the on-demand companion to the slim
@@ -376,6 +390,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,

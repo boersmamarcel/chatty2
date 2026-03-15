@@ -170,7 +170,7 @@ fn active_native_tool_names(
     has_memory: bool,
     has_search_web: bool,
 ) -> HashSet<String> {
-    let mut names = HashSet::from([String::from("list_tools")]);
+    let mut names = HashSet::from([String::from("list_tools"), String::from("read_skill")]);
 
     if has_add_mcp {
         names.extend(
@@ -1077,6 +1077,7 @@ impl AgentClient {
             typst_tool.is_some(),
             execute_code_tool.is_some(),
             remember_tool.is_some(),
+            search_web_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -1897,6 +1898,21 @@ mod tests {
             normalize_azure_endpoint("https://test.openai.azure.com/openai/deployments/"),
             "https://test.openai.azure.com"
         );
+    }
+
+    #[test]
+    fn active_native_tool_names_always_includes_read_skill() {
+        // read_skill is always a native tool, so it must always be reserved
+        // regardless of which optional tools are enabled.
+        let names = active_native_tool_names(
+            false, false, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false,
+        );
+        assert!(
+            names.contains("read_skill"),
+            "read_skill must always be reserved to prevent MCP conflicts"
+        );
+        assert!(names.contains("list_tools"));
     }
 
     #[test]
