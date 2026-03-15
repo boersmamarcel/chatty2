@@ -72,6 +72,8 @@ pub struct Conversation {
     shell_session: Option<std::sync::Arc<ShellSession>>,
     /// Per-conversation working directory override (overrides the global workspace_dir setting)
     working_dir: Option<PathBuf>,
+    /// Effective workspace directory the current agent was built with.
+    agent_workspace_dir: Option<PathBuf>,
 }
 
 impl Conversation {
@@ -105,6 +107,10 @@ impl Conversation {
 
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent_workspace_dir = exec_settings
+            .as_ref()
+            .and_then(|settings| settings.workspace_dir.as_ref())
+            .map(PathBuf::from);
 
         // Shell session is created inside the factory when execution is enabled.
         // The factory returns it so we can store it on the Conversation for reuse
@@ -148,6 +154,7 @@ impl Conversation {
             pending_artifacts,
             shell_session,
             working_dir: None,
+            agent_workspace_dir,
         })
     }
 
@@ -180,6 +187,10 @@ impl Conversation {
 
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent_workspace_dir = exec_settings
+            .as_ref()
+            .and_then(|settings| settings.workspace_dir.as_ref())
+            .map(PathBuf::from);
 
         // Reconstruct agent; factory creates shell session on-demand when execution is enabled
         let (agent, shell_session) = AgentClient::from_model_config_with_tools(
@@ -260,6 +271,7 @@ impl Conversation {
             pending_artifacts,
             shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
+            agent_workspace_dir,
         })
     }
 
@@ -599,6 +611,11 @@ impl Conversation {
         self.working_dir.as_ref()
     }
 
+    /// Get the effective workspace directory the current agent was built with
+    pub fn agent_workspace_dir(&self) -> Option<&PathBuf> {
+        self.agent_workspace_dir.as_ref()
+    }
+
     /// Set or clear the per-conversation working directory override
     pub fn set_working_dir(&mut self, dir: Option<PathBuf>) {
         self.working_dir = dir;
@@ -606,9 +623,15 @@ impl Conversation {
     }
 
     /// Set the agent and model ID synchronously (for model switching without blocking)
-    pub fn set_agent(&mut self, agent: AgentClient, model_id: String) {
+    pub fn set_agent(
+        &mut self,
+        agent: AgentClient,
+        model_id: String,
+        agent_workspace_dir: Option<PathBuf>,
+    ) {
         self.agent = agent;
         self.model_id = model_id;
+        self.agent_workspace_dir = agent_workspace_dir;
         self.updated_at = SystemTime::now();
     }
 

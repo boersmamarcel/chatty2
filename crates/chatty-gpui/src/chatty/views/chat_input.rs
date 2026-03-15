@@ -1,6 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{ActiveTheme, Icon, Sizable};
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{ActiveTheme, Icon};
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
@@ -104,7 +105,7 @@ impl ChatInputState {
         self.is_streaming
     }
 
-    /// Get the per-conversation working directory override
+    /// Get the per-conversation working directory override currently shown in the input UI
     pub fn working_dir(&self) -> Option<&PathBuf> {
         self.working_dir.as_ref()
     }
@@ -618,6 +619,7 @@ impl RenderOnce for ChatInput {
                                         .gap_1()
                                         .child(
                                             div()
+                                                .id("working-dir-selector")
                                                 .flex()
                                                 .items_center()
                                                 .gap_1()
@@ -628,13 +630,9 @@ impl RenderOnce for ChatInput {
                                                 .text_xs()
                                                 .text_color(rgb(0x6b7280))
                                                 .hover(|s| s.bg(rgb(0xe5e7eb)))
-                                                .tooltip(move |_window, cx| {
-                                                    div()
-                                                        .px_2()
-                                                        .py_1()
-                                                        .text_xs()
-                                                        .child(full_path_for_tooltip.clone())
-                                                        .into_any_element()
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(full_path_for_tooltip.clone())
+                                                        .build(window, cx)
                                                 })
                                                 .child(
                                                     Icon::new(CustomIcon::FolderOpen)
@@ -684,6 +682,7 @@ impl RenderOnce for ChatInput {
                                         .when(has_working_dir_override, |d| {
                                             d.child(
                                                 div()
+                                                    .id("working-dir-reset")
                                                     .px_1()
                                                     .py_1()
                                                     .rounded_sm()
@@ -691,13 +690,11 @@ impl RenderOnce for ChatInput {
                                                     .text_xs()
                                                     .text_color(rgb(0x9ca3af))
                                                     .hover(|s| s.bg(rgb(0xe5e7eb)))
-                                                    .tooltip(|_window, cx| {
-                                                        div()
-                                                            .px_2()
-                                                            .py_1()
-                                                            .text_xs()
-                                                            .child("Reset to global working directory")
-                                                            .into_any_element()
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new(
+                                                            "Reset to global working directory",
+                                                        )
+                                                        .build(window, cx)
                                                     })
                                                     .child("×")
                                                     .on_mouse_down(
@@ -706,14 +703,7 @@ impl RenderOnce for ChatInput {
                                                             state_for_dir_reset
                                                                 .update(cx, |state, cx| {
                                                                     state.set_working_dir(None, cx);
-                                                                })
-                                                                .map_err(|e| {
-                                                                    warn!(
-                                                                        error = ?e,
-                                                                        "Failed to reset working directory"
-                                                                    )
-                                                                })
-                                                                .ok();
+                                                                });
                                                         },
                                                     ),
                                             )
