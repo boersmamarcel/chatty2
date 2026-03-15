@@ -46,6 +46,7 @@ pub enum CustomIcon {
     Paperclip,     // paperclip.svg - Non-image attachment
     Image,         // image.svg - Copy as image (PNG)
     Download,      // download.svg - Conversation download action
+    FolderOpen,    // folder-open.svg - Working directory picker
 }
 
 impl IconNamed for CustomIcon {
@@ -68,6 +69,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::Paperclip => "icons/paperclip.svg",
             CustomIcon::Image => "icons/image.svg",
             CustomIcon::Download => "icons/download.svg",
+            CustomIcon::FolderOpen => "icons/folder-open.svg",
         }
         .into()
     }

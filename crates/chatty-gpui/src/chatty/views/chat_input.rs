@@ -1,15 +1,18 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{ActiveTheme, Icon};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
 use super::attachment_validation::{PDF_EXTENSION, is_image_extension, validate_attachment};
+use crate::assets::CustomIcon;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
+use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -22,6 +25,7 @@ pub enum ChatInputEvent {
     },
     ModelChanged(String),
     Stop,
+    WorkingDirChanged(Option<PathBuf>),
 }
 
 impl EventEmitter<ChatInputEvent> for ChatInputState {}
@@ -40,6 +44,8 @@ pub struct ChatInputState {
     supports_pdf: bool,
     thumbnail_cache: ThumbnailCache,
     is_streaming: bool,
+    /// Per-conversation working directory override (None = use global workspace_dir setting)
+    working_dir: Option<PathBuf>,
 }
 
 impl ChatInputState {
@@ -54,6 +60,7 @@ impl ChatInputState {
             supports_images: false,
             supports_pdf: false,
             is_streaming: false,
+            working_dir: None,
         }
     }
 
@@ -96,6 +103,23 @@ impl ChatInputState {
     /// Check if currently streaming
     pub fn is_streaming(&self) -> bool {
         self.is_streaming
+    }
+
+    /// Get the per-conversation working directory override currently shown in the input UI
+    pub fn working_dir(&self) -> Option<&PathBuf> {
+        self.working_dir.as_ref()
+    }
+
+    /// Set the per-conversation working directory override and emit event
+    pub fn set_working_dir(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.working_dir = dir.clone();
+        cx.emit(ChatInputEvent::WorkingDirChanged(dir));
+        cx.notify();
+    }
+
+    /// Set the working directory without emitting an event (for restoring state on conversation load)
+    pub fn set_working_dir_silent(&mut self, dir: Option<PathBuf>) {
+        self.working_dir = dir;
     }
 
     /// Add file attachments with validation
@@ -361,6 +385,8 @@ impl RenderOnce for ChatInput {
         let state_for_model = self.state.clone();
         let state_for_image = self.state.clone();
         let state_for_pdf = self.state.clone();
+        let state_for_dir = self.state.clone();
+        let state_for_dir_reset = self.state.clone();
         let input_entity = self.state.read(cx).input.clone();
 
         // Read capabilities and attachments
@@ -372,6 +398,15 @@ impl RenderOnce for ChatInput {
 
         // Read thumbnail cache (for PDF previews)
         let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
+
+        // Working directory: per-chat override or global default
+        let per_chat_working_dir = self.state.read(cx).working_dir.clone();
+        let global_workspace_dir = cx
+            .try_global::<ExecutionSettingsModel>()
+            .and_then(|s| s.workspace_dir.clone())
+            .map(PathBuf::from);
+        let effective_working_dir = per_chat_working_dir.clone().or(global_workspace_dir);
+        let has_working_dir_override = per_chat_working_dir.is_some();
 
         // Model display name
         let model_display = self.state.read(cx).get_selected_model_display_name();
@@ -568,6 +603,113 @@ impl RenderOnce for ChatInput {
                             .items_center()
                             .gap_2()
                             .when_some(attachment_popover, |d, popover| d.child(popover))
+                            .when_some(effective_working_dir, |d, dir| {
+                                // Compute display name: last path component or full path
+                                let dir_name = dir
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| dir.to_string_lossy().to_string());
+                                let full_path = dir.to_string_lossy().to_string();
+                                let full_path_for_tooltip = full_path.clone();
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .id("working-dir-selector")
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(rgb(0x6b7280))
+                                                .hover(|s| s.bg(rgb(0xe5e7eb)))
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(full_path_for_tooltip.clone())
+                                                        .build(window, cx)
+                                                })
+                                                .child(
+                                                    Icon::new(CustomIcon::FolderOpen)
+                                                        .size_3(),
+                                                )
+                                                .child(dir_name)
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |_event, _window, cx| {
+                                                        let state = state_for_dir.clone();
+                                                        cx.spawn(async move |cx| {
+                                                            let receiver = cx
+                                                                .update(|cx| {
+                                                                    cx.prompt_for_paths(
+                                                                        PathPromptOptions {
+                                                                            files: false,
+                                                                            directories: true,
+                                                                            multiple: false,
+                                                                            prompt: Some(
+                                                                                "Select Working Directory".into(),
+                                                                            ),
+                                                                        },
+                                                                    )
+                                                                })
+                                                                .ok()?;
+
+                                                            if let Ok(Some(paths)) =
+                                                                receiver.await.ok()?
+                                                            {
+                                                                if let Some(path) = paths.into_iter().next() {
+                                                                    state
+                                                                        .update(cx, |state, cx| {
+                                                                            state.set_working_dir(
+                                                                                Some(path),
+                                                                                cx,
+                                                                            );
+                                                                        })
+                                                                        .ok()?;
+                                                                }
+                                                            }
+                                                            Some(())
+                                                        })
+                                                        .detach();
+                                                    },
+                                                ),
+                                        )
+                                        .when(has_working_dir_override, |d| {
+                                            d.child(
+                                                div()
+                                                    .id("working-dir-reset")
+                                                    .px_1()
+                                                    .py_1()
+                                                    .rounded_sm()
+                                                    .cursor_pointer()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x9ca3af))
+                                                    .hover(|s| s.bg(rgb(0xe5e7eb)))
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new(
+                                                            "Reset to global working directory",
+                                                        )
+                                                        .build(window, cx)
+                                                    })
+                                                    .child("×")
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_event, _window, cx| {
+                                                            state_for_dir_reset
+                                                                .update(cx, |state, cx| {
+                                                                    state.set_working_dir(None, cx);
+                                                                });
+                                                        },
+                                                    ),
+                                            )
+                                        }),
+                                )
+                            })
                             .child(div().flex_grow())
                             .child(model_popover)
                             .child(
