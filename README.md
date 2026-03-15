@@ -69,6 +69,8 @@ Chatty can give your LLM access to the filesystem, a sandboxed shell, and MCP se
    - **Auto-approve** — tools run without prompting
    - **Deny all** — tools are visible but blocked
 
+You can also set a **per-chat working directory** to override the global workspace for a specific conversation. Click the folder icon in the chat input bar to open an OS directory picker — the selected folder name appears next to the icon. A `×` button lets you reset back to the global default. The override is saved with the conversation and takes effect immediately.
+
 Optionally, enable **Docker Code Execution** to run code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
 
 See [Tools & MCP](#tools--mcp) below for details.
