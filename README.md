@@ -236,6 +236,7 @@ When code execution is enabled in Settings, your LLM can use these tools (most a
 | `search_memory` | Search past memories by keyword to retrieve relevant stored information | No |
 | `search_web` | Search the web for current information. Uses DuckDuckGo by default (no API key needed); optionally configure Tavily or Brave in Settings > Internet for richer results. Controlled by the internet access toggle | No |
 | `fetch` | Fetch any web URL and return its readable text content. Controlled by the same internet access toggle as `search_web` | No |
+| `sub_agent` | Delegate a task to an independent sub-agent that has access to the same tools. The sub-agent runs autonomously and returns the result — useful for parallelizing work or isolating complex sub-tasks | No |
 
 ### MCP Servers
 
