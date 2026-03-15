@@ -63,15 +63,18 @@ macro_rules! process_agent_stream {
                             }
                             rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                 use tracing::info;
-                                let mut tool_id = tool_call.call_id.clone()
-                                    .unwrap_or_else(|| tool_call.id.clone());
-                                // Ollama's rig-core provider sends empty tool IDs;
-                                // fall back to rig's internal correlation ID so that
-                                // ToolCallStarted / ToolCallInput / ToolCallResult
-                                // all share the same key.
-                                if tool_id.is_empty() {
-                                    tool_id = internal_call_id.clone();
-                                }
+                                // Resolve a unique tool call ID.
+                                // Priority: provider's call_id > rig's internal_call_id > tool_call.id
+                                //
+                                // `tool_call.id` is the Tool::NAME constant (e.g. "sub_agent"),
+                                // NOT a unique per-call identifier.  When the LLM invokes the
+                                // same tool multiple times, every call would share that name,
+                                // making it impossible to correlate results.
+                                // `internal_call_id` is rig's unique correlation ID and is
+                                // always available + always unique.
+                                let tool_id = tool_call.call_id.clone()
+                                    .filter(|id| !id.is_empty())
+                                    .unwrap_or_else(|| internal_call_id.clone());
                                 info!(
                                     tool_id = %tool_id,
                                     tool_name = %tool_call.function.name,
@@ -103,12 +106,10 @@ macro_rules! process_agent_stream {
                             .collect::<Vec<_>>()
                             .join("\n");
 
-                        let mut call_id = tool_result.call_id.clone()
-                            .unwrap_or_else(|| tool_result.id.clone());
-                        // Ollama: fall back to internal_call_id (see ToolCall arm above)
-                        if call_id.is_empty() {
-                            call_id = internal_call_id;
-                        }
+                        // Resolve a unique tool call ID (same logic as ToolCall arm above).
+                        let call_id = tool_result.call_id.clone()
+                            .filter(|id| !id.is_empty())
+                            .unwrap_or(internal_call_id);
 
                         let is_error = content_text.trim_start().starts_with("Error:")
                             || content_text.trim_start().starts_with("ERROR:")

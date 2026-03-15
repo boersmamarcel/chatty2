@@ -214,18 +214,21 @@ impl SystemTrace {
         }
     }
 
-    /// Update a tool call by ID using a two-pass reverse scan.
+    /// Update a tool call by ID.
     ///
-    /// Pass 1 (reverse): find the LAST entry with matching ID in Running state.
+    /// Pass 1 (forward): find the FIRST entry with matching ID in Running state (FIFO).
     /// Pass 2 (fallback, reverse): find the LAST entry with matching ID regardless of state.
+    ///
+    /// FIFO order ensures that when results arrive for duplicate tool-call IDs,
+    /// they match the oldest pending call first.
     ///
     /// Returns true if a matching tool call was found and updated.
     pub fn update_tool_call<F>(&mut self, tool_id: &str, updater: F) -> bool
     where
         F: FnOnce(&mut ToolCallBlock),
     {
-        // Pass 1: find last Running entry with matching ID
-        for item in self.items.iter_mut().rev() {
+        // Pass 1: find first Running entry with matching ID (FIFO order)
+        for item in self.items.iter_mut() {
             if let TraceItem::ToolCall(tc) = item
                 && tc.id == tool_id
                 && matches!(tc.state, ToolCallState::Running)
@@ -331,5 +334,145 @@ impl AssistantMessage {
             .join("\n");
 
         Self::new(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool_call(id: &str, name: &str, state: ToolCallState) -> ToolCallBlock {
+        ToolCallBlock {
+            id: id.to_string(),
+            tool_name: name.to_string(),
+            display_name: name.to_string(),
+            input: String::new(),
+            output: None,
+            output_preview: None,
+            state,
+            duration: None,
+            text_before: String::new(),
+        }
+    }
+
+    #[test]
+    fn update_tool_call_fifo_with_duplicate_ids() {
+        // Simulates the bug: multiple sub_agent calls all sharing the same ID
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(make_tool_call(
+            "sub_agent",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+        trace.add_tool_call(make_tool_call(
+            "sub_agent",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+        trace.add_tool_call(make_tool_call(
+            "sub_agent",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+
+        // First result should update the FIRST Running entry (FIFO)
+        assert!(trace.update_tool_call("sub_agent", |tc| {
+            tc.output = Some("joke1".to_string());
+            tc.state = ToolCallState::Success;
+        }));
+
+        // Second result should update the SECOND Running entry
+        assert!(trace.update_tool_call("sub_agent", |tc| {
+            tc.output = Some("joke2".to_string());
+            tc.state = ToolCallState::Success;
+        }));
+
+        // Third result should update the THIRD Running entry
+        assert!(trace.update_tool_call("sub_agent", |tc| {
+            tc.output = Some("joke3".to_string());
+            tc.state = ToolCallState::Success;
+        }));
+
+        // Verify all three got their correct results
+        let tool_calls: Vec<_> = trace
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let TraceItem::ToolCall(tc) = item {
+                    Some(tc)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(tool_calls[0].output.as_deref(), Some("joke1"));
+        assert_eq!(tool_calls[1].output.as_deref(), Some("joke2"));
+        assert_eq!(tool_calls[2].output.as_deref(), Some("joke3"));
+    }
+
+    #[test]
+    fn update_tool_call_with_unique_ids() {
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(make_tool_call(
+            "call_1",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+        trace.add_tool_call(make_tool_call(
+            "call_2",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+
+        // Results can arrive in any order with unique IDs
+        assert!(trace.update_tool_call("call_2", |tc| {
+            tc.output = Some("result2".to_string());
+            tc.state = ToolCallState::Success;
+        }));
+        assert!(trace.update_tool_call("call_1", |tc| {
+            tc.output = Some("result1".to_string());
+            tc.state = ToolCallState::Success;
+        }));
+
+        let tool_calls: Vec<_> = trace
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let TraceItem::ToolCall(tc) = item {
+                    Some(tc)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(tool_calls[0].output.as_deref(), Some("result1"));
+        assert_eq!(tool_calls[1].output.as_deref(), Some("result2"));
+    }
+
+    #[test]
+    fn update_tool_call_fallback_to_any_state() {
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(make_tool_call("call_1", "fetch", ToolCallState::Success));
+
+        // Pass 2 fallback: match by ID regardless of state
+        assert!(trace.update_tool_call("call_1", |tc| {
+            tc.output = Some("updated".to_string());
+        }));
+
+        let tc = match &trace.items[0] {
+            TraceItem::ToolCall(tc) => tc,
+            _ => panic!("expected ToolCall"),
+        };
+        assert_eq!(tc.output.as_deref(), Some("updated"));
+    }
+
+    #[test]
+    fn update_tool_call_not_found() {
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(make_tool_call("call_1", "fetch", ToolCallState::Running));
+
+        assert!(!trace.update_tool_call("nonexistent", |_tc| {}));
     }
 }
