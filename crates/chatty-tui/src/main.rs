@@ -176,6 +176,13 @@ async fn main() -> Result<()> {
     let models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
 
+    // Default workspace_dir to CWD at launch so tools have an explicit root
+    if execution_settings.workspace_dir.is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            execution_settings.workspace_dir = Some(cwd.to_string_lossy().to_string());
+        }
+    }
+
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
 
