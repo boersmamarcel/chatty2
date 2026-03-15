@@ -151,6 +151,10 @@ pub struct ChatInputState {
     is_streaming: bool,
     /// Index of the highlighted item in the slash-command picker.
     slash_menu_selected: usize,
+    /// The slash query that was in effect when `slash_menu_selected` was last
+    /// reset.  Used to detect genuine query changes vs. spurious Change events
+    /// (e.g. the newline that gpui-component appends before firing PressEnter).
+    last_slash_query: Option<String>,
     /// When set, the value is written into the input on the next render frame
     /// (requires Window access, deferred from the subscription closure).
     pending_slash_insert: Option<String>,
@@ -171,6 +175,7 @@ impl ChatInputState {
             supports_pdf: false,
             is_streaming: false,
             slash_menu_selected: 0,
+            last_slash_query: None,
             pending_slash_insert: None,
             working_dir: None,
         }
@@ -385,9 +390,36 @@ impl ChatInputState {
         self.slash_menu_selected
     }
 
-    /// Reset the selection to 0 (called when input text changes).
-    pub fn reset_slash_menu_selection(&mut self) {
-        self.slash_menu_selected = 0;
+    /// Reset the selection to 0 **only** when the slash query text changes.
+    ///
+    /// This is called from the `InputEvent::Change` subscriber.  We deliberately
+    /// ignore spurious Change events that don't alter the query (e.g. the
+    /// newline that gpui-component appends to the buffer right before it fires
+    /// `InputEvent::PressEnter` in an auto-grow input) so that the arrow-key
+    /// selection is still respected when the user presses Enter.
+    pub fn reset_slash_menu_selection_if_query_changed(&mut self, new_text: &str) {
+        // Extract the raw query slice (text after '/', no leading slash).
+        // If there is no leading '/' or the text already contains whitespace
+        // (menu would be closed anyway), treat as no active query.
+        let trimmed = new_text.trim();
+        let query_raw: &str =
+            if trimmed.starts_with('/') && !trimmed.chars().any(char::is_whitespace) {
+                &trimmed[1..]
+            } else {
+                ""
+            };
+
+        // Compare without allocating; only convert to owned when storing.
+        let changed = self
+            .last_slash_query
+            .as_deref()
+            .map(|prev| !prev.eq_ignore_ascii_case(query_raw))
+            .unwrap_or(true);
+
+        if changed {
+            self.slash_menu_selected = 0;
+            self.last_slash_query = Some(query_raw.to_ascii_lowercase());
+        }
     }
 
     /// Move selection up (wraps to last item).
@@ -425,6 +457,7 @@ impl ChatInputState {
         let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
         let cmd = items[selected];
         self.slash_menu_selected = 0;
+        self.last_slash_query = None; // reset so next '/' starts fresh
 
         if cmd.execute_immediately {
             cx.emit(ChatInputEvent::SlashCommandSelected(

@@ -107,10 +107,12 @@ impl ChatView {
                     }
                 }
                 InputEvent::Change => {
-                    // Reset the slash-menu selection whenever the input text changes
-                    // so the first item is always highlighted after each keystroke.
-                    state_for_change.update(cx, |state, _cx| {
-                        state.reset_slash_menu_selection();
+                    // Reset the slash-menu selection when the query text changes,
+                    // but NOT on spurious Change events with the same query (e.g.
+                    // the newline that gpui-component writes before PressEnter).
+                    state_for_change.update(cx, |state, cx| {
+                        let new_text = state.input.read(cx).text().to_string();
+                        state.reset_slash_menu_selection_if_query_changed(&new_text);
                     });
                 }
                 _ => {}
