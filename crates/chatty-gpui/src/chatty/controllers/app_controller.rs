@@ -2665,6 +2665,12 @@ impl ChattyApp {
     fn launch_agent(&mut self, prompt: String, cx: &mut Context<Self>) {
         info!(prompt = %prompt, "Slash command: launch sub-agent");
 
+        // Capture the conversation where the sub-agent is launched so the result can be
+        // routed back to the correct conversation even if the user navigates away.
+        let launch_conv_id = cx
+            .try_global::<ConversationsStore>()
+            .and_then(|store| store.active_id().cloned());
+
         // Resolve the active model ID so the sub-agent uses the same model.
         let model_id = cx
             .try_global::<ConversationsStore>()
@@ -2686,7 +2692,7 @@ impl ChattyApp {
             );
         });
 
-        cx.spawn(async move |_weak, cx| {
+        cx.spawn(async move |weak, cx| {
             let result = tokio::task::spawn_blocking(move || {
                 // Look for chatty-tui in the same directory as this binary first,
                 // then fall back to letting the OS resolve from PATH.
@@ -2737,6 +2743,54 @@ impl ChattyApp {
                 Ok(m) => m,
                 Err(e) => format!("**Sub-agent task panicked:** {e}"),
             };
+
+            // If the user navigated to a different conversation while the sub-agent was
+            // running, route the result back to the conversation where it was launched.
+            // Exception: if the current conversation has an active LLM stream, avoid
+            // disruptive navigation — show the result in the current view with a note.
+            if let Some(ref conv_id) = launch_conv_id {
+                let (current_conv_id, current_has_active_stream) = cx
+                    .update(|cx| {
+                        let current = cx
+                            .try_global::<ConversationsStore>()
+                            .and_then(|store| store.active_id().cloned());
+                        let streaming = current
+                            .as_ref()
+                            .and_then(|id| {
+                                cx.try_global::<GlobalStreamManager>()
+                                    .and_then(|g| g.entity.clone())
+                                    .map(|mgr| mgr.read(cx).is_streaming(id))
+                            })
+                            .unwrap_or(false);
+                        (current, streaming)
+                    })
+                    .unwrap_or((None, false));
+
+                let conversation_changed = current_conv_id.as_deref() != Some(conv_id.as_str());
+
+                if conversation_changed {
+                    if current_has_active_stream {
+                        // A stream is active in the current conversation; navigating away
+                        // would be disruptive. Show the result here with a context note.
+                        let noted_msg =
+                            format!("**Sub-agent** *(background task)*:\n\n{msg}");
+                        chat_view
+                            .update(cx, |view, cx| view.add_info_message(noted_msg, cx))
+                            .map_err(|e| warn!(error = ?e, "Failed to show sub-agent result"))
+                            .ok();
+                        return;
+                    }
+
+                    // Navigate back to the launch conversation so the result appears there.
+                    let nav_conv_id = conv_id.clone();
+                    if let Some(app) = weak.upgrade() {
+                        app.update(cx, |app, cx| {
+                            app.load_conversation(&nav_conv_id, cx);
+                        })
+                        .ok();
+                    }
+                }
+            }
 
             chat_view
                 .update(cx, |view, cx| view.add_info_message(msg, cx))
