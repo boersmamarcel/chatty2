@@ -104,14 +104,14 @@ impl Tool for ReadSkillTool {
         let file_names = ["SKILL.md", "skill.md"];
 
         // Check workspace directory first
-        if let Some(ref ws_dir) = self.workspace_skills_dir {
-            if let Some(content) = try_read_skill_file(&ws_dir.join(&args.name), &file_names).await
-            {
-                return Ok(ReadSkillOutput {
-                    content,
-                    source: "workspace".to_string(),
-                });
-            }
+        if let Some(ref ws_dir) = self.workspace_skills_dir
+            && let Some(content) =
+                try_read_skill_file(&ws_dir.join(&args.name), &file_names).await
+        {
+            return Ok(ReadSkillOutput {
+                content,
+                source: "workspace".to_string(),
+            });
         }
 
         // Fall back to global directory

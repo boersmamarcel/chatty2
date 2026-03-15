@@ -3342,8 +3342,11 @@ async fn run_llm_stream(
         }
     }
 
-    // 2c. Auto-retrieve relevant memories and inject as context
-    let user_contents = {
+    // 2c. Auto-retrieve relevant memories and inject as context.
+    // Keep the original contents separate so the context block is never persisted
+    // to conversation history (it is only forwarded to the LLM).
+    let original_user_contents = user_contents.clone();
+    let llm_user_contents = {
         let memory_service = await_memory_service(cx).await;
         let embedding_service = get_embedding_service(cx);
         let skill_service = get_skill_service(cx);
@@ -3389,20 +3392,26 @@ async fn run_llm_stream(
         }
     };
 
-    // 3. Call stream_prompt
+    // 3. Call stream_prompt with augmented contents (context block included for the LLM)
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
-    let (mut stream, user_message) = stream_prompt(
+    let (mut stream, _augmented_user_message) = stream_prompt(
         &agent,
         &history,
-        user_contents,
+        llm_user_contents,
         Some(approval_rx),
         Some(resolution_rx),
         max_agent_turns,
     )
     .await?;
 
-    // 4. Optionally add user message to conversation model
+    // 4. Optionally add user message to conversation model.
+    // Use the original contents (without the injected context block) so that
+    // reopening an old conversation does not show the injected context block.
     if add_user_message_to_model {
+        let user_message = rig::completion::Message::User {
+            content: rig::OneOrMany::many(original_user_contents)
+                .map_err(|e| anyhow::anyhow!("Failed to create user message from contents: {}", e))?,
+        };
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 conv.add_user_message_with_attachments(user_message, attachment_paths);
