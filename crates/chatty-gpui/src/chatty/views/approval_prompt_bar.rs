@@ -4,14 +4,12 @@ use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 use std::sync::Arc;
 
 pub type ApprovalCallback = Arc<dyn Fn(bool, &mut App) + Send + Sync>;
-pub type ExpandCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
 
 #[derive(IntoElement)]
 pub struct ApprovalPromptBar {
     command: String,
     is_sandboxed: bool,
     on_approve_deny: Option<ApprovalCallback>,
-    on_expand: Option<ExpandCallback>,
 }
 
 impl ApprovalPromptBar {
@@ -20,7 +18,6 @@ impl ApprovalPromptBar {
             command,
             is_sandboxed,
             on_approve_deny: None,
-            on_expand: None,
         }
     }
 
@@ -29,14 +26,6 @@ impl ApprovalPromptBar {
         F: Fn(bool, &mut App) + Send + Sync + 'static,
     {
         self.on_approve_deny = Some(Arc::new(callback));
-        self
-    }
-
-    pub fn on_expand<F>(mut self, callback: F) -> Self
-    where
-        F: Fn(&mut App) + Send + Sync + 'static,
-    {
-        self.on_expand = Some(Arc::new(callback));
         self
     }
 
@@ -59,7 +48,7 @@ impl RenderOnce for ApprovalPromptBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let warning_color = cx.theme().ring; // Used for errors/warnings
         let accent_color = cx.theme().accent;
-        let bg_color = cx.theme().primary;
+        let bg_color = cx.theme().secondary;
         let border_color = if self.is_sandboxed {
             accent_color
         } else {
@@ -68,17 +57,11 @@ impl RenderOnce for ApprovalPromptBar {
 
         // Platform-specific button labels
         #[cfg(target_os = "macos")]
-        let (approve_label, deny_label, details_label) =
-            ("Approve (⌘Y)", "Deny (⇧⌘N)", "Details (⌘D)");
+        let (approve_label, deny_label) = ("Approve (⌘Y)", "Deny (⇧⌘N)");
         #[cfg(target_os = "linux")]
-        let (approve_label, deny_label, details_label) =
-            ("Approve (Opt+Y)", "Deny (Shift+Opt+N)", "Details (Opt+D)");
+        let (approve_label, deny_label) = ("Approve (Opt+Y)", "Deny (Shift+Opt+N)");
         #[cfg(target_os = "windows")]
-        let (approve_label, deny_label, details_label) = (
-            "Approve (Ctrl+Y)",
-            "Deny (Shift+Ctrl+N)",
-            "Details (Ctrl+D)",
-        );
+        let (approve_label, deny_label) = ("Approve (Ctrl+Y)", "Deny (Shift+Ctrl+N)");
 
         // Note: Keyboard shortcuts are handled at the ChatView level, not here.
         // This component just displays the approval bar UI.
@@ -177,24 +160,6 @@ impl RenderOnce for ApprovalPromptBar {
                                 move |_event, _window, cx| {
                                     if let Some(ref cb) = callback {
                                         cb(false, cx);
-                                    }
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("expand-trace")
-                            .label(details_label)
-                            .small()
-                            .on_click({
-                                let callback = self.on_expand.clone();
-                                move |_event, _window, cx| {
-                                    use tracing::warn;
-                                    warn!("Details button clicked");
-                                    if let Some(ref cb) = callback {
-                                        warn!("Calling on_expand callback");
-                                        cb(cx);
-                                    } else {
-                                        warn!("No on_expand callback set!");
                                     }
                                 }
                             }),

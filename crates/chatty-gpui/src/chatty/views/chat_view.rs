@@ -1379,14 +1379,6 @@ impl Render for ChatView {
                                     view.handle_floating_approval(approved, cx);
                                 });
                             }
-                        })
-                        .on_expand({
-                            let entity = view_entity.clone();
-                            move |cx| {
-                                entity.update(cx, |view, cx| {
-                                    view.expand_trace_to_approval(cx);
-                                });
-                            }
                         }),
                     ),
                 )
