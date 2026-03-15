@@ -1,10 +1,10 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon};
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{ActiveTheme, Icon};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};

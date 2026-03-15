@@ -45,8 +45,8 @@ pub enum CustomIcon {
     Brain,         // brain.svg - Thinking block header
     Paperclip,     // paperclip.svg - Non-image attachment
     Image,         // image.svg - Copy as image (PNG)
-    Download,    // download.svg - Conversation download action
-    FolderOpen,  // folder-open.svg - Working directory picker
+    Download,      // download.svg - Conversation download action
+    FolderOpen,    // folder-open.svg - Working directory picker
 }
 
 impl IconNamed for CustomIcon {

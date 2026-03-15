@@ -33,10 +33,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     CREATE INDEX IF NOT EXISTS idx_conversations_updated_at
         ON conversations (updated_at DESC);",
     ),
-    (
-        2,
-        "ALTER TABLE conversations ADD COLUMN working_dir TEXT;",
-    ),
+    (2, "ALTER TABLE conversations ADD COLUMN working_dir TEXT;"),
 ];
 
 /// SQLite-backed repository for conversations.

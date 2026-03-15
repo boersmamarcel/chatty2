@@ -126,10 +126,17 @@ fn get_skill_service(cx: &gpui::AsyncApp) -> chatty_core::services::SkillService
     })
 }
 
-async fn rebuild_conversation_agent(
-    conv_id: &str,
-    cx: &gpui::AsyncApp,
-) -> anyhow::Result<()> {
+fn normalize_workspace_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn normalize_workspace_string(path: &str) -> String {
+    normalize_workspace_path(Path::new(path))
+        .to_string_lossy()
+        .to_string()
+}
+
+async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
     let conv_id = conv_id.to_string();
 
     let (model_config, provider_config) = cx
@@ -185,9 +192,16 @@ async fn rebuild_conversation_agent(
                 .get_pending_approvals();
             let conv = cx.global::<ConversationsStore>().get_conversation(&conv_id);
             if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
-                settings.workspace_dir = Some(working_dir.to_string_lossy().to_string());
+                settings.workspace_dir = Some(
+                    normalize_workspace_path(working_dir)
+                        .to_string_lossy()
+                        .to_string(),
+                );
             }
-            let built_workspace_dir = settings.workspace_dir.clone().map(PathBuf::from);
+            let built_workspace_dir = settings
+                .workspace_dir
+                .as_ref()
+                .map(|dir| normalize_workspace_path(Path::new(dir)));
             let artifacts = conv.map(|c| c.pending_artifacts());
             let isolation_changed = conv
                 .and_then(|c| c.shell_session())
@@ -195,7 +209,11 @@ async fn rebuild_conversation_agent(
                 .unwrap_or(false);
             let workspace_changed = conv
                 .and_then(|c| c.shell_session())
-                .map(|sess| sess.workspace_dir().map(PathBuf::from) != built_workspace_dir)
+                .map(|sess| {
+                    sess.workspace_dir()
+                        .map(|dir| normalize_workspace_path(Path::new(dir)))
+                        != built_workspace_dir
+                })
                 .unwrap_or(false);
             let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
                 if !isolation_changed && !workspace_changed {
@@ -647,6 +665,11 @@ impl ChattyApp {
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
     ) -> anyhow::Result<Conversation> {
+        let mut effective_exec_settings = exec_settings.clone();
+        if let Some(working_dir) = data.working_dir.as_ref() {
+            effective_exec_settings.workspace_dir = Some(normalize_workspace_string(working_dir));
+        }
+
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
             anyhow::anyhow!(
@@ -684,7 +707,7 @@ impl ChattyApp {
             model_config,
             provider_config,
             mcp_tools,
-            Some(exec_settings.clone()),
+            Some(effective_exec_settings),
             Some(pending_approvals),
             Some(pending_write_approvals),
             user_secrets,
@@ -825,7 +848,7 @@ impl ChattyApp {
             .chat_input_state()
             .read(cx)
             .working_dir()
-            .cloned();
+            .map(|path| normalize_workspace_path(path));
 
         let models = cx.global::<ModelsModel>();
         let providers = cx.global::<ProviderModel>();
@@ -930,7 +953,11 @@ impl ChattyApp {
                             .global::<crate::settings::models::ExecutionSettingsModel>()
                             .clone();
                         if let Some(working_dir) = selected_working_dir.as_ref() {
-                            settings.workspace_dir = Some(working_dir.to_string_lossy().to_string());
+                            settings.workspace_dir = Some(
+                                normalize_workspace_path(working_dir)
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
                         }
                         let approvals = cx
                             .global::<crate::chatty::models::ExecutionApprovalStore>()
@@ -1151,7 +1178,9 @@ impl ChattyApp {
                 )
             });
 
-        if let Some((model_id, streaming_content, streaming_trace, conversation_working_dir)) = minimal_data {
+        if let Some((model_id, streaming_content, streaming_trace, conversation_working_dir)) =
+            minimal_data
+        {
             // Check if this conversation has an active stream via StreamManager
             let has_active_stream = cx
                 .try_global::<GlobalStreamManager>()
@@ -1404,11 +1433,16 @@ impl ChattyApp {
                                 let conv =
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
                                 if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
-                                    settings.workspace_dir =
-                                        Some(working_dir.to_string_lossy().to_string());
+                                    settings.workspace_dir = Some(
+                                        normalize_workspace_path(working_dir)
+                                            .to_string_lossy()
+                                            .to_string(),
+                                    );
                                 }
-                                let built_workspace_dir =
-                                    settings.workspace_dir.clone().map(PathBuf::from);
+                                let built_workspace_dir = settings
+                                    .workspace_dir
+                                    .as_ref()
+                                    .map(|dir| normalize_workspace_path(Path::new(dir)));
                                 let artifacts = conv.map(|c| c.pending_artifacts());
                                 let session = conv.and_then(|c| c.shell_session());
                                 let secrets = cx
@@ -1551,6 +1585,7 @@ impl ChattyApp {
         dir: Option<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        let dir = dir.map(|path| normalize_workspace_path(&path));
         let conv_id = cx
             .global::<ConversationsStore>()
             .active_id()
@@ -3174,9 +3209,7 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
             .unwrap()
             .as_secs() as i64,
         updated_at: now,
-        working_dir: conv
-            .working_dir()
-            .map(|p| p.to_string_lossy().to_string()),
+        working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),
     })
 }
 
@@ -3230,9 +3263,17 @@ async fn run_llm_stream(
             let per_conv = cx
                 .global::<ConversationsStore>()
                 .get_conversation(&conv_id)
-                .and_then(|c| c.working_dir().map(|p| p.to_string_lossy().to_string()));
+                .and_then(|c| {
+                    c.working_dir()
+                        .map(|p| normalize_workspace_path(p).to_string_lossy().to_string())
+                });
             // Fall back to global workspace_dir
-            per_conv.or_else(|| cx.global::<ExecutionSettingsModel>().workspace_dir.clone())
+            per_conv.or_else(|| {
+                cx.global::<ExecutionSettingsModel>()
+                    .workspace_dir
+                    .as_deref()
+                    .map(normalize_workspace_string)
+            })
         })
         .ok()
         .flatten();
