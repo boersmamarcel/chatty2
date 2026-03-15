@@ -45,6 +45,7 @@ pub enum AppEvent {
     // ── Lifecycle events ─────────────────────────────────────────────────
     ConversationReady,
     TitleGenerated(String),
+    SubAgentProgress(String),
     SubAgentFinished(String),
 
     // ── Terminal events ──────────────────────────────────────────────────

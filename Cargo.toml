@@ -8,7 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 # Core agent dependencies
-rig-core = { git = "https://github.com/0xPlaygrounds/rig", branch = "main" }
+rig-core = "0.32.0"
 rmcp = { version = "0.16", features = ["client", "macros", "transport-child-process"] }
 
 # Persistence layer

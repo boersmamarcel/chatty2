@@ -23,7 +23,7 @@ use crate::tools::{
     MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
     ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
     SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, WriteExcelTool, WriteFileTool,
+    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -169,6 +169,7 @@ fn active_native_tool_names(
     has_execute_code: bool,
     has_memory: bool,
     has_search_web: bool,
+    has_sub_agent: bool,
 ) -> HashSet<String> {
     let mut names = HashSet::from([String::from("list_tools"), String::from("read_skill")]);
 
@@ -276,6 +277,9 @@ fn active_native_tool_names(
     }
     if has_search_web {
         names.insert(String::from("search_web"));
+    }
+    if has_sub_agent {
+        names.insert(String::from("sub_agent"));
     }
 
     names
@@ -422,6 +426,7 @@ fn collect_tools(
     search_memory_tool: Option<SearchMemoryTool>,
     read_skill_tool: ReadSkillTool,
     search_web_tool: Option<SearchWebTool>,
+    sub_agent_tool: Option<SubAgentTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -516,6 +521,9 @@ fn collect_tools(
     }
     tools.push(Box::new(read_skill_tool));
     if let Some(t) = search_web_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = sub_agent_tool {
         tools.push(Box::new(t));
     }
     tools
@@ -1036,6 +1044,30 @@ impl AgentClient {
             None
         };
 
+        // Sub-agent tool — gated on execution being enabled (the sub-agent needs
+        // to be able to run tools). Uses the same model as the parent conversation.
+        let sub_agent_tool: Option<SubAgentTool> = if exec_settings
+            .as_ref()
+            .map(|s| s.enabled)
+            .unwrap_or(false)
+        {
+            let sub_model_id = model_config.id.clone();
+            let sub_auto_approve = exec_settings
+                .as_ref()
+                .map(|s| {
+                    matches!(
+                        s.approval_mode,
+                        crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+                    )
+                })
+                .unwrap_or(false);
+            tracing::debug!("Sub-agent tool enabled");
+            Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
+        } else {
+            tracing::debug!("Sub-agent tool disabled: execution not enabled");
+            None
+        };
+
         let native_tool_names = active_native_tool_names(
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
@@ -1055,6 +1087,7 @@ impl AgentClient {
             execute_code_tool.is_some(),
             remember_tool.is_some(),
             search_web_tool.is_some(),
+            sub_agent_tool.is_some(),
         );
         let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
 
@@ -1078,6 +1111,7 @@ impl AgentClient {
             execute_code_tool.is_some(),
             remember_tool.is_some(),
             search_web_tool.is_some(),
+            sub_agent_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -1239,6 +1273,15 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        if sub_agent_tool.is_some() {
+            tool_sections.push(
+                "- **sub_agent**: Delegate a task to an independent sub-agent that has access to \
+                 the same tools. The sub-agent runs autonomously and returns the result. \
+                 Use this to parallelize work or isolate complex sub-tasks. Each sub-agent \
+                 starts fresh — include all necessary context in the task description."
+                    .to_string(),
+            );
+        }
         // read_skill is always present — it's the on-demand companion to the slim
         // skill descriptions that appear in the automatic context block.
         tool_sections.push(
@@ -1390,6 +1433,7 @@ impl AgentClient {
                     search_memory_tool.clone(),
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
+                    sub_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1465,6 +1509,7 @@ impl AgentClient {
                     search_memory_tool.clone(),
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
+                    sub_agent_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1507,6 +1552,7 @@ impl AgentClient {
                     search_memory_tool.clone(),
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
+                    sub_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1552,6 +1598,7 @@ impl AgentClient {
                     search_memory_tool.clone(),
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
+                    sub_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1596,6 +1643,7 @@ impl AgentClient {
                     search_memory_tool.clone(),
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
+                    sub_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1778,6 +1826,7 @@ impl AgentClient {
                     search_memory_tool.clone(),
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
+                    sub_agent_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
