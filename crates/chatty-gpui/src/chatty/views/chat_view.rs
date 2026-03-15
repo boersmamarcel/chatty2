@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState};
+use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_for};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
@@ -50,6 +50,13 @@ pub struct ChatView {
     /// layout changes (image loading, SVG math, code blocks) never leave
     /// the view stuck above the true bottom. Disabled when user scrolls up.
     stick_to_bottom: bool,
+    /// Keystroke interceptor that handles ↑/↓ for the slash-command picker.
+    /// Must be held here so it stays alive (dropping it unregisters the handler).
+    _slash_menu_interceptor: Subscription,
+    /// Index into `messages` of the "Sub-agent: launching…" info message that
+    /// receives live progress lines while a sub-agent subprocess is running.
+    /// `None` when no sub-agent is active.
+    sub_agent_progress_msg_idx: Option<usize>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -81,15 +88,34 @@ impl ChatView {
 
         // Subscribe to input events to handle Enter key
         let state_for_enter = chat_input_state.clone();
+        let state_for_change = chat_input_state.clone();
         cx.subscribe(&input, move |_input_state, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter { secondary } = event {
-                // Only send on plain Enter (not Shift+Enter)
-                if !secondary {
-                    tracing::debug!("Enter key pressed, calling send_message");
-                    state_for_enter.update(cx, |state, cx| {
-                        state.send_message(cx);
+            match event {
+                InputEvent::PressEnter { secondary } => {
+                    // Only send on plain Enter (not Shift+Enter)
+                    if !secondary {
+                        tracing::debug!("Enter key pressed");
+                        state_for_enter.update(cx, |state, cx| {
+                            // If the slash-command menu is open, apply the selected
+                            // command instead of sending the message as a chat turn.
+                            if state.is_slash_menu_open(cx) {
+                                state.apply_slash_command(cx);
+                            } else {
+                                state.send_message(cx);
+                            }
+                        });
+                    }
+                }
+                InputEvent::Change => {
+                    // Reset the slash-menu selection when the query text changes,
+                    // but NOT on spurious Change events with the same query (e.g.
+                    // the newline that gpui-component writes before PressEnter).
+                    state_for_change.update(cx, |state, cx| {
+                        let new_text = state.input.read(cx).text().to_string();
+                        state.reset_slash_menu_selection_if_query_changed(&new_text);
                     });
                 }
+                _ => {}
             }
         })
         .detach();
@@ -99,6 +125,45 @@ impl ChatView {
             state.input.update(cx, |input, cx| {
                 input.focus(window, cx);
             });
+        });
+
+        // Register a keystroke interceptor to handle ↑/↓ navigation in the
+        // slash-command picker.  This fires *before* GPUI dispatches action
+        // handlers, so calling cx.stop_propagation() here prevents the
+        // InputState's MoveUp/MoveDown cursor-movement actions from running.
+        let input_for_interceptor = chat_input_state.clone();
+        let slash_menu_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
+            let key = event.keystroke.key.as_str();
+            // Only intercept plain ↑ / ↓ (no modifier keys).
+            if (key != "up" && key != "down")
+                || event.keystroke.modifiers.control
+                || event.keystroke.modifiers.alt
+                || event.keystroke.modifiers.platform
+            {
+                return;
+            }
+            // Check whether the slash-command picker is currently showing.
+            let input_text = input_for_interceptor
+                .read(cx)
+                .input
+                .read(cx)
+                .text()
+                .to_string();
+            let items = slash_menu_items_for(&input_text);
+            if items.is_empty() {
+                return;
+            }
+            // Navigate the picker and suppress cursor movement in the text input.
+            let num = items.len();
+            input_for_interceptor.update(cx, |state, cx| {
+                if key == "up" {
+                    state.move_slash_menu_up(num);
+                } else {
+                    state.move_slash_menu_down(num);
+                }
+                cx.notify();
+            });
+            cx.stop_propagation();
         });
 
         Self {
@@ -112,12 +177,19 @@ impl ChatView {
             parsed_cache: ParsedContentCache::new(),
             streaming_parse_cache: None,
             stick_to_bottom: true,
+            _slash_menu_interceptor: slash_menu_interceptor,
+            sub_agent_progress_msg_idx: None,
         }
     }
 
     /// Get the chat input state entity (for wiring callbacks)
     pub fn chat_input_state(&self) -> &Entity<ChatInputState> {
         &self.chat_input_state
+    }
+
+    /// Get a reference to all displayed messages (for slash-command handlers, etc.).
+    pub fn messages(&self) -> &[DisplayMessage] {
+        &self.messages
     }
 
     /// Set the conversation ID for this view
@@ -289,9 +361,19 @@ impl ChatView {
                 // Clear streaming parse cache
                 self.streaming_parse_cache = None;
 
-                // Finalize trace if present
+                // Finalize trace if present: cancel all Running tool calls
+                // so they don't stay stuck in the Running state permanently
                 if let Some(ref mut trace) = last.live_trace {
+                    trace.cancel_running_tool_calls();
                     trace.clear_active_tool();
+
+                    // Update the SystemTraceView with the final cancelled state
+                    let trace_clone = trace.clone();
+                    if let Some(ref view_entity) = last.system_trace_view {
+                        view_entity.update(cx, |view, cx| {
+                            view.update_trace(trace_clone, cx);
+                        });
+                    }
                 }
                 last.live_trace = None;
 
@@ -449,12 +531,11 @@ impl ChatView {
     /// Helper method to update a tool call by ID in the live trace.
     /// This works even after active_tool_index has been cleared.
     ///
-    /// Uses a two-pass reverse scan to handle non-unique tool call IDs
-    /// (e.g., multiple "shell_execute" calls that share the same ID when
-    /// rig-core doesn't provide a unique call_id):
+    /// Delegates to `SystemTrace::update_tool_call` which uses a two-pass scan:
     ///
-    /// 1. First pass (reverse): find the LAST entry with matching ID that
-    ///    is still in Running state — targets the most recent pending call.
+    /// 1. First pass (forward/FIFO): find the FIRST entry with matching ID
+    ///    that is still in Running state — ensures results are matched to
+    ///    the oldest pending call when duplicate IDs exist.
     /// 2. Fallback pass (reverse): find the LAST entry with matching ID
     ///    regardless of state — handles late-arriving updates.
     fn update_tool_call_by_id<F>(&mut self, tool_id: &str, updater: F) -> bool
@@ -856,7 +937,185 @@ impl ChatView {
         self.messages.clear();
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
+        self.sub_agent_progress_msg_idx = None;
         cx.notify();
+    }
+
+    /// Add the "Sub-agent" collapsible trace and record its index so that
+    /// subsequent `append_sub_agent_progress` calls update it in-place.
+    ///
+    /// The progress is shown as a collapsible `ToolCallBlock` (Running state) so
+    /// the user can expand it to see live stderr output while the sub-agent runs.
+    pub fn start_sub_agent_progress(&mut self, prompt: &str, cx: &mut Context<Self>) {
+        let tool_call = ToolCallBlock {
+            id: format!(
+                "sub-agent-{}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
+            tool_name: "sub_agent".to_string(),
+            display_name: "Sub-agent".to_string(),
+            input: serde_json::json!({ "task": prompt }).to_string(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Running,
+            duration: None,
+            text_before: String::new(),
+        };
+
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(tool_call);
+        trace.set_active_tool(0);
+
+        let trace_view = cx.new(|_cx| SystemTraceView::new(trace.clone()));
+
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: true,
+            system_trace_view: Some(trace_view),
+            live_trace: Some(trace),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        });
+
+        let idx = self.messages.len() - 1;
+        self.sub_agent_progress_msg_idx = Some(idx);
+
+        // Start expanded so live progress output is visible while the sub-agent runs.
+        self.collapsed_tool_calls.insert((idx, 0), false);
+
+        cx.notify();
+        self.activate_sticky_scroll();
+    }
+
+    /// Append a sub-agent progress line to the tracked trace ToolCallBlock output.
+    ///
+    /// Called repeatedly while a sub-agent subprocess runs to accumulate live
+    /// tool-call activity (e.g. "⟳ web_search", "✓ web_search") in the
+    /// collapsible trace so the user can expand it to follow along.
+    pub fn append_sub_agent_progress(&mut self, line: &str, cx: &mut Context<Self>) {
+        let Some(idx) = self.sub_agent_progress_msg_idx else {
+            return;
+        };
+        let Some(msg) = self.messages.get_mut(idx) else {
+            return;
+        };
+
+        if let Some(ref mut trace) = msg.live_trace {
+            for item in trace.items.iter_mut() {
+                if let TraceItem::ToolCall(tc) = item {
+                    if tc.tool_name == "sub_agent" {
+                        let new_output = if let Some(ref existing) = tc.output {
+                            format!("{existing}\n{line}")
+                        } else {
+                            line.to_string()
+                        };
+                        tc.output = Some(new_output);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update the SystemTraceView entity so interleaved rendering picks up the change.
+        let trace_clone = msg.live_trace.clone();
+        let view_entity = msg.system_trace_view.clone();
+        if let (Some(trace), Some(view_entity)) = (trace_clone, view_entity) {
+            view_entity.update(cx, |view, cx| {
+                view.update_trace(trace, cx);
+                cx.notify();
+            });
+        }
+
+        cx.notify();
+    }
+
+    /// Transition the sub-agent trace to its final state (Success or Error) and
+    /// freeze the live_trace into the SystemTraceView entity.
+    ///
+    /// `result` is placed in the ToolCallBlock's `output` field so it appears
+    /// in the expanded trace body instead of as a separate message.
+    pub fn finalize_sub_agent_progress(
+        &mut self,
+        success: bool,
+        result: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(idx) = self.sub_agent_progress_msg_idx else {
+            return;
+        };
+
+        if let Some(msg) = self.messages.get_mut(idx) {
+            if let Some(ref mut trace) = msg.live_trace {
+                for item in trace.items.iter_mut() {
+                    if let TraceItem::ToolCall(tc) = item {
+                        if tc.tool_name == "sub_agent" {
+                            tc.state = if success {
+                                ToolCallState::Success
+                            } else {
+                                ToolCallState::Error("Sub-agent failed".to_string())
+                            };
+                            // Place the stdout/error text in the output field so it
+                            // renders inside the expanded trace body.
+                            if let Some(text) = result {
+                                // Prepend any live progress already accumulated.
+                                tc.output = Some(match tc.output.take() {
+                                    Some(existing) if !existing.is_empty() => {
+                                        format!("{existing}\n\n---\n\n{text}")
+                                    }
+                                    _ => text,
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+                trace.clear_active_tool();
+            }
+
+            // Push final trace state to the view entity.
+            let trace_clone = msg.live_trace.clone();
+            let view_entity = msg.system_trace_view.clone();
+            if let (Some(trace), Some(view_entity)) = (trace_clone, view_entity) {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace, cx);
+                    cx.notify();
+                });
+            }
+
+            // Auto-expand the trace so the result is immediately visible.
+            self.collapsed_tool_calls.insert((idx, 0), false);
+
+            msg.live_trace = None;
+            msg.is_streaming = false;
+
+            cx.notify();
+        }
+
+        self.sub_agent_progress_msg_idx = None;
+    }
+
+    /// Add an informational message that appears as an assistant response.
+    /// Used for slash-command output such as /context and /cwd.
+    pub fn add_info_message(&mut self, text: String, cx: &mut Context<Self>) {
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: text,
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: None,
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        });
+        cx.notify();
+        self.activate_sticky_scroll();
     }
 
     /// Load message history from a conversation
@@ -879,6 +1138,9 @@ impl ChatView {
 
         // Clear parsed content cache from previous conversation
         self.parsed_cache.clear();
+
+        // Reset sub-agent tracking (sub-agent progress is UI-only, not in history)
+        self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
 

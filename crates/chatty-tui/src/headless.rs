@@ -22,7 +22,42 @@ pub async fn run_headless(
     while let Some(event) = event_rx.recv().await {
         match event {
             AppEvent::TextChunk(text) => {
+                // Stream text chunks to stderr so parent process can show live progress.
+                eprint!("{}", text);
                 response.push_str(&text);
+            }
+            AppEvent::ToolCallStarted { ref name, .. } => {
+                let name_str = name.clone();
+                engine.handle_event(event);
+                eprintln!("\n  \u{27f3} {}", name_str);
+            }
+            AppEvent::ToolCallResult { ref id, .. } => {
+                let id_str = id.clone();
+                engine.handle_event(event);
+                if let Some(name) = engine
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|m| &m.tool_calls)
+                    .find(|tc| tc.id == id_str)
+                    .map(|tc| tc.name.clone())
+                {
+                    eprintln!("  \u{2713} {}", name);
+                }
+            }
+            AppEvent::ToolCallError { ref id, .. } => {
+                let id_str = id.clone();
+                engine.handle_event(event);
+                if let Some(name) = engine
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|m| &m.tool_calls)
+                    .find(|tc| tc.id == id_str)
+                    .map(|tc| tc.name.clone())
+                {
+                    eprintln!("  \u{2717} {}", name);
+                }
             }
             AppEvent::StreamCompleted => break,
             AppEvent::StreamError(error) => {

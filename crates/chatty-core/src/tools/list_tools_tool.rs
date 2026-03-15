@@ -61,6 +61,7 @@ impl ListToolsTool {
         has_execute_code: bool,
         has_memory: bool,
         has_search_web: bool,
+        has_sub_agent: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -357,6 +358,14 @@ impl ListToolsTool {
             native_tools.push(ToolInfo {
                 name: "search_web".to_string(),
                 description: "Search the web for up-to-date information. Use this first when you need current information, recent events, or anything not in your training data.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
+        if has_sub_agent {
+            native_tools.push(ToolInfo {
+                name: "sub_agent".to_string(),
+                description: "Delegate a task to an independent sub-agent that has access to the same tools. The sub-agent runs autonomously in its own process, executes the task (including any tool calls it needs), and returns the result. Use this to parallelize work or isolate complex sub-tasks.".to_string(),
                 source: "native".to_string(),
             });
         }
