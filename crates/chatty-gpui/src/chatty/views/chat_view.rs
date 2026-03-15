@@ -928,6 +928,7 @@ impl ChatView {
         self.messages.clear();
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
+        self.sub_agent_progress_msg_idx = None;
         cx.notify();
     }
 
@@ -976,8 +977,8 @@ impl ChatView {
         let idx = self.messages.len() - 1;
         self.sub_agent_progress_msg_idx = Some(idx);
 
-        // Start collapsed so it does not take up screen space while running.
-        self.collapsed_tool_calls.insert((idx, 0), true);
+        // Start expanded so live progress output is visible while the sub-agent runs.
+        self.collapsed_tool_calls.insert((idx, 0), false);
 
         cx.notify();
         self.activate_sticky_scroll();
@@ -1128,6 +1129,9 @@ impl ChatView {
 
         // Clear parsed content cache from previous conversation
         self.parsed_cache.clear();
+
+        // Reset sub-agent tracking (sub-agent progress is UI-only, not in history)
+        self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
 
