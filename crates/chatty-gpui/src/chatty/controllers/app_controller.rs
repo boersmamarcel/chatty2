@@ -126,6 +126,172 @@ fn get_skill_service(cx: &gpui::AsyncApp) -> chatty_core::services::SkillService
     })
 }
 
+fn normalize_workspace_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn normalize_workspace_string(path: &str) -> String {
+    normalize_workspace_path(Path::new(path))
+        .to_string_lossy()
+        .to_string()
+}
+
+async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
+    let conv_id = conv_id.to_string();
+
+    let (model_config, provider_config) = cx
+        .update(|cx| {
+            let model_id = cx
+                .global::<ConversationsStore>()
+                .get_conversation(&conv_id)
+                .map(|c| c.model_id().to_string())?;
+            let models = cx.global::<ModelsModel>();
+            let providers = cx.global::<ProviderModel>();
+            let model_config = models.get_model(&model_id).cloned()?;
+            let provider_config = providers
+                .providers()
+                .iter()
+                .find(|p| p.provider_type == model_config.provider_type)
+                .cloned()?;
+            Some((model_config, provider_config))
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        .ok_or_else(|| anyhow::anyhow!("Missing model/provider config for conversation rebuild"))?;
+
+    let mcp_service = cx
+        .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let mcp_tools = mcp_service
+        .get_all_tools_with_sinks()
+        .await
+        .map_err(|e| warn!(error = ?e, "Failed to get MCP tools"))
+        .ok();
+    let mcp_tools = mcp_tools.and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+
+    let (
+        exec_settings,
+        pending_approvals,
+        pending_write_approvals,
+        pending_artifacts,
+        shell_session,
+        user_secrets,
+        theme_colors,
+        search_settings,
+        built_workspace_dir,
+    ) = cx
+        .update(|cx| {
+            let mut settings = cx
+                .global::<crate::settings::models::ExecutionSettingsModel>()
+                .clone();
+            let approvals = cx
+                .global::<crate::chatty::models::ExecutionApprovalStore>()
+                .get_pending_approvals();
+            let write_approvals = cx
+                .global::<crate::chatty::models::WriteApprovalStore>()
+                .get_pending_approvals();
+            let conv = cx.global::<ConversationsStore>().get_conversation(&conv_id);
+            if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
+                settings.workspace_dir = Some(
+                    normalize_workspace_path(working_dir)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+            let built_workspace_dir = settings
+                .workspace_dir
+                .as_ref()
+                .map(|dir| normalize_workspace_path(Path::new(dir)));
+            let artifacts = conv.map(|c| c.pending_artifacts());
+            let isolation_changed = conv
+                .and_then(|c| c.shell_session())
+                .map(|s| s.network_isolation() != settings.network_isolation)
+                .unwrap_or(false);
+            let workspace_changed = conv
+                .and_then(|c| c.shell_session())
+                .map(|sess| {
+                    sess.workspace_dir()
+                        .map(|dir| normalize_workspace_path(Path::new(dir)))
+                        != built_workspace_dir
+                })
+                .unwrap_or(false);
+            let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
+                if !isolation_changed && !workspace_changed {
+                    Some(s)
+                } else {
+                    info!(
+                        conv_id = %conv_id,
+                        isolation_changed,
+                        workspace_changed,
+                        "Shell session replaced due to settings change"
+                    );
+                    None
+                }
+            });
+            let secrets = cx
+                .global::<crate::settings::models::UserSecretsModel>()
+                .as_env_pairs();
+            let colors = extract_theme_chart_colors(cx);
+            let search_cfg = cx
+                .try_global::<crate::settings::models::SearchSettingsModel>()
+                .cloned();
+            (
+                Some(settings),
+                Some(approvals),
+                Some(write_approvals),
+                artifacts,
+                session,
+                secrets,
+                Some(colors),
+                search_cfg,
+                built_workspace_dir,
+            )
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let memory_service = await_memory_service(cx).await;
+    let embedding_service = get_embedding_service(cx);
+
+    let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
+        &model_config,
+        &provider_config,
+        mcp_tools,
+        exec_settings,
+        pending_approvals,
+        pending_write_approvals,
+        pending_artifacts,
+        shell_session,
+        user_secrets,
+        theme_colors,
+        memory_service,
+        search_settings,
+        embedding_service,
+    )
+    .await?;
+
+    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+            conv.set_agent(
+                new_agent,
+                model_config.id.clone(),
+                built_workspace_dir.clone(),
+            );
+            if new_shell_session.is_some() {
+                conv.set_shell_session(new_shell_session);
+            }
+            info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
+        } else {
+            warn!(
+                conv_id = %conv_id,
+                "Conversation not found during agent rebuild — skipping"
+            );
+        }
+    })
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    Ok(())
+}
+
 /// Global state to hold the main ChattyApp entity
 #[derive(Default)]
 pub struct GlobalChattyApp {
@@ -404,6 +570,10 @@ impl ChattyApp {
                     debug!(command = %command, "ChatInputEvent::SlashCommandSelected received");
                     app.handle_slash_command(command.clone(), cx);
                 }
+                ChatInputEvent::WorkingDirChanged(dir) => {
+                    debug!(dir = ?dir, "ChatInputEvent::WorkingDirChanged received");
+                    app.change_conversation_working_dir(dir.clone(), cx);
+                }
             },
         )
         .detach();
@@ -503,6 +673,11 @@ impl ChattyApp {
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
     ) -> anyhow::Result<Conversation> {
+        let mut effective_exec_settings = exec_settings.clone();
+        if let Some(working_dir) = data.working_dir.as_ref() {
+            effective_exec_settings.workspace_dir = Some(normalize_workspace_string(working_dir));
+        }
+
         // Look up model config by ID
         let model_config = models.get_model(&data.model_id).ok_or_else(|| {
             anyhow::anyhow!(
@@ -540,7 +715,7 @@ impl ChattyApp {
             model_config,
             provider_config,
             mcp_tools,
-            Some(exec_settings.clone()),
+            Some(effective_exec_settings),
             Some(pending_approvals),
             Some(pending_write_approvals),
             user_secrets,
@@ -675,6 +850,13 @@ impl ChattyApp {
             .read(cx)
             .selected_model_id()
             .cloned();
+        let selected_working_dir = self
+            .chat_view
+            .read(cx)
+            .chat_input_state()
+            .read(cx)
+            .working_dir()
+            .map(|path| normalize_workspace_path(path));
 
         let models = cx.global::<ModelsModel>();
         let providers = cx.global::<ProviderModel>();
@@ -775,9 +957,16 @@ impl ChattyApp {
                         theme_colors,
                         search_settings,
                     ) = cx.update(|cx| {
-                        let settings = cx
+                        let mut settings = cx
                             .global::<crate::settings::models::ExecutionSettingsModel>()
                             .clone();
+                        if let Some(working_dir) = selected_working_dir.as_ref() {
+                            settings.workspace_dir = Some(
+                                normalize_workspace_path(working_dir)
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
+                        }
                         let approvals = cx
                             .global::<crate::chatty::models::ExecutionApprovalStore>()
                             .get_pending_approvals();
@@ -805,7 +994,7 @@ impl ChattyApp {
                     let memory_service = await_memory_service(cx).await;
                     let embedding_service = get_embedding_service(cx);
 
-                    let conversation = Conversation::new(
+                    let mut conversation = Conversation::new(
                         conv_id.clone(),
                         title.clone(),
                         &model_config,
@@ -821,6 +1010,7 @@ impl ChattyApp {
                         embedding_service,
                     )
                     .await?;
+                    conversation.set_working_dir(selected_working_dir.clone());
 
                     // PHASE 3: Add to global store and refresh sidebar with real data
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
@@ -861,6 +1051,9 @@ impl ChattyApp {
                         regeneration_records: "[]".to_string(),
                         created_at: now,
                         updated_at: now,
+                        working_dir: selected_working_dir
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().to_string()),
                     };
 
                     repo.save(&conv_id, data)
@@ -989,10 +1182,13 @@ impl ChattyApp {
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                     conv.streaming_trace().cloned(),
+                    conv.working_dir().cloned(),
                 )
             });
 
-        if let Some((model_id, streaming_content, streaming_trace)) = minimal_data {
+        if let Some((model_id, streaming_content, streaming_trace, conversation_working_dir)) =
+            minimal_data
+        {
             // Check if this conversation has an active stream via StreamManager
             let has_active_stream = cx
                 .try_global::<GlobalStreamManager>()
@@ -1041,6 +1237,10 @@ impl ChattyApp {
                     // Restore streaming state if conversation has active stream
                     // Set this BEFORE restoring the message so the UI is in correct state
                     state.set_streaming(has_active_stream, cx);
+
+                    // Restore the per-conversation working directory override without emitting
+                    // a WorkingDirChanged event (which would trigger an unnecessary agent rebuild)
+                    state.set_working_dir_silent(conversation_working_dir);
                 });
 
                 // Restore in-progress streaming message from Conversation model if it exists
@@ -1162,141 +1362,8 @@ impl ChattyApp {
 
         let Some(conv_id) = conv_id else { return };
 
-        let model_id = cx
-            .global::<ConversationsStore>()
-            .get_conversation(&conv_id)
-            .map(|c| c.model_id().to_string());
-
-        let Some(model_id) = model_id else { return };
-
-        let models = cx.global::<ModelsModel>();
-        let providers = cx.global::<ProviderModel>();
-
-        let model_config = models.get_model(&model_id).cloned();
-        let provider_config = model_config.as_ref().and_then(|mc| {
-            providers
-                .providers()
-                .iter()
-                .find(|p| p.provider_type == mc.provider_type)
-                .cloned()
-        });
-
-        let (Some(model_config), Some(provider_config)) = (model_config, provider_config) else {
-            error!(
-                model_id = %model_id,
-                "Could not find model or provider config for agent rebuild"
-            );
-            return;
-        };
-
-        info!(
-            conv_id = %conv_id,
-            model_id = %model_id,
-            "Rebuilding conversation agent after tool set change"
-        );
-
         cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
-            let mcp_service = cx
-                .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-            let mcp_tools = mcp_service.get_all_tools_with_sinks().await
-                .map_err(|e| warn!(error = ?e, "Failed to get MCP tools"))
-                .ok();
-            let mcp_tools =
-                mcp_tools.and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
-
-            let mcp_server_count = mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0);
-            let mcp_tool_count: usize = mcp_tools
-                .as_ref()
-                .map(|t| t.iter().map(|(_, tools, _)| tools.len()).sum())
-                .unwrap_or(0);
-            info!(
-                conv_id = %conv_id,
-                mcp_server_count,
-                mcp_tool_count,
-                "Rebuilding agent with fresh MCP tools"
-            );
-
-            let (exec_settings, pending_approvals, pending_write_approvals, pending_artifacts, shell_session, user_secrets, theme_colors, search_settings) = cx
-                .update(|cx| {
-                    let settings = cx
-                        .global::<crate::settings::models::ExecutionSettingsModel>()
-                        .clone();
-                    let approvals = cx
-                        .global::<crate::chatty::models::ExecutionApprovalStore>()
-                        .get_pending_approvals();
-                    let write_approvals = cx
-                        .global::<crate::chatty::models::WriteApprovalStore>()
-                        .get_pending_approvals();
-                    let conv = cx
-                        .global::<ConversationsStore>()
-                        .get_conversation(&conv_id);
-                    let artifacts = conv.map(|c| c.pending_artifacts());
-                    // Drop the existing shell session if network_isolation changed — it was
-                    // spawned with the old setting and cannot be reconfigured in place.
-                    // Passing None lets the factory create a fresh session with the new setting.
-                    let session = conv.and_then(|c| c.shell_session()).and_then(|s| {
-                        if s.network_isolation() == settings.network_isolation {
-                            Some(s)
-                        } else {
-                            info!(
-                                conv_id = %conv_id,
-                                new_isolation = settings.network_isolation,
-                                "Network isolation changed — replacing shell session"
-                            );
-                            None
-                        }
-                    });
-                    let secrets = cx
-                        .global::<crate::settings::models::UserSecretsModel>()
-                        .as_env_pairs();
-                    let colors = extract_theme_chart_colors(cx);
-                    let search_cfg = cx
-                        .try_global::<crate::settings::models::SearchSettingsModel>()
-                        .cloned();
-                    (Some(settings), Some(approvals), Some(write_approvals), artifacts, session, secrets, Some(colors), search_cfg)
-                })
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-            // Wait for memory service init to complete before building the agent
-            let memory_service = await_memory_service(cx).await;
-            let embedding_service = get_embedding_service(cx);
-
-            // Factory creates shell session on-demand if not provided
-            let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
-                &model_config,
-                &provider_config,
-                mcp_tools,
-                exec_settings,
-                pending_approvals,
-                pending_write_approvals,
-                pending_artifacts,
-                shell_session,
-                user_secrets,
-                theme_colors,
-                memory_service,
-                search_settings,
-                embedding_service,
-            )
-            .await?;
-
-            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                    conv.set_agent(new_agent, model_config.id.clone());
-                    // Always store the new shell session — the factory either reused the
-                    // existing one or created a fresh one (e.g. after a network_isolation change).
-                    if new_shell_session.is_some() {
-                        conv.set_shell_session(new_shell_session);
-                    }
-                    info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
-                } else {
-                    warn!(conv_id = %conv_id, "Conversation not found during agent rebuild — skipping");
-                }
-            })
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-            Ok(())
+            rebuild_conversation_agent(&conv_id, cx).await
         })
         .detach();
     }
@@ -1359,9 +1426,10 @@ impl ChattyApp {
                             user_secrets,
                             theme_colors,
                             search_settings,
+                            built_workspace_dir,
                         ) = cx
                             .update(|cx| {
-                                let settings = cx
+                                let mut settings = cx
                                     .global::<crate::settings::models::ExecutionSettingsModel>()
                                     .clone();
                                 let approvals = cx
@@ -1372,6 +1440,17 @@ impl ChattyApp {
                                     .get_pending_approvals();
                                 let conv =
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
+                                if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
+                                    settings.workspace_dir = Some(
+                                        normalize_workspace_path(working_dir)
+                                            .to_string_lossy()
+                                            .to_string(),
+                                    );
+                                }
+                                let built_workspace_dir = settings
+                                    .workspace_dir
+                                    .as_ref()
+                                    .map(|dir| normalize_workspace_path(Path::new(dir)));
                                 let artifacts = conv.map(|c| c.pending_artifacts());
                                 let session = conv.and_then(|c| c.shell_session());
                                 let secrets = cx
@@ -1390,6 +1469,7 @@ impl ChattyApp {
                                     secrets,
                                     Some(colors),
                                     search_cfg,
+                                    built_workspace_dir,
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1422,7 +1502,11 @@ impl ChattyApp {
                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
-                                conv.set_agent(new_agent, model_config.id.clone());
+                                conv.set_agent(
+                                    new_agent,
+                                    model_config.id.clone(),
+                                    built_workspace_dir.clone(),
+                                );
                                 // Always store the new shell session — the factory either reused
                                 // the existing one or created a fresh one.
                                 if new_shell_session.is_some() {
@@ -1477,6 +1561,9 @@ impl ChattyApp {
                                             .as_secs()
                                             as i64,
                                         updated_at: now,
+                                        working_dir: conv
+                                            .working_dir()
+                                            .map(|p| p.to_string_lossy().to_string()),
                                     })
                                 })
                             });
@@ -1498,6 +1585,35 @@ impl ChattyApp {
                 error!("Model not found");
             }
         }
+    }
+
+    /// Change the working directory for the active conversation
+    fn change_conversation_working_dir(
+        &mut self,
+        dir: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = dir.map(|path| normalize_workspace_path(&path));
+        let conv_id = cx
+            .global::<ConversationsStore>()
+            .active_id()
+            .map(|s| s.to_string());
+
+        let Some(conv_id) = conv_id else { return };
+
+        info!(conv_id = %conv_id, dir = ?dir, "Changing conversation working directory");
+
+        // Update the working dir on the active conversation
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                conv.set_working_dir(dir.clone());
+            }
+        });
+
+        self.persist_conversation(&conv_id, cx);
+
+        // Rebuild the agent so the new workspace_dir takes effect for tools and shell
+        self.rebuild_active_agent(cx);
     }
 
     /// Delete a conversation
@@ -1788,6 +1904,28 @@ impl ChattyApp {
                     cx.notify();
                 }).map_err(|e| debug!(error = ?e, "Failed to refresh sidebar after creating conversation"))
                 .ok();
+
+                let needs_agent_workspace_refresh = cx
+                    .update_global::<ConversationsStore, _>(|store, cx| {
+                        let settings = cx.global::<ExecutionSettingsModel>();
+                        store.get_conversation(&conv_id).map(|conv| {
+                            let effective_workspace_dir = conv
+                                .working_dir()
+                                .cloned()
+                                .or_else(|| settings.workspace_dir.as_ref().map(PathBuf::from));
+                            conv.agent_workspace_dir().cloned() != effective_workspace_dir
+                        })
+                    })
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                    .unwrap_or(false);
+
+                if needs_agent_workspace_refresh {
+                    info!(
+                        conv_id = %conv_id,
+                        "Refreshing conversation agent before send to apply latest workspace"
+                    );
+                    rebuild_conversation_agent(&conv_id, cx).await?;
+                }
 
                 // Extract agent, history, model_id, and capabilities synchronously
                 let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_attachment_paths) = cx
@@ -3509,6 +3647,7 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
             .unwrap()
             .as_secs() as i64,
         updated_at: now,
+        working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),
     })
 }
 
@@ -3555,8 +3694,25 @@ async fn run_llm_stream(
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
+    // Use per-conversation workspace dir override if set, fall back to global setting
     let workspace_dir = cx
-        .update(|cx| cx.global::<ExecutionSettingsModel>().workspace_dir.clone())
+        .update(|cx| {
+            // Check per-conversation override first
+            let per_conv = cx
+                .global::<ConversationsStore>()
+                .get_conversation(&conv_id)
+                .and_then(|c| {
+                    c.working_dir()
+                        .map(|p| normalize_workspace_path(p).to_string_lossy().to_string())
+                });
+            // Fall back to global workspace_dir
+            per_conv.or_else(|| {
+                cx.global::<ExecutionSettingsModel>()
+                    .workspace_dir
+                    .as_deref()
+                    .map(normalize_workspace_string)
+            })
+        })
         .ok()
         .flatten();
 

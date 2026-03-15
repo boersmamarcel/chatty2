@@ -182,7 +182,9 @@ Background update checks against GitHub releases with one-click install. Downloa
 
 ### Agent Memory
 
-Chatty includes a built-in persistent memory system. The agent can explicitly store facts with the `remember` tool and retrieve them later with `search_memory`. Before each LLM call, the top 3 most relevant memories are automatically injected as context — so the agent builds on past interactions without you having to repeat yourself.
+Chatty includes a built-in persistent memory system. The agent can explicitly store facts with the `remember` tool and retrieve them later with `search_memory`. Before each LLM call, the top relevant memories are automatically injected as context — so the agent builds on past interactions without you having to repeat yourself.
+
+The agent can also save reusable **skills** — named, multi-step procedures — using the `save_skill` tool. When a relevant skill is detected for your query, a summary is injected into context automatically; the agent calls `read_skill` to load the full instructions before executing. Facts and skills are surfaced in separate context blocks so the agent can tell them apart.
 
 Memory is enabled by default and can be toggled in **Settings > Memory**. From that page you can also:
 
@@ -227,6 +229,8 @@ When code execution is enabled in Settings, your LLM can use these tools (most a
 | `compile_typst` | Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents | Yes |
 | `list_tools` | Lists all available tools and schemas | No |
 | `remember` | Store important information in persistent agent memory for use in future conversations | No |
+| `save_skill` | Save a reusable multi-step procedure to persistent memory under a memorable name for future use | No |
+| `read_skill` | Load the full step-by-step instructions for a saved skill by name | No |
 | `search_memory` | Search past memories by keyword to retrieve relevant stored information | No |
 | `search_web` | Search the web for current information. Uses DuckDuckGo by default (no API key needed); optionally configure Tavily or Brave in Settings > Internet for richer results. Controlled by the internet access toggle | No |
 | `fetch` | Fetch any web URL and return its readable text content. Controlled by the same internet access toggle as `search_web` | No |

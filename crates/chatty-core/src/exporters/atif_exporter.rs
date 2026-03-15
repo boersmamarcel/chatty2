@@ -381,6 +381,7 @@ mod tests {
             regeneration_records: serde_json::to_string(&regeneration_records).unwrap(),
             created_at: 1700000000,
             updated_at: 1700000100,
+            working_dir: None,
         }
     }
 
@@ -1118,6 +1119,7 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 0,
             updated_at: 0,
+            working_dir: None,
         };
         let result = conversation_to_atif(&conv, None).unwrap();
         assert_eq!(result["final_metrics"]["total_prompt_tokens"], 0);
@@ -1140,6 +1142,7 @@ mod tests {
             regeneration_records: "[]".to_string(),
             created_at: 0,
             updated_at: 0,
+            working_dir: None,
         };
         assert!(conversation_to_atif(&conv, None).is_err());
     }

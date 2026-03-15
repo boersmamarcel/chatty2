@@ -12,9 +12,10 @@ use super::error::{RepositoryError, RepositoryResult};
 /// Migrations applied in order. Each entry is (version, sql).
 /// To add a new migration: append a tuple with the next version number and its SQL.
 /// Never edit or remove existing entries — existing databases depend on them.
-const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    "CREATE TABLE IF NOT EXISTS conversations (
+const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        "CREATE TABLE IF NOT EXISTS conversations (
         id                   TEXT    PRIMARY KEY,
         title                TEXT    NOT NULL DEFAULT '',
         model_id             TEXT    NOT NULL DEFAULT '',
@@ -31,7 +32,9 @@ const MIGRATIONS: &[(i64, &str)] = &[(
     );
     CREATE INDEX IF NOT EXISTS idx_conversations_updated_at
         ON conversations (updated_at DESC);",
-)];
+    ),
+    (2, "ALTER TABLE conversations ADD COLUMN working_dir TEXT;"),
+];
 
 /// SQLite-backed repository for conversations.
 ///
@@ -157,7 +160,7 @@ impl ConversationRepository for ConversationSqliteRepository {
             let row = sqlx::query(
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
-                        regeneration_records, created_at, updated_at
+                        regeneration_records, created_at, updated_at, working_dir
                  FROM conversations
                  WHERE id = ?",
             )
@@ -178,6 +181,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                 regeneration_records: r.get("regeneration_records"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
+                working_dir: r.get("working_dir"),
             }))
         })
     }
@@ -188,7 +192,7 @@ impl ConversationRepository for ConversationSqliteRepository {
             let rows = sqlx::query(
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
-                        regeneration_records, created_at, updated_at
+                        regeneration_records, created_at, updated_at, working_dir
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -210,6 +214,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                     regeneration_records: r.get("regeneration_records"),
                     created_at: r.get("created_at"),
                     updated_at: r.get("updated_at"),
+                    working_dir: r.get("working_dir"),
                 })
                 .collect())
         })
@@ -223,8 +228,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                 "INSERT INTO conversations
                     (id, title, model_id, message_history, system_traces, token_usage,
                      attachment_paths, message_timestamps, message_feedback,
-                     regeneration_records, total_cost, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     regeneration_records, total_cost, created_at, updated_at, working_dir)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET
                     title                = excluded.title,
                     model_id             = excluded.model_id,
@@ -236,7 +241,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                     message_feedback     = excluded.message_feedback,
                     regeneration_records = excluded.regeneration_records,
                     total_cost           = excluded.total_cost,
-                    updated_at           = excluded.updated_at",
+                    updated_at           = excluded.updated_at,
+                    working_dir          = excluded.working_dir",
             )
             .bind(&data.id)
             .bind(&data.title)
@@ -251,6 +257,7 @@ impl ConversationRepository for ConversationSqliteRepository {
             .bind(total_cost)
             .bind(data.created_at)
             .bind(data.updated_at)
+            .bind(&data.working_dir)
             .execute(&pool)
             .await?;
 
