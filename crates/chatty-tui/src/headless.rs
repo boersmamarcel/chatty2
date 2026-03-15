@@ -24,6 +24,39 @@ pub async fn run_headless(
             AppEvent::TextChunk(text) => {
                 response.push_str(&text);
             }
+            AppEvent::ToolCallStarted { ref name, .. } => {
+                let name_str = name.clone();
+                engine.handle_event(event);
+                eprintln!("  \u{27f3} {}", name_str);
+            }
+            AppEvent::ToolCallResult { ref id, .. } => {
+                let id_str = id.clone();
+                engine.handle_event(event);
+                if let Some(name) = engine
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|m| &m.tool_calls)
+                    .find(|tc| tc.id == id_str)
+                    .map(|tc| tc.name.clone())
+                {
+                    eprintln!("  \u{2713} {}", name);
+                }
+            }
+            AppEvent::ToolCallError { ref id, .. } => {
+                let id_str = id.clone();
+                engine.handle_event(event);
+                if let Some(name) = engine
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|m| &m.tool_calls)
+                    .find(|tc| tc.id == id_str)
+                    .map(|tc| tc.name.clone())
+                {
+                    eprintln!("  \u{2717} {}", name);
+                }
+            }
             AppEvent::StreamCompleted => break,
             AppEvent::StreamError(error) => {
                 eprintln!("Error: {}", error);
