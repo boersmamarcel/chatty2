@@ -2687,6 +2687,7 @@ impl ChattyApp {
                             .update(cx, |app, cx| {
                                 app.launch_agent(prompt_clone, cx);
                             })
+                            .map_err(|e| warn!(error = ?e, "Failed to launch sub-agent after conversation creation"))
                             .ok();
                     }
                     Err(e) => {
@@ -2850,6 +2851,7 @@ impl ChattyApp {
                         }
                     });
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to inject sub-agent result into conversation history"))
                 .ok();
 
                 // Persist the updated history to disk.
