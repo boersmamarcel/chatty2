@@ -24,6 +24,7 @@ pub mod search_memory_tool;
 pub mod search_tool;
 pub mod search_web_tool;
 pub mod shell_tool;
+pub mod sub_agent_tool;
 #[cfg(test)]
 pub mod test_helpers;
 pub mod typst_tool;
@@ -59,4 +60,5 @@ pub use search_memory_tool::{
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
+pub use sub_agent_tool::SubAgentTool;
 pub use typst_tool::CompileTypstTool;

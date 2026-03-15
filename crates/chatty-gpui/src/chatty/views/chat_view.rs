@@ -361,9 +361,19 @@ impl ChatView {
                 // Clear streaming parse cache
                 self.streaming_parse_cache = None;
 
-                // Finalize trace if present
+                // Finalize trace if present: cancel all Running tool calls
+                // so they don't stay stuck in the Running state permanently
                 if let Some(ref mut trace) = last.live_trace {
+                    trace.cancel_running_tool_calls();
                     trace.clear_active_tool();
+
+                    // Update the SystemTraceView with the final cancelled state
+                    let trace_clone = trace.clone();
+                    if let Some(ref view_entity) = last.system_trace_view {
+                        view_entity.update(cx, |view, cx| {
+                            view.update_trace(trace_clone, cx);
+                        });
+                    }
                 }
                 last.live_trace = None;
 
@@ -521,12 +531,11 @@ impl ChatView {
     /// Helper method to update a tool call by ID in the live trace.
     /// This works even after active_tool_index has been cleared.
     ///
-    /// Uses a two-pass reverse scan to handle non-unique tool call IDs
-    /// (e.g., multiple "shell_execute" calls that share the same ID when
-    /// rig-core doesn't provide a unique call_id):
+    /// Delegates to `SystemTrace::update_tool_call` which uses a two-pass scan:
     ///
-    /// 1. First pass (reverse): find the LAST entry with matching ID that
-    ///    is still in Running state — targets the most recent pending call.
+    /// 1. First pass (forward/FIFO): find the FIRST entry with matching ID
+    ///    that is still in Running state — ensures results are matched to
+    ///    the oldest pending call when duplicate IDs exist.
     /// 2. Fallback pass (reverse): find the LAST entry with matching ID
     ///    regardless of state — handles late-arriving updates.
     fn update_tool_call_by_id<F>(&mut self, tool_id: &str, updater: F) -> bool
@@ -928,6 +937,7 @@ impl ChatView {
         self.messages.clear();
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
+        self.sub_agent_progress_msg_idx = None;
         cx.notify();
     }
 
@@ -976,8 +986,8 @@ impl ChatView {
         let idx = self.messages.len() - 1;
         self.sub_agent_progress_msg_idx = Some(idx);
 
-        // Start collapsed so it does not take up screen space while running.
-        self.collapsed_tool_calls.insert((idx, 0), true);
+        // Start expanded so live progress output is visible while the sub-agent runs.
+        self.collapsed_tool_calls.insert((idx, 0), false);
 
         cx.notify();
         self.activate_sticky_scroll();
@@ -1128,6 +1138,9 @@ impl ChatView {
 
         // Clear parsed content cache from previous conversation
         self.parsed_cache.clear();
+
+        // Reset sub-agent tracking (sub-agent progress is UI-only, not in history)
+        self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
 
