@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, Sizable};
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use super::attachment_validation::{PDF_EXTENSION, is_image_extension, validate_attachment};
+use crate::assets::CustomIcon;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use std::collections::HashMap;
@@ -635,7 +636,10 @@ impl RenderOnce for ChatInput {
                                                         .child(full_path_for_tooltip.clone())
                                                         .into_any_element()
                                                 })
-                                                .child("📁")
+                                                .child(
+                                                    Icon::new(CustomIcon::FolderOpen)
+                                                        .size_3(),
+                                                )
                                                 .child(dir_name)
                                                 .on_mouse_down(
                                                     MouseButton::Left,
