@@ -59,7 +59,7 @@ impl RenderOnce for ApprovalPromptBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let warning_color = cx.theme().ring; // Used for errors/warnings
         let accent_color = cx.theme().accent;
-        let bg_color = cx.theme().primary;
+        let bg_color = cx.theme().secondary;
         let border_color = if self.is_sandboxed {
             accent_color
         } else {
