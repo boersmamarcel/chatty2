@@ -3322,15 +3322,32 @@ impl ChattyApp {
         });
 
         // Read partial response from ConversationsStore (single source of truth)
-        // and save to conversation history
+        // and save to conversation history — but ONLY if there's actual content.
+        // An empty assistant message would cause LLM API errors (400 Bad Request)
+        // on the next request.
         let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 let partial_text = conv.streaming_message().cloned().unwrap_or_default();
-                conv.finalize_response(partial_text, Vec::new(), trace_json);
-                conv.set_streaming_message(None);
-                let idx = conv.message_count().saturating_sub(1);
-                debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
-                Some(idx)
+
+                if partial_text.is_empty() {
+                    // No content was received before cancellation.
+                    // Roll back the user message that triggered this stream to avoid
+                    // a trailing user message with no assistant response, which would
+                    // break the alternating User/Assistant pattern expected by LLM APIs.
+                    let removed = conv.remove_last_user_message();
+                    debug!(
+                        conv_id = %conv_id,
+                        user_msg_removed = removed,
+                        "Stream cancelled with no content — skipped empty assistant message"
+                    );
+                    None
+                } else {
+                    conv.finalize_response(partial_text, Vec::new(), trace_json);
+                    conv.set_streaming_message(None);
+                    let idx = conv.message_count().saturating_sub(1);
+                    debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+                    Some(idx)
+                }
             } else {
                 None
             }
