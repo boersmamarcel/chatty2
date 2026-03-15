@@ -191,6 +191,9 @@ pub struct ChatEngine {
     pub model_picker: Option<ModelPicker>,
     pub tool_picker: Option<ToolPicker>,
     pub scroll_offset: u16,
+    /// Index into `messages` of the system message showing sub-agent progress.
+    /// `None` when no sub-agent is running.
+    pub sub_agent_msg_idx: Option<usize>,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
 }
@@ -239,6 +242,7 @@ impl ChatEngine {
             model_picker: None,
             tool_picker: None,
             scroll_offset: 0,
+            sub_agent_msg_idx: None,
             event_tx,
         }
     }
@@ -543,7 +547,17 @@ impl ChatEngine {
                 self.is_ready = true;
                 EngineAction::Redraw
             }
+            AppEvent::SubAgentProgress(line) => {
+                if let Some(idx) = self.sub_agent_msg_idx
+                    && let Some(msg) = self.messages.get_mut(idx)
+                {
+                    msg.text.push('\n');
+                    msg.text.push_str(&line);
+                }
+                EngineAction::Redraw
+            }
             AppEvent::SubAgentFinished(message) => {
+                self.sub_agent_msg_idx = None;
                 self.add_system_message(message);
                 EngineAction::Redraw
             }
@@ -786,10 +800,11 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching sub-agent...".to_string());
+        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
 
         tokio::task::spawn_blocking(move || {
             let message =
-                match run_sub_agent_process(executable, model_id, prompt_owned, auto_approve) {
+                match run_sub_agent_process(executable, model_id, prompt_owned, auto_approve, event_tx.clone()) {
                     Ok(stdout) => {
                         let stdout = stdout.trim().to_string();
                         if stdout.is_empty() {
@@ -1263,35 +1278,48 @@ fn run_sub_agent_process(
     model_id: String,
     prompt: String,
     auto_approve: bool,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> Result<String> {
+    use std::io::BufRead as _;
+
     let mut command = ProcessCommand::new(executable);
     command
         .arg("--headless")
         .arg("--model")
         .arg(model_id)
         .arg("--message")
-        .arg(prompt);
+        .arg(prompt)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if auto_approve {
         command.arg("--auto-approve");
     }
 
-    let output = command
-        .output()
-        .context("Failed to launch sub-agent process")?;
+    let mut child = command.spawn().context("Failed to launch sub-agent process")?;
+
+    // Drain stderr in a background thread, forwarding each line as a progress event.
+    let stderr = child.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        if let Some(stderr) = stderr {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let _ = event_tx.send(AppEvent::SubAgentProgress(line));
+            }
+        }
+    });
+
+    // Wait for the process and collect stdout (stderr was already taken above).
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for sub-agent process")?;
+
+    // Ensure the stderr thread has finished before we return.
+    let _ = stderr_thread.join();
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!(
-            "exit code {:?}: {}",
-            output.status.code(),
-            if stderr.is_empty() {
-                "no stderr output".to_string()
-            } else {
-                stderr
-            }
-        );
+        bail!("exit code {:?}: sub-agent process failed", output.status.code())
     }
 }
 
