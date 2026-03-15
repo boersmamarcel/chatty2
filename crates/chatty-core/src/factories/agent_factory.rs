@@ -1061,10 +1061,10 @@ impl AgentClient {
                     )
                 })
                 .unwrap_or(false);
-            tracing::info!("Sub-agent tool enabled");
+            tracing::debug!("Sub-agent tool enabled");
             Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
         } else {
-            tracing::info!("Sub-agent tool disabled: execution not enabled");
+            tracing::debug!("Sub-agent tool disabled: execution not enabled");
             None
         };
 

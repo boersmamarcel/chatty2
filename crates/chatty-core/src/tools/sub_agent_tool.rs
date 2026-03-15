@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
+/// Maximum number of characters from stderr to include in error messages.
+const STDERR_PREVIEW_CHARS: usize = 500;
+
 /// Arguments for the sub_agent tool
 #[derive(Deserialize, Serialize)]
 pub struct SubAgentArgs {
@@ -93,12 +96,15 @@ impl Tool for SubAgentTool {
         info!(task_len = task.len(), "Launching sub-agent for delegated task");
 
         // Find the chatty-tui binary: check same directory as current binary first,
-        // then fall back to PATH resolution.
+        // then fall back to PATH resolution (may fail at spawn time if not found).
         let exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("chatty-tui")))
             .filter(|p| p.exists())
-            .unwrap_or_else(|| PathBuf::from("chatty-tui"));
+            .unwrap_or_else(|| {
+                warn!("chatty-tui not found next to current binary, falling back to PATH");
+                PathBuf::from("chatty-tui")
+            });
 
         let model_id = self.model_id.clone();
         let auto_approve = self.auto_approve;
@@ -108,7 +114,7 @@ impl Tool for SubAgentTool {
             run_sub_agent(exe, model_id, task, auto_approve)
         })
         .await
-        .map_err(|e| SubAgentError::Error(format!("Sub-agent task panicked: {e}")))?;
+        .map_err(|e| SubAgentError::Error(format!("Sub-agent task failed to complete: {e}")))?;
 
         match result {
             Ok(stdout) => {
@@ -179,7 +185,7 @@ fn run_sub_agent(
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         let exit_code = output.status.code();
-        let stderr_preview = stderr_str.chars().take(500).collect::<String>();
+        let stderr_preview = stderr_str.chars().take(STDERR_PREVIEW_CHARS).collect::<String>();
         Err(format!(
             "Sub-agent failed (exit {:?}): {}",
             exit_code, stderr_preview
