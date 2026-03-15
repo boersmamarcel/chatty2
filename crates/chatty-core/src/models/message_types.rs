@@ -214,6 +214,19 @@ impl SystemTrace {
         }
     }
 
+    /// Transition all Running tool calls to Error("Cancelled").
+    /// Called when a stream is cancelled to prevent tool calls from staying stuck
+    /// in the Running state permanently.
+    pub fn cancel_running_tool_calls(&mut self) {
+        for item in &mut self.items {
+            if let TraceItem::ToolCall(tc) = item
+                && matches!(tc.state, ToolCallState::Running)
+            {
+                tc.state = ToolCallState::Error("Cancelled".to_string());
+            }
+        }
+    }
+
     /// Update a tool call by ID.
     ///
     /// Pass 1 (forward): find the FIRST entry with matching ID in Running state (FIFO).
@@ -474,5 +487,70 @@ mod tests {
         trace.add_tool_call(make_tool_call("call_1", "fetch", ToolCallState::Running));
 
         assert!(!trace.update_tool_call("nonexistent", |_tc| {}));
+    }
+
+    #[test]
+    fn cancel_running_tool_calls_transitions_running_to_cancelled() {
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(make_tool_call(
+            "call_1",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+        trace.add_tool_call(make_tool_call(
+            "call_2",
+            "sub_agent",
+            ToolCallState::Success,
+        ));
+        trace.add_tool_call(make_tool_call(
+            "call_3",
+            "sub_agent",
+            ToolCallState::Running,
+        ));
+
+        trace.cancel_running_tool_calls();
+
+        let tool_calls: Vec<_> = trace
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let TraceItem::ToolCall(tc) = item {
+                    Some(tc)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Running calls should be cancelled
+        assert!(matches!(
+            &tool_calls[0].state,
+            ToolCallState::Error(msg) if msg == "Cancelled"
+        ));
+        // Already-completed call should be unchanged
+        assert!(matches!(&tool_calls[1].state, ToolCallState::Success));
+        // Running calls should be cancelled
+        assert!(matches!(
+            &tool_calls[2].state,
+            ToolCallState::Error(msg) if msg == "Cancelled"
+        ));
+    }
+
+    #[test]
+    fn cancel_running_tool_calls_noop_when_no_running() {
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(make_tool_call(
+            "call_1",
+            "fetch",
+            ToolCallState::Success,
+        ));
+
+        trace.cancel_running_tool_calls();
+
+        let tc = match &trace.items[0] {
+            TraceItem::ToolCall(tc) => tc,
+            _ => panic!("expected ToolCall"),
+        };
+        assert!(matches!(&tc.state, ToolCallState::Success));
     }
 }

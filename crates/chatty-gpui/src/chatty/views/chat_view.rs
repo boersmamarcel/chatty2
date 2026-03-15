@@ -361,9 +361,19 @@ impl ChatView {
                 // Clear streaming parse cache
                 self.streaming_parse_cache = None;
 
-                // Finalize trace if present
+                // Finalize trace if present: cancel all Running tool calls
+                // so they don't stay stuck in the Running state permanently
                 if let Some(ref mut trace) = last.live_trace {
+                    trace.cancel_running_tool_calls();
                     trace.clear_active_tool();
+
+                    // Update the SystemTraceView with the final cancelled state
+                    let trace_clone = trace.clone();
+                    if let Some(ref view_entity) = last.system_trace_view {
+                        view_entity.update(cx, |view, cx| {
+                            view.update_trace(trace_clone, cx);
+                        });
+                    }
                 }
                 last.live_trace = None;
 
