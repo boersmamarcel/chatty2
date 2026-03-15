@@ -53,6 +53,10 @@ pub struct ChatView {
     /// Keystroke interceptor that handles ↑/↓ for the slash-command picker.
     /// Must be held here so it stays alive (dropping it unregisters the handler).
     _slash_menu_interceptor: Subscription,
+    /// Index into `messages` of the "Sub-agent: launching…" info message that
+    /// receives live progress lines while a sub-agent subprocess is running.
+    /// `None` when no sub-agent is active.
+    sub_agent_progress_msg_idx: Option<usize>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -172,6 +176,7 @@ impl ChatView {
             streaming_parse_cache: None,
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
+            sub_agent_progress_msg_idx: None,
         }
     }
 
@@ -922,6 +927,43 @@ impl ChatView {
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         cx.notify();
+    }
+
+    /// Add the "Sub-agent: launching…" info message and record its index so that
+    /// subsequent `append_sub_agent_progress` calls update it in-place.
+    pub fn start_sub_agent_progress(&mut self, cx: &mut Context<Self>) {
+        self.add_info_message(
+            "**Sub-agent:** launching… (this may take a while)".to_string(),
+            cx,
+        );
+        self.sub_agent_progress_msg_idx = Some(self.messages.len() - 1);
+    }
+
+    /// Append a sub-agent progress line to the tracked progress message in-place.
+    ///
+    /// Called repeatedly while a sub-agent subprocess runs to show live tool-call
+    /// activity (e.g. "⟳ web_search", "✓ web_search"). Each call appends the line
+    /// as a new markdown paragraph so the message grows visibly in the chat view.
+    /// The `ParsedContentCache` is content-addressed, so the new content is
+    /// automatically re-parsed on the next render without explicit invalidation.
+    ///
+    /// Uses the index stored by `start_sub_agent_progress` so progress is always
+    /// appended to the correct message even if other messages were added later.
+    pub fn append_sub_agent_progress(&mut self, line: &str, cx: &mut Context<Self>) {
+        if let Some(idx) = self.sub_agent_progress_msg_idx
+            && let Some(msg) = self.messages.get_mut(idx)
+        {
+            msg.content.push_str("\n\n");
+            msg.content.push_str(line);
+            cx.notify();
+        }
+    }
+
+    /// Clear the tracked sub-agent progress message index.  Called when the
+    /// sub-agent finishes (success or failure) so future `append_sub_agent_progress`
+    /// calls are no-ops rather than targeting a stale index.
+    pub fn clear_sub_agent_progress(&mut self) {
+        self.sub_agent_progress_msg_idx = None;
     }
 
     /// Add an informational message that appears as an assistant response.

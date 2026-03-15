@@ -2684,16 +2684,19 @@ impl ChattyApp {
 
         let chat_view = self.chat_view.clone();
 
-        // Show immediate feedback.
+        // Show immediate feedback and record the message index for live progress.
         self.chat_view.update(cx, |view, cx| {
-            view.add_info_message(
-                "**Sub-agent:** launching… (this may take a while)".to_string(),
-                cx,
-            );
+            view.start_sub_agent_progress(cx);
         });
 
+        // Channel for streaming stderr progress lines from the subprocess.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
         cx.spawn(async move |weak, cx| {
-            let result = tokio::task::spawn_blocking(move || {
+            let mut blocking_fut = tokio::task::spawn_blocking(move || {
+                use std::io::BufRead as _;
+                use std::process::Stdio;
+
                 // Look for chatty-tui in the same directory as this binary first,
                 // then fall back to letting the OS resolve from PATH.
                 let exe = std::env::current_exe()
@@ -2703,7 +2706,11 @@ impl ChattyApp {
                     .unwrap_or_else(|| std::path::PathBuf::from("chatty-tui"));
 
                 let mut cmd = std::process::Command::new(&exe);
-                cmd.arg("--headless").arg("--message").arg(&prompt);
+                cmd.arg("--headless")
+                    .arg("--message")
+                    .arg(&prompt)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
                 if !model_id.is_empty() {
                     cmd.arg("--model").arg(&model_id);
                 }
@@ -2713,36 +2720,82 @@ impl ChattyApp {
                 info!(exe = ?exe, "Launching headless sub-agent with auto-approve (no approval UI available)");
                 cmd.arg("--auto-approve");
 
-                match cmd.output() {
-                    Ok(out) if out.status.success() => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if stdout.is_empty() {
-                            "**Sub-agent:** completed with no output.".to_string()
-                        } else {
-                            format!("**Sub-agent response:**\n\n{stdout}")
+                let mut child = match cmd.spawn() {
+                    Ok(c) => c,
+                    Err(e) => return format!("**Sub-agent failed to launch:** {e}"),
+                };
+
+                // Drain stderr in a background thread, forwarding each line as a
+                // progress event so the parent TUI can show live tool-call activity.
+                let stderr = child.stderr.take();
+                let stderr_thread = std::thread::spawn(move || {
+                    if let Some(stderr) = stderr {
+                        let reader = std::io::BufReader::new(stderr);
+                        for line in reader.lines().flatten() {
+                            let _ = progress_tx.send(line);
                         }
                     }
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                        format!(
-                            "**Sub-agent failed** (exit {:?}): {}",
-                            out.status.code(),
-                            if stderr.is_empty() {
-                                "no stderr output".to_string()
-                            } else {
-                                stderr
-                            }
-                        )
+                });
+
+                let output = match child.wait_with_output() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let _ = stderr_thread.join();
+                        return format!("**Sub-agent failed:** {e}");
                     }
-                    Err(e) => format!("**Sub-agent failed to launch:** {e}"),
+                };
+                let _ = stderr_thread.join();
+
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if stdout.is_empty() {
+                        "**Sub-agent:** completed with no output.".to_string()
+                    } else {
+                        format!("**Sub-agent response:**\n\n{stdout}")
+                    }
+                } else {
+                    format!(
+                        "**Sub-agent failed** (exit {:?}): sub-agent process failed",
+                        output.status.code()
+                    )
                 }
-            })
-            .await;
+            });
+
+            // Drive progress updates while the subprocess runs.
+            // `biased` makes tokio::select! poll branches in declaration order, so
+            // the progress-recv branch is always checked before the completion branch.
+            // This guarantees that any lines already buffered in the channel are
+            // delivered to the UI before we process the final result.
+            let result = loop {
+                tokio::select! {
+                    biased;
+                    Some(line) = progress_rx.recv() => {
+                        chat_view
+                            .update(cx, |view, cx| view.append_sub_agent_progress(&line, cx))
+                            .ok();
+                    }
+                    result = &mut blocking_fut => {
+                        // Drain any progress lines that arrived concurrently with
+                        // the task completing.
+                        while let Ok(line) = progress_rx.try_recv() {
+                            chat_view
+                                .update(cx, |view, cx| view.append_sub_agent_progress(&line, cx))
+                                .ok();
+                        }
+                        break result;
+                    }
+                }
+            };
 
             let msg = match result {
                 Ok(m) => m,
                 Err(e) => format!("**Sub-agent task panicked:** {e}"),
             };
+
+            // Sub-agent is done; clear the progress index before adding the result message.
+            chat_view
+                .update(cx, |view, _cx| view.clear_sub_agent_progress())
+                .ok();
 
             // If the user navigated to a different conversation while the sub-agent was
             // running, route the result back to the conversation where it was launched.
