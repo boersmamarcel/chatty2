@@ -22,12 +22,14 @@ pub async fn run_headless(
     while let Some(event) = event_rx.recv().await {
         match event {
             AppEvent::TextChunk(text) => {
+                // Stream text chunks to stderr so parent process can show live progress.
+                eprint!("{}", text);
                 response.push_str(&text);
             }
             AppEvent::ToolCallStarted { ref name, .. } => {
                 let name_str = name.clone();
                 engine.handle_event(event);
-                eprintln!("  \u{27f3} {}", name_str);
+                eprintln!("\n  \u{27f3} {}", name_str);
             }
             AppEvent::ToolCallResult { ref id, .. } => {
                 let id_str = id.clone();

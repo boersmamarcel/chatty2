@@ -2671,6 +2671,34 @@ impl ChattyApp {
             .try_global::<ConversationsStore>()
             .and_then(|store| store.active_id().cloned());
 
+        // If there is no conversation yet, create one first so that:
+        // 1. The sub-agent result can be injected into history
+        // 2. Sending a new message while the sub-agent runs won't trigger
+        //    conversation creation (which calls clear_messages and would
+        //    destroy the sub-agent progress trace)
+        if launch_conv_id.is_none() {
+            let prompt_clone = prompt.clone();
+            let create_task = self.create_new_conversation(cx);
+            let app_entity = cx.entity();
+            cx.spawn(async move |_weak, cx| {
+                match create_task.await {
+                    Ok(_id) => {
+                        app_entity
+                            .update(cx, |app, cx| {
+                                app.launch_agent(prompt_clone, cx);
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to launch sub-agent after conversation creation"))
+                            .ok();
+                    }
+                    Err(e) => {
+                        error!(error = ?e, "Failed to create conversation for sub-agent");
+                    }
+                }
+            })
+            .detach();
+            return;
+        }
+
         // Resolve the active model ID so the sub-agent uses the same model.
         let model_id = cx
             .try_global::<ConversationsStore>()
@@ -2801,21 +2829,29 @@ impl ChattyApp {
             };
 
             // Inject the sub-agent result into the conversation history so the main
-            // agent can reference it on subsequent turns.  We use a User message so
-            // that the LLM sees the content as context it can act on.
+            // agent can reference it on subsequent turns.  We inject a User→Assistant
+            // message pair to maintain the alternating role pattern that LLM APIs
+            // expect.  The User message describes the task that was delegated and the
+            // Assistant message contains the sub-agent's output.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
-                let history_entry = rig::completion::Message::User {
+                let user_entry = rig::completion::Message::User {
                     content: rig::OneOrMany::one(rig::message::UserContent::text(format!(
-                        "[Sub-agent result for: {prompt_label}]\n\n{txt}",
+                        "[Sub-agent task: {prompt_label}]",
                     ))),
                 };
                 cx.update(|cx| {
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
                         if let Some(conv) = store.get_conversation_mut(conv_id) {
-                            conv.add_user_message_with_attachments(history_entry, vec![]);
+                            conv.add_user_message_with_attachments(user_entry, vec![]);
+                            conv.finalize_response(
+                                format!("[Sub-agent result]\n\n{txt}"),
+                                vec![],
+                                None,
+                            );
                         }
                     });
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to inject sub-agent result into conversation history"))
                 .ok();
 
                 // Persist the updated history to disk.

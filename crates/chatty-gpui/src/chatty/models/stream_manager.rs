@@ -135,7 +135,8 @@ impl StreamManager {
     }
 
     /// Register a stream for a known conversation.
-    /// If a stream already exists for this conversation, it is cancelled first.
+    /// If a stream already exists for this conversation, it is cancelled first
+    /// with proper cleanup (emits StreamEnded with Cancelled status).
     pub fn register_stream(
         &mut self,
         conv_id: String,
@@ -144,10 +145,37 @@ impl StreamManager {
         pending_artifacts: Option<PendingArtifacts>,
         cx: &mut gpui::Context<Self>,
     ) {
-        // Cancel existing stream if any
-        if let Some(existing) = self.streams.remove(&conv_id) {
+        // Cancel existing stream if any — emit StreamEnded so subscribers
+        // (app_controller) can transition Running tool calls to Cancelled.
+        if let Some(mut existing) = self.streams.remove(&conv_id) {
+            // Flush any buffered text
+            if !existing.pending_text.is_empty() {
+                let batch = std::mem::take(&mut existing.pending_text);
+                cx.emit(StreamManagerEvent::TextChunk {
+                    conversation_id: conv_id.clone(),
+                    text: batch,
+                });
+            }
+
             existing.cancel_flag.store(true, Ordering::Relaxed);
+
+            let token_usage = existing.token_usage;
+            let trace_json = existing.trace_json.clone();
+            let turn_count = existing.api_turn_count;
+
             debug!(conv_id = %conv_id, "Cancelled existing stream before registering new one");
+
+            // Drop the task before emitting so GPUI aborts it promptly
+            drop(existing.task.take());
+
+            cx.emit(StreamManagerEvent::StreamEnded {
+                conversation_id: conv_id.clone(),
+                status: StreamStatus::Cancelled,
+                token_usage,
+                trace_json,
+                pending_artifacts: None,
+                api_turn_count: turn_count,
+            });
         }
 
         self.streams.insert(
@@ -180,10 +208,35 @@ impl StreamManager {
         pending_artifacts: Option<PendingArtifacts>,
         cx: &mut gpui::Context<Self>,
     ) {
-        // Cancel any existing pending stream
-        if let Some(existing) = self.streams.remove("__pending__") {
+        // Cancel any existing pending stream — emit StreamEnded so subscribers
+        // (app_controller) can transition Running tool calls to Cancelled.
+        if let Some(mut existing) = self.streams.remove("__pending__") {
+            if !existing.pending_text.is_empty() {
+                let batch = std::mem::take(&mut existing.pending_text);
+                cx.emit(StreamManagerEvent::TextChunk {
+                    conversation_id: "__pending__".to_string(),
+                    text: batch,
+                });
+            }
+
             existing.cancel_flag.store(true, Ordering::Relaxed);
+
+            let token_usage = existing.token_usage;
+            let trace_json = existing.trace_json.clone();
+            let turn_count = existing.api_turn_count;
+
             debug!("Cancelled existing pending stream");
+
+            drop(existing.task.take());
+
+            cx.emit(StreamManagerEvent::StreamEnded {
+                conversation_id: "__pending__".to_string(),
+                status: StreamStatus::Cancelled,
+                token_usage,
+                trace_json,
+                pending_artifacts: None,
+                api_turn_count: turn_count,
+            });
         }
 
         self.streams.insert(
