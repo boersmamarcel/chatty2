@@ -993,7 +993,7 @@ fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 
     match tool_call.tool_name.as_str() {
-        "remember" | "search_memory" | "search_web" | "fetch" => {
+        "remember" | "search_memory" | "search_web" | "fetch" | "sub_agent" => {
             // Use the friendly display_name as prefix with the detail
             format!("{}: {}", tool_call.display_name, detail)
         }
@@ -1061,6 +1061,13 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
         if tool_call.tool_name == "fetch" {
             if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
                 return url.to_string();
+            }
+        }
+
+        // For sub_agent: extract the task prompt
+        if tool_call.tool_name == "sub_agent" {
+            if let Some(task) = json.get("task").and_then(|v| v.as_str()) {
+                return task.to_string();
             }
         }
 

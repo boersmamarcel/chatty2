@@ -2685,8 +2685,10 @@ impl ChattyApp {
         let chat_view = self.chat_view.clone();
 
         // Show immediate feedback and record the message index for live progress.
+        // Clone the prompt for the display before it is moved into the async task.
+        let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
-            view.start_sub_agent_progress(cx);
+            view.start_sub_agent_progress(&prompt_for_display, cx);
         });
 
         // Channel for streaming stderr progress lines from the subprocess.
@@ -2722,7 +2724,7 @@ impl ChattyApp {
 
                 let mut child = match cmd.spawn() {
                     Ok(c) => c,
-                    Err(e) => return format!("**Sub-agent failed to launch:** {e}"),
+                    Err(e) => return Err(format!("Sub-agent failed to launch: {e}")),
                 };
 
                 // Drain stderr in a background thread, forwarding each line as a
@@ -2741,23 +2743,19 @@ impl ChattyApp {
                     Ok(o) => o,
                     Err(e) => {
                         let _ = stderr_thread.join();
-                        return format!("**Sub-agent failed:** {e}");
+                        return Err(format!("Sub-agent failed: {e}"));
                     }
                 };
                 let _ = stderr_thread.join();
 
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if stdout.is_empty() {
-                        "**Sub-agent:** completed with no output.".to_string()
-                    } else {
-                        format!("**Sub-agent response:**\n\n{stdout}")
-                    }
+                    Ok(stdout)
                 } else {
-                    format!(
-                        "**Sub-agent failed** (exit {:?}): sub-agent process failed",
+                    Err(format!(
+                        "Sub-agent failed (exit {:?})",
                         output.status.code()
-                    )
+                    ))
                 }
             });
 
@@ -2787,15 +2785,27 @@ impl ChattyApp {
                 }
             };
 
-            let msg = match result {
-                Ok(m) => m,
-                Err(e) => format!("**Sub-agent task panicked:** {e}"),
+            let agent_result: Result<String, String> = match result {
+                Ok(r) => r,
+                Err(e) => Err(format!("Sub-agent task panicked: {e}")),
             };
 
-            // Sub-agent is done; clear the progress index before adding the result message.
+            let success = agent_result.is_ok();
+
+            // Finalize the collapsible trace with the correct success/error state.
             chat_view
-                .update(cx, |view, _cx| view.clear_sub_agent_progress())
+                .update(cx, |view, cx| view.finalize_sub_agent_progress(success, cx))
                 .ok();
+
+            // Build a clean display message from the agent result.
+            let msg = match agent_result {
+                Ok(stdout) if stdout.is_empty() => {
+                    // Agent finished with no output — nothing more to display.
+                    return;
+                }
+                Ok(stdout) => stdout,
+                Err(e) => format!("⚠️ {e}"),
+            };
 
             // If the user navigated to a different conversation while the sub-agent was
             // running, route the result back to the conversation where it was launched.
@@ -2833,7 +2843,6 @@ impl ChattyApp {
                             .ok();
                         return;
                     }
-
                     // Navigate back to the launch conversation so the result appears there.
                     let nav_conv_id = conv_id.clone();
                     if let Some(app) = weak.upgrade() {

@@ -929,40 +929,143 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Add the "Sub-agent: launching…" info message and record its index so that
+    /// Add the "Sub-agent" collapsible trace and record its index so that
     /// subsequent `append_sub_agent_progress` calls update it in-place.
-    pub fn start_sub_agent_progress(&mut self, cx: &mut Context<Self>) {
-        self.add_info_message(
-            "**Sub-agent:** launching… (this may take a while)".to_string(),
-            cx,
-        );
-        self.sub_agent_progress_msg_idx = Some(self.messages.len() - 1);
+    ///
+    /// The progress is shown as a collapsible `ToolCallBlock` (Running state) so
+    /// the user can expand it to see live stderr output while the sub-agent runs.
+    pub fn start_sub_agent_progress(&mut self, prompt: &str, cx: &mut Context<Self>) {
+        let tool_call = ToolCallBlock {
+            id: format!(
+                "sub-agent-{}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
+            tool_name: "sub_agent".to_string(),
+            display_name: "Sub-agent".to_string(),
+            input: serde_json::json!({ "task": prompt }).to_string(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Running,
+            duration: None,
+            text_before: String::new(),
+        };
+
+        let mut trace = SystemTrace::new();
+        trace.add_tool_call(tool_call);
+        trace.set_active_tool(0);
+
+        let trace_view = cx.new(|_cx| SystemTraceView::new(trace.clone()));
+
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: true,
+            system_trace_view: Some(trace_view),
+            live_trace: Some(trace),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        });
+
+        let idx = self.messages.len() - 1;
+        self.sub_agent_progress_msg_idx = Some(idx);
+
+        // Start collapsed so it does not take up screen space while running.
+        self.collapsed_tool_calls.insert((idx, 0), true);
+
+        cx.notify();
+        self.activate_sticky_scroll();
     }
 
-    /// Append a sub-agent progress line to the tracked progress message in-place.
+    /// Append a sub-agent progress line to the tracked trace ToolCallBlock output.
     ///
-    /// Called repeatedly while a sub-agent subprocess runs to show live tool-call
-    /// activity (e.g. "⟳ web_search", "✓ web_search"). Each call appends the line
-    /// as a new markdown paragraph so the message grows visibly in the chat view.
-    /// The `ParsedContentCache` is content-addressed, so the new content is
-    /// automatically re-parsed on the next render without explicit invalidation.
-    ///
-    /// Uses the index stored by `start_sub_agent_progress` so progress is always
-    /// appended to the correct message even if other messages were added later.
+    /// Called repeatedly while a sub-agent subprocess runs to accumulate live
+    /// tool-call activity (e.g. "⟳ web_search", "✓ web_search") in the
+    /// collapsible trace so the user can expand it to follow along.
     pub fn append_sub_agent_progress(&mut self, line: &str, cx: &mut Context<Self>) {
-        if let Some(idx) = self.sub_agent_progress_msg_idx
-            && let Some(msg) = self.messages.get_mut(idx)
-        {
-            msg.content.push_str("\n\n");
-            msg.content.push_str(line);
+        let Some(idx) = self.sub_agent_progress_msg_idx else {
+            return;
+        };
+        let Some(msg) = self.messages.get_mut(idx) else {
+            return;
+        };
+
+        if let Some(ref mut trace) = msg.live_trace {
+            for item in trace.items.iter_mut() {
+                if let TraceItem::ToolCall(tc) = item {
+                    if tc.tool_name == "sub_agent" {
+                        let new_output = if let Some(ref existing) = tc.output {
+                            format!("{existing}\n{line}")
+                        } else {
+                            line.to_string()
+                        };
+                        tc.output = Some(new_output);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update the SystemTraceView entity so interleaved rendering picks up the change.
+        let trace_clone = msg.live_trace.clone();
+        let view_entity = msg.system_trace_view.clone();
+        if let (Some(trace), Some(view_entity)) = (trace_clone, view_entity) {
+            view_entity.update(cx, |view, cx| {
+                view.update_trace(trace, cx);
+                cx.notify();
+            });
+        }
+
+        cx.notify();
+    }
+
+    /// Transition the sub-agent trace to its final state (Success or Error) and
+    /// freeze the live_trace into the SystemTraceView entity.
+    ///
+    /// After this call the trace block renders as a finished (non-streaming)
+    /// collapsible component with the appropriate status badge.
+    pub fn finalize_sub_agent_progress(&mut self, success: bool, cx: &mut Context<Self>) {
+        let Some(idx) = self.sub_agent_progress_msg_idx else {
+            return;
+        };
+
+        if let Some(msg) = self.messages.get_mut(idx) {
+            if let Some(ref mut trace) = msg.live_trace {
+                for item in trace.items.iter_mut() {
+                    if let TraceItem::ToolCall(tc) = item {
+                        if tc.tool_name == "sub_agent" {
+                            tc.state = if success {
+                                ToolCallState::Success
+                            } else {
+                                ToolCallState::Error("Sub-agent failed".to_string())
+                            };
+                            break;
+                        }
+                    }
+                }
+                trace.clear_active_tool();
+            }
+
+            // Push final trace state to the view entity.
+            let trace_clone = msg.live_trace.clone();
+            let view_entity = msg.system_trace_view.clone();
+            if let (Some(trace), Some(view_entity)) = (trace_clone, view_entity) {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace, cx);
+                    cx.notify();
+                });
+            }
+
+            msg.live_trace = None;
+            msg.is_streaming = false;
+
             cx.notify();
         }
-    }
 
-    /// Clear the tracked sub-agent progress message index.  Called when the
-    /// sub-agent finishes (success or failure) so future `append_sub_agent_progress`
-    /// calls are no-ops rather than targeting a stale index.
-    pub fn clear_sub_agent_progress(&mut self) {
         self.sub_agent_progress_msg_idx = None;
     }
 
