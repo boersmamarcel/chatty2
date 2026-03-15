@@ -64,12 +64,10 @@ macro_rules! process_agent_stream {
                             rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                 use tracing::info;
                                 // Resolve a unique tool call ID.
-                                // Priority: provider's call_id > rig's internal_call_id > tool_call.id
+                                // Priority: provider's call_id > rig's internal_call_id
                                 //
                                 // `tool_call.id` is the Tool::NAME constant (e.g. "sub_agent"),
-                                // NOT a unique per-call identifier.  When the LLM invokes the
-                                // same tool multiple times, every call would share that name,
-                                // making it impossible to correlate results.
+                                // NOT a unique per-call identifier, so it is never used here.
                                 // `internal_call_id` is rig's unique correlation ID and is
                                 // always available + always unique.
                                 let tool_id = tool_call.call_id.clone()
