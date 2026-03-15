@@ -57,6 +57,8 @@ After adding a provider, you need to tell Chatty which model(s) to use.
 
 Close Settings and type your first message. You can switch between models using the model selector at the bottom of the chat.
 
+Type `/` in the chat input to open the slash-command picker — use arrow keys to navigate and `Enter` to select. Available commands include `/clear`, `/new`, `/compact`, `/context`, `/copy`, `/cwd`, `/cd`, `/add-dir`, and `/agent`.
+
 ### 5. Enable Tools (Optional)
 
 Chatty can give your LLM access to the filesystem, a sandboxed shell, and MCP servers. This is off by default.
@@ -234,6 +236,7 @@ When code execution is enabled in Settings, your LLM can use these tools (most a
 | `save_skill` | Save a reusable multi-step procedure to persistent memory under a memorable name for future use | No |
 | `read_skill` | Load the full step-by-step instructions for a saved skill by name | No |
 | `search_memory` | Search past memories by keyword to retrieve relevant stored information | No |
+| `sub_agent` | Launch a headless `chatty-tui` sub-agent with a given prompt and return its response — useful for delegating subtasks | Yes |
 | `search_web` | Search the web for current information. Uses DuckDuckGo by default (no API key needed); optionally configure Tavily or Brave in Settings > Internet for richer results. Controlled by the internet access toggle | No |
 | `fetch` | Fetch any web URL and return its readable text content. Controlled by the same internet access toggle as `search_web` | No |
 
