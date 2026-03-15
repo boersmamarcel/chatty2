@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState};
+use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_for};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
@@ -50,6 +50,9 @@ pub struct ChatView {
     /// layout changes (image loading, SVG math, code blocks) never leave
     /// the view stuck above the true bottom. Disabled when user scrolls up.
     stick_to_bottom: bool,
+    /// Keystroke interceptor that handles ↑/↓ for the slash-command picker.
+    /// Must be held here so it stays alive (dropping it unregisters the handler).
+    _slash_menu_interceptor: Subscription,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -118,6 +121,45 @@ impl ChatView {
             });
         });
 
+        // Register a keystroke interceptor to handle ↑/↓ navigation in the
+        // slash-command picker.  This fires *before* GPUI dispatches action
+        // handlers, so calling cx.stop_propagation() here prevents the
+        // InputState's MoveUp/MoveDown cursor-movement actions from running.
+        let input_for_interceptor = chat_input_state.clone();
+        let slash_menu_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
+            let key = event.keystroke.key.as_str();
+            // Only intercept plain ↑ / ↓ (no modifier keys).
+            if (key != "up" && key != "down")
+                || event.keystroke.modifiers.control
+                || event.keystroke.modifiers.alt
+                || event.keystroke.modifiers.platform
+            {
+                return;
+            }
+            // Check whether the slash-command picker is currently showing.
+            let input_text = input_for_interceptor
+                .read(cx)
+                .input
+                .read(cx)
+                .text()
+                .to_string();
+            let items = slash_menu_items_for(&input_text);
+            if items.is_empty() {
+                return;
+            }
+            // Navigate the picker and suppress cursor movement in the text input.
+            let num = items.len();
+            input_for_interceptor.update(cx, |state, cx| {
+                if key == "up" {
+                    state.move_slash_menu_up(num);
+                } else {
+                    state.move_slash_menu_down(num);
+                }
+                cx.notify();
+            });
+            cx.stop_propagation();
+        });
+
         Self {
             chat_input_state,
             messages: Vec::new(),
@@ -129,6 +171,7 @@ impl ChatView {
             parsed_cache: ParsedContentCache::new(),
             streaming_parse_cache: None,
             stick_to_bottom: true,
+            _slash_menu_interceptor: slash_menu_interceptor,
         }
     }
 

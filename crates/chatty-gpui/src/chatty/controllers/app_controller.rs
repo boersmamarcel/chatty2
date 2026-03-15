@@ -2676,16 +2676,6 @@ impl ChattyApp {
             })
             .unwrap_or_default();
 
-        let auto_approve = cx
-            .try_global::<ExecutionSettingsModel>()
-            .map(|s| {
-                matches!(
-                    s.approval_mode,
-                    crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
-                )
-            })
-            .unwrap_or(false);
-
         let chat_view = self.chat_view.clone();
 
         // Show immediate feedback.
@@ -2711,9 +2701,11 @@ impl ChattyApp {
                 if !model_id.is_empty() {
                     cmd.arg("--model").arg(&model_id);
                 }
-                if auto_approve {
-                    cmd.arg("--auto-approve");
-                }
+                // Headless sub-agents always run with auto-approve: there is no UI
+                // available to show approval prompts, so without this flag any tool
+                // that requires approval will block indefinitely and never complete.
+                info!(exe = ?exe, "Launching headless sub-agent with auto-approve (no approval UI available)");
+                cmd.arg("--auto-approve");
 
                 match cmd.output() {
                     Ok(out) if out.status.success() => {
