@@ -521,12 +521,11 @@ impl ChatView {
     /// Helper method to update a tool call by ID in the live trace.
     /// This works even after active_tool_index has been cleared.
     ///
-    /// Uses a two-pass reverse scan to handle non-unique tool call IDs
-    /// (e.g., multiple "shell_execute" calls that share the same ID when
-    /// rig-core doesn't provide a unique call_id):
+    /// Delegates to `SystemTrace::update_tool_call` which uses a two-pass scan:
     ///
-    /// 1. First pass (reverse): find the LAST entry with matching ID that
-    ///    is still in Running state — targets the most recent pending call.
+    /// 1. First pass (forward/FIFO): find the FIRST entry with matching ID
+    ///    that is still in Running state — ensures results are matched to
+    ///    the oldest pending call when duplicate IDs exist.
     /// 2. Fallback pass (reverse): find the LAST entry with matching ID
     ///    regardless of state — handles late-arriving updates.
     fn update_tool_call_by_id<F>(&mut self, tool_id: &str, updater: F) -> bool
