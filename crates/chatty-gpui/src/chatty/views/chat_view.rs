@@ -1026,9 +1026,14 @@ impl ChatView {
     /// Transition the sub-agent trace to its final state (Success or Error) and
     /// freeze the live_trace into the SystemTraceView entity.
     ///
-    /// After this call the trace block renders as a finished (non-streaming)
-    /// collapsible component with the appropriate status badge.
-    pub fn finalize_sub_agent_progress(&mut self, success: bool, cx: &mut Context<Self>) {
+    /// `result` is placed in the ToolCallBlock's `output` field so it appears
+    /// in the expanded trace body instead of as a separate message.
+    pub fn finalize_sub_agent_progress(
+        &mut self,
+        success: bool,
+        result: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(idx) = self.sub_agent_progress_msg_idx else {
             return;
         };
@@ -1043,6 +1048,17 @@ impl ChatView {
                             } else {
                                 ToolCallState::Error("Sub-agent failed".to_string())
                             };
+                            // Place the stdout/error text in the output field so it
+                            // renders inside the expanded trace body.
+                            if let Some(text) = result {
+                                // Prepend any live progress already accumulated.
+                                tc.output = Some(match tc.output.take() {
+                                    Some(existing) if !existing.is_empty() => {
+                                        format!("{existing}\n\n---\n\n{text}")
+                                    }
+                                    _ => text,
+                                });
+                            }
                             break;
                         }
                     }
@@ -1059,6 +1075,9 @@ impl ChatView {
                     cx.notify();
                 });
             }
+
+            // Auto-expand the trace so the result is immediately visible.
+            self.collapsed_tool_calls.insert((idx, 0), false);
 
             msg.live_trace = None;
             msg.is_streaming = false;

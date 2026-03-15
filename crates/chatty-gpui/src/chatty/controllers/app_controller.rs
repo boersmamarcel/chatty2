@@ -2791,21 +2791,21 @@ impl ChattyApp {
             };
 
             let success = agent_result.is_ok();
-
-            // Finalize the collapsible trace with the correct success/error state.
-            chat_view
-                .update(cx, |view, cx| view.finalize_sub_agent_progress(success, cx))
-                .ok();
-
-            // Build a clean display message from the agent result.
-            let msg = match agent_result {
-                Ok(stdout) if stdout.is_empty() => {
-                    // Agent finished with no output — nothing more to display.
-                    return;
-                }
-                Ok(stdout) => stdout,
-                Err(e) => format!("⚠️ {e}"),
+            let result_text = match agent_result {
+                Ok(stdout) if stdout.is_empty() => None,
+                Ok(stdout) => Some(stdout),
+                Err(e) => Some(format!("⚠️ {e}")),
             };
+
+            // Finalize the collapsible trace — result goes inside the expanded body.
+            // If the conversation changed, we still finalize so the trace is frozen,
+            // but we also navigate back / show a fallback note below.
+            let result_for_fallback = result_text.clone();
+            chat_view
+                .update(cx, |view, cx| {
+                    view.finalize_sub_agent_progress(success, result_text, cx)
+                })
+                .ok();
 
             // If the user navigated to a different conversation while the sub-agent was
             // running, route the result back to the conversation where it was launched.
@@ -2835,15 +2835,17 @@ impl ChattyApp {
                     if current_has_active_stream {
                         // A stream is active in the current conversation; navigating away
                         // would be disruptive. Show the result here with a context note.
-                        let noted_msg =
-                            format!("**Sub-agent** *(background task)*:\n\n{msg}");
-                        chat_view
-                            .update(cx, |view, cx| view.add_info_message(noted_msg, cx))
-                            .map_err(|e| warn!(error = ?e, "Failed to show sub-agent result"))
-                            .ok();
+                        if let Some(txt) = result_for_fallback {
+                            let noted_msg =
+                                format!("**Sub-agent** *(background task)*:\n\n{txt}");
+                            chat_view
+                                .update(cx, |view, cx| view.add_info_message(noted_msg, cx))
+                                .map_err(|e| warn!(error = ?e, "Failed to show sub-agent result"))
+                                .ok();
+                        }
                         return;
                     }
-                    // Navigate back to the launch conversation so the result appears there.
+                    // Navigate back to the launch conversation so the trace appears there.
                     let nav_conv_id = conv_id.clone();
                     if let Some(app) = weak.upgrade() {
                         app.update(cx, |app, cx| {
@@ -2853,11 +2855,6 @@ impl ChattyApp {
                     }
                 }
             }
-
-            chat_view
-                .update(cx, |view, cx| view.add_info_message(msg, cx))
-                .map_err(|e| warn!(error = ?e, "Failed to show sub-agent result"))
-                .ok();
         })
         .detach();
     }
