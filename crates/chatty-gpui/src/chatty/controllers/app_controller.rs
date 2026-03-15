@@ -2694,6 +2694,9 @@ impl ChattyApp {
         // Channel for streaming stderr progress lines from the subprocess.
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+        // Keep a copy of prompt to use in the history injection label below.
+        let prompt_label = prompt.clone();
+
         cx.spawn(async move |weak, cx| {
             let mut blocking_fut = tokio::task::spawn_blocking(move || {
                 use std::io::BufRead as _;
@@ -2796,6 +2799,34 @@ impl ChattyApp {
                 Ok(stdout) => Some(stdout),
                 Err(e) => Some(format!("⚠️ {e}")),
             };
+
+            // Inject the sub-agent result into the conversation history so the main
+            // agent can reference it on subsequent turns.  We use a User message so
+            // that the LLM sees the content as context it can act on.
+            if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
+                let history_entry = rig::completion::Message::User {
+                    content: rig::OneOrMany::one(rig::message::UserContent::text(format!(
+                        "[Sub-agent result for: {prompt_label}]\n\n{txt}",
+                    ))),
+                };
+                cx.update(|cx| {
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(conv_id) {
+                            conv.add_user_message_with_attachments(history_entry, vec![]);
+                        }
+                    });
+                })
+                .ok();
+
+                // Persist the updated history to disk.
+                if let Some(app) = weak.upgrade() {
+                    let conv_id_for_persist = conv_id.clone();
+                    app.update(cx, |app, cx| {
+                        app.persist_conversation(&conv_id_for_persist, cx);
+                    })
+                    .ok();
+                }
+            }
 
             // Finalize the collapsible trace — result goes inside the expanded body.
             // If the conversation changed, we still finalize so the trace is frozen,
