@@ -124,6 +124,64 @@ pub struct SlashCommand {
     pub execute_immediately: bool,
 }
 
+/// A skill loaded from the filesystem for display in the slash-command picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillEntry {
+    /// Short directory name of the skill (e.g. `"fix-ci"`).
+    pub name: String,
+    /// Human-readable description extracted from the skill's frontmatter.
+    pub description: String,
+}
+
+/// A combined item in the slash-command picker: either a built-in command or a
+/// dynamic skill loaded from the filesystem.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SlashMenuItem {
+    Command(&'static SlashCommand),
+    Skill(SkillEntry),
+}
+
+impl SlashMenuItem {
+    /// The slash-prefixed display string shown in the menu (e.g. `/compact` or `/fix-ci`).
+    pub fn display_command(&self) -> String {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.command.to_string(),
+            SlashMenuItem::Skill(skill) => format!("/{}", skill.name),
+        }
+    }
+
+    /// Human-readable description.
+    pub fn description(&self) -> &str {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.description,
+            SlashMenuItem::Skill(skill) => &skill.description,
+        }
+    }
+
+    /// Whether the item should be applied immediately (no arg input needed).
+    pub fn execute_immediately(&self) -> bool {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.execute_immediately,
+            // Skills are not execute-immediately — we insert a prompt the user
+            // can review and optionally extend before pressing Enter.
+            SlashMenuItem::Skill(_) => false,
+        }
+    }
+
+    /// Text to insert into the input when this item is selected.
+    pub fn insert_text(&self) -> String {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.insert_text.to_string(),
+            SlashMenuItem::Skill(skill) => format!("Use the '{}' skill: ", skill.name),
+        }
+    }
+
+    /// Returns true when this item represents a filesystem skill.
+    pub fn is_skill(&self) -> bool {
+        matches!(self, SlashMenuItem::Skill(_))
+    }
+}
+
 const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/add-dir",
@@ -181,9 +239,12 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
-/// Returns the slash commands that match the current `input_text`.
+/// Returns the built-in slash commands that match the current `input_text`.
 /// The menu is active only when `input_text` starts with `/` and contains
 /// no whitespace (once there is a space the user is typing arguments).
+///
+/// Use [`slash_menu_items_with_skills`] to also include filesystem skills.
+#[cfg(test)]
 pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
     let trimmed = input_text.trim();
     if !trimmed.starts_with('/') {
@@ -205,6 +266,42 @@ pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
                     .starts_with(&query)
         })
         .collect()
+}
+
+/// Returns combined slash-menu items: built-in commands first, then filesystem
+/// skills — both filtered to match the current query in `input_text`.
+pub fn slash_menu_items_with_skills(
+    input_text: &str,
+    skills: &[SkillEntry],
+) -> Vec<SlashMenuItem> {
+    let trimmed = input_text.trim();
+    if !trimmed.starts_with('/') {
+        return Vec::new();
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = trimmed[1..].to_ascii_lowercase();
+
+    let mut items: Vec<SlashMenuItem> = SLASH_COMMANDS
+        .iter()
+        .filter(|cmd| {
+            query.is_empty()
+                || cmd
+                    .command
+                    .trim_start_matches('/')
+                    .to_ascii_lowercase()
+                    .starts_with(&query)
+        })
+        .map(|cmd| SlashMenuItem::Command(cmd))
+        .collect();
+
+    let skill_items = skills.iter().filter(|skill| {
+        query.is_empty() || skill.name.to_ascii_lowercase().starts_with(&query)
+    });
+    items.extend(skill_items.map(|s| SlashMenuItem::Skill(s.clone())));
+
+    items
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +340,9 @@ pub struct ChatInputState {
     is_streaming: bool,
     /// Index of the highlighted item in the slash-command picker.
     slash_menu_selected: usize,
+    /// Scroll state for the slash-command picker so keyboard navigation can
+    /// keep the selected item visible.
+    slash_menu_scroll_handle: ScrollHandle,
     /// The slash query that was in effect when `slash_menu_selected` was last
     /// reset.  Used to detect genuine query changes vs. spurious Change events
     /// (e.g. the newline that gpui-component appends before firing PressEnter).
@@ -252,10 +352,16 @@ pub struct ChatInputState {
     pending_slash_insert: Option<String>,
     /// Per-conversation working directory override (None = use global workspace_dir setting)
     working_dir: Option<PathBuf>,
+    /// Filesystem skills loaded from the workspace `.claude/skills/` and global skills
+    /// directories.  Updated whenever the working directory changes.
+    available_skills: Vec<SkillEntry>,
     /// Cached list of files for the `@` mention picker (loaded on first use).
     at_menu_files: Vec<String>,
     /// Index of the highlighted item in the `@` mention picker.
     at_menu_selected: usize,
+    /// Scroll state for the `@` mention picker so keyboard navigation can keep
+    /// the selected item visible.
+    at_menu_scroll_handle: ScrollHandle,
     /// Last `@` query seen when `at_menu_selected` was reset (change detection).
     last_at_query: Option<String>,
     /// When set, this text is written into the input on the next render frame.
@@ -275,14 +381,28 @@ impl ChatInputState {
             supports_pdf: false,
             is_streaming: false,
             slash_menu_selected: 0,
+            slash_menu_scroll_handle: ScrollHandle::new(),
             last_slash_query: None,
             pending_slash_insert: None,
             working_dir: None,
+            available_skills: Vec::new(),
             at_menu_files: Vec::new(),
             at_menu_selected: 0,
+            at_menu_scroll_handle: ScrollHandle::new(),
             last_at_query: None,
             pending_at_insert: None,
         }
+    }
+
+    /// Replace the cached list of filesystem skills and notify GPUI to re-render.
+    pub fn set_available_skills(&mut self, skills: Vec<SkillEntry>, cx: &mut Context<Self>) {
+        self.available_skills = skills;
+        cx.notify();
+    }
+
+    /// Return the currently loaded skills (used for rendering the menu).
+    pub fn available_skills(&self) -> &[SkillEntry] {
+        &self.available_skills
     }
 
     /// Set available models for selection
@@ -495,7 +615,7 @@ impl ChatInputState {
     /// Whether the slash-command picker should be shown given the current input.
     pub fn is_slash_menu_open(&self, cx: &mut Context<Self>) -> bool {
         let text = self.input.read(cx).text().to_string();
-        !slash_menu_items_for(&text).is_empty()
+        !slash_menu_items_with_skills(&text, &self.available_skills).is_empty()
     }
 
     /// Current highlighted index in the picker.
@@ -531,6 +651,7 @@ impl ChatInputState {
 
         if changed {
             self.slash_menu_selected = 0;
+            self.slash_menu_scroll_handle.scroll_to_item(0);
             self.last_slash_query = Some(query_raw.to_ascii_lowercase());
         }
     }
@@ -545,6 +666,8 @@ impl ChatInputState {
         } else {
             self.slash_menu_selected -= 1;
         }
+        self.slash_menu_scroll_handle
+            .scroll_to_item(self.slash_menu_selected);
     }
 
     /// Move selection down (wraps to first item).
@@ -553,33 +676,39 @@ impl ChatInputState {
             return;
         }
         self.slash_menu_selected = (self.slash_menu_selected + 1) % num_items;
+        self.slash_menu_scroll_handle
+            .scroll_to_item(self.slash_menu_selected);
     }
 
-    /// Apply the currently highlighted slash command.
+    /// Apply the currently highlighted slash command or skill.
     ///
     /// * For immediate commands (no args needed) the command is emitted via
     ///   `ChatInputEvent::SlashCommandSelected` and the input is cleared.
-    /// * For argument commands the `insert_text` is written into the input on
-    ///   the next render frame via `pending_slash_insert`.
+    /// * For argument commands (and all skills) the `insert_text` is written
+    ///   into the input on the next render frame via `pending_slash_insert`.
     pub fn apply_slash_command(&mut self, cx: &mut Context<Self>) {
         let input_text = self.input.read(cx).text().to_string();
-        let items = slash_menu_items_for(&input_text);
+        let items = slash_menu_items_with_skills(&input_text, &self.available_skills);
         if items.is_empty() {
             return;
         }
         let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
-        let cmd = items[selected];
+        let item = &items[selected];
         self.slash_menu_selected = 0;
+        self.slash_menu_scroll_handle.scroll_to_item(0);
         self.last_slash_query = None; // reset so next '/' starts fresh
 
-        if cmd.execute_immediately {
-            cx.emit(ChatInputEvent::SlashCommandSelected(
-                cmd.command.to_string(),
-            ));
+        if item.execute_immediately() {
+            // Only built-in commands reach here (skills are never immediate).
+            if let SlashMenuItem::Command(cmd) = item {
+                cx.emit(ChatInputEvent::SlashCommandSelected(
+                    cmd.command.to_string(),
+                ));
+            }
             self.should_clear = true;
         } else {
             // Insert command text (with trailing space) so user can type args.
-            self.pending_slash_insert = Some(cmd.insert_text.to_string());
+            self.pending_slash_insert = Some(item.insert_text());
         }
     }
 
@@ -613,6 +742,7 @@ impl ChatInputState {
             .unwrap_or(true);
         if changed {
             self.at_menu_selected = 0;
+            self.at_menu_scroll_handle.scroll_to_item(0);
             self.last_at_query = Some(query_raw);
         }
     }
@@ -627,6 +757,8 @@ impl ChatInputState {
         } else {
             self.at_menu_selected -= 1;
         }
+        self.at_menu_scroll_handle
+            .scroll_to_item(self.at_menu_selected);
     }
 
     /// Move `@` selection down (wraps to first item).
@@ -635,6 +767,8 @@ impl ChatInputState {
             return;
         }
         self.at_menu_selected = (self.at_menu_selected + 1) % num_items;
+        self.at_menu_scroll_handle
+            .scroll_to_item(self.at_menu_selected);
     }
 
     /// Load files from `dir` if the cache is currently empty.
@@ -684,6 +818,7 @@ impl ChatInputState {
         let filename = items[selected].clone();
         let new_text = apply_at_to_input(&input_text, &filename);
         self.at_menu_selected = 0;
+        self.at_menu_scroll_handle.scroll_to_item(0);
         self.last_at_query = None;
         // Retain the file cache so that the user can insert multiple files
         // in quick succession without reloading. The cache is cleared when the
@@ -857,7 +992,8 @@ impl RenderOnce for ChatInput {
 
         // --- Slash menu ---
         let input_text = input_entity.read(cx).text().to_string();
-        let menu_items = slash_menu_items_for(&input_text);
+        let available_skills = self.state.read(cx).available_skills.clone();
+        let menu_items = slash_menu_items_with_skills(&input_text, &available_skills);
         let slash_menu_selected = self.state.read(cx).slash_menu_selected();
 
         // --- @ mention menu ---
@@ -1052,6 +1188,7 @@ impl RenderOnce for ChatInput {
                     &menu_items,
                     slash_menu_selected,
                     &state_for_menu,
+                    &self.state.read(cx).slash_menu_scroll_handle,
                     cx,
                 ))
             })
@@ -1062,6 +1199,7 @@ impl RenderOnce for ChatInput {
                     &at_items,
                     at_menu_selected,
                     &state_for_at,
+                    &self.state.read(cx).at_menu_scroll_handle,
                     cx,
                 ))
             })
@@ -1290,10 +1428,14 @@ impl RenderOnce for ChatInput {
 // ---------------------------------------------------------------------------
 
 /// Renders the slash-command picker above the input.
+///
+/// Built-in commands keep their description visible, while skills only show the
+/// slash-prefixed skill name to avoid horizontal overflow in the popover.
 fn render_slash_menu(
-    items: &[&'static SlashCommand],
+    items: &[SlashMenuItem],
     selected: usize,
     state: &Entity<ChatInputState>,
+    scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> impl IntoElement {
     let theme_bg = cx.theme().background;
@@ -1310,56 +1452,76 @@ fn render_slash_menu(
         .rounded_lg()
         .shadow_md()
         .p_1()
-        .children(items.iter().enumerate().map(|(idx, cmd)| {
-            let state_for_click = state.clone();
-            let cmd_command = cmd.command;
-            let cmd_description = cmd.description;
-            let is_selected = idx == selected.min(items.len().saturating_sub(1));
-
+        .child(
             div()
-                .id(ElementId::Name(format!("slash-cmd-{}", cmd_command).into()))
-                .px_3()
-                .py_2()
-                .rounded_sm()
-                .cursor_pointer()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .when(is_selected, |d| d.bg(theme_secondary))
-                .hover(|style| style.bg(theme_secondary))
-                // Highlight on hover to update selected index
-                .on_mouse_move({
-                    let state = state.clone();
-                    move |_event, _window, cx| {
-                        state.update(cx, |s, cx| {
-                            if s.slash_menu_selected != idx {
-                                s.slash_menu_selected = idx;
-                                cx.notify();
+                .id("slash-menu-items")
+                .max_h(px(320.0))
+                .track_scroll(scroll_handle)
+                .overflow_y_scroll()
+                .children(items.iter().enumerate().map(|(idx, item)| {
+                    let state_for_click = state.clone();
+                    let display_command = item.display_command();
+                    let description = item.description().to_string();
+                    let is_skill = item.is_skill();
+                    let is_selected = idx == selected.min(items.len().saturating_sub(1));
+
+                    // Skills use a purple accent; commands use the standard blue.
+                    let command_color = if is_skill {
+                        rgb(0x8b5cf6)
+                    } else {
+                        rgb(0x3b82f6)
+                    };
+
+                    div()
+                        .id(ElementId::Name(format!("slash-cmd-{}", display_command).into()))
+                        .px_3()
+                        .py_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .when(is_selected, |d| d.bg(theme_secondary))
+                        .hover(|style| style.bg(theme_secondary))
+                        // Highlight on hover to update selected index
+                        .on_mouse_move({
+                            let state = state.clone();
+                            move |_event, _window, cx| {
+                                state.update(cx, |s, cx| {
+                                    if s.slash_menu_selected != idx {
+                                        s.slash_menu_selected = idx;
+                                        s.slash_menu_scroll_handle.scroll_to_item(idx);
+                                        cx.notify();
+                                    }
+                                });
                             }
-                        });
-                    }
-                })
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    state_for_click.update(cx, |s, cx| {
-                        s.slash_menu_selected = idx;
-                        s.apply_slash_command(cx);
-                        cx.notify();
-                    });
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x3b82f6))
-                        .child(cmd_command),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x6b7280))
-                        .child(cmd_description),
-                )
-        }))
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            state_for_click.update(cx, |s, cx| {
+                                s.slash_menu_selected = idx;
+                                s.slash_menu_scroll_handle.scroll_to_item(idx);
+                                s.apply_slash_command(cx);
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(command_color)
+                                .child(display_command),
+                        )
+                        .when(!is_skill, |d| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0x6b7280))
+                                    .child(description),
+                            )
+                        })
+                })),
+        )
+        .vertical_scrollbar(scroll_handle)
         .child(
             // Help footer
             div()
@@ -1380,6 +1542,7 @@ fn render_at_menu(
     items: &[String],
     selected: usize,
     state: &Entity<ChatInputState>,
+    scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> impl IntoElement {
     let theme_bg = cx.theme().background;
@@ -1396,50 +1559,58 @@ fn render_at_menu(
         .rounded_lg()
         .shadow_md()
         .p_1()
-        .child(div().max_h(px(320.0)).overflow_y_scrollbar().children(
-            items.iter().enumerate().map(|(idx, filename)| {
-                let state_for_click = state.clone();
-                let filename_owned = filename.clone();
-                let is_selected = idx == selected.min(items.len().saturating_sub(1));
+        .child(
+            div()
+                .id("at-menu-items")
+                .max_h(px(320.0))
+                .track_scroll(scroll_handle)
+                .overflow_y_scroll()
+                .children(items.iter().enumerate().map(|(idx, filename)| {
+                    let state_for_click = state.clone();
+                    let filename_owned = filename.clone();
+                    let is_selected = idx == selected.min(items.len().saturating_sub(1));
 
-                div()
-                    .id(ElementId::Name(format!("at-mention-{}", idx).into()))
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .flex()
-                    .flex_row()
-                    .gap_3()
-                    .when(is_selected, |d| d.bg(theme_secondary))
-                    .hover(|style| style.bg(theme_secondary))
-                    .on_mouse_move({
-                        let state = state.clone();
-                        move |_event, _window, cx| {
-                            state.update(cx, |s, cx| {
-                                if s.at_menu_selected != idx {
-                                    s.at_menu_selected = idx;
-                                    cx.notify();
-                                }
+                    div()
+                        .id(ElementId::Name(format!("at-mention-{}", idx).into()))
+                        .px_3()
+                        .py_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .when(is_selected, |d| d.bg(theme_secondary))
+                        .hover(|style| style.bg(theme_secondary))
+                        .on_mouse_move({
+                            let state = state.clone();
+                            move |_event, _window, cx| {
+                                state.update(cx, |s, cx| {
+                                    if s.at_menu_selected != idx {
+                                        s.at_menu_selected = idx;
+                                        s.at_menu_scroll_handle.scroll_to_item(idx);
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            state_for_click.update(cx, |s, cx| {
+                                s.at_menu_selected = idx;
+                                s.at_menu_scroll_handle.scroll_to_item(idx);
+                                s.apply_at_mention(cx);
+                                cx.notify();
                             });
-                        }
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        state_for_click.update(cx, |s, cx| {
-                            s.at_menu_selected = idx;
-                            s.apply_at_mention(cx);
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x10b981))
-                            .child(filename_owned),
-                    )
-            }),
-        ))
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x10b981))
+                                .child(filename_owned),
+                        )
+                })),
+        )
+        .vertical_scrollbar(scroll_handle)
         .child(
             // Help footer
             div()

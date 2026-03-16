@@ -24,7 +24,7 @@ use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
-use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState};
+use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
@@ -653,6 +653,46 @@ impl ChattyApp {
                 });
             });
         }
+
+        // Load skills for the initial workspace directory
+        let workspace_dir = cx
+            .try_global::<ExecutionSettingsModel>()
+            .and_then(|s| s.workspace_dir.clone())
+            .map(PathBuf::from);
+        self.refresh_chat_input_skills(workspace_dir.as_deref(), cx);
+    }
+
+    /// Synchronously load filesystem skills for `workspace_dir` (and the global skills dir)
+    /// and push them into the chat-input picker so they appear in the `/` menu.
+    fn refresh_chat_input_skills(
+        &self,
+        workspace_dir: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) {
+        let skill_service = cx
+            .try_global::<chatty_core::services::SkillService>()
+            .cloned()
+            .unwrap_or_else(|| chatty_core::services::SkillService::new(None));
+
+        let workspace_skills_dir =
+            workspace_dir.map(|d| d.join(".claude").join("skills"));
+
+        let raw_skills = skill_service
+            .list_all_skills_sync(workspace_skills_dir.as_deref());
+
+        let entries: Vec<SkillEntry> = raw_skills
+            .into_iter()
+            .map(|(name, description)| SkillEntry { name, description })
+            .collect();
+
+        debug!(count = entries.len(), "Refreshed skills for slash-command picker");
+
+        let chat_view = self.chat_view.clone();
+        chat_view.update(cx, |view, cx| {
+            view.chat_input_state().update(cx, |state, cx| {
+                state.set_available_skills(entries, cx);
+            });
+        });
     }
 
     /// Restore a single conversation from persisted data
@@ -1240,7 +1280,7 @@ impl ChattyApp {
 
                     // Restore the per-conversation working directory override without emitting
                     // a WorkingDirChanged event (which would trigger an unnecessary agent rebuild)
-                    state.set_working_dir_silent(conversation_working_dir);
+                    state.set_working_dir_silent(conversation_working_dir.clone());
                 });
 
                 // Restore in-progress streaming message from Conversation model if it exists
@@ -1265,6 +1305,14 @@ impl ChattyApp {
                     }
                 }
             });
+
+            // Refresh the skills list for this conversation's effective working directory.
+            // Use the conversation-level override first, then fall back to the global setting.
+            let skills_dir: Option<PathBuf> = conversation_working_dir.clone().or_else(|| {
+                cx.try_global::<ExecutionSettingsModel>()
+                    .and_then(|s| s.workspace_dir.as_ref().map(|p| PathBuf::from(p)))
+            });
+            self.refresh_chat_input_skills(skills_dir.as_deref(), cx);
         }
     }
 
@@ -1614,6 +1662,9 @@ impl ChattyApp {
 
         // Rebuild the agent so the new workspace_dir takes effect for tools and shell
         self.rebuild_active_agent(cx);
+
+        // Refresh skills for the new working directory
+        self.refresh_chat_input_skills(dir.as_deref(), cx);
     }
 
     /// Delete a conversation

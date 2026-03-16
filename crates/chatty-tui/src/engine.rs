@@ -690,6 +690,16 @@ impl ChatEngine {
             .to_string()
     }
 
+    /// Return a reference to the current execution settings.
+    pub fn execution_settings(&self) -> &ExecutionSettingsModel {
+        &self.execution_settings
+    }
+
+    /// Return a reference to the skill service.
+    pub fn skill_service(&self) -> &chatty_core::services::SkillService {
+        &self.skill_service
+    }
+
     /// Change workspace directory and reset conversation so tools are reinitialized.
     pub fn set_working_directory(&mut self, directory: &str) -> Result<String> {
         let canonical = self.resolve_directory(directory)?;

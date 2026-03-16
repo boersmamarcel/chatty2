@@ -8,6 +8,10 @@ use crate::tools::save_skill_tool::SKILL_TITLE_PREFIX;
 
 // ── Frontmatter helpers ──────────────────────────────────────────────────────
 
+/// File names tried (in order) when searching for a skill's definition inside
+/// a skill subdirectory.
+const SKILL_FILE_NAMES: &[&str] = &["SKILL.md", "skill.md"];
+
 /// Extract the `description` field from a SKILL.md YAML frontmatter block.
 ///
 /// The frontmatter is a `---`-delimited YAML block at the top of the file.
@@ -153,6 +157,48 @@ pub struct SkillService {
     embedding_service: Option<EmbeddingService>,
 }
 
+/// Synchronously list all available skills from the given directory.
+///
+/// Returns a list of `(name, description)` pairs for every skill subdirectory
+/// that contains a `SKILL.md` or `skill.md` file.  Skills without a frontmatter
+/// `description` field fall back to `"Skill: <name>"`.
+///
+/// This is a lightweight, blocking helper intended for UI use (e.g. populating
+/// the slash-command picker) where async I/O would be inconvenient.
+pub fn list_skills_from_dir(dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut skills = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(skill_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        // Skip hidden directories and embedding cache files
+        if skill_name.starts_with('.') {
+            continue;
+        }
+        // Read SKILL.md or skill.md
+        let content = SKILL_FILE_NAMES.iter().find_map(|name| {
+            let s = std::fs::read_to_string(path.join(name)).ok()?;
+            if s.trim().is_empty() { None } else { Some(s) }
+        });
+        let Some(content) = content else {
+            continue;
+        };
+        let description = extract_frontmatter_description(&content)
+            .unwrap_or_else(|| format!("Skill: {}", skill_name));
+        skills.push((skill_name, description));
+    }
+    // Sort alphabetically for a stable display order
+    skills.sort_by(|a, b| a.0.cmp(&b.0));
+    skills
+}
+
 impl SkillService {
     /// Create a new `SkillService`.
     ///
@@ -165,6 +211,41 @@ impl SkillService {
             global_skills_dir,
             embedding_service,
         }
+    }
+
+    /// Return the path to the global skills directory.
+    pub fn global_skills_dir(&self) -> &Path {
+        &self.global_skills_dir
+    }
+
+    /// Synchronously list all skills from the workspace and global directories.
+    ///
+    /// Workspace skills are listed first, followed by global skills.  Duplicate
+    /// names are deduplicated (workspace takes precedence).
+    pub fn list_all_skills_sync(
+        &self,
+        workspace_skills_dir: Option<&Path>,
+    ) -> Vec<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        let workspace_skills = workspace_skills_dir
+            .map(list_skills_from_dir)
+            .unwrap_or_default();
+        for (name, desc) in workspace_skills {
+            if seen.insert(name.clone()) {
+                result.push((name, desc));
+            }
+        }
+
+        let global_skills = list_skills_from_dir(&self.global_skills_dir);
+        for (name, desc) in global_skills {
+            if seen.insert(name.clone()) {
+                result.push((name, desc));
+            }
+        }
+
+        result
     }
 
     /// Load skill hits from both the workspace and global directories.
@@ -222,7 +303,7 @@ impl SkillService {
 
             // Try SKILL.md then skill.md
             let mut content: Option<String> = None;
-            for name in &["SKILL.md", "skill.md"] {
+            for name in SKILL_FILE_NAMES {
                 if let Ok(c) = tokio::fs::read_to_string(path.join(name)).await
                     && !c.trim().is_empty()
                 {
@@ -356,5 +437,95 @@ mod tests {
         // Only the description should be in `text`, not the full content
         assert_eq!(hits[0].text, "Short description.");
         assert!(!hits[0].text.contains("Long content"));
+    }
+
+    #[test]
+    fn list_skills_from_dir_returns_name_and_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("fix-ci");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: fix-ci\ndescription: Diagnoses CI failures.\n---\n# Body",
+        )
+        .unwrap();
+
+        let skills = list_skills_from_dir(tmp.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].0, "fix-ci");
+        assert_eq!(skills[0].1, "Diagnoses CI failures.");
+    }
+
+    #[test]
+    fn list_skills_from_dir_falls_back_to_skill_name_when_no_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Just a heading\nNo frontmatter.").unwrap();
+
+        let skills = list_skills_from_dir(tmp.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].0, "my-skill");
+        assert!(skills[0].1.contains("my-skill"), "description should reference skill name");
+    }
+
+    #[test]
+    fn list_skills_from_dir_skips_dirs_without_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A valid skill
+        let s1 = tmp.path().join("skill-a");
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::write(s1.join("SKILL.md"), "---\ndescription: A skill.\n---").unwrap();
+        // A dir with no SKILL.md
+        std::fs::create_dir_all(tmp.path().join("not-a-skill")).unwrap();
+
+        let skills = list_skills_from_dir(tmp.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].0, "skill-a");
+    }
+
+    #[test]
+    fn list_skills_from_dir_returns_empty_for_missing_dir() {
+        let skills = list_skills_from_dir(std::path::Path::new("/nonexistent/path/to/skills"));
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn list_all_skills_sync_deduplicates_workspace_wins() {
+        let global_tmp = tempfile::tempdir().unwrap();
+        let workspace_tmp = tempfile::tempdir().unwrap();
+
+        // Same skill name in both — workspace description should win
+        for (dir, desc) in [
+            (global_tmp.path(), "Global description"),
+            (workspace_tmp.path(), "Workspace description"),
+        ] {
+            let skill_dir = dir.join("shared-skill");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\ndescription: {desc}.\n---"),
+            )
+            .unwrap();
+        }
+
+        // Additional global-only skill
+        let global_only = global_tmp.path().join("global-only");
+        std::fs::create_dir_all(&global_only).unwrap();
+        std::fs::write(global_only.join("SKILL.md"), "---\ndescription: Global only.\n---")
+            .unwrap();
+
+        let mut service = SkillService::new(None);
+        service.global_skills_dir = global_tmp.path().to_path_buf();
+
+        let skills = service.list_all_skills_sync(Some(workspace_tmp.path()));
+
+        // Should have 2 unique skills
+        assert_eq!(skills.len(), 2);
+        // shared-skill should have the workspace description (listed first)
+        let shared = skills.iter().find(|(n, _)| n == "shared-skill").unwrap();
+        assert_eq!(shared.1, "Workspace description.");
+        // global-only should also be present
+        assert!(skills.iter().any(|(n, _)| n == "global-only"));
     }
 }
