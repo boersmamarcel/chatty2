@@ -803,18 +803,23 @@ impl ChatEngine {
         self.sub_agent_msg_idx = Some(self.messages.len() - 1);
 
         tokio::task::spawn_blocking(move || {
-            let message =
-                match run_sub_agent_process(executable, model_id, prompt_owned, auto_approve, event_tx.clone()) {
-                    Ok(stdout) => {
-                        let stdout = stdout.trim().to_string();
-                        if stdout.is_empty() {
-                            "Sub-agent completed with no output.".to_string()
-                        } else {
-                            format!("Sub-agent response:\n{}", stdout)
-                        }
+            let message = match run_sub_agent_process(
+                executable,
+                model_id,
+                prompt_owned,
+                auto_approve,
+                event_tx.clone(),
+            ) {
+                Ok(stdout) => {
+                    let stdout = stdout.trim().to_string();
+                    if stdout.is_empty() {
+                        "Sub-agent completed with no output.".to_string()
+                    } else {
+                        format!("Sub-agent response:\n{}", stdout)
                     }
-                    Err(e) => format!("Sub-agent failed: {}", e),
-                };
+                }
+                Err(e) => format!("Sub-agent failed: {}", e),
+            };
 
             if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
                 warn!(error = ?e, "Failed to deliver sub-agent completion event");
@@ -1295,7 +1300,9 @@ fn run_sub_agent_process(
         command.arg("--auto-approve");
     }
 
-    let mut child = command.spawn().context("Failed to launch sub-agent process")?;
+    let mut child = command
+        .spawn()
+        .context("Failed to launch sub-agent process")?;
 
     // Drain stderr in a background thread, forwarding each line as a progress event.
     let stderr = child.stderr.take();
@@ -1319,7 +1326,10 @@ fn run_sub_agent_process(
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        bail!("exit code {:?}: sub-agent process failed", output.status.code())
+        bail!(
+            "exit code {:?}: sub-agent process failed",
+            output.status.code()
+        )
     }
 }
 

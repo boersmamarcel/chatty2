@@ -93,7 +93,10 @@ impl Tool for SubAgentTool {
             ));
         }
 
-        info!(task_len = task.len(), "Launching sub-agent for delegated task");
+        info!(
+            task_len = task.len(),
+            "Launching sub-agent for delegated task"
+        );
 
         // Find the chatty-tui binary: check same directory as current binary first,
         // then fall back to PATH resolution (may fail at spawn time if not found).
@@ -110,11 +113,12 @@ impl Tool for SubAgentTool {
         let auto_approve = self.auto_approve;
 
         // Run the subprocess in a blocking task to avoid blocking the async runtime.
-        let result = tokio::task::spawn_blocking(move || {
-            run_sub_agent(exe, model_id, task, auto_approve)
-        })
-        .await
-        .map_err(|e| SubAgentError::Error(format!("Sub-agent task failed to complete: {e}")))?;
+        let result =
+            tokio::task::spawn_blocking(move || run_sub_agent(exe, model_id, task, auto_approve))
+                .await
+                .map_err(|e| {
+                    SubAgentError::Error(format!("Sub-agent task failed to complete: {e}"))
+                })?;
 
         match result {
             Ok(stdout) => {
@@ -185,7 +189,10 @@ fn run_sub_agent(
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         let exit_code = output.status.code();
-        let stderr_preview = stderr_str.chars().take(STDERR_PREVIEW_CHARS).collect::<String>();
+        let stderr_preview = stderr_str
+            .chars()
+            .take(STDERR_PREVIEW_CHARS)
+            .collect::<String>();
         Err(format!(
             "Sub-agent failed (exit {:?}): {}",
             exit_code, stderr_preview

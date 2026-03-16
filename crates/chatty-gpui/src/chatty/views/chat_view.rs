@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_for};
+use super::chat_input::{ChatInput, ChatInputState, at_query_from, slash_menu_items_for};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
@@ -19,6 +19,7 @@ use super::message_types::{
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
+use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
 use std::time::SystemTime;
 
@@ -100,6 +101,8 @@ impl ChatView {
                             // command instead of sending the message as a chat turn.
                             if state.is_slash_menu_open(cx) {
                                 state.apply_slash_command(cx);
+                            } else if state.is_at_menu_open(cx) {
+                                state.apply_at_mention(cx);
                             } else {
                                 state.send_message(cx);
                             }
@@ -113,6 +116,17 @@ impl ChatView {
                     state_for_change.update(cx, |state, cx| {
                         let new_text = state.input.read(cx).text().to_string();
                         state.reset_slash_menu_selection_if_query_changed(&new_text);
+                        state.reset_at_menu_selection_if_query_changed(&new_text);
+
+                        // Load files for the @ menu on first use.
+                        let global_dir = cx
+                            .try_global::<ExecutionSettingsModel>()
+                            .and_then(|s| s.workspace_dir.clone())
+                            .map(std::path::PathBuf::from)
+                            .or_else(|| std::env::current_dir().ok());
+                        if state.refresh_at_files_if_needed(&new_text, global_dir) {
+                            cx.notify();
+                        }
                     });
                 }
                 _ => {}
@@ -128,9 +142,10 @@ impl ChatView {
         });
 
         // Register a keystroke interceptor to handle ↑/↓ navigation in the
-        // slash-command picker.  This fires *before* GPUI dispatches action
-        // handlers, so calling cx.stop_propagation() here prevents the
-        // InputState's MoveUp/MoveDown cursor-movement actions from running.
+        // slash-command picker and the @ mention picker.  This fires *before*
+        // GPUI dispatches action handlers, so calling cx.stop_propagation()
+        // here prevents the InputState's MoveUp/MoveDown cursor-movement
+        // actions from running.
         let input_for_interceptor = chat_input_state.clone();
         let slash_menu_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
             let key = event.keystroke.key.as_str();
@@ -142,28 +157,42 @@ impl ChatView {
             {
                 return;
             }
-            // Check whether the slash-command picker is currently showing.
             let input_text = input_for_interceptor
                 .read(cx)
                 .input
                 .read(cx)
                 .text()
                 .to_string();
-            let items = slash_menu_items_for(&input_text);
-            if items.is_empty() {
+            // Check slash-command picker first.
+            let slash_items = slash_menu_items_for(&input_text);
+            if !slash_items.is_empty() {
+                let num = slash_items.len();
+                input_for_interceptor.update(cx, |state, cx| {
+                    if key == "up" {
+                        state.move_slash_menu_up(num);
+                    } else {
+                        state.move_slash_menu_down(num);
+                    }
+                    cx.notify();
+                });
+                cx.stop_propagation();
                 return;
             }
-            // Navigate the picker and suppress cursor movement in the text input.
-            let num = items.len();
-            input_for_interceptor.update(cx, |state, cx| {
-                if key == "up" {
-                    state.move_slash_menu_up(num);
-                } else {
-                    state.move_slash_menu_down(num);
-                }
-                cx.notify();
-            });
-            cx.stop_propagation();
+            // Then check @ mention picker.
+            let at_items = input_for_interceptor
+                .read(cx)
+                .at_items_count_for_input(&input_text);
+            if at_items > 0 {
+                input_for_interceptor.update(cx, |state, cx| {
+                    if key == "up" {
+                        state.move_at_menu_up(at_items);
+                    } else {
+                        state.move_at_menu_down(at_items);
+                    }
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            }
         });
 
         Self {
