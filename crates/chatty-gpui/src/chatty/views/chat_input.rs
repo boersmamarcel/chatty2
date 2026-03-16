@@ -32,6 +32,64 @@ pub struct SlashCommand {
     pub execute_immediately: bool,
 }
 
+/// A skill loaded from the filesystem for display in the slash-command picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillEntry {
+    /// Short directory name of the skill (e.g. `"fix-ci"`).
+    pub name: String,
+    /// Human-readable description extracted from the skill's frontmatter.
+    pub description: String,
+}
+
+/// A combined item in the slash-command picker: either a built-in command or a
+/// dynamic skill loaded from the filesystem.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SlashMenuItem {
+    Command(&'static SlashCommand),
+    Skill(SkillEntry),
+}
+
+impl SlashMenuItem {
+    /// The slash-prefixed display string shown in the menu (e.g. `/compact` or `/fix-ci`).
+    pub fn display_command(&self) -> String {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.command.to_string(),
+            SlashMenuItem::Skill(skill) => format!("/{}", skill.name),
+        }
+    }
+
+    /// Human-readable description.
+    pub fn description(&self) -> &str {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.description,
+            SlashMenuItem::Skill(skill) => &skill.description,
+        }
+    }
+
+    /// Whether the item should be applied immediately (no arg input needed).
+    pub fn execute_immediately(&self) -> bool {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.execute_immediately,
+            // Skills are not execute-immediately — we insert a prompt the user
+            // can review and optionally extend before pressing Enter.
+            SlashMenuItem::Skill(_) => false,
+        }
+    }
+
+    /// Text to insert into the input when this item is selected.
+    pub fn insert_text(&self) -> String {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.insert_text.to_string(),
+            SlashMenuItem::Skill(skill) => format!("Use the '{}' skill: ", skill.name),
+        }
+    }
+
+    /// Returns true when this item represents a filesystem skill.
+    pub fn is_skill(&self) -> bool {
+        matches!(self, SlashMenuItem::Skill(_))
+    }
+}
+
 const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/add-dir",
@@ -89,9 +147,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
-/// Returns the slash commands that match the current `input_text`.
+/// Returns the built-in slash commands that match the current `input_text`.
 /// The menu is active only when `input_text` starts with `/` and contains
 /// no whitespace (once there is a space the user is typing arguments).
+///
+/// Use [`slash_menu_items_with_skills`] to also include filesystem skills.
 pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
     let trimmed = input_text.trim();
     if !trimmed.starts_with('/') {
@@ -113,6 +173,42 @@ pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
                     .starts_with(&query)
         })
         .collect()
+}
+
+/// Returns combined slash-menu items: built-in commands first, then filesystem
+/// skills — both filtered to match the current query in `input_text`.
+pub fn slash_menu_items_with_skills(
+    input_text: &str,
+    skills: &[SkillEntry],
+) -> Vec<SlashMenuItem> {
+    let trimmed = input_text.trim();
+    if !trimmed.starts_with('/') {
+        return Vec::new();
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = trimmed[1..].to_ascii_lowercase();
+
+    let mut items: Vec<SlashMenuItem> = SLASH_COMMANDS
+        .iter()
+        .filter(|cmd| {
+            query.is_empty()
+                || cmd
+                    .command
+                    .trim_start_matches('/')
+                    .to_ascii_lowercase()
+                    .starts_with(&query)
+        })
+        .map(|cmd| SlashMenuItem::Command(cmd))
+        .collect();
+
+    let skill_items = skills.iter().filter(|skill| {
+        query.is_empty() || skill.name.to_ascii_lowercase().starts_with(&query)
+    });
+    items.extend(skill_items.map(|s| SlashMenuItem::Skill(s.clone())));
+
+    items
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +256,9 @@ pub struct ChatInputState {
     pending_slash_insert: Option<String>,
     /// Per-conversation working directory override (None = use global workspace_dir setting)
     working_dir: Option<PathBuf>,
+    /// Filesystem skills loaded from the workspace `.claude/skills/` and global skills
+    /// directories.  Updated whenever the working directory changes.
+    available_skills: Vec<SkillEntry>,
 }
 
 impl ChatInputState {
@@ -178,7 +277,19 @@ impl ChatInputState {
             last_slash_query: None,
             pending_slash_insert: None,
             working_dir: None,
+            available_skills: Vec::new(),
         }
+    }
+
+    /// Replace the cached list of filesystem skills and notify GPUI to re-render.
+    pub fn set_available_skills(&mut self, skills: Vec<SkillEntry>, cx: &mut Context<Self>) {
+        self.available_skills = skills;
+        cx.notify();
+    }
+
+    /// Return the currently loaded skills (used for rendering the menu).
+    pub fn available_skills(&self) -> &[SkillEntry] {
+        &self.available_skills
     }
 
     /// Set available models for selection
@@ -382,7 +493,7 @@ impl ChatInputState {
     /// Whether the slash-command picker should be shown given the current input.
     pub fn is_slash_menu_open(&self, cx: &mut Context<Self>) -> bool {
         let text = self.input.read(cx).text().to_string();
-        !slash_menu_items_for(&text).is_empty()
+        !slash_menu_items_with_skills(&text, &self.available_skills).is_empty()
     }
 
     /// Current highlighted index in the picker.
@@ -442,31 +553,34 @@ impl ChatInputState {
         self.slash_menu_selected = (self.slash_menu_selected + 1) % num_items;
     }
 
-    /// Apply the currently highlighted slash command.
+    /// Apply the currently highlighted slash command or skill.
     ///
     /// * For immediate commands (no args needed) the command is emitted via
     ///   `ChatInputEvent::SlashCommandSelected` and the input is cleared.
-    /// * For argument commands the `insert_text` is written into the input on
-    ///   the next render frame via `pending_slash_insert`.
+    /// * For argument commands (and all skills) the `insert_text` is written
+    ///   into the input on the next render frame via `pending_slash_insert`.
     pub fn apply_slash_command(&mut self, cx: &mut Context<Self>) {
         let input_text = self.input.read(cx).text().to_string();
-        let items = slash_menu_items_for(&input_text);
+        let items = slash_menu_items_with_skills(&input_text, &self.available_skills);
         if items.is_empty() {
             return;
         }
         let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
-        let cmd = items[selected];
+        let item = &items[selected];
         self.slash_menu_selected = 0;
         self.last_slash_query = None; // reset so next '/' starts fresh
 
-        if cmd.execute_immediately {
-            cx.emit(ChatInputEvent::SlashCommandSelected(
-                cmd.command.to_string(),
-            ));
+        if item.execute_immediately() {
+            // Only built-in commands reach here (skills are never immediate).
+            if let SlashMenuItem::Command(cmd) = item {
+                cx.emit(ChatInputEvent::SlashCommandSelected(
+                    cmd.command.to_string(),
+                ));
+            }
             self.should_clear = true;
         } else {
             // Insert command text (with trailing space) so user can type args.
-            self.pending_slash_insert = Some(cmd.insert_text.to_string());
+            self.pending_slash_insert = Some(item.insert_text());
         }
     }
 
@@ -636,7 +750,8 @@ impl RenderOnce for ChatInput {
 
         // --- Slash menu ---
         let input_text = input_entity.read(cx).text().to_string();
-        let menu_items = slash_menu_items_for(&input_text);
+        let available_skills = self.state.read(cx).available_skills.clone();
+        let menu_items = slash_menu_items_with_skills(&input_text, &available_skills);
         let slash_menu_selected = self.state.read(cx).slash_menu_selected();
 
         // Model dropdown button
@@ -1049,8 +1164,11 @@ impl RenderOnce for ChatInput {
 // ---------------------------------------------------------------------------
 
 /// Renders the slash-command picker above the input.
+///
+/// Items can be built-in commands or filesystem skills; skills are shown with
+/// a purple accent colour and a `[skill]` badge to distinguish them visually.
 fn render_slash_menu(
-    items: &[&'static SlashCommand],
+    items: &[SlashMenuItem],
     selected: usize,
     state: &Entity<ChatInputState>,
     cx: &App,
@@ -1069,14 +1187,22 @@ fn render_slash_menu(
         .rounded_lg()
         .shadow_md()
         .p_1()
-        .children(items.iter().enumerate().map(|(idx, cmd)| {
+        .children(items.iter().enumerate().map(|(idx, item)| {
             let state_for_click = state.clone();
-            let cmd_command = cmd.command;
-            let cmd_description = cmd.description;
+            let display_command = item.display_command();
+            let description = item.description().to_string();
+            let is_skill = item.is_skill();
             let is_selected = idx == selected.min(items.len().saturating_sub(1));
 
+            // Skills use a purple accent; commands use the standard blue.
+            let command_color = if is_skill {
+                rgb(0x8b5cf6)
+            } else {
+                rgb(0x3b82f6)
+            };
+
             div()
-                .id(ElementId::Name(format!("slash-cmd-{}", cmd_command).into()))
+                .id(ElementId::Name(format!("slash-cmd-{}", display_command).into()))
                 .px_3()
                 .py_2()
                 .rounded_sm()
@@ -1109,14 +1235,26 @@ fn render_slash_menu(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x3b82f6))
-                        .child(cmd_command),
+                        .text_color(command_color)
+                        .child(display_command),
                 )
+                .when(is_skill, |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x8b5cf6))
+                            .px_1()
+                            .border_1()
+                            .border_color(rgb(0x8b5cf6))
+                            .rounded_sm()
+                            .child("skill"),
+                    )
+                })
                 .child(
                     div()
                         .text_sm()
                         .text_color(rgb(0x6b7280))
-                        .child(cmd_description),
+                        .child(description),
                 )
         }))
         .child(

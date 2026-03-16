@@ -27,6 +27,10 @@ async fn run_loop(
     event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
     let mut input_state = InputState::new();
+
+    // Pre-populate skills from the initial working directory
+    refresh_skills(engine, &mut input_state);
+
     let mut crossterm_events = EventStream::new();
     let tick_rate = Duration::from_millis(100);
     let mut tick_interval = tokio::time::interval(tick_rate);
@@ -132,6 +136,8 @@ async fn run_loop(
                                                 format!("Failed to initialize: {}", e),
                                             );
                                         }
+                                        // Refresh skills for the new working directory
+                                        refresh_skills(engine, &mut input_state);
                                     }
                                     Err(e) => engine.add_system_message(e.to_string()),
                                 }
@@ -350,9 +356,9 @@ fn apply_selected_slash_command(
         return KeyAction::None;
     };
 
-    input_state.set_input_text(item.insert_text);
+    input_state.set_input_text(&item.insert_text());
 
-    if item.execute_immediately
+    if item.execute_immediately()
         && let Some(cmd) = engine.try_handle_command(&input_state.peek_input())
     {
         input_state.take_input();
@@ -387,4 +393,16 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
     }
+}
+
+/// Load filesystem skills for the engine's current working directory and populate
+/// the input state so they appear in the `/` slash-command picker.
+fn refresh_skills(engine: &ChatEngine, input_state: &mut InputState) {
+    use std::path::Path;
+    let workspace_dir = engine.execution_settings().workspace_dir.as_deref();
+    let workspace_skills_dir = workspace_dir.map(|d| Path::new(d).join(".claude").join("skills"));
+    let skills = engine
+        .skill_service()
+        .list_all_skills_sync(workspace_skills_dir.as_deref());
+    input_state.set_available_skills(skills);
 }

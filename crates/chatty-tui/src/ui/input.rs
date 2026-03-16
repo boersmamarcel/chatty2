@@ -81,10 +81,59 @@ const SLASH_COMMANDS: &[SlashCommandEntry] = &[
     },
 ];
 
+/// A combined item in the TUI slash-command picker: either a built-in command
+/// or a dynamic filesystem skill.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SlashMenuItem {
+    Command(SlashCommandEntry),
+    Skill { name: String, description: String },
+}
+
+impl SlashMenuItem {
+    /// The slash-prefixed display string (e.g. `/compact` or `/fix-ci`).
+    pub fn display_command(&self) -> String {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.command.to_string(),
+            SlashMenuItem::Skill { name, .. } => format!("/{}", name),
+        }
+    }
+
+    /// Human-readable description.
+    pub fn description(&self) -> &str {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.description,
+            SlashMenuItem::Skill { description, .. } => description,
+        }
+    }
+
+    /// Whether the item should be applied immediately (no arg input needed).
+    pub fn execute_immediately(&self) -> bool {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.execute_immediately,
+            SlashMenuItem::Skill { .. } => false,
+        }
+    }
+
+    /// Text to insert into the input box when this item is selected.
+    pub fn insert_text(&self) -> String {
+        match self {
+            SlashMenuItem::Command(cmd) => cmd.insert_text.to_string(),
+            SlashMenuItem::Skill { name, .. } => format!("Use the '{}' skill: ", name),
+        }
+    }
+
+    /// Returns true when this item represents a filesystem skill.
+    pub fn is_skill(&self) -> bool {
+        matches!(self, SlashMenuItem::Skill { .. })
+    }
+}
+
 /// Manages the text input state
 pub struct InputState {
     pub textarea: TextArea<'static>,
     slash_menu_selected: usize,
+    /// Filesystem skills loaded from the workspace `.claude/skills/` and global skills dirs.
+    available_skills: Vec<(String, String)>,
 }
 
 impl InputState {
@@ -101,7 +150,14 @@ impl InputState {
         Self {
             textarea,
             slash_menu_selected: 0,
+            available_skills: Vec::new(),
         }
+    }
+
+    /// Replace the cached list of filesystem skills.
+    pub fn set_available_skills(&mut self, skills: Vec<(String, String)>) {
+        self.available_skills = skills;
+        self.slash_menu_selected = 0;
     }
 
     /// Get the current input text and clear the textarea
@@ -132,12 +188,14 @@ impl InputState {
         self.slash_menu_selected = 0;
     }
 
-    pub fn slash_menu_items(&self) -> Vec<SlashCommandEntry> {
+    /// Returns all matching slash-menu items for the current input: built-in commands
+    /// first, then filesystem skills.
+    pub fn slash_menu_items(&self) -> Vec<SlashMenuItem> {
         let Some(query) = self.slash_query() else {
             return Vec::new();
         };
 
-        SLASH_COMMANDS
+        let mut items: Vec<SlashMenuItem> = SLASH_COMMANDS
             .iter()
             .copied()
             .filter(|item| {
@@ -148,7 +206,18 @@ impl InputState {
                         .to_ascii_lowercase()
                         .starts_with(&query)
             })
-            .collect()
+            .map(SlashMenuItem::Command)
+            .collect();
+
+        let skill_items = self.available_skills.iter().filter(|(name, _)| {
+            query.is_empty() || name.to_ascii_lowercase().starts_with(&query)
+        });
+        items.extend(skill_items.map(|(name, desc)| SlashMenuItem::Skill {
+            name: name.clone(),
+            description: desc.clone(),
+        }));
+
+        items
     }
 
     pub fn is_slash_menu_open(&self) -> bool {
@@ -170,11 +239,11 @@ impl InputState {
         }
     }
 
-    pub fn selected_slash_menu_item(&mut self) -> Option<SlashCommandEntry> {
+    pub fn selected_slash_menu_item(&mut self) -> Option<SlashMenuItem> {
         self.normalize_slash_menu_selection();
         self.slash_menu_items()
             .get(self.slash_menu_selected)
-            .copied()
+            .cloned()
     }
 
     pub fn slash_menu_selected_index(&self) -> usize {
@@ -211,10 +280,14 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputState, SlashCommandEntry};
+    use super::{InputState, SlashMenuItem};
 
-    fn has_command(items: &[SlashCommandEntry], command: &str) -> bool {
-        items.iter().any(|i| i.command == command)
+    fn has_command(items: &[SlashMenuItem], command: &str) -> bool {
+        items.iter().any(|i| i.display_command() == command)
+    }
+
+    fn has_skill(items: &[SlashMenuItem], name: &str) -> bool {
+        items.iter().any(|i| matches!(i, SlashMenuItem::Skill { name: n, .. } if n == name))
     }
 
     #[test]
@@ -233,5 +306,40 @@ mod tests {
 
         input.set_input_text("/compact now");
         assert!(!input.is_slash_menu_open());
+    }
+
+    #[test]
+    fn skills_appear_in_slash_menu() {
+        let mut input = InputState::new();
+        input.set_available_skills(vec![
+            ("fix-ci".to_string(), "Fix CI failures".to_string()),
+            ("build-and-check".to_string(), "Run build pipeline".to_string()),
+        ]);
+
+        input.set_input_text("/");
+        let all = input.slash_menu_items();
+        assert!(has_skill(&all, "fix-ci"), "fix-ci skill should appear");
+        assert!(has_skill(&all, "build-and-check"), "build-and-check skill should appear");
+
+        // Filter: only "fix" prefix
+        input.set_input_text("/fix");
+        let filtered = input.slash_menu_items();
+        assert!(has_skill(&filtered, "fix-ci"));
+        assert!(!has_skill(&filtered, "build-and-check"));
+
+        // Commands with space should close the menu
+        input.set_input_text("/fix-ci extra");
+        assert!(!input.is_slash_menu_open());
+    }
+
+    #[test]
+    fn skill_insert_text() {
+        let item = SlashMenuItem::Skill {
+            name: "fix-ci".to_string(),
+            description: "Fix CI".to_string(),
+        };
+        assert_eq!(item.insert_text(), "Use the 'fix-ci' skill: ");
+        assert!(!item.execute_immediately());
+        assert!(item.is_skill());
     }
 }
