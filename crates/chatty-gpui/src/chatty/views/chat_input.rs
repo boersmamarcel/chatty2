@@ -340,6 +340,9 @@ pub struct ChatInputState {
     is_streaming: bool,
     /// Index of the highlighted item in the slash-command picker.
     slash_menu_selected: usize,
+    /// Scroll state for the slash-command picker so keyboard navigation can
+    /// keep the selected item visible.
+    slash_menu_scroll_handle: ScrollHandle,
     /// The slash query that was in effect when `slash_menu_selected` was last
     /// reset.  Used to detect genuine query changes vs. spurious Change events
     /// (e.g. the newline that gpui-component appends before firing PressEnter).
@@ -356,6 +359,9 @@ pub struct ChatInputState {
     at_menu_files: Vec<String>,
     /// Index of the highlighted item in the `@` mention picker.
     at_menu_selected: usize,
+    /// Scroll state for the `@` mention picker so keyboard navigation can keep
+    /// the selected item visible.
+    at_menu_scroll_handle: ScrollHandle,
     /// Last `@` query seen when `at_menu_selected` was reset (change detection).
     last_at_query: Option<String>,
     /// When set, this text is written into the input on the next render frame.
@@ -375,12 +381,14 @@ impl ChatInputState {
             supports_pdf: false,
             is_streaming: false,
             slash_menu_selected: 0,
+            slash_menu_scroll_handle: ScrollHandle::new(),
             last_slash_query: None,
             pending_slash_insert: None,
             working_dir: None,
             available_skills: Vec::new(),
             at_menu_files: Vec::new(),
             at_menu_selected: 0,
+            at_menu_scroll_handle: ScrollHandle::new(),
             last_at_query: None,
             pending_at_insert: None,
         }
@@ -643,6 +651,7 @@ impl ChatInputState {
 
         if changed {
             self.slash_menu_selected = 0;
+            self.slash_menu_scroll_handle.scroll_to_item(0);
             self.last_slash_query = Some(query_raw.to_ascii_lowercase());
         }
     }
@@ -657,6 +666,8 @@ impl ChatInputState {
         } else {
             self.slash_menu_selected -= 1;
         }
+        self.slash_menu_scroll_handle
+            .scroll_to_item(self.slash_menu_selected);
     }
 
     /// Move selection down (wraps to first item).
@@ -665,6 +676,8 @@ impl ChatInputState {
             return;
         }
         self.slash_menu_selected = (self.slash_menu_selected + 1) % num_items;
+        self.slash_menu_scroll_handle
+            .scroll_to_item(self.slash_menu_selected);
     }
 
     /// Apply the currently highlighted slash command or skill.
@@ -682,6 +695,7 @@ impl ChatInputState {
         let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
         let item = &items[selected];
         self.slash_menu_selected = 0;
+        self.slash_menu_scroll_handle.scroll_to_item(0);
         self.last_slash_query = None; // reset so next '/' starts fresh
 
         if item.execute_immediately() {
@@ -728,6 +742,7 @@ impl ChatInputState {
             .unwrap_or(true);
         if changed {
             self.at_menu_selected = 0;
+            self.at_menu_scroll_handle.scroll_to_item(0);
             self.last_at_query = Some(query_raw);
         }
     }
@@ -742,6 +757,8 @@ impl ChatInputState {
         } else {
             self.at_menu_selected -= 1;
         }
+        self.at_menu_scroll_handle
+            .scroll_to_item(self.at_menu_selected);
     }
 
     /// Move `@` selection down (wraps to first item).
@@ -750,6 +767,8 @@ impl ChatInputState {
             return;
         }
         self.at_menu_selected = (self.at_menu_selected + 1) % num_items;
+        self.at_menu_scroll_handle
+            .scroll_to_item(self.at_menu_selected);
     }
 
     /// Load files from `dir` if the cache is currently empty.
@@ -799,6 +818,7 @@ impl ChatInputState {
         let filename = items[selected].clone();
         let new_text = apply_at_to_input(&input_text, &filename);
         self.at_menu_selected = 0;
+        self.at_menu_scroll_handle.scroll_to_item(0);
         self.last_at_query = None;
         // Retain the file cache so that the user can insert multiple files
         // in quick succession without reloading. The cache is cleared when the
@@ -1168,6 +1188,7 @@ impl RenderOnce for ChatInput {
                     &menu_items,
                     slash_menu_selected,
                     &state_for_menu,
+                    &self.state.read(cx).slash_menu_scroll_handle,
                     cx,
                 ))
             })
@@ -1178,6 +1199,7 @@ impl RenderOnce for ChatInput {
                     &at_items,
                     at_menu_selected,
                     &state_for_at,
+                    &self.state.read(cx).at_menu_scroll_handle,
                     cx,
                 ))
             })
@@ -1407,12 +1429,13 @@ impl RenderOnce for ChatInput {
 
 /// Renders the slash-command picker above the input.
 ///
-/// Items can be built-in commands or filesystem skills; skills are shown with
-/// a purple accent colour and a `[skill]` badge to distinguish them visually.
+/// Built-in commands keep their description visible, while skills only show the
+/// slash-prefixed skill name to avoid horizontal overflow in the popover.
 fn render_slash_menu(
     items: &[SlashMenuItem],
     selected: usize,
     state: &Entity<ChatInputState>,
+    scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> impl IntoElement {
     let theme_bg = cx.theme().background;
@@ -1429,76 +1452,76 @@ fn render_slash_menu(
         .rounded_lg()
         .shadow_md()
         .p_1()
-        .children(items.iter().enumerate().map(|(idx, item)| {
-            let state_for_click = state.clone();
-            let display_command = item.display_command();
-            let description = item.description().to_string();
-            let is_skill = item.is_skill();
-            let is_selected = idx == selected.min(items.len().saturating_sub(1));
-
-            // Skills use a purple accent; commands use the standard blue.
-            let command_color = if is_skill {
-                rgb(0x8b5cf6)
-            } else {
-                rgb(0x3b82f6)
-            };
-
+        .child(
             div()
-                .id(ElementId::Name(format!("slash-cmd-{}", display_command).into()))
-                .px_3()
-                .py_2()
-                .rounded_sm()
-                .cursor_pointer()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .when(is_selected, |d| d.bg(theme_secondary))
-                .hover(|style| style.bg(theme_secondary))
-                // Highlight on hover to update selected index
-                .on_mouse_move({
-                    let state = state.clone();
-                    move |_event, _window, cx| {
-                        state.update(cx, |s, cx| {
-                            if s.slash_menu_selected != idx {
-                                s.slash_menu_selected = idx;
-                                cx.notify();
+                .id("slash-menu-items")
+                .max_h(px(320.0))
+                .track_scroll(scroll_handle)
+                .overflow_y_scroll()
+                .children(items.iter().enumerate().map(|(idx, item)| {
+                    let state_for_click = state.clone();
+                    let display_command = item.display_command();
+                    let description = item.description().to_string();
+                    let is_skill = item.is_skill();
+                    let is_selected = idx == selected.min(items.len().saturating_sub(1));
+
+                    // Skills use a purple accent; commands use the standard blue.
+                    let command_color = if is_skill {
+                        rgb(0x8b5cf6)
+                    } else {
+                        rgb(0x3b82f6)
+                    };
+
+                    div()
+                        .id(ElementId::Name(format!("slash-cmd-{}", display_command).into()))
+                        .px_3()
+                        .py_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .when(is_selected, |d| d.bg(theme_secondary))
+                        .hover(|style| style.bg(theme_secondary))
+                        // Highlight on hover to update selected index
+                        .on_mouse_move({
+                            let state = state.clone();
+                            move |_event, _window, cx| {
+                                state.update(cx, |s, cx| {
+                                    if s.slash_menu_selected != idx {
+                                        s.slash_menu_selected = idx;
+                                        s.slash_menu_scroll_handle.scroll_to_item(idx);
+                                        cx.notify();
+                                    }
+                                });
                             }
-                        });
-                    }
-                })
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    state_for_click.update(cx, |s, cx| {
-                        s.slash_menu_selected = idx;
-                        s.apply_slash_command(cx);
-                        cx.notify();
-                    });
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(command_color)
-                        .child(display_command),
-                )
-                .when(is_skill, |d| {
-                    d.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x8b5cf6))
-                            .px_1()
-                            .border_1()
-                            .border_color(rgb(0x8b5cf6))
-                            .rounded_sm()
-                            .child("skill"),
-                    )
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x6b7280))
-                        .child(description),
-                )
-        }))
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            state_for_click.update(cx, |s, cx| {
+                                s.slash_menu_selected = idx;
+                                s.slash_menu_scroll_handle.scroll_to_item(idx);
+                                s.apply_slash_command(cx);
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(command_color)
+                                .child(display_command),
+                        )
+                        .when(!is_skill, |d| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0x6b7280))
+                                    .child(description),
+                            )
+                        })
+                })),
+        )
+        .vertical_scrollbar(scroll_handle)
         .child(
             // Help footer
             div()
@@ -1519,6 +1542,7 @@ fn render_at_menu(
     items: &[String],
     selected: usize,
     state: &Entity<ChatInputState>,
+    scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> impl IntoElement {
     let theme_bg = cx.theme().background;
@@ -1535,50 +1559,58 @@ fn render_at_menu(
         .rounded_lg()
         .shadow_md()
         .p_1()
-        .child(div().max_h(px(320.0)).overflow_y_scrollbar().children(
-            items.iter().enumerate().map(|(idx, filename)| {
-                let state_for_click = state.clone();
-                let filename_owned = filename.clone();
-                let is_selected = idx == selected.min(items.len().saturating_sub(1));
+        .child(
+            div()
+                .id("at-menu-items")
+                .max_h(px(320.0))
+                .track_scroll(scroll_handle)
+                .overflow_y_scroll()
+                .children(items.iter().enumerate().map(|(idx, filename)| {
+                    let state_for_click = state.clone();
+                    let filename_owned = filename.clone();
+                    let is_selected = idx == selected.min(items.len().saturating_sub(1));
 
-                div()
-                    .id(ElementId::Name(format!("at-mention-{}", idx).into()))
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .flex()
-                    .flex_row()
-                    .gap_3()
-                    .when(is_selected, |d| d.bg(theme_secondary))
-                    .hover(|style| style.bg(theme_secondary))
-                    .on_mouse_move({
-                        let state = state.clone();
-                        move |_event, _window, cx| {
-                            state.update(cx, |s, cx| {
-                                if s.at_menu_selected != idx {
-                                    s.at_menu_selected = idx;
-                                    cx.notify();
-                                }
+                    div()
+                        .id(ElementId::Name(format!("at-mention-{}", idx).into()))
+                        .px_3()
+                        .py_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .when(is_selected, |d| d.bg(theme_secondary))
+                        .hover(|style| style.bg(theme_secondary))
+                        .on_mouse_move({
+                            let state = state.clone();
+                            move |_event, _window, cx| {
+                                state.update(cx, |s, cx| {
+                                    if s.at_menu_selected != idx {
+                                        s.at_menu_selected = idx;
+                                        s.at_menu_scroll_handle.scroll_to_item(idx);
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            state_for_click.update(cx, |s, cx| {
+                                s.at_menu_selected = idx;
+                                s.at_menu_scroll_handle.scroll_to_item(idx);
+                                s.apply_at_mention(cx);
+                                cx.notify();
                             });
-                        }
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        state_for_click.update(cx, |s, cx| {
-                            s.at_menu_selected = idx;
-                            s.apply_at_mention(cx);
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x10b981))
-                            .child(filename_owned),
-                    )
-            }),
-        ))
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x10b981))
+                                .child(filename_owned),
+                        )
+                })),
+        )
+        .vertical_scrollbar(scroll_handle)
         .child(
             // Help footer
             div()

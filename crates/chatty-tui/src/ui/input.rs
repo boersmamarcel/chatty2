@@ -216,12 +216,14 @@ impl SlashMenuItem {
 pub struct InputState {
     pub textarea: TextArea<'static>,
     slash_menu_selected: usize,
+    slash_menu_scroll_offset: usize,
     /// Filesystem skills loaded from the workspace `.claude/skills/` and global skills dirs.
     available_skills: Vec<(String, String)>,
     /// Cached list of files for the `@` mention picker.
     pub at_menu_files: Vec<String>,
     /// Index of the highlighted item in the `@` mention picker.
     at_menu_selected: usize,
+    at_menu_scroll_offset: usize,
 }
 
 impl InputState {
@@ -238,9 +240,11 @@ impl InputState {
         Self {
             textarea,
             slash_menu_selected: 0,
+            slash_menu_scroll_offset: 0,
             available_skills: Vec::new(),
             at_menu_files: Vec::new(),
             at_menu_selected: 0,
+            at_menu_scroll_offset: 0,
         }
     }
 
@@ -248,6 +252,7 @@ impl InputState {
     pub fn set_available_skills(&mut self, skills: Vec<(String, String)>) {
         self.available_skills = skills;
         self.slash_menu_selected = 0;
+        self.slash_menu_scroll_offset = 0;
     }
 
     /// Get the current input text and clear the textarea
@@ -258,7 +263,9 @@ impl InputState {
         self.textarea.select_all();
         self.textarea.cut();
         self.slash_menu_selected = 0;
+        self.slash_menu_scroll_offset = 0;
         self.at_menu_selected = 0;
+        self.at_menu_scroll_offset = 0;
         text
     }
 
@@ -277,7 +284,9 @@ impl InputState {
         self.textarea.cut();
         self.textarea.insert_str(text);
         self.slash_menu_selected = 0;
+        self.slash_menu_scroll_offset = 0;
         self.at_menu_selected = 0;
+        self.at_menu_scroll_offset = 0;
     }
 
     /// Returns all matching slash-menu items for the current input: built-in commands
@@ -342,10 +351,19 @@ impl InputState {
         self.slash_menu_selected
     }
 
+    pub fn slash_menu_scroll_offset(&self) -> usize {
+        self.slash_menu_scroll_offset
+    }
+
+    pub fn set_slash_menu_scroll_offset(&mut self, offset: usize) {
+        self.slash_menu_scroll_offset = offset;
+    }
+
     fn normalize_slash_menu_selection(&mut self) {
         let len = self.slash_menu_items().len();
         if len == 0 {
             self.slash_menu_selected = 0;
+            self.slash_menu_scroll_offset = 0;
         } else if self.slash_menu_selected >= len {
             self.slash_menu_selected = len - 1;
         }
@@ -406,6 +424,14 @@ impl InputState {
         self.at_menu_selected
     }
 
+    pub fn at_menu_scroll_offset(&self) -> usize {
+        self.at_menu_scroll_offset
+    }
+
+    pub fn set_at_menu_scroll_offset(&mut self, offset: usize) {
+        self.at_menu_scroll_offset = offset;
+    }
+
     pub fn selected_at_menu_item(&self) -> Option<String> {
         let items = self.at_menu_items();
         if items.is_empty() {
@@ -429,6 +455,7 @@ impl InputState {
         let current = self.peek_input();
         let new_text = apply_at_to_input(&current, &selected);
         self.at_menu_selected = 0;
+        self.at_menu_scroll_offset = 0;
         Some(new_text)
     }
 }

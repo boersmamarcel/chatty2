@@ -38,7 +38,7 @@ async fn run_loop(
     loop {
         // Render
         terminal.draw(|frame| {
-            ui::render(frame, engine, &input_state);
+            ui::render(frame, engine, &mut input_state);
         })?;
 
         // Multiplex event sources

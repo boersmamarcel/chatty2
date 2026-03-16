@@ -7,9 +7,10 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::ui::InputState;
 use crate::ui::input::SlashMenuItem;
 
-pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &InputState) {
+pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &mut InputState) {
     let items = input_state.slash_menu_items();
     if items.is_empty() {
+        input_state.set_slash_menu_scroll_offset(0);
         return;
     }
 
@@ -43,8 +44,11 @@ pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &InputState
     let selected = input_state
         .slash_menu_selected_index()
         .min(items.len().saturating_sub(1));
-    let mut state = ListState::default().with_selected(Some(selected));
+    let mut state = ListState::default()
+        .with_offset(input_state.slash_menu_scroll_offset())
+        .with_selected(Some(selected));
     frame.render_stateful_widget(list, chunks[0], &mut state);
+    input_state.set_slash_menu_scroll_offset(state.offset());
 
     let help = Line::from(vec![
         Span::styled("Type /", Style::default().fg(Color::Cyan)),

@@ -15,7 +15,7 @@ use crate::engine::ChatEngine;
 pub use input::InputState;
 
 /// Render the full TUI layout
-pub fn render(frame: &mut Frame, engine: &ChatEngine, input_state: &InputState) {
+pub fn render(frame: &mut Frame, engine: &ChatEngine, input_state: &mut InputState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
