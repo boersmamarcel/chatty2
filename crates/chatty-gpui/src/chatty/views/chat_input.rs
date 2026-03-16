@@ -3,6 +3,7 @@ use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::popover::Popover;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Icon};
 use std::path::{Path, PathBuf};
@@ -88,9 +89,10 @@ pub fn at_menu_items_for<'a>(input_text: &str, files: &'a [String]) -> Vec<&'a S
 /// Build the replacement input text when a file is chosen from the `@`
 /// mention picker.  The `@<query>` suffix is replaced with `@<filename> `.
 pub fn apply_at_to_input(input_text: &str, filename: &str) -> String {
+    let input_text = input_text.trim_end_matches(['\r', '\n']);
     // Find the `@` that opened the menu on the last line.
     let last_line_start = input_text.rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let last_line = &input_text[last_line_start..].trim_end();
+    let last_line = &input_text[last_line_start..];
     let at_pos_in_line = match last_line.rfind('@') {
         Some(p) => p,
         None => return format!("{} @{} ", input_text.trim_end(), filename),
@@ -1394,48 +1396,50 @@ fn render_at_menu(
         .rounded_lg()
         .shadow_md()
         .p_1()
-        .children(items.iter().enumerate().map(|(idx, filename)| {
-            let state_for_click = state.clone();
-            let filename_owned = filename.clone();
-            let is_selected = idx == selected.min(items.len().saturating_sub(1));
+        .child(div().max_h(px(320.0)).overflow_y_scrollbar().children(
+            items.iter().enumerate().map(|(idx, filename)| {
+                let state_for_click = state.clone();
+                let filename_owned = filename.clone();
+                let is_selected = idx == selected.min(items.len().saturating_sub(1));
 
-            div()
-                .id(ElementId::Name(format!("at-mention-{}", idx).into()))
-                .px_3()
-                .py_2()
-                .rounded_sm()
-                .cursor_pointer()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .when(is_selected, |d| d.bg(theme_secondary))
-                .hover(|style| style.bg(theme_secondary))
-                .on_mouse_move({
-                    let state = state.clone();
-                    move |_event, _window, cx| {
-                        state.update(cx, |s, cx| {
-                            if s.at_menu_selected != idx {
-                                s.at_menu_selected = idx;
-                                cx.notify();
-                            }
+                div()
+                    .id(ElementId::Name(format!("at-mention-{}", idx).into()))
+                    .px_3()
+                    .py_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .when(is_selected, |d| d.bg(theme_secondary))
+                    .hover(|style| style.bg(theme_secondary))
+                    .on_mouse_move({
+                        let state = state.clone();
+                        move |_event, _window, cx| {
+                            state.update(cx, |s, cx| {
+                                if s.at_menu_selected != idx {
+                                    s.at_menu_selected = idx;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        state_for_click.update(cx, |s, cx| {
+                            s.at_menu_selected = idx;
+                            s.apply_at_mention(cx);
+                            cx.notify();
                         });
-                    }
-                })
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    state_for_click.update(cx, |s, cx| {
-                        s.at_menu_selected = idx;
-                        s.apply_at_mention(cx);
-                        cx.notify();
-                    });
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x10b981))
-                        .child(format!("@{}", filename_owned)),
-                )
-        }))
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x10b981))
+                            .child(filename_owned),
+                    )
+            }),
+        ))
         .child(
             // Help footer
             div()

@@ -32,7 +32,7 @@ pub fn render_at_menu(frame: &mut Frame, area: Rect, input_state: &InputState) {
         .iter()
         .map(|name| {
             let line = Line::from(vec![Span::styled(
-                format!("@{}", name),
+                name.to_string(),
                 Style::default().fg(Color::Green),
             )]);
             ListItem::new(line)

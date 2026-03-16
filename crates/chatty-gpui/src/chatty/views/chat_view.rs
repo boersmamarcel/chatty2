@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState, at_query_from, slash_menu_items_for};
+use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_for};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,

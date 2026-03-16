@@ -70,8 +70,9 @@ pub fn at_menu_items_for<'a>(input_text: &str, files: &'a [String]) -> Vec<&'a S
 
 /// Build the replacement input text when a file is chosen from the @ picker.
 pub fn apply_at_to_input(input_text: &str, filename: &str) -> String {
+    let input_text = input_text.trim_end_matches(['\r', '\n']);
     let last_line_start = input_text.rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let last_line = &input_text[last_line_start..].trim_end();
+    let last_line = &input_text[last_line_start..];
     let at_pos_in_line = match last_line.rfind('@') {
         Some(p) => p,
         None => return format!("{} @{} ", input_text.trim_end(), filename),
