@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_for};
+use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_with_skills};
 use super::message_component::{DisplayMessage, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
@@ -143,13 +143,14 @@ impl ChatView {
                 return;
             }
             // Check whether the slash-command picker is currently showing.
-            let input_text = input_for_interceptor
-                .read(cx)
-                .input
-                .read(cx)
-                .text()
-                .to_string();
-            let items = slash_menu_items_for(&input_text);
+            let (input_text, skills) = {
+                let state = input_for_interceptor.read(cx);
+                (
+                    state.input.read(cx).text().to_string(),
+                    state.available_skills().to_vec(),
+                )
+            };
+            let items = slash_menu_items_with_skills(&input_text, &skills);
             if items.is_empty() {
                 return;
             }
