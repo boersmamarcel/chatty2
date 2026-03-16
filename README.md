@@ -59,6 +59,8 @@ Close Settings and type your first message. You can switch between models using 
 
 Type `/` in the chat input to open the slash-command picker — use arrow keys to navigate and `Enter` to select. Available commands include `/clear`, `/new`, `/compact`, `/context`, `/copy`, `/cwd`, `/cd`, `/add-dir`, and `/agent`.
 
+Type `@` to open a file picker showing files in the current working directory. Continue typing to filter the list, use arrow keys to navigate, and press `Enter` to insert the file reference inline. Hidden files and common build directories (`.git`, `node_modules`, `target`, etc.) are excluded automatically.
+
 ### 5. Enable Tools (Optional)
 
 Chatty can give your LLM access to the filesystem, a sandboxed shell, and MCP servers. This is off by default.
@@ -396,6 +398,7 @@ cargo install --path crates/chatty-tui
 |:----|:-------|
 | `Enter` | Send message |
 | `/` | Open slash-command picker (use `↑/↓` to select, `Tab` or `Enter` to apply) |
+| `@` | Open file picker — type to filter, `↑/↓` to navigate, `Enter` to insert file reference |
 | `--enable tool1,tool2` / `--disable tool1,tool2` | Override tool availability at launch |
 | `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` | Scroll chat view |
 | `y` / `n` | Approve / deny a tool execution prompt |
