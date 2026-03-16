@@ -4036,8 +4036,9 @@ async fn run_llm_stream(
     // reopening an old conversation does not show the injected context block.
     if add_user_message_to_model {
         let user_message = rig::completion::Message::User {
-            content: rig::OneOrMany::many(original_user_contents)
-                .map_err(|e| anyhow::anyhow!("Failed to create user message from contents: {}", e))?,
+            content: rig::OneOrMany::many(original_user_contents).map_err(|e| {
+                anyhow::anyhow!("Failed to create user message from contents: {}", e)
+            })?,
         };
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {

@@ -4,6 +4,90 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders};
 use tui_textarea::TextArea;
 
+// ---------------------------------------------------------------------------
+// @ mention / file picker
+// ---------------------------------------------------------------------------
+
+/// Directories excluded from the @ mention file list.
+const AT_EXCLUDED: &[&str] = &[
+    "node_modules",
+    "target",
+    "__pycache__",
+    "dist",
+    "build",
+    ".git",
+];
+
+/// Maximum number of items shown in the @ mention picker.
+const AT_MENU_MAX_ITEMS: usize = 15;
+
+/// Load files from `dir` for the @ mention picker.
+/// Returns a sorted list, skipping hidden entries and common build directories.
+pub fn load_files_for_dir(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || AT_EXCLUDED.contains(&name.as_str()) {
+                return None;
+            }
+            Some(name)
+        })
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+/// Extract the `@` query from the end of `input_text`.
+///
+/// Returns `Some(query)` when the text ends with `@<word>` (no whitespace
+/// after `@`).
+pub fn at_query_from(input_text: &str) -> Option<String> {
+    let last_line = input_text.lines().next_back().unwrap_or(input_text);
+    let trimmed = last_line.trim_end();
+    let at_pos = trimmed.rfind('@')?;
+    let after_at = &trimmed[at_pos + 1..];
+    if after_at.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(after_at.to_ascii_lowercase())
+}
+
+/// Return filtered items from `files` for the current `@` query in `input_text`.
+pub fn at_menu_items_for<'a>(input_text: &str, files: &'a [String]) -> Vec<&'a String> {
+    let Some(query) = at_query_from(input_text) else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .filter(|f| query.is_empty() || f.to_ascii_lowercase().contains(query.as_str()))
+        .take(AT_MENU_MAX_ITEMS)
+        .collect()
+}
+
+/// Build the replacement input text when a file is chosen from the @ picker.
+pub fn apply_at_to_input(input_text: &str, filename: &str) -> String {
+    let input_text = input_text.trim_end_matches(['\r', '\n']);
+    let last_line_start = input_text.rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let last_line = &input_text[last_line_start..];
+    let at_pos_in_line = match last_line.rfind('@') {
+        Some(p) => p,
+        None => return format!("{} @{} ", input_text.trim_end(), filename),
+    };
+    let prefix_lines = &input_text[..last_line_start];
+    let before_at = &last_line[..at_pos_in_line];
+    if prefix_lines.is_empty() && before_at.is_empty() {
+        format!("@{} ", filename)
+    } else if before_at.is_empty() {
+        format!("{}@{} ", prefix_lines, filename)
+    } else {
+        format!("{}{}@{} ", prefix_lines, before_at, filename)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlashCommandEntry {
     pub command: &'static str,
@@ -85,6 +169,10 @@ const SLASH_COMMANDS: &[SlashCommandEntry] = &[
 pub struct InputState {
     pub textarea: TextArea<'static>,
     slash_menu_selected: usize,
+    /// Cached list of files for the `@` mention picker.
+    pub at_menu_files: Vec<String>,
+    /// Index of the highlighted item in the `@` mention picker.
+    at_menu_selected: usize,
 }
 
 impl InputState {
@@ -101,6 +189,8 @@ impl InputState {
         Self {
             textarea,
             slash_menu_selected: 0,
+            at_menu_files: Vec::new(),
+            at_menu_selected: 0,
         }
     }
 
@@ -112,6 +202,7 @@ impl InputState {
         self.textarea.select_all();
         self.textarea.cut();
         self.slash_menu_selected = 0;
+        self.at_menu_selected = 0;
         text
     }
 
@@ -130,6 +221,7 @@ impl InputState {
         self.textarea.cut();
         self.textarea.insert_str(text);
         self.slash_menu_selected = 0;
+        self.at_menu_selected = 0;
     }
 
     pub fn slash_menu_items(&self) -> Vec<SlashCommandEntry> {
@@ -203,6 +295,73 @@ impl InputState {
 
         Some(query.to_ascii_lowercase())
     }
+
+    // -----------------------------------------------------------------------
+    // @ mention / file picker helpers
+    // -----------------------------------------------------------------------
+
+    /// Return filtered items from the cached file list for the current input.
+    pub fn at_menu_items(&self) -> Vec<&String> {
+        let text = self.peek_input();
+        at_menu_items_for(&text, &self.at_menu_files)
+    }
+
+    /// Whether the `@` mention picker should be shown.
+    pub fn is_at_menu_open(&self) -> bool {
+        !self.at_menu_items().is_empty()
+    }
+
+    pub fn move_at_menu_up(&mut self) {
+        let len = self.at_menu_items().len();
+        if len == 0 {
+            self.at_menu_selected = 0;
+            return;
+        }
+        if self.at_menu_selected > 0 {
+            self.at_menu_selected -= 1;
+        }
+    }
+
+    pub fn move_at_menu_down(&mut self) {
+        let items = self.at_menu_items();
+        if items.is_empty() {
+            self.at_menu_selected = 0;
+            return;
+        }
+        if self.at_menu_selected + 1 < items.len() {
+            self.at_menu_selected += 1;
+        }
+    }
+
+    pub fn at_menu_selected_index(&self) -> usize {
+        self.at_menu_selected
+    }
+
+    pub fn selected_at_menu_item(&self) -> Option<String> {
+        let items = self.at_menu_items();
+        if items.is_empty() {
+            return None;
+        }
+        let idx = self.at_menu_selected.min(items.len() - 1);
+        Some(items[idx].clone())
+    }
+
+    /// Load files from `dir` if the cache is empty.
+    pub fn ensure_at_files_loaded(&mut self, dir: &std::path::Path) {
+        if self.at_menu_files.is_empty() {
+            self.at_menu_files = load_files_for_dir(dir);
+        }
+    }
+
+    /// Apply the currently highlighted `@` mention: replace the `@<query>`
+    /// suffix with `@<filename> ` and return the new input text.
+    pub fn apply_at_mention(&mut self) -> Option<String> {
+        let selected = self.selected_at_menu_item()?;
+        let current = self.peek_input();
+        let new_text = apply_at_to_input(&current, &selected);
+        self.at_menu_selected = 0;
+        Some(new_text)
+    }
 }
 
 pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState) {
@@ -211,7 +370,9 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputState, SlashCommandEntry};
+    use super::{
+        InputState, SlashCommandEntry, apply_at_to_input, at_menu_items_for, at_query_from,
+    };
 
     fn has_command(items: &[SlashCommandEntry], command: &str) -> bool {
         items.iter().any(|i| i.command == command)
@@ -233,5 +394,48 @@ mod tests {
 
         input.set_input_text("/compact now");
         assert!(!input.is_slash_menu_open());
+    }
+
+    #[test]
+    fn at_query_returns_none_when_no_at() {
+        assert!(at_query_from("hello world").is_none());
+        assert!(at_query_from("").is_none());
+    }
+
+    #[test]
+    fn at_query_returns_query_after_at() {
+        assert_eq!(at_query_from("@"), Some(String::new()));
+        assert_eq!(at_query_from("@readme"), Some("readme".into()));
+        assert_eq!(at_query_from("hello @src"), Some("src".into()));
+    }
+
+    #[test]
+    fn at_query_closes_on_space() {
+        assert!(at_query_from("@readme ").is_none());
+        assert!(at_query_from("@readme.md and more").is_none());
+    }
+
+    #[test]
+    fn at_menu_items_filter_by_query() {
+        let files = vec![
+            "README.md".to_string(),
+            "src".to_string(),
+            "Cargo.toml".to_string(),
+        ];
+        // "r" matches all three: README.md, src, Cargo.toml (all contain 'r')
+        assert_eq!(at_menu_items_for("@r", &files).len(), 3);
+        assert_eq!(at_menu_items_for("@", &files).len(), 3); // all
+        assert_eq!(at_menu_items_for("@readme", &files).len(), 1); // only README.md
+        assert!(at_menu_items_for("@zzz", &files).is_empty());
+    }
+
+    #[test]
+    fn apply_at_to_input_replaces_query() {
+        assert_eq!(apply_at_to_input("@", "README.md"), "@README.md ");
+        assert_eq!(apply_at_to_input("@read", "README.md"), "@README.md ");
+        assert_eq!(
+            apply_at_to_input("please check @read", "README.md"),
+            "please check @README.md "
+        );
     }
 }

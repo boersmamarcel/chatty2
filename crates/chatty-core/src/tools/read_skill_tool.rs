@@ -105,8 +105,7 @@ impl Tool for ReadSkillTool {
 
         // Check workspace directory first
         if let Some(ref ws_dir) = self.workspace_skills_dir
-            && let Some(content) =
-                try_read_skill_file(&ws_dir.join(&args.name), &file_names).await
+            && let Some(content) = try_read_skill_file(&ws_dir.join(&args.name), &file_names).await
         {
             return Ok(ReadSkillOutput {
                 content,
