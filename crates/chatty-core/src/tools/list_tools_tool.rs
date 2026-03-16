@@ -417,6 +417,7 @@ impl ListToolsTool {
             false,
             false,
             false,
+            false,
             Vec::new(),
         )
     }
