@@ -277,6 +277,32 @@ fn handle_key_event(
         }
     }
 
+    // @ mention menu is open while typing `@<query>` in input
+    if input_state.is_at_menu_open() {
+        match key.code {
+            KeyCode::Up => {
+                input_state.move_at_menu_up();
+                return KeyAction::None;
+            }
+            KeyCode::Down => {
+                input_state.move_at_menu_down();
+                return KeyAction::None;
+            }
+            KeyCode::Tab => {
+                return apply_selected_at_mention(input_state);
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                return apply_selected_at_mention(input_state);
+            }
+            KeyCode::Esc => {
+                // Allow Esc to fall through to the textarea so the user can
+                // delete the `@` query naturally (the menu will close once the
+                // `@` is removed from the input).
+            }
+            _ => {}
+        }
+    }
+
     // If there's a pending approval, handle y/n first
     if engine.pending_approval.is_some() {
         match key.code {
@@ -340,9 +366,14 @@ fn handle_key_event(
             KeyAction::None
         }
 
-        // All other keys: forward to textarea
+        // All other keys: forward to textarea, then refresh @ file list if needed
         _ => {
             input_state.textarea.input(key);
+            // If the @ menu just opened and we have no files yet, load them.
+            if input_state.is_at_menu_open() && input_state.at_menu_files.is_empty() {
+                let cwd = engine.current_working_directory();
+                input_state.ensure_at_files_loaded(std::path::Path::new(&cwd));
+            }
             KeyAction::None
         }
     }
@@ -367,6 +398,13 @@ fn apply_selected_slash_command(
         }
     }
 
+    KeyAction::None
+}
+
+fn apply_selected_at_mention(input_state: &mut InputState) -> KeyAction {
+    if let Some(new_text) = input_state.apply_at_mention() {
+        input_state.set_input_text(&new_text);
+    }
     KeyAction::None
 }
 

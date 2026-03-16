@@ -78,7 +78,11 @@ if [ -n "$PDFIUM_SRC" ]; then
     chmod +x "${APPDIR}/usr/lib/libpdfium.so"
     echo "Bundled libpdfium.so from ${PDFIUM_SRC}"
 else
-    echo "Warning: libpdfium.so not found — PDF features will be unavailable"
+    echo "Error: libpdfium.so not found in expected locations:" >&2
+    echo "  crates/chatty-core/libs/lib/libpdfium.so" >&2
+    echo "  crates/chatty-gpui/libs/lib/libpdfium.so" >&2
+    echo "Run 'cargo build --release' first to download the pdfium library." >&2
+    exit 1
 fi
 
 # Copy chatty-tui CLI binary if available

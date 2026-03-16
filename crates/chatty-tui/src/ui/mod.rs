@@ -1,4 +1,5 @@
 mod approval;
+mod at_menu;
 mod chat_view;
 mod input;
 mod model_picker;
@@ -54,5 +55,15 @@ pub fn render(frame: &mut Frame, engine: &ChatEngine, input_state: &InputState) 
         && input_state.is_slash_menu_open()
     {
         slash_menu::render_slash_menu(frame, frame.area(), input_state);
+    }
+
+    // @ mention menu overlay (only while typing @<query>)
+    if engine.model_picker.is_none()
+        && engine.tool_picker.is_none()
+        && engine.pending_approval.is_none()
+        && !input_state.is_slash_menu_open()
+        && input_state.is_at_menu_open()
+    {
+        at_menu::render_at_menu(frame, frame.area(), input_state);
     }
 }

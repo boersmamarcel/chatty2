@@ -539,11 +539,7 @@ mod tests {
     #[test]
     fn cancel_running_tool_calls_noop_when_no_running() {
         let mut trace = SystemTrace::new();
-        trace.add_tool_call(make_tool_call(
-            "call_1",
-            "fetch",
-            ToolCallState::Success,
-        ));
+        trace.add_tool_call(make_tool_call("call_1", "fetch", ToolCallState::Success));
 
         trace.cancel_running_tool_calls();
 

@@ -1,13 +1,91 @@
 #[cfg(test)]
 mod tests {
     use super::super::chat_input::{
-        ChatInputState, IMAGE_EXTENSIONS, MAX_FILE_SIZE, PDF_EXTENSION, slash_menu_items_for,
+        ChatInputState, IMAGE_EXTENSIONS, MAX_FILE_SIZE, PDF_EXTENSION, apply_at_to_input,
+        at_menu_items_for, at_query_from, slash_menu_items_for,
     };
     use gpui::{App, Context, Entity, TestWindow};
     use gpui_component::input::InputState;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+
+    // -----------------------------------------------------------------------
+    // @ mention menu tests (pure, no GPUI context required)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_at_query_none_without_at() {
+        assert!(at_query_from("").is_none());
+        assert!(at_query_from("hello world").is_none());
+        assert!(at_query_from("/clear").is_none());
+    }
+
+    #[test]
+    fn test_at_query_bare_at() {
+        assert_eq!(at_query_from("@"), Some(String::new()));
+    }
+
+    #[test]
+    fn test_at_query_with_word() {
+        assert_eq!(at_query_from("@readme"), Some("readme".into()));
+        assert_eq!(at_query_from("hello @src"), Some("src".into()));
+    }
+
+    #[test]
+    fn test_at_query_closes_on_space() {
+        assert!(at_query_from("@readme ").is_none());
+        assert!(at_query_from("@file.txt and more").is_none());
+    }
+
+    #[test]
+    fn test_at_menu_items_all_for_bare_at() {
+        let files = vec!["README.md".to_string(), "src".to_string()];
+        let items = at_menu_items_for("@", &files);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_at_menu_items_filter_by_query() {
+        let files = vec![
+            "README.md".to_string(),
+            "Cargo.toml".to_string(),
+            "src".to_string(),
+        ];
+        let items = at_menu_items_for("@README", &files);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], "README.md");
+    }
+
+    #[test]
+    fn test_at_menu_items_empty_when_no_match() {
+        let files = vec!["README.md".to_string()];
+        assert!(at_menu_items_for("@zzz", &files).is_empty());
+    }
+
+    #[test]
+    fn test_at_menu_items_empty_when_no_at() {
+        let files = vec!["README.md".to_string()];
+        assert!(at_menu_items_for("hello", &files).is_empty());
+    }
+
+    #[test]
+    fn test_apply_at_to_input_bare_at() {
+        assert_eq!(apply_at_to_input("@", "README.md"), "@README.md ");
+    }
+
+    #[test]
+    fn test_apply_at_to_input_with_query() {
+        assert_eq!(apply_at_to_input("@read", "README.md"), "@README.md ");
+    }
+
+    #[test]
+    fn test_apply_at_to_input_with_prefix_text() {
+        assert_eq!(
+            apply_at_to_input("please look at @read", "README.md"),
+            "please look at @README.md "
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Slash-command menu tests (pure, no GPUI context required)

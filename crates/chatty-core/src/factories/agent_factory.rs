@@ -1046,27 +1046,24 @@ impl AgentClient {
 
         // Sub-agent tool — gated on execution being enabled (the sub-agent needs
         // to be able to run tools). Uses the same model as the parent conversation.
-        let sub_agent_tool: Option<SubAgentTool> = if exec_settings
-            .as_ref()
-            .map(|s| s.enabled)
-            .unwrap_or(false)
-        {
-            let sub_model_id = model_config.id.clone();
-            let sub_auto_approve = exec_settings
-                .as_ref()
-                .map(|s| {
-                    matches!(
+        let sub_agent_tool: Option<SubAgentTool> =
+            if exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false) {
+                let sub_model_id = model_config.id.clone();
+                let sub_auto_approve = exec_settings
+                    .as_ref()
+                    .map(|s| {
+                        matches!(
                         s.approval_mode,
                         crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
                     )
-                })
-                .unwrap_or(false);
-            tracing::debug!("Sub-agent tool enabled");
-            Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
-        } else {
-            tracing::debug!("Sub-agent tool disabled: execution not enabled");
-            None
-        };
+                    })
+                    .unwrap_or(false);
+                tracing::debug!("Sub-agent tool enabled");
+                Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
+            } else {
+                tracing::debug!("Sub-agent tool disabled: execution not enabled");
+                None
+            };
 
         let native_tool_names = active_native_tool_names(
             fs_read_tools.is_some(),
