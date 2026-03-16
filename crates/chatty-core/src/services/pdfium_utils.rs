@@ -22,6 +22,10 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     debug!(path = %exe.display(), "pdfium: raw executable path");
 
+    // Resolved once at the top so it can be used both in the platform-specific
+    // directory checks below and in the final "beside-executable" fallback.
+    let lib_name = Pdfium::pdfium_platform_library_name();
+
     // Canonicalize to resolve symlinks and translocation (especially on macOS)
     let canonical_exe = std::fs::canonicalize(&exe)
         .inspect_err(|e| warn!(error = %e, "pdfium: failed to canonicalize exe path"))
@@ -39,7 +43,7 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
         {
             let frameworks = exe_dir.join("../Frameworks");
             debug!(path = %frameworks.display(), "pdfium: trying canonical Frameworks path");
-            if frameworks.is_dir() {
+            if frameworks.is_dir() && frameworks.join(&lib_name).exists() {
                 return Some(frameworks);
             }
         }
@@ -47,7 +51,7 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
         if let Some(exe_dir) = exe.parent() {
             let frameworks = exe_dir.join("../Frameworks");
             debug!(path = %frameworks.display(), "pdfium: trying raw Frameworks path");
-            if frameworks.is_dir() {
+            if frameworks.is_dir() && frameworks.join(&lib_name).exists() {
                 return Some(frameworks);
             }
         }
@@ -76,7 +80,6 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
     // Final fallback: library next to the executable (non-standard installations)
     let exe_for_fallback = canonical_exe.as_ref().unwrap_or(&exe);
     if let Some(exe_dir) = exe_for_fallback.parent() {
-        let lib_name = Pdfium::pdfium_platform_library_name();
         let beside_exe = exe_dir.join(&lib_name);
         debug!(path = %beside_exe.display(), "pdfium: trying library beside executable");
         if beside_exe.exists() {

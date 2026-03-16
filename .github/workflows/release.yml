@@ -90,6 +90,14 @@ jobs:
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
+      - name: Cache pdfium library
+        uses: actions/cache@v4
+        with:
+          path: |
+            crates/chatty-core/libs
+            crates/chatty-gpui/libs
+          key: pdfium-linux-${{ hashFiles('crates/chatty-core/build.rs', 'crates/chatty-gpui/build.rs') }}
+
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -146,6 +154,14 @@ jobs:
           key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-release-${{ runner.os }}-
+
+      - name: Cache pdfium library
+        uses: actions/cache@v4
+        with:
+          path: |
+            crates/chatty-core/libs
+            crates/chatty-gpui/libs
+          key: pdfium-macos-${{ hashFiles('crates/chatty-core/build.rs', 'crates/chatty-gpui/build.rs') }}
 
       - name: Build release binary
         run: cargo build --release

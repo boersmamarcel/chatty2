@@ -53,7 +53,11 @@ if [ -n "$PDFIUM_SRC" ]; then
     cp "$PDFIUM_SRC" "${FRAMEWORKS_DIR}/libpdfium.dylib"
     echo "Bundled libpdfium.dylib from ${PDFIUM_SRC}"
 else
-    echo "Warning: libpdfium.dylib not found — PDF features will be unavailable"
+    echo "Error: libpdfium.dylib not found in expected locations:" >&2
+    echo "  crates/chatty-core/libs/lib/libpdfium.dylib" >&2
+    echo "  crates/chatty-gpui/libs/lib/libpdfium.dylib" >&2
+    echo "Run 'cargo build --release' first to download the pdfium library." >&2
+    exit 1
 fi
 
 # Copy chatty-tui CLI binary if available
