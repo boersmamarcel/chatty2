@@ -393,6 +393,12 @@ impl InputState {
         at_menu_items_for(&text, &self.at_menu_files)
     }
 
+    /// Whether the current input contains an `@` query (regardless of whether
+    /// the file cache has been populated yet).
+    pub fn has_at_query(&self) -> bool {
+        at_query_from(&self.peek_input()).is_some()
+    }
+
     /// Whether the `@` mention picker should be shown.
     pub fn is_at_menu_open(&self) -> bool {
         !self.at_menu_items().is_empty()
@@ -446,6 +452,14 @@ impl InputState {
         if self.at_menu_files.is_empty() {
             self.at_menu_files = load_files_for_dir(dir);
         }
+    }
+
+    /// Invalidate the cached `@` file list so it will be reloaded from the new
+    /// working directory on the next `@` query.
+    pub fn invalidate_at_files(&mut self) {
+        self.at_menu_files.clear();
+        self.at_menu_selected = 0;
+        self.at_menu_scroll_offset = 0;
     }
 
     /// Apply the currently highlighted `@` mention: replace the `@<query>`
@@ -562,6 +576,59 @@ mod tests {
         assert_eq!(at_menu_items_for("@", &files).len(), 3); // all
         assert_eq!(at_menu_items_for("@readme", &files).len(), 1); // only README.md
         assert!(at_menu_items_for("@zzz", &files).is_empty());
+    }
+
+    #[test]
+    fn has_at_query_is_true_when_at_is_typed_even_with_empty_file_cache() {
+        // This is the key regression test for the original bug:
+        // has_at_query() must return true when the input contains `@`
+        // even when at_menu_files is empty (before any files are loaded).
+        let mut input = InputState::new();
+        assert!(input.at_menu_files.is_empty(), "files start empty");
+
+        // No @ -> false
+        input.set_input_text("hello");
+        assert!(!input.has_at_query());
+
+        // Just @ -> true (even with no files loaded)
+        input.set_input_text("@");
+        assert!(input.has_at_query());
+        // But is_at_menu_open() is false because files haven't been loaded yet
+        assert!(!input.is_at_menu_open());
+
+        // With partial query -> still true
+        input.set_input_text("@readme");
+        assert!(input.has_at_query());
+
+        // After space -> false (query closed)
+        input.set_input_text("@readme ");
+        assert!(!input.has_at_query());
+    }
+
+    #[test]
+    fn is_at_menu_open_after_files_loaded() {
+        let mut input = InputState::new();
+        input.at_menu_files = vec!["README.md".to_string(), "src".to_string()];
+        input.set_input_text("@");
+        assert!(input.is_at_menu_open());
+
+        input.set_input_text("@readme");
+        assert!(input.is_at_menu_open());
+
+        input.set_input_text("@zzz_no_match");
+        assert!(!input.is_at_menu_open());
+    }
+
+    #[test]
+    fn invalidate_at_files_clears_cache() {
+        let mut input = InputState::new();
+        input.at_menu_files = vec!["file.txt".to_string()];
+        input.at_menu_selected = 2;
+        input.at_menu_scroll_offset = 5;
+        input.invalidate_at_files();
+        assert!(input.at_menu_files.is_empty());
+        assert_eq!(input.at_menu_selected_index(), 0);
+        assert_eq!(input.at_menu_scroll_offset(), 0);
     }
 
     #[test]

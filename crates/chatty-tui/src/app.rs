@@ -136,8 +136,9 @@ async fn run_loop(
                                                 format!("Failed to initialize: {}", e),
                                             );
                                         }
-                                        // Refresh skills for the new working directory
+                                        // Refresh skills and invalidate @ file cache for the new dir
                                         refresh_skills(engine, &mut input_state);
+                                        input_state.invalidate_at_files();
                                     }
                                     Err(e) => engine.add_system_message(e.to_string()),
                                 }
@@ -369,8 +370,10 @@ fn handle_key_event(
         // All other keys: forward to textarea, then refresh @ file list if needed
         _ => {
             input_state.textarea.input(key);
-            // If the @ menu just opened and we have no files yet, load them.
-            if input_state.is_at_menu_open() && input_state.at_menu_files.is_empty() {
+            // If the input contains an @ query and we have no files yet, load them.
+            // NOTE: we check has_at_query() (not is_at_menu_open()) because the menu
+            // cannot be open when the file cache is empty — they depend on each other.
+            if input_state.has_at_query() && input_state.at_menu_files.is_empty() {
                 let cwd = engine.current_working_directory();
                 input_state.ensure_at_files_loaded(std::path::Path::new(&cwd));
             }
