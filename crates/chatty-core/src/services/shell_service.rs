@@ -334,6 +334,10 @@ impl ShellSession {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // In sandboxed sessions we only allow writes under /tmp by default.
+            // Point TMPDIR to /tmp so tools that rely on temporary files (e.g. `uv`)
+            // don't attempt writes to /var/folders/... and fail with EPERM.
+            .env("TMPDIR", "/tmp")
             .kill_on_drop(true);
 
         if let Some(workspace) = workspace_dir {
@@ -995,6 +999,41 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_sandboxed_macos_tmpdir_is_tmp() {
+        if !ShellSession::can_sandbox() {
+            return;
+        }
+
+        let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+        let tmpdir_output = session
+            .execute("echo $TMPDIR")
+            .await
+            .expect("Failed to execute TMPDIR check in sandboxed macOS session");
+        assert_eq!(tmpdir_output.stdout.trim(), "/tmp");
+
+        session
+            .execute("rm -f \"$TMPDIR/chatty_uv_tmp_test\"")
+            .await
+            .expect("Failed to clean up prior temp file in sandboxed macOS TMPDIR");
+        let write_output = session
+            .execute(
+                "touch \"$TMPDIR/chatty_uv_tmp_test\" && test -f \"$TMPDIR/chatty_uv_tmp_test\" && echo ok",
+            )
+            .await
+            .expect("Failed to write a temp file in sandboxed macOS TMPDIR");
+        session
+            .execute("rm -f \"$TMPDIR/chatty_uv_tmp_test\"")
+            .await
+            .expect("Failed to remove temp file in sandboxed macOS TMPDIR");
+        assert!(
+            write_output.stdout.contains("ok"),
+            "Expected successful temp write in TMPDIR, got: {}",
+            write_output.stdout
+        );
     }
 
     #[tokio::test]
