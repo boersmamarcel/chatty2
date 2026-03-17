@@ -267,21 +267,15 @@ mod tests {
         store
     }
 
-    /// Helper: simulate inserting a conversation into the cache without needing
+    /// Simulate inserting a conversation into the LRU tracker without needing
     /// a real Conversation object (which requires an AgentClient).
-    /// Uses the same access-order and eviction logic as `insert_loaded`.
-    impl ConversationsStore {
-        fn insert_dummy(&mut self, id: &str) {
-            // We can't create a real Conversation, but we can test the LRU
-            // tracking by manipulating the internal data structures directly.
-            // The access_order + eviction logic is independent of Conversation data.
-            self.access_order.retain(|s| s != id);
-            self.access_order.push_back(id.to_string());
-        }
+    fn insert_dummy(store: &mut ConversationsStore, id: &str) {
+        store.access_order.retain(|s| s != id);
+        store.access_order.push_back(id.to_string());
+    }
 
-        fn cached_ids(&self) -> Vec<String> {
-            self.access_order.iter().cloned().collect()
-        }
+    fn cached_ids(store: &ConversationsStore) -> Vec<String> {
+        store.access_order.iter().cloned().collect()
     }
 
     #[test]
@@ -327,22 +321,22 @@ mod tests {
     #[test]
     fn touch_access_order_moves_to_back() {
         let mut store = ConversationsStore::new();
-        store.insert_dummy("a");
-        store.insert_dummy("b");
-        store.insert_dummy("c");
-        assert_eq!(store.cached_ids(), vec!["a", "b", "c"]);
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        insert_dummy(&mut store, "c");
+        assert_eq!(cached_ids(&store), vec!["a", "b", "c"]);
 
         // Touch "a" — should move to back
         store.touch_access_order("a");
-        assert_eq!(store.cached_ids(), vec!["b", "c", "a"]);
+        assert_eq!(cached_ids(&store), vec!["b", "c", "a"]);
     }
 
     #[test]
     fn find_lru_evictable_returns_oldest_non_protected() {
         let mut store = ConversationsStore::new();
-        store.insert_dummy("a");
-        store.insert_dummy("b");
-        store.insert_dummy("c");
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        insert_dummy(&mut store, "c");
 
         // No protections: oldest is "a"
         assert_eq!(store.find_lru_evictable(), Some("a".to_string()));
@@ -363,20 +357,20 @@ mod tests {
     #[test]
     fn set_active_by_id_updates_access_order() {
         let mut store = ConversationsStore::new();
-        store.insert_dummy("a");
-        store.insert_dummy("b");
-        store.insert_dummy("c");
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        insert_dummy(&mut store, "c");
 
         // Selecting "a" as active moves it to the back
         store.set_active_by_id("a".to_string());
-        assert_eq!(store.cached_ids(), vec!["b", "c", "a"]);
+        assert_eq!(cached_ids(&store), vec!["b", "c", "a"]);
     }
 
     #[test]
     fn mark_streaming_protects_from_eviction() {
         let mut store = ConversationsStore::new();
-        store.insert_dummy("a");
-        store.insert_dummy("b");
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
 
         store.mark_streaming("a");
         assert_eq!(store.find_lru_evictable(), Some("b".to_string()));
@@ -388,12 +382,12 @@ mod tests {
     #[test]
     fn delete_conversation_cleans_up_access_order_and_streaming() {
         let mut store = ConversationsStore::new();
-        store.insert_dummy("a");
-        store.insert_dummy("b");
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
         store.mark_streaming("a");
 
         store.delete_conversation("a");
-        assert_eq!(store.cached_ids(), vec!["b"]);
+        assert_eq!(cached_ids(&store), vec!["b"]);
         // streaming_ids should also be cleaned up
         assert_eq!(store.find_lru_evictable(), Some("b".to_string()));
     }

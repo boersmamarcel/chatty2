@@ -47,7 +47,13 @@ impl MermaidRendererService {
             && let Some(svg) = cache.get(&cache_key)
         {
             debug!("Mermaid cache hit");
-            return Ok(svg.clone());
+            let svg = svg.clone();
+            // Touch LRU order so this entry stays fresh
+            if let Ok(mut order) = self.insertion_order.lock() {
+                order.retain(|k| k != &cache_key);
+                order.push_back(cache_key);
+            }
+            return Ok(svg);
         }
 
         debug!(is_dark, "Rendering mermaid diagram to SVG");
@@ -75,6 +81,7 @@ impl MermaidRendererService {
         if let Ok(mut cache) = self.cache.lock() {
             cache.insert(cache_key.clone(), svg.clone());
             if let Ok(mut order) = self.insertion_order.lock() {
+                order.retain(|k| k != &cache_key);
                 order.push_back(cache_key);
                 while cache.len() > MAX_MERMAID_CACHE_ENTRIES {
                     if let Some(oldest) = order.pop_front() {
@@ -83,6 +90,8 @@ impl MermaidRendererService {
                         break;
                     }
                 }
+            } else {
+                warn!("Failed to lock mermaid cache insertion_order — entry may not be evicted");
             }
         }
 

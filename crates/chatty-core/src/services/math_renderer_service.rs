@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Simple RGB color representation for theme colors (avoids gpui dependency).
 /// Each component is a float in the range [0.0, 1.0].
@@ -156,7 +156,13 @@ impl MathRendererService {
             && let Some(svg) = cache.get(&cache_key)
         {
             debug!(latex, "Math cache hit");
-            return Ok(svg.clone());
+            let svg = svg.clone();
+            // Touch LRU order so this entry stays fresh
+            if let Ok(mut order) = self.insertion_order.lock() {
+                order.retain(|k| k != &cache_key);
+                order.push_back(cache_key);
+            }
+            return Ok(svg);
         }
 
         debug!(latex, is_inline, "Rendering math to SVG");
@@ -220,6 +226,7 @@ $ {typst_code} $")
         if let Ok(mut cache) = self.cache.lock() {
             cache.insert(cache_key.clone(), svg.clone());
             if let Ok(mut order) = self.insertion_order.lock() {
+                order.retain(|k| k != &cache_key);
                 order.push_back(cache_key);
                 while cache.len() > MAX_MATH_CACHE_ENTRIES {
                     if let Some(oldest) = order.pop_front() {
@@ -228,6 +235,8 @@ $ {typst_code} $")
                         break;
                     }
                 }
+            } else {
+                warn!("Failed to lock math cache insertion_order — entry may not be evicted");
             }
         }
 
