@@ -3,7 +3,7 @@ members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.116"
+version = "0.1.117"
 edition = "2024"
 
 [workspace.dependencies]
