@@ -2108,6 +2108,14 @@ impl ChattyApp {
         match event {
             StreamManagerEvent::StreamStarted { conversation_id } => {
                 debug!(conv_id = %conversation_id, "StreamManager: stream started");
+
+                // Protect this conversation from LRU eviction while streaming
+                if conversation_id != "__pending__" {
+                    cx.update_global::<ConversationsStore, _>(|store, _| {
+                        store.mark_streaming(conversation_id);
+                    });
+                }
+
                 // Set streaming UI state if this is the active conversation
                 let conv_id = conversation_id.clone();
                 cx.defer(move |cx| {
@@ -2342,6 +2350,14 @@ impl ChattyApp {
                 api_turn_count,
             } => {
                 debug!(conv_id = %conversation_id, status = ?status, "StreamManager: stream ended");
+
+                // Allow this conversation to be evicted again
+                if conversation_id != "__pending__" {
+                    cx.update_global::<ConversationsStore, _>(|store, _| {
+                        store.unmark_streaming(conversation_id);
+                    });
+                }
+
                 // Update UI streaming state
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id)

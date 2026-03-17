@@ -1,9 +1,14 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
+
+// Maximum number of in-memory SVG cache entries. Prevents unbounded memory growth
+// in long sessions with many unique diagrams. At ~20-100KB per SVG, 200
+// entries ≈ 4-20MB worst case.
+const MAX_MERMAID_CACHE_ENTRIES: usize = 200;
 
 /// Mermaid diagram renderer service that converts Mermaid syntax to SVG
 ///
@@ -12,8 +17,11 @@ use tracing::{debug, info, warn};
 ///
 /// Caching: in-memory HashMap + disk cache at `{config_dir}/chatty/mermaid_cache/`.
 /// Dark/light mode variants are cached separately via the `is_dark` hash flag.
+/// In-memory cache is bounded to `MAX_MERMAID_CACHE_ENTRIES` entries with LRU eviction.
 pub struct MermaidRendererService {
     cache: Arc<Mutex<HashMap<String, String>>>,
+    /// Tracks insertion order for LRU eviction of in-memory cache entries.
+    insertion_order: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Default for MermaidRendererService {
@@ -26,6 +34,7 @@ impl MermaidRendererService {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
+            insertion_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -62,9 +71,19 @@ impl MermaidRendererService {
         let svg = mermaid_rs_renderer::render_with_options(source, opts)
             .map_err(|e| anyhow::anyhow!("Failed to render mermaid diagram: {}", e))?;
 
-        // Store in cache
+        // Store in cache with LRU eviction
         if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(cache_key, svg.clone());
+            cache.insert(cache_key.clone(), svg.clone());
+            if let Ok(mut order) = self.insertion_order.lock() {
+                order.push_back(cache_key);
+                while cache.len() > MAX_MERMAID_CACHE_ENTRIES {
+                    if let Some(oldest) = order.pop_front() {
+                        cache.remove(&oldest);
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(svg)
@@ -256,6 +275,9 @@ impl MermaidRendererService {
         if let Ok(mut cache) = self.cache.lock() {
             cache.clear();
         }
+        if let Ok(mut order) = self.insertion_order.lock() {
+            order.clear();
+        }
     }
 
     /// Get the number of cached items
@@ -372,6 +394,18 @@ mod tests {
         assert!(
             !sanitized.contains("Segoe"),
             "Font-family override should remove Segoe UI entirely"
+        );
+    }
+
+    #[test]
+    fn test_cache_max_entries_constant_is_reasonable() {
+        assert!(
+            MAX_MERMAID_CACHE_ENTRIES >= 50,
+            "Cache limit too low — would cause excessive re-renders"
+        );
+        assert!(
+            MAX_MERMAID_CACHE_ENTRIES <= 1000,
+            "Cache limit too high — defeats memory bounding"
         );
     }
 }
