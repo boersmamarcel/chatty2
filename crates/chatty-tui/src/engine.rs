@@ -670,6 +670,10 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::SubAgentProgress(line) => {
+                let line = sanitize_progress_line(&line);
+                if line.is_empty() {
+                    return EngineAction::None;
+                }
                 if let Some(idx) = self.sub_agent_msg_idx
                     && let Some(msg) = self.messages.get_mut(idx)
                 {
@@ -1465,9 +1469,54 @@ fn run_sub_agent_process(
     }
 }
 
+fn sanitize_progress_line(line: &str) -> String {
+    let mut cleaned = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    loop {
+                        match chars.next() {
+                            Some('\u{7}') => break,
+                            Some('\u{1b}') => {
+                                if chars.next_if_eq(&'\\').is_some() {
+                                    break;
+                                }
+                            }
+                            Some(_) => {}
+                            None => break,
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if ch.is_control() && ch != '\t' {
+            continue;
+        }
+
+        cleaned.push(ch);
+    }
+
+    cleaned.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Command, common_ancestor};
+    use super::{Command, common_ancestor, sanitize_progress_line};
     use std::path::Path;
 
     #[test]
@@ -1516,5 +1565,31 @@ mod tests {
         let right = Path::new("/home/user/project/docs");
         let ancestor = common_ancestor(left, right).unwrap();
         assert_eq!(ancestor, Path::new("/home/user/project"));
+    }
+
+    #[test]
+    fn strips_ansi_and_control_sequences_from_progress_lines() {
+        let line = "\u{1b}[2K\r\u{1b}[0;32mResolving dependencies...\u{1b}[0m";
+        assert_eq!(sanitize_progress_line(line), "Resolving dependencies...");
+    }
+
+    #[test]
+    fn keeps_tabs_in_progress_lines() {
+        assert_eq!(
+            sanitize_progress_line("Step\t1:\tPreparing"),
+            "Step\t1:\tPreparing"
+        );
+    }
+
+    #[test]
+    fn strips_osc_sequences_from_progress_lines() {
+        let line = "\u{1b}]0;chatty\u{7}Installing tools";
+        assert_eq!(sanitize_progress_line(line), "Installing tools");
+    }
+
+    #[test]
+    fn strips_standalone_escape_characters() {
+        let line = "\u{1b}Resolving dependencies";
+        assert_eq!(sanitize_progress_line(line), "Resolving dependencies");
     }
 }
