@@ -1486,12 +1486,17 @@ fn sanitize_progress_line(line: &str) -> String {
                 }
                 Some(']') => {
                     chars.next();
-                    let mut prev_was_esc = false;
-                    for c in chars.by_ref() {
-                        if c == '\u{7}' || (prev_was_esc && c == '\\') {
-                            break;
+                    loop {
+                        match chars.next() {
+                            Some('\u{7}') => break,
+                            Some('\u{1b}') => {
+                                if chars.next_if_eq(&'\\').is_some() {
+                                    break;
+                                }
+                            }
+                            Some(_) => {}
+                            None => break,
                         }
-                        prev_was_esc = c == '\u{1b}';
                     }
                 }
                 _ => {}
@@ -1499,7 +1504,7 @@ fn sanitize_progress_line(line: &str) -> String {
             continue;
         }
 
-        if ch.is_control() {
+        if ch.is_control() && ch != '\t' {
             continue;
         }
 
@@ -1566,5 +1571,25 @@ mod tests {
     fn strips_ansi_and_control_sequences_from_progress_lines() {
         let line = "\u{1b}[2K\r\u{1b}[0;32mResolving dependencies...\u{1b}[0m";
         assert_eq!(sanitize_progress_line(line), "Resolving dependencies...");
+    }
+
+    #[test]
+    fn keeps_tabs_in_progress_lines() {
+        assert_eq!(
+            sanitize_progress_line("Step\t1:\tPreparing"),
+            "Step\t1:\tPreparing"
+        );
+    }
+
+    #[test]
+    fn strips_osc_sequences_from_progress_lines() {
+        let line = "\u{1b}]0;chatty\u{7}Installing tools";
+        assert_eq!(sanitize_progress_line(line), "Installing tools");
+    }
+
+    #[test]
+    fn strips_standalone_escape_characters() {
+        let line = "\u{1b}Resolving dependencies";
+        assert_eq!(sanitize_progress_line(line), "Resolving dependencies");
     }
 }
