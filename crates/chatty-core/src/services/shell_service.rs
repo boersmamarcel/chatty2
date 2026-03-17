@@ -1009,8 +1009,31 @@ mod tests {
         }
 
         let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
-        let output = session.execute("echo $TMPDIR").await.unwrap();
-        assert_eq!(output.stdout.trim(), "/tmp");
+        let tmpdir_output = session
+            .execute("echo $TMPDIR")
+            .await
+            .expect("Failed to execute TMPDIR check in sandboxed macOS session");
+        assert_eq!(tmpdir_output.stdout.trim(), "/tmp");
+
+        session
+            .execute("rm -f \"$TMPDIR/chatty_uv_tmp_test\"")
+            .await
+            .expect("Failed to clean up prior temp file in sandboxed macOS TMPDIR");
+        let write_output = session
+            .execute(
+                "touch \"$TMPDIR/chatty_uv_tmp_test\" && test -f \"$TMPDIR/chatty_uv_tmp_test\" && echo ok",
+            )
+            .await
+            .expect("Failed to write a temp file in sandboxed macOS TMPDIR");
+        session
+            .execute("rm -f \"$TMPDIR/chatty_uv_tmp_test\"")
+            .await
+            .expect("Failed to remove temp file in sandboxed macOS TMPDIR");
+        assert!(
+            write_output.stdout.contains("ok"),
+            "Expected successful temp write in TMPDIR, got: {}",
+            write_output.stdout
+        );
     }
 
     #[tokio::test]
