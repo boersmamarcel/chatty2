@@ -232,18 +232,26 @@ async fn main() -> Result<()> {
         "Using model"
     );
 
-    // Load user secrets
-    let user_secrets = match chatty_core::user_secrets_repository().load().await {
-        Ok(secrets) => secrets.as_env_pairs(),
-        Err(_) => vec![],
-    };
-
-    // Load and start MCP servers
-    let mcp_service = start_mcp_servers().await;
-
-    // Initialize agent memory service
-    let memory_service = if execution_settings.memory_enabled {
-        if let Some(data_dir) = chatty_core::services::memory_service::memory_data_dir() {
+    // Parallel batch 2: user secrets, MCP servers, memory service, and search settings
+    // are all independent of each other — run them concurrently to reduce startup latency.
+    let memory_enabled = execution_settings.memory_enabled;
+    let (user_secrets, mcp_service, memory_service, search_settings) = tokio::join!(
+        async {
+            match chatty_core::user_secrets_repository().load().await {
+                Ok(secrets) => secrets.as_env_pairs(),
+                Err(_) => vec![],
+            }
+        },
+        start_mcp_servers(),
+        async {
+            if !memory_enabled {
+                info!("Agent memory disabled by settings");
+                return None;
+            }
+            let Some(data_dir) = chatty_core::services::memory_service::memory_data_dir() else {
+                warn!("Could not determine data directory for agent memory");
+                return None;
+            };
             match chatty_core::services::MemoryService::open_or_create(&data_dir).await {
                 Ok(service) => {
                     info!("Agent memory service initialized");
@@ -254,14 +262,17 @@ async fn main() -> Result<()> {
                     None
                 }
             }
-        } else {
-            warn!("Could not determine data directory for agent memory");
-            None
-        }
-    } else {
-        info!("Agent memory disabled by settings");
-        None
-    };
+        },
+        async {
+            match chatty_core::search_settings_repository().load().await {
+                Ok(settings) => Some(settings),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to load search settings, using None");
+                    None
+                }
+            }
+        },
+    );
 
     // Initialize embedding service for semantic memory search (if configured)
     let embedding_service = if execution_settings.embedding_enabled {
@@ -322,16 +333,6 @@ async fn main() -> Result<()> {
 
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
-
-    // Create engine
-    // Load search settings
-    let search_settings = match chatty_core::search_settings_repository().load().await {
-        Ok(settings) => Some(settings),
-        Err(e) => {
-            tracing::warn!(error = ?e, "Failed to load search settings, using None");
-            None
-        }
-    };
 
     let mut engine = ChatEngine::new(
         model_config,

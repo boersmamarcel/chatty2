@@ -236,11 +236,11 @@ impl McpService {
         Ok(())
     }
 
-    /// Start all enabled servers from the given configurations
+    /// Start all enabled servers from the given configurations concurrently.
     pub async fn start_all(&self, configs: Vec<McpServerConfig>) -> Result<()> {
         info!(count = configs.len(), "Starting MCP servers");
 
-        let mut errors = Vec::new();
+        let mut join_set = tokio::task::JoinSet::new();
 
         for config in configs {
             if !config.enabled {
@@ -248,18 +248,31 @@ impl McpService {
                 continue;
             }
 
-            if let Err(e) = self.start_server(config.clone()).await {
-                error!(
-                    server = %config.name,
-                    error = ?e,
-                    "Failed to start MCP server"
-                );
-                errors.push((config.name.clone(), e));
+            let svc = self.clone();
+            join_set.spawn(async move {
+                let name = config.name.clone();
+                match svc.start_server(config).await {
+                    Ok(()) => None,
+                    Err(e) => {
+                        error!(server = %name, error = ?e, "Failed to start MCP server");
+                        Some((name, e))
+                    }
+                }
+            });
+        }
+
+        let mut error_count = 0usize;
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                // Error already logged with full details inside the spawned task; just count it.
+                Ok(Some(_)) => error_count += 1,
+                Ok(None) => {}
+                Err(e) => warn!(error = ?e, "MCP server start task panicked"),
             }
         }
 
-        if !errors.is_empty() {
-            warn!(failed = errors.len(), "Some MCP servers failed to start");
+        if error_count > 0 {
+            warn!(failed = error_count, "Some MCP servers failed to start");
         }
 
         Ok(())
