@@ -184,7 +184,7 @@ Enable auto-export in **Settings > Training Data**.
 
 ### Auto-Updates
 
-Background update checks against GitHub releases with one-click install. Downloads are verified with SHA-256 checksums before installation. On macOS, the update replaces the app bundle and relaunches automatically.
+Background update checks against GitHub releases with one-click install. Downloads are verified with SHA-256 checksums before installation. On macOS, the update replaces the app bundle and relaunches automatically. On Linux, if `chatty-tui` was installed via the desktop app, it is automatically refreshed on the next launch after an update.
 
 ### Agent Memory
 
