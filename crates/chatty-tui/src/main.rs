@@ -471,10 +471,15 @@ async fn start_mcp_servers() -> Option<McpService> {
         .map_err(|_| tracing::warn!("MCP_SERVICE already initialized"))
         .ok();
 
-    let servers_clone = servers.clone();
-    if let Err(e) = service.start_all(servers_clone).await {
-        tracing::error!(error = ?e, "Failed to start MCP servers");
-    }
+    // Fire server connections in the background so startup is not blocked.
+    // Whatever servers have connected by the time init_conversation() runs
+    // will have their tools available; the rest become available after /clear.
+    let svc = service.clone();
+    tokio::spawn(async move {
+        if let Err(e) = svc.start_all(servers).await {
+            tracing::error!(error = ?e, "Failed to start MCP servers");
+        }
+    });
 
     Some(service)
 }

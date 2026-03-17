@@ -6,6 +6,7 @@ use nix::unistd::Pid;
 use rmcp::service::ServiceExt;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -46,6 +47,9 @@ impl McpConnection {
             for (key, value) in &config.env {
                 cmd.env(key, value);
             }
+            // Silence the subprocess's stderr so it doesn't corrupt the caller's
+            // terminal (e.g. the TUI) when servers start in the background.
+            cmd.stderr(Stdio::null());
         });
 
         // Spawn the child process
