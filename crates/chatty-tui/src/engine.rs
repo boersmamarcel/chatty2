@@ -317,7 +317,10 @@ impl ChatEngine {
     /// Spawn conversation initialization as a background task.
     ///
     /// The result is delivered via `AppEvent::ConversationInitialized` so the
-    /// TUI can render immediately while the agent is being built.
+    /// TUI can render immediately while the agent is being built. Each call
+    /// increments an internal generation counter; if `init_conversation()` or
+    /// another `spawn_init_conversation()` runs before the background task
+    /// finishes, the stale result is silently discarded by the event handler.
     pub fn spawn_init_conversation(&mut self) {
         self.init_generation += 1;
         let generation = self.init_generation;
@@ -386,13 +389,23 @@ impl ChatEngine {
 
             match result {
                 Ok(conversation) => {
-                    let _ = event_tx.send(AppEvent::ConversationInitialized {
-                        conversation: Box::new(conversation),
-                        generation,
-                    });
+                    if event_tx
+                        .send(AppEvent::ConversationInitialized {
+                            conversation: Box::new(conversation),
+                            generation,
+                        })
+                        .is_err()
+                    {
+                        warn!(generation, "Failed to send ConversationInitialized event (receiver dropped)");
+                    }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(AppEvent::ConversationInitFailed(format!("{:#}", e)));
+                    if event_tx
+                        .send(AppEvent::ConversationInitFailed(format!("{:#}", e)))
+                        .is_err()
+                    {
+                        warn!("Failed to send ConversationInitFailed event (receiver dropped)");
+                    }
                 }
             }
         });

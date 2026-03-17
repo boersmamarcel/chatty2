@@ -922,37 +922,47 @@ impl AgentClient {
         let git_tools: Option<GitTools> = if let Some(handle) = git_service_handle {
             match handle.await {
                 Ok(Ok(service)) => {
-                    let workspace_dir = exec_settings
+                    if let Some(workspace_dir) = exec_settings
                         .as_ref()
                         .and_then(|s| s.workspace_dir.as_ref())
-                        .expect("git_service_handle only created when workspace_dir is Some");
-                    let service = std::sync::Arc::new(service);
-                    let approval_mode = exec_settings
-                        .as_ref()
-                        .map(|s| s.approval_mode.clone())
-                        .unwrap_or_default();
-                    let approvals = pending_approvals.clone().unwrap_or_else(|| {
-                        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
-                    });
+                    {
+                        let service = std::sync::Arc::new(service);
+                        let approval_mode = exec_settings
+                            .as_ref()
+                            .map(|s| s.approval_mode.clone())
+                            .unwrap_or_default();
+                        let approvals = pending_approvals.clone().unwrap_or_else(|| {
+                            std::sync::Arc::new(std::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            ))
+                        });
 
-                    tracing::info!(workspace = %workspace_dir, "Git tools enabled");
-                    Some((
-                        GitStatusTool::new(service.clone()),
-                        GitDiffTool::new(service.clone()),
-                        GitLogTool::new(service.clone()),
-                        GitAddTool::new(service.clone(), approval_mode.clone(), approvals.clone()),
-                        GitCreateBranchTool::new(
-                            service.clone(),
-                            approval_mode.clone(),
-                            approvals.clone(),
-                        ),
-                        GitSwitchBranchTool::new(
-                            service.clone(),
-                            approval_mode.clone(),
-                            approvals.clone(),
-                        ),
-                        GitCommitTool::new(service, approval_mode, approvals),
-                    ))
+                        tracing::info!(workspace = %workspace_dir, "Git tools enabled");
+                        Some((
+                            GitStatusTool::new(service.clone()),
+                            GitDiffTool::new(service.clone()),
+                            GitLogTool::new(service.clone()),
+                            GitAddTool::new(
+                                service.clone(),
+                                approval_mode.clone(),
+                                approvals.clone(),
+                            ),
+                            GitCreateBranchTool::new(
+                                service.clone(),
+                                approval_mode.clone(),
+                                approvals.clone(),
+                            ),
+                            GitSwitchBranchTool::new(
+                                service.clone(),
+                                approval_mode.clone(),
+                                approvals.clone(),
+                            ),
+                            GitCommitTool::new(service, approval_mode, approvals),
+                        ))
+                    } else {
+                        tracing::error!("git_service_handle exists but workspace_dir is None");
+                        None
+                    }
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
