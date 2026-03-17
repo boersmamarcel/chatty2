@@ -708,6 +708,11 @@ fn main() {
         updater.start_polling(cx);
         info!("Auto-updater initialized and polling started");
 
+        // Silently refresh the CLI binary if it was previously installed.
+        // On Linux this re-copies chatty-tui after an AppImage auto-update;
+        // on macOS/Windows the symlink / installer already keeps it in sync.
+        cli_installer::update_cli_if_installed(cx);
+
         // Initialize math renderer service for LaTeX math rendering
         let math_renderer = chatty::services::MathRendererService::new();
         cx.set_global(math_renderer);
