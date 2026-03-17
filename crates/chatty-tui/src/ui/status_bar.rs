@@ -32,8 +32,13 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
         spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     }
 
-    // Streaming indicator
-    if engine.is_streaming {
+    // Status indicator
+    if !engine.is_ready {
+        spans.push(Span::styled(
+            "● initializing…",
+            Style::default().fg(Color::Cyan),
+        ));
+    } else if engine.is_streaming {
         spans.push(Span::styled(
             "● streaming",
             Style::default().fg(Color::Yellow),

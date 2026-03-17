@@ -196,6 +196,8 @@ pub struct ChatEngine {
     pub sub_agent_msg_idx: Option<usize>,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    /// Monotonically increasing counter to discard stale background init results.
+    init_generation: u64,
 }
 
 impl ChatEngine {
@@ -244,11 +246,15 @@ impl ChatEngine {
             scroll_offset: 0,
             sub_agent_msg_idx: None,
             event_tx,
+            init_generation: 0,
         }
     }
 
     /// Initialize the conversation (async — creates agent with tools)
     pub async fn init_conversation(&mut self) -> Result<()> {
+        // Bump generation so any in-flight background init is ignored
+        self.init_generation += 1;
+
         let id = uuid::Uuid::new_v4().to_string();
 
         // Gather MCP tools if service is available
@@ -306,6 +312,103 @@ impl ChatEngine {
         self.conversation = Some(conversation);
         self.is_ready = true;
         Ok(())
+    }
+
+    /// Spawn conversation initialization as a background task.
+    ///
+    /// The result is delivered via `AppEvent::ConversationInitialized` so the
+    /// TUI can render immediately while the agent is being built. Each call
+    /// increments an internal generation counter; if `init_conversation()` or
+    /// another `spawn_init_conversation()` runs before the background task
+    /// finishes, the stale result is silently discarded by the event handler.
+    pub fn spawn_init_conversation(&mut self) {
+        self.init_generation += 1;
+        let generation = self.init_generation;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let model_config = self.model_config.clone();
+        let provider_config = self.provider_config.clone();
+        let mcp_service = self.mcp_service.clone();
+        let execution_settings = self.execution_settings.clone();
+        let pending_approvals = self.execution_approval_store.get_pending_approvals();
+        let pending_write_approvals = self.write_approval_store.get_pending_approvals();
+        let user_secrets = self.user_secrets.clone();
+        let memory_service = self.memory_service.clone();
+        let search_settings = self.search_settings.clone();
+        let embedding_service = self.embedding_service.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            // Gather MCP tools
+            let mcp_tools = if let Some(ref mcp_service) = mcp_service {
+                match mcp_service.get_all_tools_with_sinks().await {
+                    Ok(tools) if !tools.is_empty() => {
+                        info!(count = tools.len(), "MCP tools loaded (background)");
+                        Some(tools)
+                    }
+                    Ok(_) => None,
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to load MCP tools (background)");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let es = &execution_settings;
+            let any_tool_enabled = es.enabled
+                || es.filesystem_read_enabled
+                || es.filesystem_write_enabled
+                || es.fetch_enabled
+                || es.git_enabled
+                || es.mcp_service_tool_enabled
+                || es.docker_code_execution_enabled;
+            let exec_settings = if any_tool_enabled {
+                Some(execution_settings.clone())
+            } else {
+                None
+            };
+
+            let result = Conversation::new(
+                id,
+                "New Chat".to_string(),
+                &model_config,
+                &provider_config,
+                mcp_tools,
+                exec_settings,
+                Some(pending_approvals),
+                Some(pending_write_approvals),
+                user_secrets,
+                None, // no theme colors in TUI
+                memory_service,
+                search_settings,
+                embedding_service,
+            )
+            .await;
+
+            match result {
+                Ok(conversation) => {
+                    if event_tx
+                        .send(AppEvent::ConversationInitialized {
+                            conversation: Box::new(conversation),
+                            generation,
+                        })
+                        .is_err()
+                    {
+                        warn!(generation, "Failed to send ConversationInitialized event (receiver dropped)");
+                    }
+                }
+                Err(e) => {
+                    if event_tx
+                        .send(AppEvent::ConversationInitFailed(format!("{:#}", e)))
+                        .is_err()
+                    {
+                        warn!("Failed to send ConversationInitFailed event (receiver dropped)");
+                    }
+                }
+            }
+        });
     }
 
     /// Send a message and start streaming the response
@@ -545,6 +648,25 @@ impl ChatEngine {
             }
             AppEvent::ConversationReady => {
                 self.is_ready = true;
+                EngineAction::Redraw
+            }
+            AppEvent::ConversationInitialized {
+                conversation,
+                generation,
+            } => {
+                // Only accept if this is still the latest init generation.
+                // A newer init_conversation() or spawn_init_conversation() call
+                // may have started since this background task was launched.
+                if generation == self.init_generation {
+                    self.conversation = Some(*conversation);
+                    self.is_ready = true;
+                    info!("Background conversation initialization completed");
+                }
+                EngineAction::Redraw
+            }
+            AppEvent::ConversationInitFailed(error) => {
+                error!(error = %error, "Background conversation initialization failed");
+                self.add_system_message(format!("Failed to initialize: {}", error));
                 EngineAction::Redraw
             }
             AppEvent::SubAgentProgress(line) => {
