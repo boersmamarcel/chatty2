@@ -670,6 +670,10 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::SubAgentProgress(line) => {
+                let line = sanitize_progress_line(&line);
+                if line.is_empty() {
+                    return EngineAction::None;
+                }
                 if let Some(idx) = self.sub_agent_msg_idx
                     && let Some(msg) = self.messages.get_mut(idx)
                 {
@@ -1465,9 +1469,49 @@ fn run_sub_agent_process(
     }
 }
 
+fn sanitize_progress_line(line: &str) -> String {
+    let mut cleaned = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    let mut prev_was_esc = false;
+                    for c in chars.by_ref() {
+                        if c == '\u{7}' || (prev_was_esc && c == '\\') {
+                            break;
+                        }
+                        prev_was_esc = c == '\u{1b}';
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if ch.is_control() {
+            continue;
+        }
+
+        cleaned.push(ch);
+    }
+
+    cleaned.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Command, common_ancestor};
+    use super::{Command, common_ancestor, sanitize_progress_line};
     use std::path::Path;
 
     #[test]
@@ -1516,5 +1560,11 @@ mod tests {
         let right = Path::new("/home/user/project/docs");
         let ancestor = common_ancestor(left, right).unwrap();
         assert_eq!(ancestor, Path::new("/home/user/project"));
+    }
+
+    #[test]
+    fn strips_ansi_and_control_sequences_from_progress_lines() {
+        let line = "\u{1b}[2K\r\u{1b}[0;32mResolving dependencies...\u{1b}[0m";
+        assert_eq!(sanitize_progress_line(line), "Resolving dependencies...");
     }
 }
