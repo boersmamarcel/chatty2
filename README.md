@@ -66,7 +66,7 @@ Type `@` to open a file picker showing files in the current working directory. C
 
 ### 5. Enable Agentic Tools
 
-Chatty can give your LLM access to the filesystem, a sandboxed shell, MCP servers, and the ability to spawn sub-agents. This is off by default — enable it in **Settings > Execution**.
+Chatty can give your LLM access to the filesystem, a sandboxed shell, MCP servers, and the ability to spawn sub-agents. This is off by default — enable it in **Settings > Code Execution**.
 
 1. Set a **workspace directory** — the LLM can only access files inside this folder
 2. Toggle **code execution** on
@@ -120,7 +120,7 @@ You send a message
   Agent receives result → reasons again
        │
        ▼
-  ...repeats up to 10 tool calls per response...
+  ...repeats up to the configured turn limit (10 by default, adjustable in Settings > Code Execution)...
        │
        ▼
   Agent produces final answer → streamed to you
@@ -136,7 +136,7 @@ With tools enabled, an agent can autonomously:
 - **Execute shell commands** — run build systems, test suites, git operations, or arbitrary scripts inside a sandbox
 - **Write and run code** — generate Python, JavaScript, TypeScript, Rust, or Bash scripts and execute them in isolated Docker containers
 - **Query your data** — run SQL over Parquet, CSV, and JSON files using DuckDB; read and write Excel spreadsheets
-- **Browse the web** — search DuckDuckGo, Tavily, or Brave; fetch and parse any URL
+- **Browse the web** — search via Tavily or Brave (API key required, configure in Settings > Search); falls back to DuckDuckGo lite automatically when no API key is configured; fetch and parse any URL
 - **Generate and display outputs** — create charts (bar, line, pie, donut, area, candlestick), compile Typst documents to PDF, render diagrams, and display images inline in chat
 - **Manage its own tools** — list available tools, add or configure MCP servers, discover new capabilities at runtime
 - **Remember and learn** — store facts and reusable procedures across conversations via the built-in memory system
@@ -178,7 +178,7 @@ Enable context tracking by setting the **Max Context Window** field on your mode
 
 ### Built-in Agent Tools
 
-When code execution is enabled in Settings, your LLM agent can use these tools. Most are scoped to your configured workspace directory; internet tools have a separate toggle in Settings > Execution.
+When code execution is enabled in Settings, your LLM agent can use these tools. Most are scoped to your configured workspace directory; internet tools have a separate toggle in Settings > Search.
 
 #### Filesystem & Code
 
@@ -224,11 +224,11 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 
 #### Web & Internet
 
-> These tools are available when **Internet Access** is enabled in Settings > Execution.
+> These tools are available when **Internet Access** is enabled in Settings > Search.
 
 | Tool | What the agent can do | Approval |
 |:-----|:----------------------|:--------:|
-| `search_web` | Search the web via DuckDuckGo (default), Tavily, or Brave | — |
+| `search_web` | Search the web — configure Tavily or Brave in Settings > Search for best results; falls back to DuckDuckGo lite automatically when no API key is set | — |
 | `fetch` | Fetch any URL and return its readable text content | — |
 
 #### Memory & Skills
@@ -354,7 +354,7 @@ Memory is stored per-platform:
 | Linux | `~/.local/share/chatty/memory.mv2` |
 | Windows | `%APPDATA%\chatty\memory.mv2` |
 
-Memory is enabled by default and can be toggled in **Settings > Execution**. You can also:
+Memory is enabled by default and can be toggled in **Settings > Code Execution**. You can also:
 - **Purge All Memory** — permanently delete all stored memories
 - **Semantic Search** — enable vector similarity search so the agent finds memories by meaning, not just keywords (requires a configured embedding provider)
 
