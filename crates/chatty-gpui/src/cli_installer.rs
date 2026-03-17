@@ -9,7 +9,7 @@
 
 use gpui::App;
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// Install the CLI tool. Called from the InstallCli action handler.
 ///
@@ -211,4 +211,70 @@ async fn do_install() -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to update PATH: {}", stderr.trim()))
     }
+}
+
+// ── Auto-update CLI ────────────────────────────────────────────────────
+
+/// Silently update the CLI binary if it was previously installed.
+///
+/// Called at application startup so that the CLI stays in sync after an
+/// auto-update replaces the main application binary. No notification is shown
+/// to the user; failures are logged at debug level.
+///
+/// - macOS:   The CLI is a symlink into the `.app` bundle, so it is
+///            automatically correct after the bundle is replaced in-place.
+///            No action needed.
+/// - Linux:   The CLI is a copy in `~/.local/bin` that must be refreshed
+///            explicitly after the AppImage is replaced on disk.
+/// - Windows: The Inno Setup installer already replaces the binary.
+///            No action needed.
+pub fn update_cli_if_installed(cx: &mut App) {
+    cx.spawn(async move |_cx: &mut gpui::AsyncApp| {
+        match do_update_if_installed().await {
+            Ok(Some(msg)) => info!("{}", msg),
+            Ok(None) => {}
+            Err(e) => debug!("CLI auto-update skipped: {}", e),
+        }
+    })
+    .detach();
+}
+
+#[cfg(target_os = "linux")]
+async fn do_update_if_installed() -> Result<Option<String>, String> {
+    let bin_dir = dirs::home_dir()
+        .ok_or_else(|| "Cannot determine home directory".to_string())?
+        .join(".local/bin");
+    let target = bin_dir.join("chatty-tui");
+
+    // Only act if the CLI was previously installed by the user.
+    if !target.exists() {
+        return Ok(None);
+    }
+
+    let tui_binary = find_bundled_binary()?;
+
+    // Re-copy the bundled binary to update the installed CLI to the current version.
+    tokio::fs::copy(&tui_binary, &target)
+        .await
+        .map_err(|e| format!("Failed to update CLI binary: {}", e))?;
+
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&target, perms)
+            .await
+            .map_err(|e| format!("Failed to set permissions on CLI binary: {}", e))?;
+    }
+
+    Ok(Some(format!(
+        "CLI at {} updated to current version.",
+        target.display()
+    )))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn do_update_if_installed() -> Result<Option<String>, String> {
+    // macOS: symlink into .app bundle is automatically correct after bundle replacement.
+    // Windows: Inno Setup installer already replaces the binary.
+    Ok(None)
 }

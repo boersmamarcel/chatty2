@@ -19,6 +19,7 @@ use events::AppEvent;
 #[derive(Parser)]
 #[command(
     name = "chatty-tui",
+    version,
     about = "Terminal chat interface for Chatty — chat with LLMs from your terminal",
     long_about = "\
 Terminal chat interface for Chatty — chat with LLMs from your terminal.
