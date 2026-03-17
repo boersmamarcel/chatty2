@@ -625,6 +625,26 @@ impl AgentClient {
                 None
             };
 
+        // Start git service initialization early (spawns subprocesses that take
+        // 50-200ms). Runs concurrently with the filesystem service block below.
+        let git_service_handle = if exec_settings
+            .as_ref()
+            .map(|s| s.git_enabled)
+            .unwrap_or(false)
+        {
+            if let Some(workspace_dir) = exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+            {
+                let wd = workspace_dir.clone();
+                Some(tokio::spawn(async move { GitService::new(&wd).await }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
         let mut pdf_to_image_tool: Option<PdfToImageTool> = None;
@@ -897,68 +917,65 @@ impl AgentClient {
             None
         };
 
-        // Create git tools if enabled and workspace is a git repository
-        let git_tools: Option<GitTools> = if exec_settings
-            .as_ref()
-            .map(|s| s.git_enabled)
-            .unwrap_or(false)
-        {
-            match exec_settings
-                .as_ref()
-                .and_then(|s| s.workspace_dir.as_ref())
-            {
-                Some(workspace_dir) => match GitService::new(workspace_dir).await {
-                    Ok(service) => {
-                        let service = std::sync::Arc::new(service);
-                        let approval_mode = exec_settings
-                            .as_ref()
-                            .map(|s| s.approval_mode.clone())
-                            .unwrap_or_default();
-                        let approvals = pending_approvals.clone().unwrap_or_else(|| {
-                            std::sync::Arc::new(std::sync::Mutex::new(
-                                std::collections::HashMap::new(),
-                            ))
-                        });
+        // Create git tools from the handle started before the filesystem block.
+        // GitService ran concurrently with FileSystemService + CodeSearchService.
+        let git_tools: Option<GitTools> = if let Some(handle) = git_service_handle {
+            match handle.await {
+                Ok(Ok(service)) => {
+                    let workspace_dir = exec_settings
+                        .as_ref()
+                        .and_then(|s| s.workspace_dir.as_ref())
+                        .expect("git_service_handle only created when workspace_dir is Some");
+                    let service = std::sync::Arc::new(service);
+                    let approval_mode = exec_settings
+                        .as_ref()
+                        .map(|s| s.approval_mode.clone())
+                        .unwrap_or_default();
+                    let approvals = pending_approvals.clone().unwrap_or_else(|| {
+                        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+                    });
 
-                        tracing::info!(workspace = %workspace_dir, "Git tools enabled");
-                        Some((
-                            GitStatusTool::new(service.clone()),
-                            GitDiffTool::new(service.clone()),
-                            GitLogTool::new(service.clone()),
-                            GitAddTool::new(
-                                service.clone(),
-                                approval_mode.clone(),
-                                approvals.clone(),
-                            ),
-                            GitCreateBranchTool::new(
-                                service.clone(),
-                                approval_mode.clone(),
-                                approvals.clone(),
-                            ),
-                            GitSwitchBranchTool::new(
-                                service.clone(),
-                                approval_mode.clone(),
-                                approvals.clone(),
-                            ),
-                            GitCommitTool::new(service, approval_mode, approvals),
-                        ))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = ?e,
-                            workspace = %workspace_dir,
-                            "Failed to initialize git tools (workspace may not be a git repository)"
-                        );
-                        None
-                    }
-                },
-                None => {
-                    tracing::info!("Git tools skipped: no workspace directory configured");
+                    tracing::info!(workspace = %workspace_dir, "Git tools enabled");
+                    Some((
+                        GitStatusTool::new(service.clone()),
+                        GitDiffTool::new(service.clone()),
+                        GitLogTool::new(service.clone()),
+                        GitAddTool::new(service.clone(), approval_mode.clone(), approvals.clone()),
+                        GitCreateBranchTool::new(
+                            service.clone(),
+                            approval_mode.clone(),
+                            approvals.clone(),
+                        ),
+                        GitSwitchBranchTool::new(
+                            service.clone(),
+                            approval_mode.clone(),
+                            approvals.clone(),
+                        ),
+                        GitCommitTool::new(service, approval_mode, approvals),
+                    ))
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "Failed to initialize git tools (workspace may not be a git repository)"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Git service init task panicked");
                     None
                 }
             }
         } else {
-            tracing::info!("Git tools disabled by execution settings");
+            if exec_settings
+                .as_ref()
+                .map(|s| s.git_enabled)
+                .unwrap_or(false)
+            {
+                tracing::info!("Git tools skipped: no workspace directory configured");
+            } else {
+                tracing::info!("Git tools disabled by execution settings");
+            }
             None
         };
 

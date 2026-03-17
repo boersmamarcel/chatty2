@@ -10,9 +10,6 @@ pub async fn run_headless(
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
     message: String,
 ) -> Result<()> {
-    // Initialize conversation
-    engine.init_conversation().await?;
-
     // Send message
     engine.send_message(message);
 

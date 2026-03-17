@@ -360,8 +360,8 @@ async fn main() -> Result<()> {
         engine.init_conversation().await?;
         headless::run_headless(engine, event_rx, message).await
     } else {
-        // Interactive mode: init conversation then run TUI
-        engine.init_conversation().await?;
+        // Interactive mode: show TUI immediately, init conversation in background
+        engine.spawn_init_conversation();
         app::run(engine, event_rx).await
     }
 }
