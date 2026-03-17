@@ -57,7 +57,7 @@ After adding a provider, you need to tell Chatty which model(s) to use.
 
 Close Settings and type your first message. You can switch between models using the model selector at the bottom of the chat.
 
-Type `/` in the chat input to open the slash-command picker — use arrow keys to navigate and `Enter` to select. Available commands include `/clear`, `/new`, `/compact`, `/context`, `/copy`, `/cwd`, `/cd`, `/add-dir`, and `/agent`.
+Type `/` in the chat input to open the slash-command picker — use arrow keys to navigate and `Enter` to select. Available commands include `/clear`, `/new`, `/compact`, `/context`, `/copy`, `/cwd`, `/cd`, `/add-dir`, and `/agent`. Skills saved in your workspace (`.claude/skills/`) or global skills directory (`~/Library/Application Support/chatty/skills/` on macOS, `~/.local/share/chatty/skills/` on Linux) also appear in the picker with a `[skill]` badge — selecting one inserts `Use the 'skill-name' skill: ` so you can append context before sending.
 
 Type `@` to open a file picker showing files in the current working directory. Continue typing to filter the list, use arrow keys to navigate, and press `Enter` to insert the file reference inline. Hidden files and common build directories (`.git`, `node_modules`, `target`, etc.) are excluded automatically.
 
@@ -190,7 +190,7 @@ Background update checks against GitHub releases with one-click install. Downloa
 
 Chatty includes a built-in persistent memory system. The agent can explicitly store facts with the `remember` tool and retrieve them later with `search_memory`. Before each LLM call, the top relevant memories are automatically injected as context — so the agent builds on past interactions without you having to repeat yourself.
 
-The agent can also save reusable **skills** — named, multi-step procedures — using the `save_skill` tool. When a relevant skill is detected for your query, a summary is injected into context automatically; the agent calls `read_skill` to load the full instructions before executing. Facts and skills are surfaced in separate context blocks so the agent can tell them apart.
+The agent can also save reusable **skills** — named, multi-step procedures — using the `save_skill` tool. When a relevant skill is detected for your query, a summary is injected into context automatically; the agent calls `read_skill` to load the full instructions before executing. Facts and skills are surfaced in separate context blocks so the agent can tell them apart. Skills also appear directly in the `/` slash-command picker so you can invoke them without typing the full prompt.
 
 Memory is enabled by default and can be toggled in **Settings > Memory**. From that page you can also:
 
