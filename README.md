@@ -5,14 +5,17 @@
 <h1 align="center">Chatty</h1>
  
 <p align="center">
-  <strong>A fast, native desktop chat client for LLMs — built with Rust and GPU-accelerated rendering. Also ships a lightweight terminal interface (<code>chatty-tui</code>) for headless and pipe workflows.</strong>
+  <strong>A native, GPU-accelerated AI agent desktop — built with Rust. Run powerful multi-tool agents against any LLM provider, fully local and fully private. Also ships <code>chatty-tui</code>, a headless terminal agent for scripting, pipelines, and sub-agent orchestration.</strong>
 </p>
 
 <p align="center">
   <a href="#getting-started">Getting Started</a> &bull;
-  <a href="#why-chatty">Why Chatty</a> &bull;
-  <a href="#features">Features</a> &bull;
+  <a href="#agents">Agents</a> &bull;
   <a href="#tools--mcp">Tools & MCP</a> &bull;
+  <a href="#agent-memory--skills">Memory & Skills</a> &bull;
+  <a href="#sub-agent-orchestration">Sub-Agents</a> &bull;
+  <a href="#security--sandboxing">Security</a> &bull;
+  <a href="#features">Features</a> &bull;
   <a href="#chatty-tui--terminal-interface">Terminal Interface</a> &bull;
   <a href="#development">Development</a>
 </p>
@@ -61,27 +64,28 @@ Type `/` in the chat input to open the slash-command picker — use arrow keys t
 
 Type `@` to open a file picker showing files in the current working directory. Continue typing to filter the list, use arrow keys to navigate, and press `Enter` to insert the file reference inline. Hidden files and common build directories (`.git`, `node_modules`, `target`, etc.) are excluded automatically.
 
-### 5. Enable Tools (Optional)
+### 5. Enable Agentic Tools
 
-Chatty can give your LLM access to the filesystem, a sandboxed shell, and MCP servers. This is off by default.
+Chatty can give your LLM access to the filesystem, a sandboxed shell, MCP servers, and the ability to spawn sub-agents. This is off by default — enable it in **Settings > Code Execution**.
 
-1. Go to **Settings > Execution**
-2. Set a **workspace directory** — the LLM can only access files inside this folder
-3. Toggle **code execution** on
-4. Choose an approval mode:
+1. Set a **workspace directory** — the LLM can only access files inside this folder
+2. Toggle **code execution** on
+3. Choose an approval mode:
    - **Ask every time** — you approve each tool call (recommended to start)
-   - **Auto-approve** — tools run without prompting
+   - **Auto-approve** — tools run without prompting, great for trusted agentic workflows
    - **Deny all** — tools are visible but blocked
 
 You can also set a **per-chat working directory** to override the global workspace for a specific conversation. Click the folder icon in the chat input bar to open an OS directory picker — the selected folder name appears next to the icon. A `×` button lets you reset back to the global default. The override is saved with the conversation and takes effect immediately.
 
-Optionally, enable **Docker Code Execution** to run code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
+Optionally, enable **Docker Code Execution** to run agent-generated code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
 
-See [Tools & MCP](#tools--mcp) below for details.
+See [Tools & MCP](#tools--mcp) below for the full list of agent tools.
 
 ---
 
 ## Why Chatty?
+
+**Designed for agentic work.** Chatty is built from the ground up for multi-turn agents, not just chat. Your LLM can autonomously chain dozens of tool calls — read files, run shell commands, query databases, browse the web, write and execute code, generate charts and documents, spawn sub-agents for parallel subtasks — and come back with a complete answer. Everything runs locally under your control.
 
 **Your keys, your data.** No middleman, no subscriptions. Talk directly to OpenAI, Anthropic, Google, Mistral, or your local Ollama instance. See exactly what each conversation costs with per-message token tracking and running cost totals in the sidebar.
 
@@ -91,161 +95,161 @@ See [Tools & MCP](#tools--mcp) below for details.
 
 **Real tool use, properly sandboxed.** Give your LLM filesystem access, a bash shell, and MCP servers — all within a workspace sandbox. On Linux, shell commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with namespace isolation. On macOS, they use `sandbox-exec` with policy profiles that block access to `.ssh`, `.aws`, and other sensitive directories. You choose the approval mode: ask every time, auto-approve, or deny all.
 
-**Multi-turn agents.** Your LLM can chain up to 10 tool calls per response — read files, run commands, analyze results, and iterate. It can generate plots, charts, and documents and display them inline in the chat. With multimodal models, you can ask follow-up questions that reference those generated files directly.
-
 **Privacy first.** Run fully local with Ollama — no data leaves your machine. No telemetry, no tracking. Conversations are stored in a local SQLite database, never uploaded anywhere.
 
 ---
 
-## Features
+## Agents
 
-### Multi-Provider Support
+Chatty is not just a chat interface — it is an **agentic loop** that lets your LLM reason, act, observe, and iterate until the task is done.
 
-Connect to multiple LLM providers from a single interface. Chatty auto-detects per-model capabilities (vision, PDF support, temperature) so the UI always shows the right options.
+### How the Agent Loop Works
 
-| Provider | Image Support | PDF Support | Temperature | Notes |
-|:---------|:---:|:---:|:---:|:------|
-| **OpenAI** | Yes | Lossy | Yes | GPT-4, GPT-4 Turbo, o1, o3-mini |
-| **Anthropic** | Yes | Native | Yes | Claude 3.5 Sonnet, Claude 3 Opus/Haiku |
-| **Google Gemini** | Yes | Native | Yes | Gemini 1.5 Pro, Gemini 1.5 Flash |
-| **Mistral** | — | — | Yes | Mistral Large, Medium, Small |
-| **Azure OpenAI** | Yes | Lossy | Yes | API Key or Entra ID auth |
-| **Ollama** | Per-model | Per-model | — | Auto-detected capabilities, fully local |
+Each time you send a message, Chatty builds a full agent with access to your configured tools and MCP servers, then starts a streaming multi-turn loop:
 
-### Rich Rendering
+```
+You send a message
+       │
+       ▼
+  Agent reasons → decides to call a tool
+       │
+       ▼
+  Tool executes (with your approval if required)
+       │
+       ▼
+  Agent receives result → reasons again
+       │
+       ▼
+  ...repeats up to the configured turn limit (10 by default, adjustable in Settings > Code Execution)...
+       │
+       ▼
+  Agent produces final answer → streamed to you
+```
 
-- **Markdown** with full formatting
-- **Syntax-highlighted code blocks** (30+ languages via tree-sitter) with one-click copy
-- **LaTeX math** — inline (`$...$`) and block (`$$...$$`) rendered to crisp SVGs via Typst
+You see every tool call, its inputs and outputs, and the agent's reasoning in real time — as collapsible trace blocks alongside the response.
 
-  <img src="assets/animations/advanced_math_rendering.gif" alt="LaTeX math rendering" width="680">
+### What Agents Can Do
 
-- **Mermaid diagrams** — ` ```mermaid ` code blocks rendered as SVG diagrams inline in chat, with theme-aware dark/light rendering. Copy the source or copy as PNG with a single click. Supports 23 diagram types (flowcharts, sequence diagrams, ER diagrams, Gantt charts, and more) via a pure Rust renderer — no browser required
+With tools enabled, an agent can autonomously:
 
-  <img src="assets/animations/mermaid.gif" alt="Mermaid diagram rendering" width="680">
+- **Explore and edit your codebase** — read files, navigate directories, apply diffs, rename and delete files
+- **Execute shell commands** — run build systems, test suites, git operations, or arbitrary scripts inside a sandbox
+- **Write and run code** — generate Python, JavaScript, TypeScript, Rust, or Bash scripts and execute them in isolated Docker containers
+- **Query your data** — run SQL over Parquet, CSV, and JSON files using DuckDB; read and write Excel spreadsheets
+- **Browse the web** — search via Tavily or Brave (API key required, configure in Settings > Search); falls back to DuckDuckGo lite automatically when no API key is configured; fetch and parse any URL
+- **Generate and display outputs** — create charts (bar, line, pie, donut, area, candlestick), compile Typst documents to PDF, render diagrams, and display images inline in chat
+- **Manage its own tools** — list available tools, add or configure MCP servers, discover new capabilities at runtime
+- **Remember and learn** — store facts and reusable procedures across conversations via the built-in memory system
+- **Delegate to sub-agents** — spawn independent headless agents with their own tool access to parallelize work
 
-- **Image and PDF** previews inline in chat
+### Agentic Slash Commands
 
-### Conversations & Cost Tracking
+Type `/` in the chat input to access agentic commands:
 
-- Persistent conversations saved locally in a SQLite database — nothing is stored remotely
-- Auto-generated conversation titles
-- **Export to Markdown** — click the `…` menu on any sidebar conversation and choose **Download** to save it as a `.md` file via your OS file picker
-- **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
-- **Per-message token usage** — input and output token counts with cost breakdown
-- Cost calculations use your model's actual pricing (cost per million input/output tokens)
-- **Context window fill bar** — a segmented footer progress bar breaking down context usage by component (preamble, tool definitions, conversation history, latest message), color-coded green/amber/red. A popover shows estimated token counts per segment plus the actual input/output counts returned by the provider after each response. Enable it by setting **Max Context Window** (tokens) on a model via Settings → Models → Advanced tab
-- **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
+| Command | What it does |
+|:--------|:-------------|
+| `/agent <prompt>` | Spawn a headless `chatty-tui` sub-agent with the given prompt |
+| `/compact` | Summarize older conversation history to free up context for longer agent runs |
+| `/context` | Show current token usage, context window fill, and working directory |
+| `/add-dir <path>` | Expand the agent's workspace access to include an additional directory |
+| `/cwd` / `/cd <path>` | Show or change the agent's current working directory |
+| `/new` / `/clear` | Start a fresh agent conversation |
+| `/copy` | Copy the latest agent response to the clipboard |
+| `[skill name]` | Invoke a saved skill — the agent loads and follows the procedure |
 
-### Training Data Export (ATIF)
+### Extended Thinking
 
-Chatty can export conversations in [ATIF (Agent Trajectory Interchange Format)](https://harborframework.com/docs/agents/trajectory-format), a structured JSON format designed for agent training data pipelines. Each export captures:
+For models that support chain-of-thought reasoning (e.g., Claude with extended thinking), Chatty renders `<thinking>`, `<think>`, and `<thought>` blocks as collapsible sections alongside the agent's response — so you can inspect how it reasoned without it cluttering the conversation.
 
-- **Messages** — user and agent steps with full content
-- **Tool calls** — function name, arguments, and output for every tool invocation
-- **Reasoning** — chain-of-thought thinking blocks from extended thinking
-- **Timestamps** — per-message Unix timestamps
-- **Token metrics** — per-step and aggregate input/output token counts with cost
-- **Feedback** — thumbs up/down signals per assistant message
-- **Regeneration pairs** — original (rejected) vs. replacement (chosen) responses for DPO fine-tuning
+### Context Window Management
 
-ATIF trajectories feed into external training pipelines, Harbor Framework workflows, and the planned in-app fine-tuning system.
+Long agent runs consume context fast. Chatty gives you full visibility and control:
 
-### Training Data Export (JSONL)
+- **Context window fill bar** — a segmented footer progress bar breaking down context usage by component (preamble, tool definitions, conversation history, latest message), color-coded green/amber/red
+- **Token popover** — hover the bar to see estimated token counts per segment plus actual input/output counts returned by the provider
+- **`/compact`** — summarize older messages to compress context when the window fills up, letting the agent continue without losing history
+- **Per-model context budget** — set **Max Context Window** (tokens) on a model via Settings → Models → Advanced to enable the fill bar
 
-Chatty can also export conversations in JSONL format for direct use with fine-tuning APIs:
-
-- **SFT (Supervised Fine-Tuning)** — conversations in ChatML format (`{"messages": [{"role": "...", "content": "..."}]}`) compatible with OpenAI, Anthropic, Together AI, and other fine-tuning services
-- **DPO (Direct Preference Optimization)** — preference pairs from regenerated responses (`{"prompt": [...], "chosen": "...", "rejected": "..."}`) for RLHF training
-
-Key features:
-- **Automatic deduplication** — re-exported conversations replace previous entries (keyed by `_conversation_id`)
-- **Multimodal stripping** — images and PDFs are stripped, keeping only text content (most fine-tuning APIs don't support multimodal inputs)
-- **Tool call support** — optionally include tool calls and results in ChatML format
-
-SFT data is appended to `sft.jsonl` and DPO pairs to `dpo.jsonl` in the exports directory:
-
-- **macOS**: `~/Library/Application Support/chatty/exports/`
-- **Linux**: `~/.config/chatty/exports/` (or `$XDG_CONFIG_HOME/chatty/exports/`)
-- **Windows**: `%APPDATA%\chatty\exports\`
-
-Enable auto-export in **Settings > Training Data**.
-
-### Thinking & Traces
-
-- **Extended thinking** blocks for models that emit chain-of-thought reasoning via `<thinking>`, `<think>`, or `<thought>` tags — rendered as collapsible blocks instead of raw text
-- **Tool call traces** showing input, output, duration, and status
-- **Visual diff view** for `apply_diff` tool calls — additions shown in green, deletions in red, with context lines around each change. Long runs of unchanged lines collapse automatically; large diffs show a preview with an expandable "Show N more lines" button
-- Collapsible so they don't clutter the conversation
-
-### Themes
-
-20+ themes with light and dark variants: Ayu, Catppuccin, Everforest, Flexoki, Gruvbox, Matrix, Solarized, TokyoNight, and more. Configurable font size.
-
-### Auto-Updates
-
-Background update checks against GitHub releases with one-click install. Downloads are verified with SHA-256 checksums before installation. On macOS, the update replaces the app bundle and relaunches automatically. On Linux, if `chatty-tui` was installed via the desktop app, it is automatically refreshed on the next launch after an update.
-
-### Agent Memory
-
-Chatty includes a built-in persistent memory system. The agent can explicitly store facts with the `remember` tool and retrieve them later with `search_memory`. Before each LLM call, the top relevant memories are automatically injected as context — so the agent builds on past interactions without you having to repeat yourself.
-
-The agent can also save reusable **skills** — named, multi-step procedures — using the `save_skill` tool. When a relevant skill is detected for your query, a summary is injected into context automatically; the agent calls `read_skill` to load the full instructions before executing. Facts and skills are surfaced in separate context blocks so the agent can tell them apart. Skills also appear directly in the `/` slash-command picker so you can invoke them without typing the full prompt.
-
-Memory is enabled by default and can be toggled in **Settings > Memory**. From that page you can also:
-
-- **Purge All Memory** — permanently delete all stored memories
-- **Semantic Search** — enable vector similarity search so the agent finds memories by meaning, not just keywords. Requires a configured embedding provider (any provider except Anthropic). Disabled by default.
-
-### Environment Secrets
-
-Manage environment variables that are automatically injected into every shell session. Go to **Settings > Secrets** to add key-value pairs — the AI knows which variable names are available (e.g., `os.environ["API_KEY"]`) but never sees the actual values. Secrets are persisted locally and masked in tool output.
+Enable context tracking by setting the **Max Context Window** field on your model in Settings → Models → Advanced.
 
 ---
 
 ## Tools & MCP
 
-### Built-in Tools
+### Built-in Agent Tools
 
-When code execution is enabled in Settings, your LLM can use these tools (most are scoped to your configured workspace directory; internet tools have a separate toggle in Settings > Execution):
+When code execution is enabled in Settings, your LLM agent can use these tools. Most are scoped to your configured workspace directory; internet tools have a separate toggle in Settings > Search.
 
-| Tool | What it does | Requires approval |
-|:-----|:-------------|:-:|
-| `read_file` | Read text file contents | No |
-| `read_binary` | Read binary files as base64 | No |
-| `list_directory` | List directory contents with metadata | No |
-| `glob_search` | Search files using glob patterns (e.g., `**/*.rs`) | No |
-| `write_file` | Create or overwrite files | Yes |
-| `apply_diff` | Apply unified diff patches | Yes |
-| `create_directory` | Create directories | Yes |
-| `delete_file` | Delete files or directories | Yes |
-| `move_file` | Move or rename files | Yes |
-| `bash` | Execute shell commands (sandboxed, streaming output) | Yes |
-| `execute_code` | Execute code in an isolated Docker container. Supports Python, JavaScript, TypeScript, Rust, and Bash. Requires Docker enabled in Settings → Execution | Yes |
-| `add_attachment` | Display a generated image or PDF inline in the chat | No |
-| `create_chart` | Create and display a chart inline in the chat — supports bar, line, pie, donut, area, and candlestick chart types | No |
-| `read_excel` | Read Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods) as JSON with markdown table preview | No |
-| `write_excel` | Create a new Excel (.xlsx) file with data, formatting, formulas, merged cells, and auto-filters | Yes |
-| `edit_excel` | Edit an existing Excel file with targeted modifications (set cells, add sheets, delete rows, formulas, formatting) | Yes |
-| `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | No |
-| `pdf_info` | Get metadata and structural information about a PDF file | No |
-| `pdf_extract_text` | Extract text content from PDF pages (up to 50 pages) | No |
-| `query_data` | Run SQL queries against local Parquet, CSV, and JSON files using DuckDB — results returned as a markdown table | No |
-| `describe_data` | Inspect the schema of a Parquet, CSV, or JSON file (column names, types, row count, file size) | No |
-| `compile_typst` | Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents | Yes |
-| `list_tools` | Lists all available tools and schemas | No |
-| `remember` | Store important information in persistent agent memory for use in future conversations | No |
-| `save_skill` | Save a reusable multi-step procedure to persistent memory under a memorable name for future use | No |
-| `read_skill` | Load the full step-by-step instructions for a saved skill by name | No |
-| `search_memory` | Search past memories by keyword to retrieve relevant stored information | No |
-| `sub_agent` | Launch a headless `chatty-tui` sub-agent with a given prompt and return its response — useful for delegating subtasks | Yes |
-| `search_web` | Search the web for current information. Uses DuckDuckGo by default (no API key needed); optionally configure Tavily or Brave in Settings > Internet for richer results. Controlled by the internet access toggle | No |
-| `fetch` | Fetch any web URL and return its readable text content. Controlled by the same internet access toggle as `search_web` | No |
-| `sub_agent` | Delegate a task to an independent sub-agent that has access to the same tools. The sub-agent runs autonomously and returns the result — useful for parallelizing work or isolating complex sub-tasks | No |
+#### Filesystem & Code
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `read_file` | Read any text file in the workspace | — |
+| `read_binary` | Read binary files as base64 (images, archives) | — |
+| `list_directory` | List directory contents with metadata | — |
+| `glob_search` | Find files using patterns like `**/*.rs` or `src/**/*.test.js` | — |
+| `write_file` | Create or overwrite files | ✓ |
+| `apply_diff` | Apply unified diff patches to existing files | ✓ |
+| `create_directory` | Create new directories | ✓ |
+| `delete_file` | Delete files or directories | ✓ |
+| `move_file` | Move or rename files | ✓ |
+
+#### Shell & Code Execution
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `bash` | Execute shell commands in a sandboxed environment with streaming output | ✓ |
+| `execute_code` | Run Python, JavaScript, TypeScript, Rust, or Bash in an isolated Docker container | ✓ |
+
+#### Data & Documents
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `query_data` | Run SQL queries over Parquet, CSV, and JSON files with DuckDB | — |
+| `describe_data` | Inspect schema of Parquet, CSV, or JSON (columns, types, row count, size) | — |
+| `read_excel` | Read Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods) as JSON | — |
+| `write_excel` | Create Excel files with data, formatting, formulas, merged cells, auto-filters | ✓ |
+| `edit_excel` | Modify existing Excel files (set cells, add sheets, delete rows, formulas) | ✓ |
+| `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | — |
+| `pdf_info` | Get metadata and structural information about a PDF | — |
+| `pdf_extract_text` | Extract text from PDF pages (up to 50 pages) | — |
+| `compile_typst` | Compile Typst markup into a PDF — headings, tables, math, code blocks, multi-page | ✓ |
+
+#### Visuals & Output
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `add_attachment` | Display a generated image or PDF inline in the chat | — |
+| `create_chart` | Create bar, line, pie, donut, area, or candlestick charts inline in chat | — |
+
+#### Web & Internet
+
+> These tools are available when **Internet Access** is enabled in Settings > Search.
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `search_web` | Search the web — configure Tavily or Brave in Settings > Search for best results; falls back to DuckDuckGo lite automatically when no API key is set | — |
+| `fetch` | Fetch any URL and return its readable text content | — |
+
+#### Memory & Skills
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `remember` | Store a fact, insight, or preference in persistent memory | — |
+| `search_memory` | Search past memories by natural-language query | — |
+| `save_skill` | Save a reusable multi-step procedure under a memorable name | — |
+| `read_skill` | Load the full instructions for a saved skill by name | — |
+
+#### Agent Management
+
+| Tool | What the agent can do | Approval |
+|:-----|:----------------------|:--------:|
+| `list_tools` | List all available tools and their schemas | — |
+| `sub_agent` | Spawn a headless `chatty-tui` sub-agent with its own tools and return the result | ✓ |
 
 ### MCP Servers
 
-[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) lets your LLM interact with external tools and data sources. Chatty has first-class MCP support — configure a server in Settings and the tools become available to your model automatically.
+[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) lets your LLM agent interact with external tools and data sources beyond the built-ins. Chatty has first-class MCP support — configure a server in Settings and its tools become available to the agent automatically.
 
 **To add an MCP server:**
 
@@ -254,12 +258,12 @@ When code execution is enabled in Settings, your LLM can use these tools (most a
 3. Enter the server command, args, and any environment variables
 4. Enable the server when you're ready to use it
 
-MCP management tools (enable in Settings > Execution) let the LLM itself add, edit, list, and delete MCP servers — with env var masking so your API keys are never exposed.
+The agent can also manage its own MCP servers at runtime — add, edit, list, and delete servers via tool calls — with env var masking so your API keys are never exposed.
 
 <details>
 <summary><strong>Recommended MCP Servers</strong></summary>
 
-Here are MCP servers that pair well with Chatty:
+Here are MCP servers that pair well with Chatty agents:
 
 #### GitHub (`@modelcontextprotocol/server-github`)
 Search code, browse issues and PRs, read file contents from repos.
@@ -280,7 +284,7 @@ Run read-only SQL queries against your PostgreSQL databases.
 ```
 
 #### Brave Search (`@modelcontextprotocol/server-brave-search`)
-Give your LLM access to web search for current events and documentation.
+Give your agent access to web search for current events and documentation.
 ```json
 { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "..." } }
 ```
@@ -316,24 +320,236 @@ Query and explore SQLite databases.
 ```
 
 #### Fetch (`@modelcontextprotocol/server-fetch`)
-Fetch and convert web pages to markdown for the LLM to read.
+Fetch and convert web pages to markdown for the agent to read.
 ```json
 { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"] }
 ```
 
-> **Tip:** You can also write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
+> **Tip:** You can write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
 
 </details>
 
-### Security
+---
 
-- **API key masking** — MCP env vars containing keys, tokens, or secrets are shown to the LLM as `****`
-- **User secrets masking** — environment variables added in Settings > Secrets are injected into shell sessions but their values are never exposed to the LLM
-- **Workspace sandboxing** — filesystem and bash tools can only access the directory you configure
-- **Shell sandboxing** — on Linux, commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with full namespace isolation (process, network, mount). On macOS, `sandbox-exec` blocks access to `.ssh`, `.aws`, `.gnupg`, and other sensitive paths
-- **Optional network isolation** — block shell commands from making network requests entirely
-- **MCP servers disabled by default** — servers added by the LLM must be manually enabled
+## Agent Memory & Skills
+
+Chatty includes a built-in **persistent memory system** that lets the agent accumulate knowledge across conversations. Memory is stored in a local binary file using [memvid-core](https://crates.io/crates/memvid-core). By default, memories are retrieved via full-text search; enable **Semantic Search** in Settings to add vector similarity search (requires a configured embedding provider).
+
+### How Memory Works
+
+Before each LLM call, the system automatically searches memory for context relevant to your current message and injects the top results — so the agent builds on what it already knows without you repeating yourself.
+
+The agent has two memory tools:
+
+| Tool | What it does |
+|:-----|:-------------|
+| `remember` | Store a fact, note, or preference with optional title and tags |
+| `search_memory` | Retrieve relevant memories via natural-language query |
+
+Memory is stored per-platform:
+
+| Platform | Path |
+|:---------|:-----|
+| macOS | `~/Library/Application Support/chatty/memory.mv2` |
+| Linux | `~/.local/share/chatty/memory.mv2` |
+| Windows | `%APPDATA%\chatty\memory.mv2` |
+
+Memory is enabled by default and can be toggled in **Settings > Code Execution**. You can also:
+- **Purge All Memory** — permanently delete all stored memories
+- **Semantic Search** — enable vector similarity search so the agent finds memories by meaning, not just keywords (requires a configured embedding provider)
+
+### Skills — Reusable Agent Procedures
+
+The agent can also save and recall **skills** — named, multi-step procedures for recurring tasks:
+
+- Use `save_skill` to store a procedure under a memorable name (e.g., `"deploy-to-staging"`, `"write-unit-tests"`)
+- When a skill is relevant to your query, a summary is automatically injected into context; the agent calls `read_skill` to load the full instructions before executing
+- Skills appear directly in the `/` slash-command picker, so you can invoke them by name without typing a full prompt
+- Workspace-specific skills can also live in `.claude/skills/` alongside your code
+
+---
+
+## Sub-Agent Orchestration
+
+One of Chatty's most powerful agentic features is the ability to **spawn sub-agents** — independent headless `chatty-tui` instances that run in the background, complete a subtask, and return the result to the parent agent.
+
+### Why Sub-Agents?
+
+- **Parallelism** — delegate independent subtasks to sub-agents that run concurrently
+- **Isolation** — each sub-agent has its own conversation context and tool access; mistakes don't pollute the parent conversation
+- **Composition** — build pipelines where one agent's output feeds the next
+- **Specialization** — direct each sub-agent with a focused prompt and specific toolset
+
+### How to Use Sub-Agents
+
+**From the chat UI**, type `/agent <your prompt>` to launch a headless sub-agent inline.
+
+**Via the `sub_agent` tool**, the LLM can spawn sub-agents programmatically:
+
+```
+Agent receives task: "Refactor all modules and write tests for each one"
+
+→ Agent calls sub_agent("Refactor the authentication module and write tests")
+→ Agent calls sub_agent("Refactor the billing module and write tests")
+→ Agent calls sub_agent("Refactor the notifications module and write tests")
+→ Results returned and merged into a final summary
+```
+
+Each sub-agent is a full `chatty-tui --headless` process with access to the same configured tools and models. Sub-agents can themselves spawn further sub-agents for deeply nested workflows.
+
+**From the terminal**, use `chatty-tui` directly:
+
+```bash
+# Single headless call
+chatty-tui --headless -m "Summarize the changes in the last 5 commits"
+
+# Pipe input to the agent
+git diff HEAD~3 | chatty-tui --pipe
+
+# Chain agents: first agent lists TODOs, second agent creates GitHub issues for them
+chatty-tui --headless -m "List all TODO comments in src/" | \
+  chatty-tui --pipe
+```
+
+---
+
+## Security & Sandboxing
+
+Agents are powerful — Chatty takes security seriously. Every layer of tool access is sandboxed.
+
+### Workspace Sandboxing
+
+All filesystem and bash tools are scoped to the workspace directory you configure. The agent cannot read or write files outside that boundary.
+
+### Shell Sandboxing
+
+Shell commands run inside OS-level sandboxes:
+
+- **Linux** — [bubblewrap](https://github.com/containers/bubblewrap) with full namespace isolation: separate process, network, and mount namespaces. The agent cannot see your other processes or escape the workspace.
+- **macOS** — `sandbox-exec` with policy profiles that block access to `.ssh`, `.aws`, `.gnupg`, and other sensitive directories.
+
+Optional **network isolation** lets you block shell commands from making any network requests at all.
+
+### Docker Isolation
+
+When Docker Code Execution is enabled, agent-generated code runs inside ephemeral Docker containers — fully isolated from the host filesystem and network.
+
+### Approval Flows
+
+Every tool that has a side effect (file writes, shell commands, sub-agents) supports a configurable approval flow:
+
+| Mode | Behavior |
+|:-----|:---------|
+| **Ask every time** | Chatty prompts you before each tool call — you see the exact command before it runs |
+| **Auto-approve** | Tools run immediately — ideal for trusted agentic workflows |
+| **Deny all** | Tools are listed in the context but blocked from executing |
+
+### Secrets & Key Masking
+
+- **API key masking** — MCP env vars containing keys, tokens, or secrets are shown to the agent as `****` — the agent knows the variable name but never sees the value
+- **User secrets** — environment variables added in Settings > Secrets are injected into shell sessions but their values are never revealed to the agent or logged in tool output
 - **No telemetry** — nothing is sent anywhere except directly to your configured LLM provider
+
+---
+
+## Features
+
+### Multi-Provider Support
+
+Connect to multiple LLM providers from a single interface. Chatty auto-detects per-model capabilities (vision, PDF support, temperature) so the UI always shows the right options.
+
+| Provider | Image Support | PDF Support | Temperature | Notes |
+|:---------|:---:|:---:|:---:|:------|
+| **OpenAI** | Yes | Lossy | Yes | GPT-4, GPT-4 Turbo, o1, o3-mini |
+| **Anthropic** | Yes | Native | Yes | Claude 3.5 Sonnet, Claude 3 Opus/Haiku |
+| **Google Gemini** | Yes | Native | Yes | Gemini 1.5 Pro, Gemini 1.5 Flash |
+| **Mistral** | — | — | Yes | Mistral Large, Medium, Small |
+| **Azure OpenAI** | Yes | Lossy | Yes | API Key or Entra ID auth |
+| **Ollama** | Per-model | Per-model | — | Auto-detected capabilities, fully local |
+
+### Rich Rendering
+
+- **Markdown** with full formatting
+- **Syntax-highlighted code blocks** (30+ languages via tree-sitter) with one-click copy
+- **LaTeX math** — inline (`$...$`) and block (`$$...$$`) rendered to crisp SVGs via Typst
+
+  <img src="assets/animations/advanced_math_rendering.gif" alt="LaTeX math rendering" width="680">
+
+- **Mermaid diagrams** — ` ```mermaid ` code blocks rendered as SVG diagrams inline in chat, with theme-aware dark/light rendering. Copy the source or copy as PNG with a single click. Supports 23 diagram types (flowcharts, sequence diagrams, ER diagrams, Gantt charts, and more) via a pure Rust renderer — no browser required
+
+  <img src="assets/animations/mermaid.gif" alt="Mermaid diagram rendering" width="680">
+
+- **Image and PDF** previews inline in chat
+
+### Tool Call Traces
+
+Every agent tool call is rendered as a collapsible trace block showing:
+
+- **Tool name** and input arguments
+- **Output** — the raw result returned to the agent
+- **Duration** — how long the tool took to execute
+- **Status** — success, error, or cancelled
+
+For `apply_diff` tool calls, Chatty renders a **visual diff view** — additions in green, deletions in red, context lines around each change. Long runs of unchanged lines collapse automatically; large diffs show a preview with an expandable "Show N more lines" button.
+
+### Conversations & Cost Tracking
+
+- Persistent conversations saved locally in a SQLite database — nothing is stored remotely
+- Auto-generated conversation titles
+- **Export to Markdown** — click the `…` menu on any sidebar conversation and choose **Download** to save it as a `.md` file via your OS file picker
+- **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
+- **Per-message token usage** — input and output token counts with cost breakdown
+- Cost calculations use your model's actual pricing (cost per million input/output tokens)
+- **Regeneration tracking** — original assistant responses are captured automatically when regenerated, creating DPO preference pairs for model fine-tuning
+
+### Training Data Export — Build Your Own Agent
+
+Chatty can export your agent conversations as training data, so the best runs become the foundation for the next generation of models.
+
+#### ATIF (Agent Trajectory Interchange Format)
+
+Export conversations in [ATIF](https://harborframework.com/docs/agents/trajectory-format), a structured JSON format designed for agent training pipelines:
+
+- **Messages** — full user and agent steps
+- **Tool calls** — function name, arguments, and output for every tool invocation
+- **Reasoning** — chain-of-thought thinking blocks
+- **Timestamps** — per-message Unix timestamps
+- **Token metrics** — per-step and aggregate input/output counts with cost
+- **Feedback** — thumbs up/down signals per assistant message
+- **Regeneration pairs** — original (rejected) vs. replacement (chosen) responses for DPO fine-tuning
+
+ATIF trajectories feed directly into Harbor Framework workflows and external training pipelines.
+
+#### JSONL (Fine-Tuning APIs)
+
+Export in JSONL format for direct use with fine-tuning APIs:
+
+- **SFT** — conversations in ChatML format compatible with OpenAI, Anthropic, Together AI, and others
+- **DPO** — preference pairs from regenerated responses for RLHF training
+- **Automatic deduplication** — re-exported conversations replace previous entries
+- **Tool call support** — include tool calls and results in ChatML format
+
+SFT data is appended to `sft.jsonl` and DPO pairs to `dpo.jsonl`:
+
+| Platform | Path |
+|:---------|:-----|
+| macOS | `~/Library/Application Support/chatty/exports/` |
+| Linux | `~/.config/chatty/exports/` |
+| Windows | `%APPDATA%\chatty\exports\` |
+
+Enable auto-export in **Settings > Training Data**.
+
+### Environment Secrets
+
+Manage environment variables that are automatically injected into every agent shell session. Go to **Settings > Secrets** to add key-value pairs — the agent knows which variable names are available (e.g., `os.environ["API_KEY"]`) but never sees the actual values. Secrets are persisted locally and masked in tool output.
+
+### Themes & UI
+
+20+ themes with light and dark variants: Ayu, Catppuccin, Everforest, Flexoki, Gruvbox, Matrix, Solarized, TokyoNight, and more. Configurable font size.
+
+### Auto-Updates
+
+Background update checks against GitHub releases with one-click install. Downloads are verified with SHA-256 checksums before installation. On macOS, the update replaces the app bundle and relaunches automatically. On Linux, if `chatty-tui` was installed via the desktop app, it is automatically refreshed on the next launch after an update.
 
 <details>
 <summary><strong>More Feature Demos</strong></summary>
@@ -372,13 +588,13 @@ Fetch and convert web pages to markdown for the LLM to read.
 
 ## chatty-tui — Terminal Interface
 
-`chatty-tui` is a lightweight terminal companion to the desktop app. It shares the same provider and model configuration and supports three modes:
+`chatty-tui` is a lightweight terminal agent that shares the same provider and model configuration as the desktop app. It supports three modes:
 
 | Mode | How to run | Description |
 |:-----|:-----------|:------------|
-| **Interactive** | `chatty-tui` | Full-screen TUI with scrollable chat, model picker, and tool picker |
-| **Headless** | `chatty-tui --headless -m "your question"` | Send a single message; response printed to stdout |
-| **Pipe** | `cat file.rs \| chatty-tui --pipe` | Read from stdin, send as a message, print the response |
+| **Interactive** | `chatty-tui` | Full-screen TUI with scrollable chat, model picker, tool picker, and approval prompts |
+| **Headless** | `chatty-tui --headless -m "your question"` | Send a single message; response printed to stdout — ideal for scripts and sub-agents |
+| **Pipe** | `cat file.rs \| chatty-tui --pipe` | Read from stdin, send as a message, print the response — compose with shell pipelines |
 
 ### Installing chatty-tui
 
@@ -392,7 +608,7 @@ Fetch and convert web pages to markdown for the LLM to read.
 cargo install --path crates/chatty-tui
 ```
 
-### Interactive mode keybindings
+### Interactive Mode Keybindings
 
 | Key | Action |
 |:----|:-------|
@@ -405,21 +621,21 @@ cargo install --path crates/chatty-tui
 | `Ctrl+C` | Stop streaming response (or quit if idle) |
 | `Ctrl+Q` | Quit immediately |
 
-### Slash commands
+### Slash Commands
 
 | Command | Action |
 |:--------|:-------|
 | `/model [query]` | Switch model (`/model` opens picker) |
 | `/tools [name]` | Toggle tool groups (`/tools` opens picker) |
-| `/add-dir <directory>` | Expand workspace access to include a directory |
+| `/add-dir <directory>` | Expand agent workspace access to include a directory |
 | `/agent <prompt>` | Launch a headless `chatty-tui` sub-agent with a prompt |
 | `/clear`, `/new` | Clear conversation history and start fresh |
-| `/compact` | Summarize older messages to reduce context usage |
+| `/compact` | Summarize older messages to reduce context usage for longer agent runs |
 | `/context` | Show token/context usage and current working directory |
-| `/copy` | Copy the latest assistant response to system clipboard |
-| `/cwd`, `/cd [directory]` | Show or change the working directory |
+| `/copy` | Copy the latest agent response to system clipboard |
+| `/cwd`, `/cd [directory]` | Show or change the agent's working directory |
 
-> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere.
+> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent.
 
 ---
 
@@ -428,13 +644,29 @@ cargo install --path crates/chatty-tui
 Built with:
 - **[GPUI](https://crates.io/crates/gpui)** — Zed's GPU-accelerated UI framework (desktop app)
 - **[Ratatui](https://crates.io/crates/ratatui)** — Terminal UI framework (chatty-tui)
-- **[rig-core](https://crates.io/crates/rig-core)** — Multi-provider LLM integration
+- **[rig-core](https://crates.io/crates/rig-core)** — Multi-provider LLM integration with streaming tool calls
 - **[rmcp](https://crates.io/crates/rmcp)** — Model Context Protocol support
-- **[Typst](https://crates.io/crates/typst)** — LaTeX math rendering
+- **[memvid-core](https://crates.io/crates/memvid-core)** — Persistent agent memory with hybrid vector + full-text search
+- **[Typst](https://crates.io/crates/typst)** — LaTeX math rendering and document compilation
 - **[mermaid-rs-renderer](https://crates.io/crates/mermaid-rs-renderer)** — Native Mermaid diagram rendering (pure Rust, no browser)
 - **[tree-sitter](https://crates.io/crates/tree-sitter)** — Syntax highlighting (via gpui-component)
+- **[DuckDB](https://crates.io/crates/duckdb)** — In-process SQL over Parquet, CSV, and JSON
+- **[bubblewrap](https://github.com/containers/bubblewrap)** — Linux sandbox for shell commands
 - **Tokio** — Async runtime
 - **serde** — Serialization/persistence
+
+### Workspace Structure
+
+Chatty is organized as a Cargo workspace with three crates:
+
+```
+crates/
+├── chatty-core/   # UI-agnostic: models, services, tools, settings, persistence
+├── chatty-gpui/   # GPUI desktop frontend
+└── chatty-tui/    # Terminal frontend (Ratatui) + headless/pipe agent modes
+```
+
+See [docs/architecture-overview.md](docs/architecture-overview.md) for the full module breakdown and data flow.
 
 ### Build Commands
 
@@ -474,7 +706,7 @@ You can also trigger a release manually from **Actions → Prepare Release → R
 
 - **Event-driven** reactive UI with GPUI's global state system
 - **Centralized stream lifecycle** via `StreamManager` entity with cancellation tokens and decoupled event-driven UI updates
-- **Streaming** LLM responses with interleaved tool calls
+- **Streaming** LLM responses with interleaved tool calls rendered in real time
 - **Optimistic updates** for instant UI feedback with async persistence
 - **SQLite** database for conversations; **JSON-based** local storage for settings and configuration
 - **LaTeX to SVG** pipeline with theme-aware caching
