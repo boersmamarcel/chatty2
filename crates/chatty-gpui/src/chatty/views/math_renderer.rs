@@ -71,7 +71,6 @@ impl MathComponent {
                         .max_w(px(INLINE_MATH_MAX_WIDTH))
                         .object_fit(gpui::ObjectFit::Contain),
                 )
-                .child(self.build_copy_button(&id, &content, cx))
         } else {
             div()
                 .id(id.clone())

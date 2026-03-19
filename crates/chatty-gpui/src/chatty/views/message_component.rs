@@ -239,89 +239,118 @@ impl RenderOnce for MarkdownContent {
     }
 }
 
+/// Pre-render a math expression to a `MathComponent` with SVG caching.
+///
+/// Uses the theme foreground colour for the SVG and falls back to lazy
+/// rendering if the SVG cache misses.
+fn make_math_component(
+    math_content: &str,
+    is_inline: bool,
+    element_id: ElementId,
+    cx: &App,
+) -> MathComponent {
+    if let Some(service) = cx.try_global::<MathRendererService>() {
+        let hsla = cx.theme().foreground;
+        let rgb = hsla.to_rgb();
+        let theme_color = chatty_core::services::math_renderer_service::RgbColor {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+        };
+        match service.render_to_styled_svg_file(math_content, is_inline, theme_color) {
+            Ok(svg_path) => {
+                MathComponent::with_svg_path(math_content.to_string(), is_inline, element_id, svg_path)
+            }
+            Err(e) => {
+                warn!(
+                    error = ?e,
+                    content = %math_content,
+                    is_inline = is_inline,
+                    "Failed to pre-render math"
+                );
+                MathComponent::new(math_content.to_string(), is_inline, element_id)
+            }
+        }
+    } else {
+        warn!(content = %math_content, is_inline = is_inline, "Math renderer service unavailable");
+        MathComponent::new(math_content.to_string(), is_inline, element_id)
+    }
+}
+
 /// Render pre-parsed math segments to GPUI elements.
 ///
 /// Accepts `&[MathSegment]` so it can be used both from the live parsing path
 /// (`render_math_aware_content`) and from the cached path (`render_from_cached`).
+///
+/// Segments are processed in **batches** separated by `BlockMath` boundaries.
+/// Within each batch `has_inline_math` is determined locally, so text-only
+/// batches (e.g. a heading paragraph that precedes a display equation) keep
+/// full markdown rendering via `MarkdownContent`, while batches that mix text
+/// and `InlineMath` use content-sized plain divs so math stays on the same row.
 fn render_math_segments(
     math_segments: &[MathSegment],
     base_index: usize,
     cx: &App,
 ) -> Vec<AnyElement> {
-    // When inline math is present, text segments must be content-sized so they
-    // don't expand to the full row width and push math onto separate lines.
-    // MarkdownContent (via TextView::markdown) fills available width, so we use
-    // a plain div for text in inline-math context. For text-only paragraphs we
-    // preserve full markdown rendering via MarkdownContent.
-    let has_inline_math = math_segments
-        .iter()
-        .any(|s| matches!(s, MathSegment::InlineMath(_)));
-
     let mut elements = Vec::new();
-    let mut inline_row: Vec<AnyElement> = Vec::new();
-    for (seg_idx, segment) in math_segments.iter().enumerate() {
-        let element_index = base_index * 1000 + seg_idx;
+    let n = math_segments.len();
+    let mut batch_start = 0;
 
-        match segment {
-            MathSegment::Text(text) => {
-                if has_inline_math {
-                    // Use a plain div so the element is sized to content width,
-                    // allowing adjacent math components to share the same row.
-                    //
-                    // NOTE: This intentionally forgoes full markdown rendering
-                    // (bold, italic, links) for text segments that appear inline
-                    // with math. MarkdownContent (TextView::markdown) fills the
-                    // entire available row width, which pushes every math element
-                    // onto its own line. A plain div is content-sized, so short
-                    // text like ")" stays on the same row as adjacent math.
-                    // Proper inline text+image flow would require a custom GPUI
-                    // element that interleaves StyledText runs with SVG images.
-                    inline_row.push(div().child(text.clone()).into_any_element());
-                } else {
-                    // No inline math in this paragraph – keep full markdown rendering.
-                    inline_row.push(
-                        MarkdownContent {
-                            content: text.clone(),
-                            message_index: element_index,
+    // Iterate one past the end so the final batch is always flushed.
+    for i in 0..=n {
+        let at_block_math = i < n && matches!(math_segments[i], MathSegment::BlockMath(_));
+
+        if at_block_math || i == n {
+            // ── Flush the current inline batch [batch_start..i] ──────────────
+            let batch = &math_segments[batch_start..i];
+            if !batch.is_empty() {
+                // Only switch to content-sized plain text when inline math is
+                // actually present in *this* batch.  Batches without inline math
+                // (e.g. a heading or list paragraph before a display equation)
+                // retain full markdown rendering through MarkdownContent.
+                let batch_has_inline =
+                    batch.iter().any(|s| matches!(s, MathSegment::InlineMath(_)));
+
+                let mut inline_row: Vec<AnyElement> = Vec::new();
+                for (batch_idx, segment) in batch.iter().enumerate() {
+                    let element_index = base_index * 1000 + batch_start + batch_idx;
+                    match segment {
+                        MathSegment::Text(text) => {
+                            if batch_has_inline {
+                                // Content-sized plain div so inline math stays on
+                                // the same row.  Full markdown formatting is not
+                                // available here because MarkdownContent
+                                // (TextView::markdown) fills the entire row width
+                                // and would push math to the next line.  A proper
+                                // fix requires a custom element that interleaves
+                                // StyledText runs with SVG images.
+                                inline_row.push(div().child(text.clone()).into_any_element());
+                            } else {
+                                // No inline math in this batch – full markdown.
+                                inline_row.push(
+                                    MarkdownContent {
+                                        content: text.clone(),
+                                        message_index: element_index,
+                                    }
+                                    .into_any_element(),
+                                );
+                            }
                         }
-                        .into_any_element(),
-                    );
-                }
-            }
-            MathSegment::InlineMath(math_content) => {
-                // Add inline math to inline row
-                let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
-
-                // Pre-compute styled SVG path with theme color
-                let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
-                    let hsla = cx.theme().foreground;
-                    let rgb = hsla.to_rgb();
-                    let theme_color = chatty_core::services::math_renderer_service::RgbColor {
-                        r: rgb.r,
-                        g: rgb.g,
-                        b: rgb.b,
-                    };
-                    match service.render_to_styled_svg_file(math_content, true, theme_color) {
-                        Ok(svg_path) => MathComponent::with_svg_path(
-                            math_content.clone(),
-                            true,
-                            element_id,
-                            svg_path,
-                        ),
-                        Err(e) => {
-                            warn!(error = ?e, content = %math_content, is_inline = true, "Failed to pre-render inline math");
-                            MathComponent::new(math_content.clone(), true, element_id)
+                        MathSegment::InlineMath(math_content) => {
+                            let element_id = ElementId::Name(
+                                format!("math-inline-{}", element_index).into(),
+                            );
+                            inline_row.push(
+                                make_math_component(math_content, true, element_id, cx)
+                                    .into_any_element(),
+                            );
+                        }
+                        MathSegment::BlockMath(_) => {
+                            unreachable!("BlockMath should not appear within a batch")
                         }
                     }
-                } else {
-                    warn!(content = %math_content, "Math renderer service unavailable for inline math");
-                    MathComponent::new(math_content.clone(), true, element_id)
-                };
+                }
 
-                inline_row.push(math_elem.into_any_element());
-            }
-            MathSegment::BlockMath(math_content) => {
-                // Flush any pending inline content first
                 if !inline_row.is_empty() {
                     elements.push(
                         div()
@@ -329,56 +358,25 @@ fn render_math_segments(
                             .flex_row()
                             .flex_wrap()
                             .items_center()
-                            .children(inline_row.drain(..))
+                            .children(inline_row)
                             .into_any_element(),
                     );
                 }
+            }
 
-                // Render block math as its own element
-                let element_id = ElementId::Name(format!("math-block-{}", element_index).into());
-
-                // Pre-compute styled SVG path with theme color
-                let math_elem = if let Some(service) = cx.try_global::<MathRendererService>() {
-                    let hsla = cx.theme().foreground;
-                    let rgb = hsla.to_rgb();
-                    let theme_color = chatty_core::services::math_renderer_service::RgbColor {
-                        r: rgb.r,
-                        g: rgb.g,
-                        b: rgb.b,
-                    };
-                    match service.render_to_styled_svg_file(math_content, false, theme_color) {
-                        Ok(svg_path) => MathComponent::with_svg_path(
-                            math_content.clone(),
-                            false,
-                            element_id,
-                            svg_path,
-                        ),
-                        Err(e) => {
-                            warn!(error = ?e, content = %math_content, is_inline = false, "Failed to pre-render block math");
-                            MathComponent::new(math_content.clone(), false, element_id)
-                        }
-                    }
-                } else {
-                    warn!(content = %math_content, "Math renderer service unavailable for block math");
-                    MathComponent::new(math_content.clone(), false, element_id)
-                };
-
-                elements.push(math_elem.into_any_element());
+            // ── Render the BlockMath element itself ──────────────────────────
+            if at_block_math {
+                if let MathSegment::BlockMath(math_content) = &math_segments[i] {
+                    let element_index = base_index * 1000 + i;
+                    let element_id =
+                        ElementId::Name(format!("math-block-{}", element_index).into());
+                    elements.push(
+                        make_math_component(math_content, false, element_id, cx).into_any_element(),
+                    );
+                }
+                batch_start = i + 1;
             }
         }
-    }
-
-    // Flush any remaining inline content
-    if !inline_row.is_empty() {
-        elements.push(
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .children(inline_row)
-                .into_any_element(),
-        );
     }
 
     elements
