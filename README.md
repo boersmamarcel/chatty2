@@ -79,6 +79,8 @@ You can also set a **per-chat working directory** to override the global workspa
 
 Optionally, enable **Docker Code Execution** to run agent-generated code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
 
+**Fast Python execution (MontySandbox):** Simple Python scripts that use only the standard library are automatically run directly on the host interpreter (~5–50 ms) rather than spinning up a Docker container (200–500 ms cold start). Scripts that import third-party packages, or that fail with a module-not-found error, automatically fall back to Docker — no configuration needed. The fast path enforces a memory cap and runs with a minimal environment; it does not provide the same full isolation as Docker.
+
 See [Tools & MCP](#tools--mcp) below for the full list of agent tools.
 
 ---
@@ -432,7 +434,7 @@ Optional **network isolation** lets you block shell commands from making any net
 
 ### Docker Isolation
 
-When Docker Code Execution is enabled, agent-generated code runs inside ephemeral Docker containers — fully isolated from the host filesystem and network.
+When Docker Code Execution is enabled, agent-generated code runs inside ephemeral Docker containers — fully isolated from the host filesystem and network. **Exception:** simple Python scripts that use only the standard library run via MontySandbox (directly on the host interpreter) for speed. These scripts run with a memory cap and a stripped environment, then fall back to Docker automatically on any import error or unsupported syntax.
 
 ### Approval Flows
 
