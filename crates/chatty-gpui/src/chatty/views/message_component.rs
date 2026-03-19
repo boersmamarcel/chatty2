@@ -248,6 +248,15 @@ fn render_math_segments(
     base_index: usize,
     cx: &App,
 ) -> Vec<AnyElement> {
+    // When inline math is present, text segments must be content-sized so they
+    // don't expand to the full row width and push math onto separate lines.
+    // MarkdownContent (via TextView::markdown) fills available width, so we use
+    // a plain div for text in inline-math context. For text-only paragraphs we
+    // preserve full markdown rendering via MarkdownContent.
+    let has_inline_math = math_segments
+        .iter()
+        .any(|s| matches!(s, MathSegment::InlineMath(_)));
+
     let mut elements = Vec::new();
     let mut inline_row: Vec<AnyElement> = Vec::new();
     for (seg_idx, segment) in math_segments.iter().enumerate() {
@@ -255,14 +264,29 @@ fn render_math_segments(
 
         match segment {
             MathSegment::Text(text) => {
-                // Add text to inline row
-                inline_row.push(
-                    MarkdownContent {
-                        content: text.clone(),
-                        message_index: element_index,
-                    }
-                    .into_any_element(),
-                );
+                if has_inline_math {
+                    // Use a plain div so the element is sized to content width,
+                    // allowing adjacent math components to share the same row.
+                    //
+                    // NOTE: This intentionally forgoes full markdown rendering
+                    // (bold, italic, links) for text segments that appear inline
+                    // with math. MarkdownContent (TextView::markdown) fills the
+                    // entire available row width, which pushes every math element
+                    // onto its own line. A plain div is content-sized, so short
+                    // text like ")" stays on the same row as adjacent math.
+                    // Proper inline text+image flow would require a custom GPUI
+                    // element that interleaves StyledText runs with SVG images.
+                    inline_row.push(div().child(text.clone()).into_any_element());
+                } else {
+                    // No inline math in this paragraph – keep full markdown rendering.
+                    inline_row.push(
+                        MarkdownContent {
+                            content: text.clone(),
+                            message_index: element_index,
+                        }
+                        .into_any_element(),
+                    );
+                }
             }
             MathSegment::InlineMath(math_content) => {
                 // Add inline math to inline row

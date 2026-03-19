@@ -63,6 +63,7 @@ impl MathComponent {
             div()
                 .id(id.clone())
                 .flex()
+                .flex_row()
                 .items_center()
                 .child(
                     img(svg_path)
