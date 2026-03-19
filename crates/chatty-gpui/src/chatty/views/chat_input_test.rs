@@ -164,12 +164,21 @@ mod tests {
         // Bare "/" should return all built-ins AND all skills
         let items = slash_menu_items_with_skills("/", &skills);
         let has_skill = |name: &str| {
-            items.iter().any(|i| matches!(i, SlashMenuItem::Skill(s) if s.name == name))
+            items
+                .iter()
+                .any(|i| matches!(i, SlashMenuItem::Skill(s) if s.name == name))
         };
         assert!(has_skill("fix-ci"), "fix-ci skill should appear");
-        assert!(has_skill("build-and-check"), "build-and-check skill should appear");
+        assert!(
+            has_skill("build-and-check"),
+            "build-and-check skill should appear"
+        );
         // A built-in should also be present
-        assert!(items.iter().any(|i| matches!(i, SlashMenuItem::Command(c) if c.command == "/compact")));
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, SlashMenuItem::Command(c) if c.command == "/compact"))
+        );
     }
 
     #[test]
@@ -177,8 +186,14 @@ mod tests {
         use super::super::chat_input::{SkillEntry, SlashMenuItem, slash_menu_items_with_skills};
 
         let skills = vec![
-            SkillEntry { name: "fix-ci".to_string(), description: "Fix CI.".to_string() },
-            SkillEntry { name: "build-and-check".to_string(), description: "Build.".to_string() },
+            SkillEntry {
+                name: "fix-ci".to_string(),
+                description: "Fix CI.".to_string(),
+            },
+            SkillEntry {
+                name: "build-and-check".to_string(),
+                description: "Build.".to_string(),
+            },
         ];
 
         let items = slash_menu_items_with_skills("/fix", &skills);
@@ -208,7 +223,10 @@ mod tests {
     fn test_skills_menu_empty_when_no_slash() {
         use super::super::chat_input::{SkillEntry, slash_menu_items_with_skills};
 
-        let skills = vec![SkillEntry { name: "fix-ci".to_string(), description: "Fix CI.".to_string() }];
+        let skills = vec![SkillEntry {
+            name: "fix-ci".to_string(),
+            description: "Fix CI.".to_string(),
+        }];
         assert!(slash_menu_items_with_skills("", &skills).is_empty());
         assert!(slash_menu_items_with_skills("hello", &skills).is_empty());
     }
@@ -217,11 +235,12 @@ mod tests {
     fn test_skills_menu_closes_on_space() {
         use super::super::chat_input::{SkillEntry, slash_menu_items_with_skills};
 
-        let skills = vec![SkillEntry { name: "fix-ci".to_string(), description: "Fix.".to_string() }];
+        let skills = vec![SkillEntry {
+            name: "fix-ci".to_string(),
+            description: "Fix.".to_string(),
+        }];
         assert!(slash_menu_items_with_skills("/fix-ci extra", &skills).is_empty());
     }
-
-
 
     /// Verify that the /agent command prefix extraction used by
     /// `try_handle_arg_slash_command` works correctly.

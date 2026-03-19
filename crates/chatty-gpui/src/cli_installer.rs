@@ -229,13 +229,13 @@ async fn do_install() -> Result<String, String> {
 /// - Windows: The Inno Setup installer already replaces the binary.
 ///            No action needed.
 pub fn update_cli_if_installed(cx: &mut App) {
-    cx.spawn(async move |_cx: &mut gpui::AsyncApp| {
-        match do_update_if_installed().await {
+    cx.spawn(
+        async move |_cx: &mut gpui::AsyncApp| match do_update_if_installed().await {
             Ok(Some(msg)) => info!("{}", msg),
             Ok(None) => {}
             Err(e) => debug!("CLI auto-update skipped: {}", e),
-        }
-    })
+        },
+    )
     .detach();
 }
 

@@ -664,28 +664,25 @@ impl ChattyApp {
 
     /// Synchronously load filesystem skills for `workspace_dir` (and the global skills dir)
     /// and push them into the chat-input picker so they appear in the `/` menu.
-    fn refresh_chat_input_skills(
-        &self,
-        workspace_dir: Option<&Path>,
-        cx: &mut Context<Self>,
-    ) {
+    fn refresh_chat_input_skills(&self, workspace_dir: Option<&Path>, cx: &mut Context<Self>) {
         let skill_service = cx
             .try_global::<chatty_core::services::SkillService>()
             .cloned()
             .unwrap_or_else(|| chatty_core::services::SkillService::new(None));
 
-        let workspace_skills_dir =
-            workspace_dir.map(|d| d.join(".claude").join("skills"));
+        let workspace_skills_dir = workspace_dir.map(|d| d.join(".claude").join("skills"));
 
-        let raw_skills = skill_service
-            .list_all_skills_sync(workspace_skills_dir.as_deref());
+        let raw_skills = skill_service.list_all_skills_sync(workspace_skills_dir.as_deref());
 
         let entries: Vec<SkillEntry> = raw_skills
             .into_iter()
             .map(|(name, description)| SkillEntry { name, description })
             .collect();
 
-        debug!(count = entries.len(), "Refreshed skills for slash-command picker");
+        debug!(
+            count = entries.len(),
+            "Refreshed skills for slash-command picker"
+        );
 
         let chat_view = self.chat_view.clone();
         chat_view.update(cx, |view, cx| {

@@ -81,10 +81,7 @@ fn menu_item_to_list_item(item: &SlashMenuItem) -> ListItem<'static> {
         ]))
     } else {
         ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{:<18}", display),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(format!("{:<18}", display), Style::default().fg(Color::Cyan)),
             Span::styled(description, Style::default().fg(Color::White)),
         ]))
     }

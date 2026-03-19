@@ -175,7 +175,11 @@ pub fn list_skills_from_dir(dir: &Path) -> Vec<(String, String)> {
         if !path.is_dir() {
             continue;
         }
-        let Some(skill_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(skill_name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         // Skip hidden directories and embedding cache files
@@ -461,12 +465,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("my-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "# Just a heading\nNo frontmatter.").unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Just a heading\nNo frontmatter.",
+        )
+        .unwrap();
 
         let skills = list_skills_from_dir(tmp.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].0, "my-skill");
-        assert!(skills[0].1.contains("my-skill"), "description should reference skill name");
+        assert!(
+            skills[0].1.contains("my-skill"),
+            "description should reference skill name"
+        );
     }
 
     #[test]
@@ -512,8 +523,11 @@ mod tests {
         // Additional global-only skill
         let global_only = global_tmp.path().join("global-only");
         std::fs::create_dir_all(&global_only).unwrap();
-        std::fs::write(global_only.join("SKILL.md"), "---\ndescription: Global only.\n---")
-            .unwrap();
+        std::fs::write(
+            global_only.join("SKILL.md"),
+            "---\ndescription: Global only.\n---",
+        )
+        .unwrap();
 
         let mut service = SkillService::new(None);
         service.global_skills_dir = global_tmp.path().to_path_buf();
