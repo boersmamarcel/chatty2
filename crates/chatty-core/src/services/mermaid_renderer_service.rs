@@ -10,6 +10,11 @@ use tracing::{debug, info, warn};
 // entries ≈ 4-20MB worst case.
 const MAX_MERMAID_CACHE_ENTRIES: usize = 200;
 
+// GPUI renders SVGs with SMOOTH_SVG_SCALE_FACTOR = 2.0, and the Metal texture atlas
+// is capped at 16384 device pixels per dimension. Safe intrinsic max = 16384/2 = 8192px.
+// We use half (4096px) to leave headroom for atlas fragmentation across frames.
+const MAX_SVG_DISPLAY_PIXELS: f64 = 4096.0;
+
 /// Mermaid diagram renderer service that converts Mermaid syntax to SVG
 ///
 /// Uses `mermaid-rs-renderer` for pure-Rust rendering (no browser needed).
@@ -166,7 +171,65 @@ impl MermaidRendererService {
         let blend_re = Regex::new(r#"\s+style="[^"]*mix-blend-mode[^"]*""#).unwrap();
         let result = blend_re.replace_all(&result, "");
 
-        result.into_owned()
+        Self::cap_svg_dimensions(&result)
+    }
+
+    /// Cap SVG width and height to prevent Metal texture atlas allocation failures.
+    ///
+    /// GPUI renders SVGs at 2x (SMOOTH_SVG_SCALE_FACTOR), so the rasterized bitmap is
+    /// `intrinsic_size × 2`. The Metal atlas is capped at 16384 device pixels per
+    /// dimension, meaning any SVG with an intrinsic dimension > 8192px causes
+    /// `failed to allocate`. We cap at `MAX_SVG_DISPLAY_PIXELS` (4096px) to stay well
+    /// within limits while still displaying large diagrams legibly via CSS scaling.
+    ///
+    /// If either dimension exceeds the cap both are scaled down proportionally so the
+    /// aspect ratio is preserved. The `viewBox` is left unchanged; SVG renderers map
+    /// the coordinate system onto the new (smaller) canvas automatically.
+    fn cap_svg_dimensions(svg: &str) -> String {
+        // Only inspect attributes inside the opening <svg ...> tag.
+        let tag_end = match svg.find('>') {
+            Some(pos) => pos,
+            None => return svg.to_string(),
+        };
+        let svg_tag = &svg[..tag_end];
+
+        // Match width/height attributes with optional "px" suffix (e.g. width="1234" or width="1234px")
+        let dim_re = Regex::new(r#"\b(width|height)="([0-9.]+)(?:px)?""#).unwrap();
+
+        let mut width = 0.0f64;
+        let mut height = 0.0f64;
+        for cap in dim_re.captures_iter(svg_tag) {
+            match &cap[1] {
+                "width" => width = cap[2].parse().unwrap_or(0.0),
+                "height" => height = cap[2].parse().unwrap_or(0.0),
+                _ => {}
+            }
+        }
+
+        if width <= MAX_SVG_DISPLAY_PIXELS && height <= MAX_SVG_DISPLAY_PIXELS {
+            return svg.to_string();
+        }
+
+        let scale = (MAX_SVG_DISPLAY_PIXELS / width.max(height)).min(1.0);
+        let new_w = (width * scale).round() as u32;
+        let new_h = (height * scale).round() as u32;
+
+        warn!(
+            original_width = width,
+            original_height = height,
+            new_width = new_w,
+            new_height = new_h,
+            "Mermaid SVG exceeds Metal atlas safe size; scaling down"
+        );
+
+        // Replace only within the opening <svg> tag using the same regex.
+        let new_tag = dim_re.replace_all(svg_tag, |caps: &regex::Captures| match &caps[1] {
+            "width" => format!(r#"width="{}""#, new_w),
+            "height" => format!(r#"height="{}""#, new_h),
+            _ => caps[0].to_string(),
+        });
+
+        format!("{}{}", new_tag, &svg[tag_end..])
     }
 
     /// Render a cached SVG file to PNG bytes at 2x scale for crisp output.
@@ -227,7 +290,7 @@ impl MermaidRendererService {
 
     /// Cache version — bump whenever rendering or sanitization logic changes
     /// to invalidate stale on-disk SVGs from previous builds.
-    const CACHE_VERSION: &'static str = "v3";
+    const CACHE_VERSION: &'static str = "v4";
 
     fn make_cache_key(&self, source: &str, is_dark: bool) -> String {
         let mut hasher = Sha256::new();
@@ -416,5 +479,54 @@ mod tests {
             MAX_MERMAID_CACHE_ENTRIES <= 1000,
             "Cache limit too high — defeats memory bounding"
         );
+    }
+
+    #[test]
+    fn test_cap_svg_dimensions_small_svg_unchanged() {
+        let svg = r#"<svg width="800" height="600" viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
+        let result = MermaidRendererService::cap_svg_dimensions(svg);
+        assert_eq!(result, svg, "Small SVG should not be modified");
+    }
+
+    #[test]
+    fn test_cap_svg_dimensions_oversized_width() {
+        let svg = r#"<svg width="9000" height="600" viewBox="0 0 9000 600" xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
+        let result = MermaidRendererService::cap_svg_dimensions(svg);
+        assert!(
+            result.contains(r#"width="4096""#),
+            "Width should be capped to MAX_SVG_DISPLAY_PIXELS"
+        );
+        // Height scaled proportionally: 600 * (4096/9000) ≈ 273
+        assert!(
+            result.contains(r#"height="273""#),
+            "Height should be scaled proportionally, got: {result}"
+        );
+        // viewBox must remain unchanged for correct coordinate mapping
+        assert!(
+            result.contains(r#"viewBox="0 0 9000 600""#),
+            "viewBox must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_cap_svg_dimensions_oversized_height() {
+        let svg = r#"<svg width="400" height="10000" viewBox="0 0 400 10000" xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
+        let result = MermaidRendererService::cap_svg_dimensions(svg);
+        assert!(
+            result.contains(r#"height="4096""#),
+            "Height should be capped to MAX_SVG_DISPLAY_PIXELS"
+        );
+        // Width scaled proportionally: 400 * (4096/10000) ≈ 164
+        assert!(
+            result.contains(r#"width="164""#),
+            "Width should be scaled proportionally, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_cap_svg_dimensions_exact_limit_unchanged() {
+        let svg = r#"<svg width="4096" height="4096" viewBox="0 0 4096 4096" xmlns="http://www.w3.org/2000/svg"></svg>"#;
+        let result = MermaidRendererService::cap_svg_dimensions(svg);
+        assert_eq!(result, svg, "SVG at exactly the limit should not be modified");
     }
 }
