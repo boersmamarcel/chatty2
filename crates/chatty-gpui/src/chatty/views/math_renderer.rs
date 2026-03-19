@@ -74,6 +74,7 @@ impl MathComponent {
         } else {
             div()
                 .id(id.clone())
+                .w_full()
                 .relative()
                 .flex()
                 .justify_center()
