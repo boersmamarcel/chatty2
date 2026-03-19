@@ -258,9 +258,12 @@ fn make_math_component(
             b: rgb.b,
         };
         match service.render_to_styled_svg_file(math_content, is_inline, theme_color) {
-            Ok(svg_path) => {
-                MathComponent::with_svg_path(math_content.to_string(), is_inline, element_id, svg_path)
-            }
+            Ok(svg_path) => MathComponent::with_svg_path(
+                math_content.to_string(),
+                is_inline,
+                element_id,
+                svg_path,
+            ),
             Err(e) => {
                 warn!(
                     error = ?e,
@@ -312,17 +315,12 @@ fn render_math_segments(
             // ── Flush the current batch [batch_start..i] ─────────────────────
             let batch = &math_segments[batch_start..i];
             if !batch.is_empty() {
-                let batch_has_inline =
-                    batch.iter().any(|s| matches!(s, MathSegment::InlineMath(_)));
+                let batch_has_inline = batch
+                    .iter()
+                    .any(|s| matches!(s, MathSegment::InlineMath(_)));
 
                 if batch_has_inline {
-                    render_inline_math_batch(
-                        batch,
-                        base_index,
-                        batch_start,
-                        cx,
-                        &mut elements,
-                    );
+                    render_inline_math_batch(batch, base_index, batch_start, cx, &mut elements);
                 } else {
                     // Text-only batch: push MarkdownContent directly so that
                     // headings, bold, lists, etc. render with full formatting.
@@ -362,10 +360,16 @@ fn render_math_segments(
 /// Render an inline-math batch (a slice of [`MathSegment`]s that contains at
 /// least one [`MathSegment::InlineMath`]).
 ///
-/// Text segments are split at `\n` characters.  Each contiguous run of text
-/// and inline-math segments that belongs to the same logical line is wrapped in
-/// a `w_full` flex-row so that the SVG image and the surrounding text share
-/// one row, and consecutive lines stack vertically.
+/// Text segments are split at `\n` so that each logical line is handled
+/// independently:
+///
+/// * Lines that **contain at least one math SVG** are emitted as a full-width
+///   `flex_row` with `.min_w_0()` plain-text divs and the math SVG components.
+///   The `.min_w_0()` lets each text div shrink below its natural content
+///   width so that long text wraps rather than overflowing the container.
+/// * Lines that are **text-only** (no adjacent math on that line) are emitted
+///   as a `MarkdownContent` element so that headings (`##`), horizontal rules
+///   (`---`), bold (`**…**`), and other markdown constructs render correctly.
 fn render_inline_math_batch(
     batch: &[MathSegment],
     base_index: usize,
@@ -373,71 +377,135 @@ fn render_inline_math_batch(
     cx: &App,
     elements: &mut Vec<AnyElement>,
 ) {
-    let mut current_row: Vec<AnyElement> = Vec::new();
+    // Accumulated plain text for the current logical line.  Flushed into
+    // `math_row` when an InlineMath is encountered, or into a MarkdownContent
+    // element at a newline boundary when the line has no math.
+    let mut text_buf = String::new();
+
+    // Elements for the current math-containing line (plain-text divs + SVGs).
+    let mut math_row: Vec<AnyElement> = Vec::new();
+
+    // Whether the current logical line has at least one inline math component.
+    let mut line_has_math = false;
+
+    // Monotone counter used to generate unique element IDs per logical line.
+    let mut line_counter = 0usize;
 
     for (batch_idx, segment) in batch.iter().enumerate() {
         let element_index = base_index * 1000 + batch_start + batch_idx;
         match segment {
             MathSegment::Text(text) => {
-                // Split text at newline boundaries.  Characters before each
-                // `\n` are added to the current row; the `\n` itself flushes
-                // the row so that subsequent content starts on a fresh line.
                 let mut remainder = text.as_str();
                 while let Some(nl_pos) = remainder.find('\n') {
-                    let line = &remainder[..nl_pos];
-                    if !line.is_empty() {
-                        current_row.push(div().child(line.to_string()).into_any_element());
-                    }
-                    // Flush the current row to elements.
-                    if !current_row.is_empty() {
-                        let children = std::mem::take(&mut current_row);
-                        elements.push(
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_center()
-                                .children(children)
-                                .into_any_element(),
-                        );
-                    }
+                    // Accumulate the text before this newline.
+                    text_buf.push_str(&remainder[..nl_pos]);
+
+                    // Flush the logical line ending at this newline.
+                    flush_inline_line(
+                        &mut text_buf,
+                        &mut math_row,
+                        line_has_math,
+                        base_index,
+                        batch_start,
+                        line_counter,
+                        elements,
+                    );
+                    line_has_math = false;
+                    line_counter += 1;
                     remainder = &remainder[nl_pos + 1..];
                 }
-                // Append any trailing text (after the last newline, or the
-                // whole text when there are no newlines) to the current row.
-                if !remainder.is_empty() {
-                    current_row.push(div().child(remainder.to_string()).into_any_element());
-                }
+                // The text after the last newline (or the whole segment when
+                // there are no newlines) stays in text_buf for the current line.
+                text_buf.push_str(remainder);
             }
             MathSegment::InlineMath(math_content) => {
-                let element_id =
-                    ElementId::Name(format!("math-inline-{}", element_index).into());
-                current_row.push(
+                // Move any pending plain text into the math row before the SVG.
+                if !text_buf.is_empty() {
+                    math_row.push(
+                        div()
+                            .min_w_0()
+                            .child(std::mem::take(&mut text_buf))
+                            .into_any_element(),
+                    );
+                }
+                let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
+                math_row.push(
                     make_math_component(math_content, true, element_id, cx).into_any_element(),
                 );
+                line_has_math = true;
             }
             MathSegment::BlockMath(_) => {
-                    unreachable!(
-                        "BlockMath segments are split out as batch boundaries in \
-                         render_math_segments and must never appear inside an inline batch"
-                    )
-                }
+                unreachable!(
+                    "BlockMath segments are split out as batch boundaries in \
+                     render_math_segments and must never appear inside an inline batch"
+                )
+            }
         }
     }
 
-    // Flush any remaining content in the last row.
-    if !current_row.is_empty() {
-        let children = std::mem::take(&mut current_row);
+    // Flush the final logical line.
+    flush_inline_line(
+        &mut text_buf,
+        &mut math_row,
+        line_has_math,
+        base_index,
+        batch_start,
+        line_counter,
+        elements,
+    );
+}
+
+/// Flush one logical line produced by [`render_inline_math_batch`].
+///
+/// * If the line contained math, any remaining text in `text_buf` is appended
+///   to `math_row` as a `.min_w_0()` div, then the full row is emitted as a
+///   full-width `flex_row` element.
+/// * If the line is text-only, the accumulated text is emitted as a
+///   `MarkdownContent` element (preserves headings, bold, lists, `---`, etc.).
+#[allow(clippy::too_many_arguments)]
+fn flush_inline_line(
+    text_buf: &mut String,
+    math_row: &mut Vec<AnyElement>,
+    has_math: bool,
+    base_index: usize,
+    batch_start: usize,
+    line_counter: usize,
+    elements: &mut Vec<AnyElement>,
+) {
+    if has_math {
+        // Append any trailing plain text to the math row.
+        if !text_buf.is_empty() {
+            math_row.push(
+                div()
+                    .min_w_0()
+                    .child(std::mem::take(text_buf))
+                    .into_any_element(),
+            );
+        }
+        if !math_row.is_empty() {
+            let children = std::mem::take(math_row);
+            elements.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .children(children)
+                    .into_any_element(),
+            );
+        }
+    } else if !text_buf.is_empty() {
+        // Text-only line: full markdown rendering.
+        // Use a large multiplier to avoid element-ID collisions with segment
+        // indices used elsewhere in the same message render.
+        let element_index = base_index * 100_000 + batch_start * 100 + line_counter;
         elements.push(
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .children(children)
-                .into_any_element(),
+            MarkdownContent {
+                content: std::mem::take(text_buf),
+                message_index: element_index,
+            }
+            .into_any_element(),
         );
     }
 }

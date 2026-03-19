@@ -60,17 +60,12 @@ impl MathComponent {
         let content = self.content.clone();
 
         if self.is_inline {
-            div()
-                .id(id.clone())
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(
-                    img(svg_path)
-                        .max_h(px(INLINE_MATH_MAX_HEIGHT))
-                        .max_w(px(INLINE_MATH_MAX_WIDTH))
-                        .object_fit(gpui::ObjectFit::Contain),
-                )
+            div().id(id.clone()).flex().flex_row().items_center().child(
+                img(svg_path)
+                    .max_h(px(INLINE_MATH_MAX_HEIGHT))
+                    .max_w(px(INLINE_MATH_MAX_WIDTH))
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
         } else {
             div()
                 .id(id.clone())
