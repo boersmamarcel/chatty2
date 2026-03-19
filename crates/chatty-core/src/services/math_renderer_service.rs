@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Simple RGB color representation for theme colors (avoids gpui dependency).
 /// Each component is a float in the range [0.0, 1.0].
@@ -99,9 +99,16 @@ impl World for MathWorld {
     }
 }
 
+// Maximum number of in-memory SVG cache entries. Prevents unbounded memory growth
+// in long sessions with many unique math expressions. At ~10-50KB per SVG, 500
+// entries ≈ 5-25MB worst case.
+const MAX_MATH_CACHE_ENTRIES: usize = 500;
+
 /// Math renderer service that converts LaTeX to SVG using Typst
 pub struct MathRendererService {
     cache: Arc<Mutex<HashMap<String, String>>>,
+    /// Tracks insertion order for LRU eviction of in-memory cache entries.
+    insertion_order: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Default for MathRendererService {
@@ -135,6 +142,7 @@ impl MathRendererService {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
+            insertion_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -148,7 +156,13 @@ impl MathRendererService {
             && let Some(svg) = cache.get(&cache_key)
         {
             debug!(latex, "Math cache hit");
-            return Ok(svg.clone());
+            let svg = svg.clone();
+            // Touch LRU order so this entry stays fresh
+            if let Ok(mut order) = self.insertion_order.lock() {
+                order.retain(|k| k != &cache_key);
+                order.push_back(cache_key);
+            }
+            return Ok(svg);
         }
 
         debug!(latex, is_inline, "Rendering math to SVG");
@@ -208,9 +222,22 @@ $ {typst_code} $")
             .compile_typst_to_svg(&doc_content)
             .context("Failed to compile Typst to SVG")?;
 
-        // Store in cache
+        // Store in cache with LRU eviction
         if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(cache_key, svg.clone());
+            cache.insert(cache_key.clone(), svg.clone());
+            if let Ok(mut order) = self.insertion_order.lock() {
+                order.retain(|k| k != &cache_key);
+                order.push_back(cache_key);
+                while cache.len() > MAX_MATH_CACHE_ENTRIES {
+                    if let Some(oldest) = order.pop_front() {
+                        cache.remove(&oldest);
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                warn!("Failed to lock math cache insertion_order — entry may not be evicted");
+            }
         }
 
         Ok(svg)
@@ -385,6 +412,9 @@ $ {typst_code} $")
         if let Ok(mut cache) = self.cache.lock() {
             cache.clear();
         }
+        if let Ok(mut order) = self.insertion_order.lock() {
+            order.clear();
+        }
     }
 
     /// Strip width and height attributes from SVG and add proper scaling
@@ -552,5 +582,17 @@ mod tests {
         let service = MathRendererService::new();
         let svg = service.render_to_svg("\\frac{a}{b}", false).unwrap();
         assert!(svg.contains("<svg"), "Output should be SVG");
+    }
+
+    #[test]
+    fn test_cache_max_entries_constant_is_reasonable() {
+        assert!(
+            MAX_MATH_CACHE_ENTRIES >= 100,
+            "Cache limit too low — would cause excessive re-renders"
+        );
+        assert!(
+            MAX_MATH_CACHE_ENTRIES <= 2000,
+            "Cache limit too high — defeats memory bounding"
+        );
     }
 }

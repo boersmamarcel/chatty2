@@ -1,21 +1,32 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::repositories::ConversationMetadata;
 
 use super::conversation::Conversation;
 
+/// Maximum number of full conversation objects kept in memory.
+/// When the cache exceeds this limit, the least recently used conversations are evicted.
+/// They will be re-loaded from SQLite on demand if the user navigates back.
+const MAX_CACHED_CONVERSATIONS: usize = 10;
+
 /// Global store for all conversations.
 ///
 /// Two-layer design:
 /// - `metadata`: always loaded at startup (lightweight — just id/title/cost)
-/// - `conversations`: lazily populated when a conversation is selected
+/// - `conversations`: lazily populated when a conversation is selected, with LRU eviction
 pub struct ConversationsStore {
     /// Lightweight metadata list, sorted by updated_at descending.
     /// This is the source of truth for the sidebar and navigation.
     metadata: Vec<ConversationMetadata>,
     /// Full conversation data, populated on demand when the user selects a conversation.
+    /// Bounded to `MAX_CACHED_CONVERSATIONS` entries via LRU eviction.
     conversations: HashMap<String, Conversation>,
+    /// Tracks access order for LRU eviction. Most recently used at the back.
+    access_order: VecDeque<String>,
     active_conversation_id: Option<String>,
+    /// IDs of conversations that have an active LLM stream. These are protected from eviction
+    /// to avoid losing in-flight streaming state.
+    streaming_ids: Vec<String>,
 }
 
 impl ConversationsStore {
@@ -23,7 +34,9 @@ impl ConversationsStore {
         Self {
             metadata: Vec::new(),
             conversations: HashMap::new(),
+            access_order: VecDeque::new(),
             active_conversation_id: None,
+            streaming_ids: Vec::new(),
         }
     }
 
@@ -85,9 +98,65 @@ impl ConversationsStore {
     }
 
     /// Insert a lazily-loaded conversation into the cache.
+    /// Evicts the least recently used non-active, non-streaming conversations if the cache
+    /// exceeds `MAX_CACHED_CONVERSATIONS`.
     pub fn insert_loaded(&mut self, conversation: Conversation) {
         let id = conversation.id().to_string();
-        self.conversations.insert(id, conversation);
+        self.conversations.insert(id.clone(), conversation);
+        self.touch_access_order(&id);
+        self.evict_if_needed();
+    }
+
+    /// Move an ID to the back of the access order (most recently used).
+    fn touch_access_order(&mut self, id: &str) {
+        self.access_order.retain(|s| s != id);
+        self.access_order.push_back(id.to_string());
+    }
+
+    /// Evict least recently used non-protected conversations when cache exceeds the limit.
+    /// Protected conversations: the active one and any with active streams.
+    fn evict_if_needed(&mut self) {
+        while self.conversations.len() > MAX_CACHED_CONVERSATIONS {
+            let evict_id = self.find_lru_evictable();
+            if let Some(id) = evict_id {
+                self.conversations.remove(&id);
+                self.access_order.retain(|s| s != &id);
+            } else {
+                // All remaining conversations are protected — stop evicting
+                break;
+            }
+        }
+    }
+
+    /// Find the least recently used conversation that is neither active nor streaming.
+    fn find_lru_evictable(&self) -> Option<String> {
+        // access_order front = oldest access, so iterate from front
+        self.access_order
+            .iter()
+            .find(|id| {
+                // Don't evict the active conversation
+                self.active_conversation_id.as_deref() != Some(id.as_str())
+                    // Don't evict conversations with active streams
+                    && !self.streaming_ids.contains(id)
+            })
+            .cloned()
+    }
+
+    /// Mark a conversation as having an active stream (protects it from eviction).
+    pub fn mark_streaming(&mut self, id: &str) {
+        if !self.streaming_ids.contains(&id.to_string()) {
+            self.streaming_ids.push(id.to_string());
+        }
+    }
+
+    /// Remove the streaming mark from a conversation (allows eviction again).
+    pub fn unmark_streaming(&mut self, id: &str) {
+        self.streaming_ids.retain(|s| s != id);
+    }
+
+    /// Number of full conversations currently cached in memory.
+    pub fn cached_count(&self) -> usize {
+        self.conversations.len()
     }
 
     /// Get a conversation by ID (immutable). Returns `None` if not yet loaded.
@@ -106,6 +175,8 @@ impl ConversationsStore {
         let in_cache = self.conversations.remove(id).is_some();
         let in_metadata = self.metadata.iter().any(|m| m.id == id);
         self.remove_metadata(id);
+        self.access_order.retain(|s| s != id);
+        self.streaming_ids.retain(|s| s != id);
 
         if self.active_conversation_id.as_deref() == Some(id) {
             self.active_conversation_id = self.metadata.first().map(|m| m.id.clone());
@@ -122,6 +193,7 @@ impl ConversationsStore {
     /// or lazy-loading it, before the metadata list has been updated. Prefer `set_active`
     /// when you want existence validation.
     pub fn set_active_by_id(&mut self, id: String) {
+        self.touch_access_order(&id);
         self.active_conversation_id = Some(id);
     }
 
@@ -195,6 +267,17 @@ mod tests {
         store
     }
 
+    /// Simulate inserting a conversation into the LRU tracker without needing
+    /// a real Conversation object (which requires an AgentClient).
+    fn insert_dummy(store: &mut ConversationsStore, id: &str) {
+        store.access_order.retain(|s| s != id);
+        store.access_order.push_back(id.to_string());
+    }
+
+    fn cached_ids(store: &ConversationsStore) -> Vec<String> {
+        store.access_order.iter().cloned().collect()
+    }
+
     #[test]
     fn list_recent_metadata_returns_correct_count() {
         let store = make_store_with_n_entries(100);
@@ -231,5 +314,94 @@ mod tests {
         assert_eq!(ids.len(), 1000);
         assert_eq!(ids[0], "conv-999");
         assert_eq!(ids[999], "conv-0");
+    }
+
+    // ── LRU eviction tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn touch_access_order_moves_to_back() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        insert_dummy(&mut store, "c");
+        assert_eq!(cached_ids(&store), vec!["a", "b", "c"]);
+
+        // Touch "a" — should move to back
+        store.touch_access_order("a");
+        assert_eq!(cached_ids(&store), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn find_lru_evictable_returns_oldest_non_protected() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        insert_dummy(&mut store, "c");
+
+        // No protections: oldest is "a"
+        assert_eq!(store.find_lru_evictable(), Some("a".to_string()));
+
+        // Protect "a" as active: oldest evictable is "b"
+        store.set_active_by_id("a".to_string());
+        assert_eq!(store.find_lru_evictable(), Some("b".to_string()));
+
+        // Also protect "b" as streaming: oldest evictable is "c"
+        store.mark_streaming("b");
+        assert_eq!(store.find_lru_evictable(), Some("c".to_string()));
+
+        // Protect "c" too: nothing evictable
+        store.mark_streaming("c");
+        assert_eq!(store.find_lru_evictable(), None);
+    }
+
+    #[test]
+    fn set_active_by_id_updates_access_order() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        insert_dummy(&mut store, "c");
+
+        // Selecting "a" as active moves it to the back
+        store.set_active_by_id("a".to_string());
+        assert_eq!(cached_ids(&store), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn mark_streaming_protects_from_eviction() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+
+        store.mark_streaming("a");
+        assert_eq!(store.find_lru_evictable(), Some("b".to_string()));
+
+        store.unmark_streaming("a");
+        assert_eq!(store.find_lru_evictable(), Some("a".to_string()));
+    }
+
+    #[test]
+    fn delete_conversation_cleans_up_access_order_and_streaming() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+        insert_dummy(&mut store, "b");
+        store.mark_streaming("a");
+
+        store.delete_conversation("a");
+        assert_eq!(cached_ids(&store), vec!["b"]);
+        // streaming_ids should also be cleaned up
+        assert_eq!(store.find_lru_evictable(), Some("b".to_string()));
+    }
+
+    #[test]
+    fn max_cached_conversations_constant_is_reasonable() {
+        // Guard: keep the constant between 5 and 50 to prevent accidental extremes
+        assert!(
+            MAX_CACHED_CONVERSATIONS >= 5,
+            "Cache limit too low — would cause excessive reloads"
+        );
+        assert!(
+            MAX_CACHED_CONVERSATIONS <= 50,
+            "Cache limit too high — defeats the purpose of eviction"
+        );
     }
 }
