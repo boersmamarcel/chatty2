@@ -396,7 +396,10 @@ impl ChatEngine {
                         })
                         .is_err()
                     {
-                        warn!(generation, "Failed to send ConversationInitialized event (receiver dropped)");
+                        warn!(
+                            generation,
+                            "Failed to send ConversationInitialized event (receiver dropped)"
+                        );
                     }
                 }
                 Err(e) => {

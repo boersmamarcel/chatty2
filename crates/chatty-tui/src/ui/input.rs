@@ -310,9 +310,10 @@ impl InputState {
             .map(SlashMenuItem::Command)
             .collect();
 
-        let skill_items = self.available_skills.iter().filter(|(name, _)| {
-            query.is_empty() || name.to_ascii_lowercase().starts_with(&query)
-        });
+        let skill_items = self
+            .available_skills
+            .iter()
+            .filter(|(name, _)| query.is_empty() || name.to_ascii_lowercase().starts_with(&query));
         items.extend(skill_items.map(|(name, desc)| SlashMenuItem::Skill {
             name: name.clone(),
             description: desc.clone(),
@@ -480,16 +481,16 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        InputState, SlashMenuItem, apply_at_to_input, at_menu_items_for, at_query_from,
-    };
+    use super::{InputState, SlashMenuItem, apply_at_to_input, at_menu_items_for, at_query_from};
 
     fn has_command(items: &[SlashMenuItem], command: &str) -> bool {
         items.iter().any(|i| i.display_command() == command)
     }
 
     fn has_skill(items: &[SlashMenuItem], name: &str) -> bool {
-        items.iter().any(|i| matches!(i, SlashMenuItem::Skill { name: n, .. } if n == name))
+        items
+            .iter()
+            .any(|i| matches!(i, SlashMenuItem::Skill { name: n, .. } if n == name))
     }
 
     #[test]
@@ -515,13 +516,19 @@ mod tests {
         let mut input = InputState::new();
         input.set_available_skills(vec![
             ("fix-ci".to_string(), "Fix CI failures".to_string()),
-            ("build-and-check".to_string(), "Run build pipeline".to_string()),
+            (
+                "build-and-check".to_string(),
+                "Run build pipeline".to_string(),
+            ),
         ]);
 
         input.set_input_text("/");
         let all = input.slash_menu_items();
         assert!(has_skill(&all, "fix-ci"), "fix-ci skill should appear");
-        assert!(has_skill(&all, "build-and-check"), "build-and-check skill should appear");
+        assert!(
+            has_skill(&all, "build-and-check"),
+            "build-and-check skill should appear"
+        );
 
         // Filter: only "fix" prefix
         input.set_input_text("/fix");

@@ -527,6 +527,9 @@ mod tests {
     fn test_cap_svg_dimensions_exact_limit_unchanged() {
         let svg = r#"<svg width="4096" height="4096" viewBox="0 0 4096 4096" xmlns="http://www.w3.org/2000/svg"></svg>"#;
         let result = MermaidRendererService::cap_svg_dimensions(svg);
-        assert_eq!(result, svg, "SVG at exactly the limit should not be modified");
+        assert_eq!(
+            result, svg,
+            "SVG at exactly the limit should not be modified"
+        );
     }
 }

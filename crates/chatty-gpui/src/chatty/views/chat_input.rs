@@ -270,10 +270,7 @@ pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
 
 /// Returns combined slash-menu items: built-in commands first, then filesystem
 /// skills — both filtered to match the current query in `input_text`.
-pub fn slash_menu_items_with_skills(
-    input_text: &str,
-    skills: &[SkillEntry],
-) -> Vec<SlashMenuItem> {
+pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> Vec<SlashMenuItem> {
     let trimmed = input_text.trim();
     if !trimmed.starts_with('/') {
         return Vec::new();
@@ -296,9 +293,9 @@ pub fn slash_menu_items_with_skills(
         .map(|cmd| SlashMenuItem::Command(cmd))
         .collect();
 
-    let skill_items = skills.iter().filter(|skill| {
-        query.is_empty() || skill.name.to_ascii_lowercase().starts_with(&query)
-    });
+    let skill_items = skills
+        .iter()
+        .filter(|skill| query.is_empty() || skill.name.to_ascii_lowercase().starts_with(&query));
     items.extend(skill_items.map(|s| SlashMenuItem::Skill(s.clone())));
 
     items
@@ -1473,7 +1470,9 @@ fn render_slash_menu(
                     };
 
                     div()
-                        .id(ElementId::Name(format!("slash-cmd-{}", display_command).into()))
+                        .id(ElementId::Name(
+                            format!("slash-cmd-{}", display_command).into(),
+                        ))
                         .px_3()
                         .py_2()
                         .rounded_sm()
@@ -1512,12 +1511,7 @@ fn render_slash_menu(
                                 .child(display_command),
                         )
                         .when(!is_skill, |d| {
-                            d.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0x6b7280))
-                                    .child(description),
-                            )
+                            d.child(div().text_sm().text_color(rgb(0x6b7280)).child(description))
                         })
                 })),
         )
