@@ -169,7 +169,9 @@ impl Tool for BrowseTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::BrowserEngineConfig;
     use crate::page_repr::{PageSnapshot, PageState};
+    use rig::tool::Tool;
 
     #[test]
     fn test_browse_output_from_snapshot() {
@@ -208,5 +210,64 @@ mod tests {
         let output = BrowseToolOutput::from_snapshot(&snapshot);
         assert!(output.content.len() < 2100); // 2000 + "..."
         assert!(output.content.ends_with("..."));
+    }
+
+    /// End-to-end test: BrowseTool → BrowserEngine (mock) → BrowserSession (mock) → PageSnapshot.
+    /// This exercises the full tool pipeline without needing a real browser.
+    #[tokio::test]
+    async fn test_browse_tool_mock_end_to_end() {
+        let config = BrowserEngineConfig {
+            mock_mode: true,
+            ..BrowserEngineConfig::default()
+        };
+        let engine = Arc::new(crate::engine::BrowserEngine::new(config));
+        let tool = BrowseTool::new(engine);
+
+        let output = tool
+            .call(BrowseToolArgs {
+                url: "https://example.com".to_string(),
+            })
+            .await
+            .expect("Mock browse should succeed");
+
+        assert!(output.title.contains("example.com"));
+        assert_eq!(output.url, "https://example.com");
+        assert!(!output.content.is_empty());
+        assert!(output.interactive_element_count > 0);
+        assert!(output.form_count > 0);
+        assert!(output.link_count > 0);
+        assert!(output.page_snapshot.contains("example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_browse_tool_mock_rejects_bad_url() {
+        let config = BrowserEngineConfig {
+            mock_mode: true,
+            ..BrowserEngineConfig::default()
+        };
+        let engine = Arc::new(crate::engine::BrowserEngine::new(config));
+        let tool = BrowseTool::new(engine);
+
+        let result = tool
+            .call(BrowseToolArgs {
+                url: "ftp://example.com".to_string(),
+            })
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_browse_tool_mock_definition() {
+        let config = BrowserEngineConfig {
+            mock_mode: true,
+            ..BrowserEngineConfig::default()
+        };
+        let engine = Arc::new(crate::engine::BrowserEngine::new(config));
+        let tool = BrowseTool::new(engine);
+
+        let def = tool.definition("test".to_string()).await;
+        assert_eq!(def.name, "browse");
+        assert!(def.description.contains("Navigate"));
     }
 }

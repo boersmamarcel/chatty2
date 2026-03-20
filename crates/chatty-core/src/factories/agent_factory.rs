@@ -1107,9 +1107,19 @@ impl AgentClient {
             .map(|s| s.browser_enabled)
             .unwrap_or(false)
         {
-            let config = chatty_browser::BrowserEngineConfig::default();
+            let mock_mode = std::env::var("CHATTY_BROWSER_MOCK")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let config = chatty_browser::BrowserEngineConfig {
+                mock_mode,
+                ..chatty_browser::BrowserEngineConfig::default()
+            };
             let engine = std::sync::Arc::new(chatty_browser::BrowserEngine::new(config));
-            tracing::info!("Browse tool enabled");
+            if mock_mode {
+                tracing::info!("Browse tool enabled (MOCK mode — no real browser)");
+            } else {
+                tracing::info!("Browse tool enabled");
+            }
             Some(BrowseTool::new(engine))
         } else {
             tracing::info!("Browse tool disabled by execution settings");

@@ -27,6 +27,11 @@ pub struct BrowserEngineConfig {
     pub headless: bool,
     /// Page load timeout in milliseconds.
     pub page_load_timeout_ms: u64,
+    /// Mock mode: return realistic fake page data without launching versoview.
+    /// Useful for testing the full tool pipeline and LLM integration.
+    /// Enable via `BrowserEngineConfig { mock_mode: true, .. }` or by setting
+    /// the `CHATTY_BROWSER_MOCK=1` environment variable.
+    pub mock_mode: bool,
 }
 
 impl Default for BrowserEngineConfig {
@@ -36,6 +41,7 @@ impl Default for BrowserEngineConfig {
             devtools_port: 0,
             headless: false,
             page_load_timeout_ms: 30_000,
+            mock_mode: false,
         }
     }
 }
@@ -51,6 +57,8 @@ pub struct BrowserEngine {
     resolved_port: u16,
     /// Next session ID counter.
     next_session_id: std::sync::atomic::AtomicU64,
+    /// Whether mock mode is active (no real browser process).
+    mock_running: std::sync::atomic::AtomicBool,
 }
 
 impl BrowserEngine {
@@ -70,11 +78,21 @@ impl BrowserEngine {
             devtools: Arc::new(DevToolsClient::new(port)),
             resolved_port: port,
             next_session_id: std::sync::atomic::AtomicU64::new(1),
+            mock_running: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Start the versoview process and connect to its DevTools server.
+    ///
+    /// In mock mode, this succeeds immediately without launching any process.
     pub async fn start(&self) -> Result<(), BrowserError> {
+        if self.config.mock_mode {
+            info!("Browser engine starting in MOCK mode (no versoview process)");
+            self.mock_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+
         let binary_path = self.resolve_versoview_path()?;
         info!(path = %binary_path.display(), port = self.resolved_port, "Starting versoview");
 
@@ -128,6 +146,9 @@ impl BrowserEngine {
 
     /// Check if the engine is currently running and connected.
     pub async fn is_running(&self) -> bool {
+        if self.mock_running.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
         let proc = self.process.lock().await;
         if proc.is_none() {
             return false;
@@ -144,6 +165,7 @@ impl BrowserEngine {
             format!("session-{}", session_id),
             self.devtools.clone(),
             self.config.page_load_timeout_ms,
+            self.config.mock_mode,
         )
     }
 
@@ -155,6 +177,11 @@ impl BrowserEngine {
     /// Return the resolved DevTools port.
     pub fn port(&self) -> u16 {
         self.resolved_port
+    }
+
+    /// Check if the engine is configured in mock mode.
+    pub fn is_mock(&self) -> bool {
+        self.config.mock_mode
     }
 
     /// Resolve the path to the `versoview` binary.
@@ -251,6 +278,7 @@ mod tests {
         let config = BrowserEngineConfig::default();
         assert_eq!(config.devtools_port, 0);
         assert!(!config.headless);
+        assert!(!config.mock_mode);
         assert_eq!(config.page_load_timeout_ms, 30_000);
         assert!(config.versoview_path.is_none());
     }

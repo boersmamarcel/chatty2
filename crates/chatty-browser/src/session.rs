@@ -32,6 +32,8 @@ pub struct BrowserSession {
     page_load_timeout_ms: u64,
     /// Counter for generating stable element IDs within this session.
     next_element_id: u64,
+    /// Mock mode: return fake page data without a real browser.
+    mock_mode: bool,
 }
 
 impl BrowserSession {
@@ -40,6 +42,7 @@ impl BrowserSession {
         id: String,
         devtools: Arc<DevToolsClient>,
         page_load_timeout_ms: u64,
+        mock_mode: bool,
     ) -> Self {
         Self {
             id,
@@ -48,6 +51,7 @@ impl BrowserSession {
             current_url: None,
             page_load_timeout_ms,
             next_element_id: 1,
+            mock_mode,
         }
     }
 
@@ -64,6 +68,10 @@ impl BrowserSession {
     /// Navigate to a URL and return a snapshot of the loaded page.
     pub async fn navigate(&mut self, url: &str) -> Result<PageSnapshot, BrowserError> {
         debug!(url, session = %self.id, "Navigating");
+
+        if self.mock_mode {
+            return Ok(self.build_mock_snapshot(url));
+        }
 
         let response = self.devtools.navigate(url, &self.actor_id).await?;
 
@@ -238,6 +246,115 @@ impl BrowserSession {
         })
     }
 
+    /// Build a realistic mock page snapshot for testing without a real browser.
+    ///
+    /// Generates a plausible `PageSnapshot` based on the URL domain, including
+    /// sample text content, interactive elements, forms (for login-like pages),
+    /// and links. This allows testing the full browse tool pipeline end-to-end.
+    fn build_mock_snapshot(&mut self, url: &str) -> PageSnapshot {
+        self.next_element_id = 1;
+        self.current_url = Some(url.to_string());
+
+        // Extract domain for realistic mock content
+        let domain = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("example.com");
+
+        let title = format!("Welcome to {} - Mock Page", domain);
+        let text_content = format!(
+            "This is a mock page snapshot for {}.\n\n\
+             The browse tool is running in mock mode, which means it returns \
+             realistic fake data without launching a real browser engine. \
+             This is useful for testing LLM tool integration.\n\n\
+             In production, the browse tool launches a Verso (Servo-based) browser \
+             that executes JavaScript, renders the page, and extracts structured data.\n\n\
+             Page content from {} would appear here with the full text, \
+             interactive elements, forms, and links extracted from the DOM.",
+            url, domain
+        );
+
+        let elements = vec![
+            InteractiveElement {
+                id: self.next_element_id_str(),
+                tag: "input".to_string(),
+                role: None,
+                text: String::new(),
+                element_type: Some("text".to_string()),
+                selector: "#search-input".to_string(),
+                is_visible: true,
+                is_enabled: true,
+            },
+            InteractiveElement {
+                id: self.next_element_id_str(),
+                tag: "button".to_string(),
+                role: Some("button".to_string()),
+                text: "Search".to_string(),
+                element_type: Some("submit".to_string()),
+                selector: "#search-button".to_string(),
+                is_visible: true,
+                is_enabled: true,
+            },
+            InteractiveElement {
+                id: self.next_element_id_str(),
+                tag: "a".to_string(),
+                role: Some("link".to_string()),
+                text: "Sign In".to_string(),
+                element_type: None,
+                selector: "#signin-link".to_string(),
+                is_visible: true,
+                is_enabled: true,
+            },
+        ];
+
+        let forms = vec![FormInfo {
+            action: Some(format!("https://{}/search", domain)),
+            method: Some("GET".to_string()),
+            fields: vec![FormField {
+                element_id: "e1".to_string(),
+                name: "q".to_string(),
+                field_type: Some("text".to_string()),
+                required: false,
+            }],
+        }];
+
+        let links = vec![
+            LinkInfo {
+                text: "Home".to_string(),
+                href: format!("https://{}/", domain),
+            },
+            LinkInfo {
+                text: "About".to_string(),
+                href: format!("https://{}/about", domain),
+            },
+            LinkInfo {
+                text: "Contact".to_string(),
+                href: format!("https://{}/contact", domain),
+            },
+        ];
+
+        debug!(url, "Built mock page snapshot");
+
+        PageSnapshot {
+            url: url.to_string(),
+            title,
+            text_content,
+            elements,
+            forms,
+            links,
+            state: PageState::Complete,
+        }
+    }
+
+    /// Generate the next element ID string (e.g., "e1", "e2").
+    fn next_element_id_str(&mut self) -> String {
+        let id = format!("e{}", self.next_element_id);
+        self.next_element_id += 1;
+        id
+    }
+
     /// Wait for the page to reach "complete" ready state.
     async fn wait_for_page_load(&self) -> Result<(), BrowserError> {
         let start = std::time::Instant::now();
@@ -379,7 +496,7 @@ mod tests {
     #[test]
     fn test_parse_elements() {
         let devtools = Arc::new(DevToolsClient::new(0));
-        let mut session = BrowserSession::new("test".to_string(), devtools, 30_000);
+        let mut session = BrowserSession::new("test".to_string(), devtools, 30_000, false);
 
         let json = r##"[
             {"tag":"button","role":null,"text":"Submit","type":null,"selector":"#submit","visible":true,"enabled":true},
@@ -400,7 +517,7 @@ mod tests {
     #[test]
     fn test_parse_forms() {
         let devtools = Arc::new(DevToolsClient::new(0));
-        let session = BrowserSession::new("test".to_string(), devtools, 30_000);
+        let session = BrowserSession::new("test".to_string(), devtools, 30_000, false);
 
         let json = r#"[{
             "action": "/login",
@@ -421,7 +538,7 @@ mod tests {
     #[test]
     fn test_parse_links() {
         let devtools = Arc::new(DevToolsClient::new(0));
-        let session = BrowserSession::new("test".to_string(), devtools, 30_000);
+        let session = BrowserSession::new("test".to_string(), devtools, 30_000, false);
 
         let json = r#"[
             {"text":"Home","href":"https://example.com"},
@@ -432,5 +549,47 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].text, "Home");
         assert_eq!(links[1].href, "https://example.com/about");
+    }
+
+    #[tokio::test]
+    async fn test_mock_session_navigate() {
+        let devtools = Arc::new(DevToolsClient::new(0));
+        let mut session = BrowserSession::new("mock-test".to_string(), devtools, 30_000, true);
+
+        let snapshot = session
+            .navigate("https://example.com/test")
+            .await
+            .expect("Mock navigation should succeed");
+
+        assert_eq!(snapshot.url, "https://example.com/test");
+        assert!(snapshot.title.contains("example.com"));
+        assert!(!snapshot.text_content.is_empty());
+        assert_eq!(snapshot.state, PageState::Complete);
+        // Should have mock interactive elements
+        assert!(!snapshot.elements.is_empty());
+        assert_eq!(snapshot.elements[0].id, "e1");
+        // Should have mock forms
+        assert!(!snapshot.forms.is_empty());
+        // Should have mock links
+        assert!(!snapshot.links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_session_navigate_different_urls() {
+        let devtools = Arc::new(DevToolsClient::new(0));
+        let mut session = BrowserSession::new("mock-test".to_string(), devtools, 30_000, true);
+
+        let snap1 = session
+            .navigate("https://github.com")
+            .await
+            .expect("Mock navigation should succeed");
+        assert!(snap1.title.contains("github.com"));
+
+        let snap2 = session
+            .navigate("https://rust-lang.org/docs")
+            .await
+            .expect("Mock navigation should succeed");
+        assert!(snap2.title.contains("rust-lang.org"));
+        assert_eq!(snap2.url, "https://rust-lang.org/docs");
     }
 }
