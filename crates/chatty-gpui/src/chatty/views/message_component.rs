@@ -436,17 +436,21 @@ fn render_inline_math_batch(
                 // Before the first math on this line, flush any preceding
                 // text-only lines as ONE MarkdownContent so that headings, lists,
                 // paragraphs, and bold/italic in those lines render correctly.
-                if !full_text_buf.is_empty() {
+                // Trim trailing whitespace to prevent the markdown renderer from
+                // creating extra vertical space for dangling paragraph separators.
+                let trimmed = full_text_buf.trim_end();
+                if !trimmed.is_empty() {
                     let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
                     md_counter += 1;
                     elements.push(
                         MarkdownContent {
-                            content: std::mem::take(&mut full_text_buf),
+                            content: trimmed.to_string(),
                             message_index: md_idx,
                         }
                         .into_any_element(),
                     );
                 }
+                full_text_buf.clear();
                 // Move the current line's plain-text prefix into the math row.
                 if !text_buf.is_empty() {
                     math_row.push(
@@ -477,14 +481,17 @@ fn render_inline_math_batch(
         flush_math_row(&mut text_buf, &mut math_row, elements);
     } else {
         // The last line is text-only: append it and emit the whole run.
+        // Trim trailing whitespace to prevent the markdown renderer from
+        // creating extra vertical space for dangling paragraph separators.
         if !text_buf.is_empty() {
             full_text_buf.push_str(&text_buf);
         }
-        if !full_text_buf.is_empty() {
+        let trimmed = full_text_buf.trim_end();
+        if !trimmed.is_empty() {
             let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
             elements.push(
                 MarkdownContent {
-                    content: full_text_buf,
+                    content: trimmed.to_string(),
                     message_index: md_idx,
                 }
                 .into_any_element(),
