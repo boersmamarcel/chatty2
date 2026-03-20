@@ -1659,7 +1659,12 @@ where
                 "Processing tool call for interleaving"
             );
 
-            // Only render if there's new text since the last segment
+            // Only render if there's new text since the last segment.
+            // text_before is frozen (captured when the tool call started), so
+            // treat it as non-streaming to use the persistent parsed_cache
+            // instead of the streaming cache.  Sharing a single streaming
+            // cache across multiple independent text segments corrupts its
+            // incremental-reuse state, producing wrong elements and blank space.
             if text_before.len() > last_text_end {
                 let text_segment = &text_before[last_text_end..];
                 if !text_segment.is_empty() {
@@ -1667,10 +1672,10 @@ where
                         text_segment,
                         index * 100 + tool_idx,
                         msg.is_markdown,
-                        msg.is_streaming,
+                        false, // frozen content — use persistent cache
                         is_dark,
                         parsed_cache,
-                        streaming_cache,
+                        &mut None, // don't pollute the streaming cache
                         cx,
                     );
                     container = container.children(elements);
