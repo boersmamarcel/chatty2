@@ -37,11 +37,10 @@ pub struct ExecutionSettingsModel {
     /// Zero-configuration web access without requiring an MCP fetch server.
     #[serde(default = "default_true")]
     pub fetch_enabled: bool,
-    /// Enable the built-in browser tool, which allows the LLM to navigate web pages
-    /// using the Verso browser engine (Servo-based). Supports JavaScript execution,
-    /// form interaction, and structured page extraction.
-    /// Requires the `versoview` binary to be installed.
-    #[serde(default)]
+    /// Enable the built-in browser tool, which allows the LLM to navigate web pages.
+    /// Uses the Verso browser engine when available, with automatic HTTP fallback
+    /// when Verso is not installed — no external binary required.
+    #[serde(default = "default_true")]
     pub browser_enabled: bool,
     /// Enable git integration tools (status, diff, log, branch, commit).
     /// Requires workspace_dir to be set and the workspace to be a git repository.
@@ -100,7 +99,7 @@ impl Default for ExecutionSettingsModel {
             filesystem_write_enabled: true, // Enabled by default when workspace is set
             mcp_service_tool_enabled: false,
             fetch_enabled: true, // Enabled by default for zero-config web access
-            browser_enabled: false, // Opt-in: requires versoview binary
+            browser_enabled: true, // Enabled by default; HTTP fallback when Verso unavailable
             git_enabled: false,  // Opt-in: requires workspace with git repo
             docker_code_execution_enabled: false, // Opt-in: requires Docker
             docker_host: None,

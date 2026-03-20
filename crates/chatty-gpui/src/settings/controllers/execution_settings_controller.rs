@@ -258,6 +258,31 @@ pub fn toggle_docker_code_execution(cx: &mut App) {
     .detach();
 }
 
+/// Toggle the built-in browser tool enabled/disabled and persist to disk.
+pub fn toggle_browser(cx: &mut App) {
+    // 1. Apply update immediately (optimistic update)
+    let new_enabled = !cx.global::<ExecutionSettingsModel>().browser_enabled;
+    cx.global_mut::<ExecutionSettingsModel>().browser_enabled = new_enabled;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately (optimistic update)
+    cx.refresh_windows();
+
+    // 4. Notify so the active conversation's agent is rebuilt with the new tool set
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle git integration tools enabled/disabled and persist to disk.
 pub fn toggle_git(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)
