@@ -62,6 +62,7 @@ impl ListToolsTool {
         has_memory: bool,
         has_search_web: bool,
         has_sub_agent: bool,
+        has_browse: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -370,6 +371,14 @@ impl ListToolsTool {
             });
         }
 
+        if has_browse {
+            native_tools.push(ToolInfo {
+                name: "browse".to_string(),
+                description: "Navigate to a URL using a built-in browser engine that executes JavaScript. Returns structured page content including text, interactive elements (buttons, inputs), forms, and links. Use this for dynamic web pages and SPAs that require JS rendering.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         // read_skill is always available — it's the on-demand companion to the slim
         // skill descriptions shown in the automatic context block.
         native_tools.push(ToolInfo {
@@ -418,6 +427,7 @@ impl ListToolsTool {
             false,
             false,
             false,
+            false,
             Vec::new(),
         )
     }
@@ -434,6 +444,7 @@ impl Tool for ListToolsTool {
             name: "list_tools".to_string(),
             description: "List all available tools including:\n\
                          - fetch: Fetch web URLs and return readable text content\n\
+                         - browse: Navigate web pages with a built-in browser engine (JS rendering)\n\
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
                          - Filesystem tools: read_file, write_file, list_directory, etc.\n\
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit\n\
