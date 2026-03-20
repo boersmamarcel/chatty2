@@ -352,6 +352,8 @@ impl SystemTraceView {
             .text_color(badge_text)
             .child(state_label);
 
+        let tool_url = extract_url_from_tool_call(tool_call);
+
         let mut container = div().flex().flex_col().gap_1().child(
             // Command invocation line
             div()
@@ -393,6 +395,30 @@ impl SystemTraceView {
                             .text_xs()
                             .text_color(muted_text)
                             .child(format!("({:.1}s)", duration.as_secs_f32())),
+                    )
+                })
+                .when_some(tool_url, |this, url| {
+                    this.child(
+                        div()
+                            .id(ElementId::Name(
+                                format!("trace-open-url-{}", index).into(),
+                            ))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .rounded_sm()
+                            .hover(|s| s.bg(panel_bg))
+                            .p(px(2.0))
+                            .tooltip(|window, cx| {
+                                gpui_component::Tooltip::new("Open in browser", window, cx)
+                            })
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                                open_url_in_system_browser(&url);
+                            })
+                            .child(
+                                Icon::new(CustomIcon::ExternalLink)
+                                    .size_3p5()
+                                    .text_color(muted_text),
+                            ),
                     )
                 }),
         );
@@ -911,6 +937,39 @@ where
         );
     }
 
+    // Extract URL for the external link icon (browse/fetch tools)
+    let tool_url = extract_url_from_tool_call(tool_call);
+
+    // Wrap header in a row that includes the optional external link icon
+    let header_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(div().flex_1().min_w_0().child(header))
+        .when_some(tool_url, |this, url| {
+            this.child(
+                div()
+                    .id(ElementId::Name(
+                        format!("open-url-{}-{}", message_index, tool_index).into(),
+                    ))
+                    .flex_shrink_0()
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .p(px(2.0))
+                    .tooltip(|window, cx| gpui_component::Tooltip::new("Open in browser", window, cx))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                        open_url_in_system_browser(&url);
+                    })
+                    .child(
+                        Icon::new(CustomIcon::ExternalLink)
+                            .size_3p5()
+                            .text_color(muted_text),
+                    ),
+            )
+        });
+
     // Return header + conditionally visible content
     div()
         .flex()
@@ -922,7 +981,7 @@ where
         .border_color(cx.theme().border)
         .rounded_md()
         .bg(panel_bg.opacity(0.3))
-        .child(header)
+        .child(header_row)
         .when(!collapsed && !content_children.is_empty(), |this| {
             this.child(
                 div()
@@ -1218,4 +1277,41 @@ fn escape_markdown(s: &str) -> SharedString {
         }
     }
     SharedString::from(out)
+}
+
+/// Extract a URL from a tool call's input, if the tool is URL-bearing (browse, fetch).
+fn extract_url_from_tool_call(tool_call: &ToolCallBlock) -> Option<String> {
+    match tool_call.tool_name.as_str() {
+        "browse" | "fetch" => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool_call.input) {
+                json.get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Open a URL in the system's default web browser.
+fn open_url_in_system_browser(url: &str) {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", &url])
+                .spawn();
+        }
+    });
 }
