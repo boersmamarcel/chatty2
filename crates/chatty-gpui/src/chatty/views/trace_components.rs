@@ -3,7 +3,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
+use gpui_component::{button::Button, text::TextView, ActiveTheme, Icon, Sizable};
 use std::time::Duration;
 
 use super::diff_view_component::DiffViewComponent;
@@ -400,9 +400,7 @@ impl SystemTraceView {
                 .when_some(tool_url, |this, url| {
                     this.child(
                         div()
-                            .id(ElementId::Name(
-                                format!("trace-open-url-{}", index).into(),
-                            ))
+                            .id(ElementId::Name(format!("trace-open-url-{}", index).into()))
                             .flex_shrink_0()
                             .cursor_pointer()
                             .rounded_sm()
@@ -442,38 +440,64 @@ impl SystemTraceView {
             .as_ref()
             .or(tool_call.output_preview.as_ref())
         {
-            let formatted_output = format_tool_output(output);
-            container = container.child(
-                div()
-                    .ml_4()
-                    .pl_3()
-                    .border_l_2()
-                    .border_color(border_color)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_xs()
-                            .text_color(muted_text)
-                            .child("output:"),
-                    )
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_xs()
-                            .px_2()
-                            .py_1()
-                            .bg(panel_bg)
-                            .rounded_sm()
-                            .text_color(text_color)
-                            .child(SelectableText::new(
-                                ElementId::Name(format!("tool-output-{}", index).into()),
-                                formatted_output,
-                            )),
-                    ),
-            );
+            // For browse/fetch tools, try to render a styled website preview card
+            let is_web_tool = tool_call.tool_name == "browse" || tool_call.tool_name == "fetch";
+            let url_from_input = extract_url_from_tool_call(tool_call);
+            let preview = if is_web_tool {
+                try_render_website_preview(
+                    &tool_call.tool_name,
+                    output,
+                    url_from_input.as_deref(),
+                    &format!("trace-{}", index),
+                    cx,
+                )
+            } else {
+                None
+            };
+
+            if let Some(card) = preview {
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .child(card),
+                );
+            } else {
+                let formatted_output = format_tool_output(output);
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_xs()
+                                .text_color(muted_text)
+                                .child("output:"),
+                        )
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_xs()
+                                .px_2()
+                                .py_1()
+                                .bg(panel_bg)
+                                .rounded_sm()
+                                .text_color(text_color)
+                                .child(SelectableText::new(
+                                    ElementId::Name(format!("tool-output-{}", index).into()),
+                                    formatted_output,
+                                )),
+                        ),
+                );
+            }
         }
 
         // Error section (if error state)
@@ -867,24 +891,44 @@ where
             .as_ref()
             .or(tool_call.output_preview.as_ref())
         {
-            let formatted_output = format_tool_output(output);
-            content_children.push(
-                div()
-                    .font_family("monospace")
-                    .text_xs()
-                    .px_2()
-                    .py_1()
-                    .bg(panel_bg)
-                    .rounded_sm()
-                    .text_color(text_color)
-                    .child(SelectableText::new(
-                        ElementId::Name(
-                            format!("inline-tool-output-{}-{}", message_index, tool_index).into(),
-                        ),
-                        formatted_output,
-                    ))
-                    .into_any_element(),
-            );
+            // For browse/fetch tools, try to render a styled website preview card
+            let is_web_tool = tool_call.tool_name == "browse" || tool_call.tool_name == "fetch";
+            let url_from_input = extract_url_from_tool_call(tool_call);
+            let preview = if is_web_tool {
+                try_render_website_preview(
+                    &tool_call.tool_name,
+                    output,
+                    url_from_input.as_deref(),
+                    &format!("inline-{}-{}", message_index, tool_index),
+                    cx,
+                )
+            } else {
+                None
+            };
+
+            if let Some(card) = preview {
+                content_children.push(card);
+            } else {
+                let formatted_output = format_tool_output(output);
+                content_children.push(
+                    div()
+                        .font_family("monospace")
+                        .text_xs()
+                        .px_2()
+                        .py_1()
+                        .bg(panel_bg)
+                        .rounded_sm()
+                        .text_color(text_color)
+                        .child(SelectableText::new(
+                            ElementId::Name(
+                                format!("inline-tool-output-{}-{}", message_index, tool_index)
+                                    .into(),
+                            ),
+                            formatted_output,
+                        ))
+                        .into_any_element(),
+                );
+            }
         } else if matches!(tool_call.state, ToolCallState::Running) {
             // Show "Running..." for running tools
             content_children.push(
@@ -958,7 +1002,9 @@ where
                     .rounded_sm()
                     .hover(|s| s.bg(cx.theme().muted))
                     .p(px(2.0))
-                    .tooltip(|window, cx| gpui_component::Tooltip::new("Open in browser", window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_component::Tooltip::new("Open in browser", window, cx)
+                    })
                     .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
                         open_url_in_system_browser(&url);
                     })
@@ -1233,6 +1279,202 @@ fn format_tool_output(output: &str) -> String {
 
     // Return as-is if not JSON or can't extract anything useful
     output.to_string()
+}
+
+/// Try to render a website preview card from a browse or fetch tool's output.
+/// Returns `Some(element)` if the output can be parsed, `None` otherwise.
+fn try_render_website_preview(
+    tool_name: &str,
+    output: &str,
+    url_from_input: Option<&str>,
+    element_id_prefix: &str,
+    cx: &App,
+) -> Option<AnyElement> {
+    let json: serde_json::Value = serde_json::from_str(output).ok()?;
+
+    // Extract fields based on tool type
+    let (title, url, content, meta_line) = match tool_name {
+        "browse" => {
+            let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let url = json.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let link_count = json.get("link_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let form_count = json.get("form_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mut meta_parts = Vec::new();
+            if link_count > 0 {
+                meta_parts.push(format!(
+                    "{} link{}",
+                    link_count,
+                    if link_count == 1 { "" } else { "s" }
+                ));
+            }
+            if form_count > 0 {
+                meta_parts.push(format!(
+                    "{} form{}",
+                    form_count,
+                    if form_count == 1 { "" } else { "s" }
+                ));
+            }
+            let meta = if meta_parts.is_empty() {
+                None
+            } else {
+                Some(meta_parts.join(" · "))
+            };
+            (
+                title.to_string(),
+                url.to_string(),
+                content.to_string(),
+                meta,
+            )
+        }
+        "fetch" => {
+            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let status = json.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+            let content_type = json
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let url = url_from_input.unwrap_or("").to_string();
+            // Extract a pseudo-title from the first non-empty line of content
+            let title = content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            let mut meta_parts = Vec::new();
+            if status > 0 {
+                meta_parts.push(format!("HTTP {}", status));
+            }
+            if !content_type.is_empty() {
+                meta_parts.push(content_type.to_string());
+            }
+            let meta = if meta_parts.is_empty() {
+                None
+            } else {
+                Some(meta_parts.join(" · "))
+            };
+            (title, url, content.to_string(), meta)
+        }
+        _ => return None,
+    };
+
+    // Truncate content for preview
+    let preview_text: String = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview_text = if preview_text.chars().count() > 300 {
+        format!("{}…", preview_text.chars().take(297).collect::<String>())
+    } else {
+        preview_text
+    };
+
+    let muted_text = cx.theme().muted_foreground;
+    let text_color = cx.theme().foreground;
+    let card_bg = cx.theme().muted;
+    let accent = cx.theme().primary;
+
+    let url_for_click = url.clone();
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .bg(card_bg)
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            // Title row with globe icon
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(CustomIcon::Earth).size_4().text_color(accent))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(text_color)
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(if title.is_empty() { url.clone() } else { title }),
+                    ),
+            )
+            // URL line (clickable)
+            .when(!url.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("{}-preview-url", element_id_prefix).into(),
+                        ))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .pl_6() // align with title text (past icon)
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                            open_url_in_system_browser(&url_for_click);
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(accent)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(url.clone()),
+                        )
+                        .child(
+                            Icon::new(CustomIcon::ExternalLink)
+                                .size_3()
+                                .text_color(accent),
+                        ),
+                )
+            })
+            // Content preview
+            .when(!preview_text.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .pl_6()
+                        .mt_1()
+                        .max_h(px(80.0))
+                        .overflow_hidden()
+                        .child(SelectableText::new(
+                            ElementId::Name(
+                                format!("{}-preview-content", element_id_prefix).into(),
+                            ),
+                            preview_text,
+                        )),
+                )
+            })
+            // Meta line (link count, form count, status, etc.)
+            .when_some(meta_line, |this, meta| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .pl_6()
+                        .mt_1()
+                        .child(meta),
+                )
+            })
+            .into_any_element(),
+    )
 }
 
 /// A simple `RenderOnce` wrapper that renders plain text using `TextView` with
