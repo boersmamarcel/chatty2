@@ -10,6 +10,12 @@ use crate::page_repr::{LinkInfo, PageSnapshot, PageState};
 /// Maximum response body size for the HTTP fallback (5 MB).
 const MAX_BODY_BYTES: usize = 5_000_000;
 
+/// HTTP request timeout for the fallback path.
+const HTTP_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum number of HTTP redirects to follow.
+const MAX_REDIRECTS: usize = 10;
+
 /// Fetch a URL via plain HTTP and build a [`PageSnapshot`] from the response.
 ///
 /// This is intentionally simple: no JavaScript execution, no interactive
@@ -17,9 +23,9 @@ const MAX_BODY_BYTES: usize = 5_000_000;
 /// extracts `<a>` links so the LLM can navigate further.
 pub async fn fetch_and_snapshot(url: &str) -> Result<PageSnapshot, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
         .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
@@ -66,8 +72,9 @@ pub async fn fetch_and_snapshot(url: &str) -> Result<PageSnapshot, String> {
 /// Extract the `<title>` content from HTML.
 fn extract_title(html: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
-    let start = lower.find("<title")?.checked_add(6)?;
-    // Skip past any attributes on the title tag
+    let tag = "<title";
+    let start = lower.find(tag)?.checked_add(tag.len())?;
+    // Skip past '>' to reach title content
     let after_open = lower[start..]
         .find('>')?
         .checked_add(start)?
@@ -130,7 +137,7 @@ fn extract_links(html: &str, base_url: &str) -> Vec<LinkInfo> {
             }
         }
 
-        search_from = text_end + 4; // skip past </a>
+        search_from = text_end + "</a>".len(); // skip past closing tag
     }
 
     links
