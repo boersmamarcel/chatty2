@@ -74,10 +74,12 @@ fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegmen
         let match_start = cap.get(0).unwrap().start();
         let match_end = cap.get(0).unwrap().end();
 
-        // Add text before this code block
+        // Add text before this code block.
+        // Trim trailing whitespace to prevent the markdown renderer from
+        // creating an extra paragraph break before the code block.
         if match_start > last_end {
-            let text = content[last_end..match_start].to_string();
-            if !text.trim().is_empty() {
+            let text = content[last_end..match_start].trim_end().to_string();
+            if !text.is_empty() {
                 segments.push(MarkdownSegment::Text(text));
             }
         }
@@ -107,9 +109,10 @@ fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegmen
 
         if streaming {
             if let Some(incomplete) = detect_incomplete_code_block(remaining) {
-                // Add text before the incomplete code block
-                let text_before = &remaining[..incomplete.0];
-                if !text_before.trim().is_empty() {
+                // Add text before the incomplete code block.
+                // Trim trailing whitespace to prevent extra paragraph breaks.
+                let text_before = remaining[..incomplete.0].trim_end();
+                if !text_before.is_empty() {
                     segments.push(MarkdownSegment::Text(text_before.to_string()));
                 }
                 // Add the incomplete code block
@@ -710,10 +713,25 @@ fn parse_content_segment_streaming(
 
                 result
             } else {
-                // Full parse of all md segments (count changed or no prev)
+                // Full parse of all md segments (count changed or no prev).
+                // Still pass prev_mds (if available) so that code blocks whose
+                // language+code haven't changed can reuse their cached
+                // highlight styles via try_reuse_code_block.
+                let prev_mds_for_reuse: &[CachedMarkdownSegment] = prev
+                    .result
+                    .segments
+                    .last()
+                    .and_then(|s| {
+                        if let CachedContentSegment::Text(mds) = s {
+                            Some(mds.as_slice())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(&[]);
                 markdown_segs
                     .into_iter()
-                    .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
+                    .map(|ms| parse_markdown_segment_streaming(ms, prev_mds_for_reuse, cx))
                     .collect()
             };
 
