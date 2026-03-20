@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// Maximum characters of text content included in LLM rendering.
+const LLM_TEXT_MAX_CHARS: usize = 4000;
+/// Maximum number of links rendered in LLM text output.
+const LLM_MAX_LINKS: usize = 20;
+
 /// Snapshot of a web page suitable for LLM consumption.
 ///
 /// The agent receives this structured representation instead of raw HTML,
@@ -30,10 +35,8 @@ impl PageSnapshot {
         out.push_str(&format!("State: {:?}\n\n", self.state));
 
         if !self.text_content.is_empty() {
-            // Truncate very long text to keep within reasonable token budgets
-            let max_text = 4000;
-            if self.text_content.len() > max_text {
-                out.push_str(&self.text_content[..max_text]);
+            if self.text_content.len() > LLM_TEXT_MAX_CHARS {
+                out.push_str(&self.text_content[..LLM_TEXT_MAX_CHARS]);
                 out.push_str("\n... (truncated)\n");
             } else {
                 out.push_str(&self.text_content);
@@ -61,16 +64,10 @@ impl PageSnapshot {
         if !self.forms.is_empty() {
             out.push_str("\nForms:\n");
             for (i, form) in self.forms.iter().enumerate() {
-                let action = form
-                    .action
-                    .as_deref()
-                    .unwrap_or("(no action)");
+                let action = form.action.as_deref().unwrap_or("(no action)");
                 out.push_str(&format!("  Form #{} (action: {})\n", i + 1, action));
                 for field in &form.fields {
-                    let field_type = field
-                        .field_type
-                        .as_deref()
-                        .unwrap_or("text");
+                    let field_type = field.field_type.as_deref().unwrap_or("text");
                     let required = if field.required { ", required" } else { "" };
                     out.push_str(&format!(
                         "    - [{}] {} ({}{})\n",
@@ -82,13 +79,13 @@ impl PageSnapshot {
 
         if !self.links.is_empty() {
             out.push_str("\nLinks:\n");
-            for link in self.links.iter().take(20) {
+            for link in self.links.iter().take(LLM_MAX_LINKS) {
                 out.push_str(&format!("  - \"{}\" → {}\n", link.text, link.href));
             }
-            if self.links.len() > 20 {
+            if self.links.len() > LLM_MAX_LINKS {
                 out.push_str(&format!(
                     "  ... and {} more links\n",
-                    self.links.len() - 20
+                    self.links.len() - LLM_MAX_LINKS
                 ));
             }
         }

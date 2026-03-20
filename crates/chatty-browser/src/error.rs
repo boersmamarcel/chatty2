@@ -1,7 +1,9 @@
 /// Errors specific to the chatty-browser crate.
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
-    #[error("Versoview binary not found at '{0}'. Install Verso or set the path in Settings → Browser.")]
+    #[error(
+        "Versoview binary not found at '{0}'. Install Verso or set the path in Settings → Browser."
+    )]
     VersoviewNotFound(String),
 
     #[error("Failed to spawn versoview process: {0}")]

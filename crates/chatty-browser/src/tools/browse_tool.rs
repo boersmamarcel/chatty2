@@ -12,6 +12,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+/// Maximum characters of text content returned in the tool output.
+/// Shorter than the LLM snapshot rendering (4000) because the full snapshot
+/// is also included in the output and contains the same text content.
+const TOOL_OUTPUT_TEXT_MAX_CHARS: usize = 2000;
+
 /// Arguments for the browse tool.
 #[derive(Deserialize, Serialize)]
 pub struct BrowseToolArgs {
@@ -44,8 +49,11 @@ impl BrowseToolOutput {
         Self {
             title: snapshot.title.clone(),
             url: snapshot.url.clone(),
-            content: if snapshot.text_content.len() > 2000 {
-                format!("{}...", &snapshot.text_content[..2000])
+            content: if snapshot.text_content.len() > TOOL_OUTPUT_TEXT_MAX_CHARS {
+                format!(
+                    "{}...",
+                    &snapshot.text_content[..TOOL_OUTPUT_TEXT_MAX_CHARS]
+                )
             } else {
                 snapshot.text_content.clone()
             },
@@ -84,9 +92,7 @@ impl BrowseTool {
     }
 
     /// Get or create the browser session for this tool instance.
-    async fn get_or_create_session(
-        &self,
-    ) -> Result<(), BrowseToolError> {
+    async fn get_or_create_session(&self) -> Result<(), BrowseToolError> {
         let mut guard = self.session.lock().await;
         if guard.is_none() {
             // Ensure the engine is running
@@ -151,9 +157,10 @@ impl Tool for BrowseTool {
             BrowseToolError::BrowseError("Session unexpectedly missing".to_string())
         })?;
 
-        let snapshot = session.navigate(&url).await.map_err(|e| {
-            BrowseToolError::BrowseError(format!("Navigation failed: {}", e))
-        })?;
+        let snapshot = session
+            .navigate(&url)
+            .await
+            .map_err(|e| BrowseToolError::BrowseError(format!("Navigation failed: {}", e)))?;
 
         Ok(BrowseToolOutput::from_snapshot(&snapshot))
     }

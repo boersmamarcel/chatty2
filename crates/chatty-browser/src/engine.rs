@@ -91,11 +91,7 @@ impl BrowserEngine {
             .stderr(std::process::Stdio::null());
 
         let child = cmd.spawn().map_err(|e| {
-            BrowserError::SpawnFailed(format!(
-                "Failed to start {}: {}",
-                binary_path.display(),
-                e
-            ))
+            BrowserError::SpawnFailed(format!("Failed to start {}: {}", binary_path.display(), e))
         })?;
 
         {
@@ -104,9 +100,7 @@ impl BrowserEngine {
         }
 
         // Connect to the DevTools server with retries
-        self.devtools
-            .connect(DEFAULT_CONNECT_RETRIES)
-            .await?;
+        self.devtools.connect(DEFAULT_CONNECT_RETRIES).await?;
 
         info!("Versoview started and DevTools connected");
         Ok(())
@@ -175,9 +169,7 @@ impl BrowserEngine {
             if path.exists() {
                 return Ok(path.clone());
             }
-            return Err(BrowserError::VersoviewNotFound(
-                path.display().to_string(),
-            ));
+            return Err(BrowserError::VersoviewNotFound(path.display().to_string()));
         }
 
         // 2. Environment variable
@@ -207,11 +199,11 @@ impl Drop for BrowserEngine {
     fn drop(&mut self) {
         // Best-effort synchronous cleanup: try to kill the child process.
         // The async `stop()` method should be preferred for graceful shutdown.
-        if let Ok(mut proc) = self.process.try_lock() {
-            if let Some(ref mut child) = *proc {
-                // start_kill is sync and non-blocking
-                let _ = child.start_kill();
-            }
+        if let Ok(mut proc) = self.process.try_lock()
+            && let Some(ref mut child) = *proc
+        {
+            // start_kill is sync and non-blocking
+            let _ = child.start_kill();
         }
     }
 }
@@ -221,7 +213,7 @@ fn pick_available_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .map(|addr| addr.port())
-        .unwrap_or(6080) // Fallback to a well-known port
+        .unwrap_or(6080) // Fallback if binding fails; 6080 is Verso's conventional DevTools port
 }
 
 /// Search for `versoview` on `$PATH`.
@@ -241,9 +233,7 @@ fn which_versoview() -> Result<PathBuf, BrowserError> {
         }
     }
 
-    Err(BrowserError::VersoviewNotFound(
-        binary_name.to_string(),
-    ))
+    Err(BrowserError::VersoviewNotFound(binary_name.to_string()))
 }
 
 #[cfg(test)]

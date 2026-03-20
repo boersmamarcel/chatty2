@@ -1,6 +1,6 @@
 //! # chatty-browser
 //!
-//! Rust-native browser automation for chatty2, powered by [Verso](https://github.com/nicholasLiang/nickel-browser)
+//! Rust-native browser automation for chatty2, powered by [Verso](https://github.com/nickel-browser/nickel-browser)
 //! (a Servo-based browser engine).
 //!
 //! This crate provides:

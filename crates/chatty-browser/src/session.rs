@@ -11,13 +11,20 @@ use crate::page_repr::{
 use std::sync::Arc;
 use tracing::debug;
 
+/// Maximum number of interactive elements extracted per page snapshot.
+const MAX_INTERACTIVE_ELEMENTS: usize = 100;
+/// Maximum number of forms extracted per page snapshot.
+const MAX_FORMS: usize = 10;
+/// Maximum number of links extracted per page snapshot.
+const MAX_LINKS: usize = 50;
+
 /// A single browsing session (one tab/context) connected to the Verso engine.
 pub struct BrowserSession {
     /// Unique session identifier.
     id: String,
     /// DevTools client shared with the engine.
     devtools: Arc<DevToolsClient>,
-    /// The DevTools actor ID for this tab.
+    /// The DevTools actor ID for this tab (static default for Verso's DevTools protocol).
     actor_id: String,
     /// Current page URL.
     current_url: Option<String>,
@@ -121,17 +128,16 @@ impl BrowserSession {
             .unwrap_or_default();
 
         // Extract interactive elements
-        let elements_json = self
-            .evaluate_js(
-                r#"(function() {
+        let elements_js = format!(
+            r#"(function() {{
                     var els = document.querySelectorAll(
                         'a, button, input, select, textarea, [role="button"], [role="link"], [tabindex]'
                     );
                     var result = [];
-                    for (var i = 0; i < els.length && i < 100; i++) {
+                    for (var i = 0; i < els.length && i < {max_elements}; i++) {{
                         var el = els[i];
                         var rect = el.getBoundingClientRect();
-                        result.push({
+                        result.push({{
                             tag: el.tagName.toLowerCase(),
                             role: el.getAttribute('role'),
                             text: (el.textContent || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().substring(0, 100),
@@ -139,64 +145,71 @@ impl BrowserSession {
                             selector: el.id ? '#' + el.id : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase()),
                             visible: rect.width > 0 && rect.height > 0,
                             enabled: !el.disabled
-                        });
-                    }
+                        }});
+                    }}
                     return JSON.stringify(result);
-                })()"#,
-            )
+                }})()"#,
+            max_elements = MAX_INTERACTIVE_ELEMENTS,
+        );
+        let elements_json = self
+            .evaluate_js(&elements_js)
             .await
             .unwrap_or_else(|_| "[]".to_string());
 
         let elements = self.parse_elements(&elements_json);
 
         // Extract forms
-        let forms_json = self
-            .evaluate_js(
-                r#"(function() {
+        let forms_js = format!(
+            r#"(function() {{
                     var forms = document.querySelectorAll('form');
                     var result = [];
-                    for (var i = 0; i < forms.length && i < 10; i++) {
+                    for (var i = 0; i < forms.length && i < {max_forms}; i++) {{
                         var form = forms[i];
                         var fields = [];
                         var inputs = form.querySelectorAll('input, select, textarea');
-                        for (var j = 0; j < inputs.length; j++) {
+                        for (var j = 0; j < inputs.length; j++) {{
                             var inp = inputs[j];
-                            fields.push({
+                            fields.push({{
                                 name: inp.name || inp.id || '',
                                 type: inp.type || 'text',
                                 required: inp.required
-                            });
-                        }
-                        result.push({
+                            }});
+                        }}
+                        result.push({{
                             action: form.action || null,
                             method: (form.method || 'GET').toUpperCase(),
                             fields: fields
-                        });
-                    }
+                        }});
+                    }}
                     return JSON.stringify(result);
-                })()"#,
-            )
+                }})()"#,
+            max_forms = MAX_FORMS,
+        );
+        let forms_json = self
+            .evaluate_js(&forms_js)
             .await
             .unwrap_or_else(|_| "[]".to_string());
 
         let forms = self.parse_forms(&forms_json);
 
         // Extract links
-        let links_json = self
-            .evaluate_js(
-                r#"(function() {
+        let links_js = format!(
+            r#"(function() {{
                     var anchors = document.querySelectorAll('a[href]');
                     var result = [];
-                    for (var i = 0; i < anchors.length && i < 50; i++) {
+                    for (var i = 0; i < anchors.length && i < {max_links}; i++) {{
                         var a = anchors[i];
                         var text = (a.textContent || '').trim().substring(0, 100);
-                        if (text) {
-                            result.push({ text: text, href: a.href });
-                        }
-                    }
+                        if (text) {{
+                            result.push({{ text: text, href: a.href }});
+                        }}
+                    }}
                     return JSON.stringify(result);
-                })()"#,
-            )
+                }})()"#,
+            max_links = MAX_LINKS,
+        );
+        let links_json = self
+            .evaluate_js(&links_js)
             .await
             .unwrap_or_else(|_| "[]".to_string());
 
@@ -320,8 +333,10 @@ impl BrowserSession {
 /// Strip surrounding double-quotes from a JavaScript eval result string.
 fn strip_js_quotes(s: &str) -> String {
     let s = s.trim();
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        s[1..s.len() - 1].to_string()
+    let mut chars = s.chars();
+    if chars.next() == Some('"') && s.ends_with('"') && s.len() > 2 {
+        chars.next_back(); // Remove trailing quote
+        chars.collect()
     } else {
         s.to_string()
     }
@@ -347,8 +362,9 @@ mod tests {
     fn test_strip_js_quotes() {
         assert_eq!(strip_js_quotes(r#""hello""#), "hello");
         assert_eq!(strip_js_quotes("hello"), "hello");
-        assert_eq!(strip_js_quotes(r#""""#), "");
+        assert_eq!(strip_js_quotes(r#""""#), r#""""#); // Only 2 chars, not stripped
         assert_eq!(strip_js_quotes(""), "");
+        assert_eq!(strip_js_quotes(r#""abc""#), "abc");
     }
 
     #[test]

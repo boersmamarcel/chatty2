@@ -15,6 +15,11 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+/// Maximum size for a single DevTools protocol message (10 MB).
+const MAX_DEVTOOLS_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+/// Maximum digits in the length prefix (prevents unbounded reads).
+const MAX_LENGTH_PREFIX_DIGITS: usize = 20;
+
 /// Client for the Firefox Remote Debug Protocol used by Verso's DevTools server.
 pub struct DevToolsClient {
     /// TCP stream to the DevTools server, wrapped in a mutex for concurrent access.
@@ -124,8 +129,8 @@ impl DevToolsClient {
             to: actor.to_string(),
         };
 
-        let payload =
-            serde_json::to_string(&request).map_err(|e| BrowserError::DevToolsProtocol(e.to_string()))?;
+        let payload = serde_json::to_string(&request)
+            .map_err(|e| BrowserError::DevToolsProtocol(e.to_string()))?;
 
         let mut guard = self.stream.lock().await;
         let stream = guard
@@ -155,8 +160,13 @@ impl DevToolsClient {
         stream: &mut BufReader<TcpStream>,
     ) -> Result<DevToolsResponse, BrowserError> {
         // Read until we get the length prefix (digits followed by ':')
-        let mut length_buf = String::new();
+        let mut length_buf = String::with_capacity(MAX_LENGTH_PREFIX_DIGITS);
         loop {
+            if length_buf.len() >= MAX_LENGTH_PREFIX_DIGITS {
+                return Err(BrowserError::DevToolsProtocol(
+                    "Length prefix too long".to_string(),
+                ));
+            }
             let mut byte = [0u8; 1];
             stream
                 .read_exact(&mut byte)
@@ -180,6 +190,13 @@ impl DevToolsClient {
             .parse()
             .map_err(|e| BrowserError::DevToolsProtocol(format!("Invalid length: {}", e)))?;
 
+        if length > MAX_DEVTOOLS_MESSAGE_SIZE {
+            return Err(BrowserError::DevToolsProtocol(format!(
+                "Message too large: {} bytes (max: {})",
+                length, MAX_DEVTOOLS_MESSAGE_SIZE
+            )));
+        }
+
         // Read exactly `length` bytes of JSON
         let mut json_buf = vec![0u8; length];
         stream
@@ -195,12 +212,8 @@ impl DevToolsClient {
 
     /// Navigate the tab to the given URL.
     pub async fn navigate(&self, url: &str, actor: &str) -> Result<DevToolsResponse, BrowserError> {
-        self.send_request(
-            "navigateTo",
-            serde_json::json!({ "url": url }),
-            actor,
-        )
-        .await
+        self.send_request("navigateTo", serde_json::json!({ "url": url }), actor)
+            .await
     }
 
     /// Evaluate a JavaScript expression in the page context and return the result.
@@ -225,14 +238,14 @@ impl DevToolsClient {
         let value = if response.result.is_null() {
             "undefined".to_string()
         } else {
-            serde_json::to_string(&response.result)
-                .unwrap_or_else(|_| "undefined".to_string())
+            serde_json::to_string(&response.result).unwrap_or_else(|_| "undefined".to_string())
         };
 
         let is_exception = response
             .result
             .get("exceptionMessage")
-            .is_some();
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
 
         Ok(JsEvalResult {
             value,
