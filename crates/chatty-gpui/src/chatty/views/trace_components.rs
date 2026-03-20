@@ -414,7 +414,7 @@ impl SystemTraceView {
                             .hover(|s| s.bg(panel_bg))
                             .p(px(2.0))
                             .tooltip(|window, cx| {
-                                gpui_component::Tooltip::new("Open in browser", window, cx)
+                                gpui_component::tooltip::Tooltip::new("Open in browser", window, cx)
                             })
                             .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
                                 open_url_in_system_browser(&url);
@@ -1010,7 +1010,7 @@ where
                     .hover(|s| s.bg(cx.theme().muted))
                     .p(px(2.0))
                     .tooltip(|window, cx| {
-                        gpui_component::Tooltip::new("Open in browser", window, cx)
+                        gpui_component::tooltip::Tooltip::new("Open in browser", window, cx)
                     })
                     .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
                         open_url_in_system_browser(&url);
