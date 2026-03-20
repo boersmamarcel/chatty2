@@ -1503,6 +1503,7 @@ name = "chatty-browser"
 version = "0.1.121"
 dependencies = [
  "anyhow",
+ "reqwest 0.13.2",
  "rig-core",
  "serde",
  "serde_json",

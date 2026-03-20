@@ -21,5 +21,8 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# HTTP client (used for fallback when browser engine is unavailable)
+reqwest.workspace = true
+
 # Unique IDs
 uuid.workspace = true

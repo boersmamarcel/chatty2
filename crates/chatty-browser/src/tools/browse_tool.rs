@@ -148,21 +148,37 @@ impl Tool for BrowseTool {
 
         info!(url = %url, "Browse tool: navigating");
 
-        // Ensure session exists
-        self.get_or_create_session().await?;
+        // Try the full browser engine first; fall back to HTTP if unavailable
+        match self.get_or_create_session().await {
+            Ok(()) => {
+                // Navigate and build snapshot via browser engine
+                let mut guard = self.session.lock().await;
+                let session = guard.as_mut().ok_or_else(|| {
+                    BrowseToolError::BrowseError("Session unexpectedly missing".to_string())
+                })?;
 
-        // Navigate and build snapshot
-        let mut guard = self.session.lock().await;
-        let session = guard.as_mut().ok_or_else(|| {
-            BrowseToolError::BrowseError("Session unexpectedly missing".to_string())
-        })?;
+                let snapshot = session.navigate(&url).await.map_err(|e| {
+                    BrowseToolError::BrowseError(format!("Navigation failed: {}", e))
+                })?;
 
-        let snapshot = session
-            .navigate(&url)
-            .await
-            .map_err(|e| BrowseToolError::BrowseError(format!("Navigation failed: {}", e)))?;
+                Ok(BrowseToolOutput::from_snapshot(&snapshot))
+            }
+            Err(_engine_err) => {
+                // Browser engine unavailable — fall back to plain HTTP fetch
+                info!(
+                    url = %url,
+                    "Browser engine unavailable, using HTTP fallback"
+                );
 
-        Ok(BrowseToolOutput::from_snapshot(&snapshot))
+                let snapshot = crate::http_fallback::fetch_and_snapshot(&url)
+                    .await
+                    .map_err(|e| {
+                        BrowseToolError::BrowseError(format!("HTTP fallback failed: {}", e))
+                    })?;
+
+                Ok(BrowseToolOutput::from_snapshot(&snapshot))
+            }
+        }
     }
 }
 

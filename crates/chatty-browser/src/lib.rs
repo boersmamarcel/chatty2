@@ -25,6 +25,7 @@
 pub mod devtools;
 pub mod engine;
 pub mod error;
+pub mod http_fallback;
 pub mod page_repr;
 pub mod session;
 pub mod tools;
