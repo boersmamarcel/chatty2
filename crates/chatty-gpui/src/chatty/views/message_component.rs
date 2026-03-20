@@ -241,7 +241,7 @@ impl RenderOnce for MarkdownContent {
 
 /// Pre-render a math expression to a `MathComponent` with SVG caching.
 ///
-/// Uses the theme foreground colour for the SVG and falls back to lazy
+/// Uses the theme foreground color for the SVG and falls back to lazy
 /// rendering if the SVG cache misses.
 fn make_math_component(
     math_content: &str,
@@ -360,16 +360,21 @@ fn render_math_segments(
 /// Render an inline-math batch (a slice of [`MathSegment`]s that contains at
 /// least one [`MathSegment::InlineMath`]).
 ///
-/// Text segments are split at `\n` so that each logical line is handled
-/// independently:
+/// **Two kinds of content are interleaved:**
 ///
-/// * Lines that **contain at least one math SVG** are emitted as a full-width
-///   `flex_row` with `.min_w_0()` plain-text divs and the math SVG components.
-///   The `.min_w_0()` lets each text div shrink below its natural content
-///   width so that long text wraps rather than overflowing the container.
-/// * Lines that are **text-only** (no adjacent math on that line) are emitted
-///   as a `MarkdownContent` element so that headings (`##`), horizontal rules
-///   (`---`), bold (`**…**`), and other markdown constructs render correctly.
+/// * **Math-containing lines** – logical lines (delimited by `\n`) that have at
+///   least one [`MathSegment::InlineMath`].  These are emitted as a full-width
+///   `flex_row` with `.min_w_0()` plain-text divs flanking the SVG so that long
+///   text wraps instead of overflowing.
+///
+/// * **Text-only "runs"** – one or more consecutive logical lines that contain
+///   no math.  All such lines are accumulated into a *single* `MarkdownContent`
+///   element (with their `\n` characters preserved) and emitted together.
+///   Keeping them together preserves markdown block structure: headings, ordered
+///   lists, paragraphs, horizontal rules, and bold/italic all render correctly
+///   within the shared document context.  Splitting them into one
+///   `MarkdownContent` per line would break list continuity and introduce
+///   artificial margin/padding gaps ("blank parts") between the fragments.
 fn render_inline_math_batch(
     batch: &[MathSegment],
     base_index: usize,
@@ -377,19 +382,28 @@ fn render_inline_math_batch(
     cx: &App,
     elements: &mut Vec<AnyElement>,
 ) {
-    // Accumulated plain text for the current logical line.  Flushed into
-    // `math_row` when an InlineMath is encountered, or into a MarkdownContent
-    // element at a newline boundary when the line has no math.
+    // `full_text_buf` accumulates consecutive text-only lines (including their
+    // `\n`) to be emitted as a single `MarkdownContent`.  It is flushed when
+    // an `InlineMath` is encountered (so the math can begin a new flex row) or
+    // at the end of the batch.  Invariant: `full_text_buf` is always empty
+    // when `line_has_math` is true, because it is drained the moment the first
+    // `InlineMath` appears on a line.
+    let mut full_text_buf = String::new();
+
+    // `text_buf` holds the text for the *current* logical line – from the last
+    // `\n` (or the start of the batch) to the current position.  It ends up
+    // either in `math_row` (when the line contains math) or appended to
+    // `full_text_buf` at the next `\n`.
     let mut text_buf = String::new();
 
-    // Elements for the current math-containing line (plain-text divs + SVGs).
+    // Children for the current math-containing flex row.
     let mut math_row: Vec<AnyElement> = Vec::new();
 
-    // Whether the current logical line has at least one inline math component.
+    // Whether the current logical line has seen at least one `InlineMath`.
     let mut line_has_math = false;
 
-    // Monotone counter used to generate unique element IDs per logical line.
-    let mut line_counter = 0usize;
+    // Counter for stable `MarkdownContent` element IDs within this batch.
+    let mut md_counter = 0usize;
 
     for (batch_idx, segment) in batch.iter().enumerate() {
         let element_index = base_index * 1000 + batch_start + batch_idx;
@@ -397,29 +411,43 @@ fn render_inline_math_batch(
             MathSegment::Text(text) => {
                 let mut remainder = text.as_str();
                 while let Some(nl_pos) = remainder.find('\n') {
-                    // Accumulate the text before this newline.
                     text_buf.push_str(&remainder[..nl_pos]);
 
-                    // Flush the logical line ending at this newline.
-                    flush_inline_line(
-                        &mut text_buf,
-                        &mut math_row,
-                        line_has_math,
-                        base_index,
-                        batch_start,
-                        line_counter,
-                        elements,
-                    );
-                    line_has_math = false;
-                    line_counter += 1;
+                    if line_has_math {
+                        // End of a math-containing line: flush as flex row.
+                        flush_math_row(&mut text_buf, &mut math_row, elements);
+                        line_has_math = false;
+                        // `full_text_buf` is always empty here because it was
+                        // flushed when the first InlineMath on this line appeared.
+                    } else {
+                        // End of a text-only line: add to the running text buffer.
+                        full_text_buf.push_str(&text_buf);
+                        full_text_buf.push('\n');
+                        text_buf.clear();
+                    }
+
                     remainder = &remainder[nl_pos + 1..];
                 }
-                // The text after the last newline (or the whole segment when
-                // there are no newlines) stays in text_buf for the current line.
+                // Any remaining text (after the last `\n`, or the whole segment)
+                // stays in `text_buf` for the current line.
                 text_buf.push_str(remainder);
             }
             MathSegment::InlineMath(math_content) => {
-                // Move any pending plain text into the math row before the SVG.
+                // Before the first math on this line, flush any preceding
+                // text-only lines as ONE MarkdownContent so that headings, lists,
+                // paragraphs, and bold/italic in those lines render correctly.
+                if !full_text_buf.is_empty() {
+                    let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
+                    md_counter += 1;
+                    elements.push(
+                        MarkdownContent {
+                            content: std::mem::take(&mut full_text_buf),
+                            message_index: md_idx,
+                        }
+                        .into_any_element(),
+                    );
+                }
+                // Move the current line's plain-text prefix into the math row.
                 if !text_buf.is_empty() {
                     math_row.push(
                         div()
@@ -443,69 +471,57 @@ fn render_inline_math_batch(
         }
     }
 
-    // Flush the final logical line.
-    flush_inline_line(
-        &mut text_buf,
-        &mut math_row,
-        line_has_math,
-        base_index,
-        batch_start,
-        line_counter,
-        elements,
-    );
+    // Final flush.
+    if line_has_math {
+        // The last line contains math: emit it as a flex row.
+        flush_math_row(&mut text_buf, &mut math_row, elements);
+    } else {
+        // The last line is text-only: append it and emit the whole run.
+        if !text_buf.is_empty() {
+            full_text_buf.push_str(&text_buf);
+        }
+        if !full_text_buf.is_empty() {
+            let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
+            elements.push(
+                MarkdownContent {
+                    content: full_text_buf,
+                    message_index: md_idx,
+                }
+                .into_any_element(),
+            );
+        }
+    }
 }
 
-/// Flush one logical line produced by [`render_inline_math_batch`].
+/// Flush the current math-containing line as a full-width `flex_row`.
 ///
-/// * If the line contained math, any remaining text in `text_buf` is appended
-///   to `math_row` as a `.min_w_0()` div, then the full row is emitted as a
-///   full-width `flex_row` element.
-/// * If the line is text-only, the accumulated text is emitted as a
-///   `MarkdownContent` element (preserves headings, bold, lists, `---`, etc.).
-#[allow(clippy::too_many_arguments)]
-fn flush_inline_line(
+/// Any remaining plain text in `text_buf` is moved into the row first (as a
+/// `.min_w_0()` div so it can shrink and wrap), then all row children are
+/// wrapped in `div().w_full().flex().flex_row().flex_wrap().items_center()`.
+fn flush_math_row(
     text_buf: &mut String,
     math_row: &mut Vec<AnyElement>,
-    has_math: bool,
-    base_index: usize,
-    batch_start: usize,
-    line_counter: usize,
     elements: &mut Vec<AnyElement>,
 ) {
-    if has_math {
-        // Append any trailing plain text to the math row.
-        if !text_buf.is_empty() {
-            math_row.push(
-                div()
-                    .min_w_0()
-                    .child(std::mem::take(text_buf))
-                    .into_any_element(),
-            );
-        }
-        if !math_row.is_empty() {
-            let children = std::mem::take(math_row);
-            elements.push(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .children(children)
-                    .into_any_element(),
-            );
-        }
-    } else if !text_buf.is_empty() {
-        // Text-only line: full markdown rendering.
-        // Use a large multiplier to avoid element-ID collisions with segment
-        // indices used elsewhere in the same message render.
-        let element_index = base_index * 100_000 + batch_start * 100 + line_counter;
+    if !text_buf.is_empty() {
+        math_row.push(
+            div()
+                .min_w_0()
+                .child(std::mem::take(text_buf))
+                .into_any_element(),
+        );
+    }
+    if !math_row.is_empty() {
+        let children = std::mem::take(math_row);
         elements.push(
-            MarkdownContent {
-                content: std::mem::take(text_buf),
-                message_index: element_index,
-            }
-            .into_any_element(),
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .children(children)
+                .into_any_element(),
         );
     }
 }
