@@ -90,6 +90,52 @@ impl<'a> MathParser<'a> {
         true
     }
 
+    /// Check if there's a blank line (paragraph break) before position `pos`.
+    ///
+    /// Scans backwards from `pos`, skipping spaces/tabs and `\r`, counting
+    /// newline characters. Returns `true` when two or more `\n` are found
+    /// before any non-whitespace character.
+    fn has_blank_line_before(&self, pos: usize) -> bool {
+        let mut newline_count = 0;
+        let mut i = pos;
+        while i > 0 {
+            i -= 1;
+            match self.chars[i] {
+                '\n' => {
+                    newline_count += 1;
+                    if newline_count >= 2 {
+                        return true;
+                    }
+                }
+                '\r' => {}
+                c if c.is_whitespace() => {}
+                _ => break,
+            }
+        }
+        false
+    }
+
+    /// Check if there's a blank line (paragraph break) after position `pos`.
+    fn has_blank_line_after(&self, pos: usize) -> bool {
+        let mut newline_count = 0;
+        let mut i = pos;
+        while i < self.chars.len() {
+            match self.chars[i] {
+                '\n' => {
+                    newline_count += 1;
+                    if newline_count >= 2 {
+                        return true;
+                    }
+                }
+                '\r' => {}
+                c if c.is_whitespace() => {}
+                _ => break,
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// Parse math code blocks (```math or ```latex)
     fn parse_math_code_block(&self, start_pos: usize, language: &str) -> Option<(String, usize)> {
         let lang_chars: Vec<char> = language.chars().collect();
@@ -379,7 +425,18 @@ impl<'a> MathParser<'a> {
                                 current_text.clear();
                             }
 
-                            if (is_block_start && is_block_end) || has_newlines {
+                            // Treat as block math only when the content spans
+                            // multiple lines OR the `$$` delimiters sit inside a
+                            // paragraph break (blank line before or after).
+                            // A single newline before/after `$$` is NOT enough:
+                            // LLMs often put `$$` on its own line inside a list
+                            // item, and the user expects inline rendering there.
+                            let has_para_break = self.has_blank_line_before(i)
+                                || self.has_blank_line_after(j + 2);
+
+                            if has_newlines
+                                || (is_block_start && is_block_end && has_para_break)
+                            {
                                 segments
                                     .push(MathSegment::BlockMath(math_content.trim().to_string()));
                             } else {
@@ -553,10 +610,10 @@ mod tests {
             .filter(|s| matches!(s, MathSegment::BlockMath(_)))
             .count();
 
-        // Inline: $x$ and \(y\) = 2
-        // Block: $$z$$ (has newlines), \[w\], ```math = 3
-        assert_eq!(inline_count, 2);
-        assert_eq!(block_count, 3);
+        // Inline: $x$, \(y\), and $$z$$ (no blank line around $$) = 3
+        // Block: \[w\], ```math = 2
+        assert_eq!(inline_count, 3);
+        assert_eq!(block_count, 2);
     }
 
     #[test]
@@ -578,5 +635,60 @@ mod tests {
         let segments = parse_math_segments(input);
         assert_eq!(segments.len(), 1);
         assert!(matches!(segments[0], MathSegment::BlockMath(_)));
+    }
+
+    #[test]
+    fn test_double_dollar_in_list_is_inline() {
+        // LLMs often put $$ on its own line inside a numbered list item.
+        // Without a blank line (paragraph break) around $$, this should
+        // be treated as inline math so the list reads naturally.
+        let input = "1. **Governing Equation:** (e.g.,\n$$u_t = \\alpha u_{xx}$$\n).";
+        let segments = parse_math_segments(input);
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(segments[0], MathSegment::Text(_)));
+        assert!(matches!(segments[1], MathSegment::InlineMath(_)));
+        assert!(matches!(segments[2], MathSegment::Text(_)));
+        if let MathSegment::InlineMath(content) = &segments[1] {
+            assert_eq!(content, "u_t = \\alpha u_{xx}");
+        }
+    }
+
+    #[test]
+    fn test_double_dollar_with_blank_line_is_block() {
+        // With a blank line before $$, treat as block math.
+        let input = "Consider the equation:\n\n$$E = mc^2$$\n\nMore text.";
+        let segments = parse_math_segments(input);
+        assert!(
+            segments
+                .iter()
+                .any(|s| matches!(s, MathSegment::BlockMath(_))),
+            "Expected BlockMath for $$ with blank line around it"
+        );
+    }
+
+    #[test]
+    fn test_double_dollar_with_blank_line_after_is_block() {
+        // Blank line after $$ is also sufficient for block math.
+        let input = "Consider:\n$$E = mc^2$$\n\nMore text.";
+        let segments = parse_math_segments(input);
+        assert!(
+            segments
+                .iter()
+                .any(|s| matches!(s, MathSegment::BlockMath(_))),
+            "Expected BlockMath for $$ with blank line after it"
+        );
+    }
+
+    #[test]
+    fn test_double_dollar_multiline_content_always_block() {
+        // Newlines inside $$ content always means block math.
+        let input = "Inline text $$\nx = y\n$$ more text";
+        let segments = parse_math_segments(input);
+        assert!(
+            segments
+                .iter()
+                .any(|s| matches!(s, MathSegment::BlockMath(_))),
+            "Expected BlockMath when content spans multiple lines"
+        );
     }
 }

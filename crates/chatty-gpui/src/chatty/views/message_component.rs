@@ -74,10 +74,12 @@ fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegmen
         let match_start = cap.get(0).unwrap().start();
         let match_end = cap.get(0).unwrap().end();
 
-        // Add text before this code block
+        // Add text before this code block.
+        // Trim trailing whitespace to prevent the markdown renderer from
+        // creating an extra paragraph break before the code block.
         if match_start > last_end {
-            let text = content[last_end..match_start].to_string();
-            if !text.trim().is_empty() {
+            let text = content[last_end..match_start].trim_end().to_string();
+            if !text.is_empty() {
                 segments.push(MarkdownSegment::Text(text));
             }
         }
@@ -107,9 +109,10 @@ fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegmen
 
         if streaming {
             if let Some(incomplete) = detect_incomplete_code_block(remaining) {
-                // Add text before the incomplete code block
-                let text_before = &remaining[..incomplete.0];
-                if !text_before.trim().is_empty() {
+                // Add text before the incomplete code block.
+                // Trim trailing whitespace to prevent extra paragraph breaks.
+                let text_before = remaining[..incomplete.0].trim_end();
+                if !text_before.is_empty() {
                     segments.push(MarkdownSegment::Text(text_before.to_string()));
                 }
                 // Add the incomplete code block
@@ -288,16 +291,15 @@ fn make_math_component(
 /// Segments are processed in **batches** separated by `BlockMath` boundaries.
 /// Within each batch `has_inline_math` is determined locally:
 ///
-/// * **Text-only batch** – `MarkdownContent` is pushed directly, preserving
+/// * **Text-only batch** -- `MarkdownContent` is pushed directly, preserving
 ///   full markdown formatting (headings, bold, lists, etc.).
-/// * **Inline-math batch** – text is split at newline characters so that each
+/// * **Inline-math batch** -- text is split at newline characters so that each
 ///   logical line (with its adjacent math SVGs) becomes its own full-width flex
 ///   row.  This prevents long text from pushing the closing `)` or other
-///   trailing text onto the next screen row.
-///
-/// All batch-level wrapper divs use `.w_full()` so that they fill the available
-/// width in the outer container (which may be flex-row by default in GPUI),
-/// ensuring consecutive batches and block-math elements stack vertically.
+///   trailing text onto the next screen row.  The entire inline-math batch is
+///   wrapped in a **single container div** so the parent layout sees only one
+///   element, preventing the blank-space issue during streaming that occurred
+///   when multiple top-level elements (heading + flex rows) were emitted.
 fn render_math_segments(
     math_segments: &[MathSegment],
     base_index: usize,
@@ -312,7 +314,7 @@ fn render_math_segments(
         let at_block_math = i < n && matches!(math_segments[i], MathSegment::BlockMath(_));
 
         if at_block_math || i == n {
-            // ── Flush the current batch [batch_start..i] ─────────────────────
+            // -- Flush the current batch [batch_start..i] ---------------------
             let batch = &math_segments[batch_start..i];
             if !batch.is_empty() {
                 let batch_has_inline = batch
@@ -339,7 +341,7 @@ fn render_math_segments(
                 }
             }
 
-            // ── Render the BlockMath element itself ──────────────────────────
+            // -- Render the BlockMath element itself --------------------------
             if at_block_math {
                 if let MathSegment::BlockMath(math_content) = &math_segments[i] {
                     let element_index = base_index * 1000 + i;
@@ -362,19 +364,20 @@ fn render_math_segments(
 ///
 /// **Two kinds of content are interleaved:**
 ///
-/// * **Math-containing lines** – logical lines (delimited by `\n`) that have at
+/// * **Math-containing lines** -- logical lines (delimited by `\n`) that have at
 ///   least one [`MathSegment::InlineMath`].  These are emitted as a full-width
 ///   `flex_row` with `.min_w_0()` plain-text divs flanking the SVG so that long
 ///   text wraps instead of overflowing.
 ///
-/// * **Text-only "runs"** – one or more consecutive logical lines that contain
+/// * **Text-only runs** -- one or more consecutive logical lines that contain
 ///   no math.  All such lines are accumulated into a *single* `MarkdownContent`
 ///   element (with their `\n` characters preserved) and emitted together.
-///   Keeping them together preserves markdown block structure: headings, ordered
-///   lists, paragraphs, horizontal rules, and bold/italic all render correctly
-///   within the shared document context.  Splitting them into one
-///   `MarkdownContent` per line would break list continuity and introduce
-///   artificial margin/padding gaps ("blank parts") between the fragments.
+///
+/// All output is collected into a local vector and wrapped in a **single
+/// container `div`** (`flex_col`, `w_full`) before being pushed to the parent
+/// `elements`.  This prevents the blank-space-during-streaming bug that occurred
+/// when multiple top-level elements (e.g. a heading `MarkdownContent` followed
+/// by a flex row) were emitted directly into the parent layout.
 fn render_inline_math_batch(
     batch: &[MathSegment],
     base_index: usize,
@@ -382,18 +385,16 @@ fn render_inline_math_batch(
     cx: &App,
     elements: &mut Vec<AnyElement>,
 ) {
+    // Local vector: everything goes here first, then gets wrapped in ONE div.
+    let mut batch_elements: Vec<AnyElement> = Vec::new();
+
     // `full_text_buf` accumulates consecutive text-only lines (including their
     // `\n`) to be emitted as a single `MarkdownContent`.  It is flushed when
     // an `InlineMath` is encountered (so the math can begin a new flex row) or
-    // at the end of the batch.  Invariant: `full_text_buf` is always empty
-    // when `line_has_math` is true, because it is drained the moment the first
-    // `InlineMath` appears on a line.
+    // at the end of the batch.
     let mut full_text_buf = String::new();
 
-    // `text_buf` holds the text for the *current* logical line – from the last
-    // `\n` (or the start of the batch) to the current position.  It ends up
-    // either in `math_row` (when the line contains math) or appended to
-    // `full_text_buf` at the next `\n`.
+    // `text_buf` holds the text for the *current* logical line.
     let mut text_buf = String::new();
 
     // Children for the current math-containing flex row.
@@ -414,13 +415,9 @@ fn render_inline_math_batch(
                     text_buf.push_str(&remainder[..nl_pos]);
 
                     if line_has_math {
-                        // End of a math-containing line: flush as flex row.
-                        flush_math_row(&mut text_buf, &mut math_row, elements);
+                        flush_math_row(&mut text_buf, &mut math_row, &mut batch_elements);
                         line_has_math = false;
-                        // `full_text_buf` is always empty here because it was
-                        // flushed when the first InlineMath on this line appeared.
                     } else {
-                        // End of a text-only line: add to the running text buffer.
                         full_text_buf.push_str(&text_buf);
                         full_text_buf.push('\n');
                         text_buf.clear();
@@ -428,25 +425,23 @@ fn render_inline_math_batch(
 
                     remainder = &remainder[nl_pos + 1..];
                 }
-                // Any remaining text (after the last `\n`, or the whole segment)
-                // stays in `text_buf` for the current line.
                 text_buf.push_str(remainder);
             }
             MathSegment::InlineMath(math_content) => {
-                // Before the first math on this line, flush any preceding
-                // text-only lines as ONE MarkdownContent so that headings, lists,
-                // paragraphs, and bold/italic in those lines render correctly.
-                if !full_text_buf.is_empty() {
+                // Flush any preceding text-only lines as ONE MarkdownContent.
+                let trimmed = full_text_buf.trim_end();
+                if !trimmed.is_empty() {
                     let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
                     md_counter += 1;
-                    elements.push(
+                    batch_elements.push(
                         MarkdownContent {
-                            content: std::mem::take(&mut full_text_buf),
+                            content: trimmed.to_string(),
                             message_index: md_idx,
                         }
                         .into_any_element(),
                     );
                 }
+                full_text_buf.clear();
                 // Move the current line's plain-text prefix into the math row.
                 if !text_buf.is_empty() {
                     math_row.push(
@@ -473,23 +468,36 @@ fn render_inline_math_batch(
 
     // Final flush.
     if line_has_math {
-        // The last line contains math: emit it as a flex row.
-        flush_math_row(&mut text_buf, &mut math_row, elements);
+        flush_math_row(&mut text_buf, &mut math_row, &mut batch_elements);
     } else {
-        // The last line is text-only: append it and emit the whole run.
         if !text_buf.is_empty() {
             full_text_buf.push_str(&text_buf);
         }
-        if !full_text_buf.is_empty() {
+        let trimmed = full_text_buf.trim_end();
+        if !trimmed.is_empty() {
             let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
-            elements.push(
+            batch_elements.push(
                 MarkdownContent {
-                    content: full_text_buf,
+                    content: trimmed.to_string(),
                     message_index: md_idx,
                 }
                 .into_any_element(),
             );
         }
+    }
+
+    // Wrap all batch children in a single container div to prevent the
+    // blank-space-during-streaming bug.  The parent layout sees only ONE
+    // element for the entire inline-math batch.
+    if !batch_elements.is_empty() {
+        elements.push(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .children(batch_elements)
+                .into_any_element(),
+        );
     }
 }
 
@@ -705,10 +713,25 @@ fn parse_content_segment_streaming(
 
                 result
             } else {
-                // Full parse of all md segments (count changed or no prev)
+                // Full parse of all md segments (count changed or no prev).
+                // Still pass prev_mds (if available) so that code blocks whose
+                // language+code haven't changed can reuse their cached
+                // highlight styles via try_reuse_code_block.
+                let prev_mds_for_reuse: &[CachedMarkdownSegment] = prev
+                    .result
+                    .segments
+                    .last()
+                    .and_then(|s| {
+                        if let CachedContentSegment::Text(mds) = s {
+                            Some(mds.as_slice())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(&[]);
                 markdown_segs
                     .into_iter()
-                    .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
+                    .map(|ms| parse_markdown_segment_streaming(ms, prev_mds_for_reuse, cx))
                     .collect()
             };
 
@@ -1659,7 +1682,12 @@ where
                 "Processing tool call for interleaving"
             );
 
-            // Only render if there's new text since the last segment
+            // Only render if there's new text since the last segment.
+            // text_before is frozen (captured when the tool call started), so
+            // treat it as non-streaming to use the persistent parsed_cache
+            // instead of the streaming cache.  Sharing a single streaming
+            // cache across multiple independent text segments corrupts its
+            // incremental-reuse state, producing wrong elements and blank space.
             if text_before.len() > last_text_end {
                 let text_segment = &text_before[last_text_end..];
                 if !text_segment.is_empty() {
@@ -1667,10 +1695,10 @@ where
                         text_segment,
                         index * 100 + tool_idx,
                         msg.is_markdown,
-                        msg.is_streaming,
+                        false, // frozen content — use persistent cache
                         is_dark,
                         parsed_cache,
-                        streaming_cache,
+                        &mut None, // don't pollute the streaming cache
                         cx,
                     );
                     container = container.children(elements);
