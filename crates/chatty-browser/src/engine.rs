@@ -30,7 +30,8 @@ pub struct BrowserEngineConfig {
     /// Mock mode: return realistic fake page data without launching versoview.
     /// Useful for testing the full tool pipeline and LLM integration.
     /// Enable via `BrowserEngineConfig { mock_mode: true, .. }` or by setting
-    /// the `CHATTY_BROWSER_MOCK=1` environment variable.
+    /// the `CHATTY_BROWSER_MOCK=1` environment variable (checked by the
+    /// application layer in `agent_factory.rs` when creating the tool).
     pub mock_mode: bool,
 }
 

@@ -451,7 +451,7 @@ impl BrowserSession {
 fn strip_js_quotes(s: &str) -> String {
     let s = s.trim();
     let mut chars = s.chars();
-    if chars.next() == Some('"') && s.ends_with('"') && s.len() > 2 {
+    if chars.next() == Some('"') && s.ends_with('"') && s.len() >= 2 {
         chars.next_back(); // Remove trailing quote
         chars.collect()
     } else {
@@ -479,7 +479,7 @@ mod tests {
     fn test_strip_js_quotes() {
         assert_eq!(strip_js_quotes(r#""hello""#), "hello");
         assert_eq!(strip_js_quotes("hello"), "hello");
-        assert_eq!(strip_js_quotes(r#""""#), r#""""#); // Only 2 chars, not stripped
+        assert_eq!(strip_js_quotes(r#""""#), ""); // JS empty string
         assert_eq!(strip_js_quotes(""), "");
         assert_eq!(strip_js_quotes(r#""abc""#), "abc");
     }

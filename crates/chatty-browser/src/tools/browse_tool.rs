@@ -233,9 +233,9 @@ mod tests {
         assert!(output.title.contains("example.com"));
         assert_eq!(output.url, "https://example.com");
         assert!(!output.content.is_empty());
-        assert!(output.interactive_element_count > 0);
-        assert!(output.form_count > 0);
-        assert!(output.link_count > 0);
+        assert_eq!(output.interactive_element_count, 3); // search input, search button, sign in link
+        assert_eq!(output.form_count, 1); // search form
+        assert_eq!(output.link_count, 3); // home, about, contact
         assert!(output.page_snapshot.contains("example.com"));
     }
 
