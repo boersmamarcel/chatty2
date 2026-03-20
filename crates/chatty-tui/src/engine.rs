@@ -1119,6 +1119,11 @@ impl ChatEngine {
                 label: "Docker Execution".to_string(),
                 enabled: es.docker_code_execution_enabled,
             },
+            ToolPickerItem {
+                key: "browser".to_string(),
+                label: "Browser (Verso)".to_string(),
+                enabled: es.browser_enabled,
+            },
         ];
 
         self.tool_picker = Some(ToolPicker { items, selected: 0 });
@@ -1147,6 +1152,7 @@ impl ChatEngine {
                 "docker-exec" => {
                     self.execution_settings.docker_code_execution_enabled = item.enabled
                 }
+                "browser" => self.execution_settings.browser_enabled = item.enabled,
                 _ => {}
             }
         }
@@ -1182,9 +1188,12 @@ impl ChatEngine {
                 self.execution_settings.docker_code_execution_enabled =
                     !self.execution_settings.docker_code_execution_enabled
             }
+            "browser" => {
+                self.execution_settings.browser_enabled = !self.execution_settings.browser_enabled
+            }
             _ => {
                 self.add_system_message(format!(
-                    "Unknown tool '{}'. Valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec",
+                    "Unknown tool '{}'. Valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec, browser",
                     name
                 ));
                 return false;
@@ -1199,6 +1208,7 @@ impl ChatEngine {
             "git" => self.execution_settings.git_enabled,
             "mcp-manage" => self.execution_settings.mcp_service_tool_enabled,
             "docker-exec" => self.execution_settings.docker_code_execution_enabled,
+            "browser" => self.execution_settings.browser_enabled,
             _ => false,
         };
         let state = if enabled { "enabled" } else { "disabled" };
