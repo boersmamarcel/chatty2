@@ -12,6 +12,13 @@ use super::message_types::{
 };
 use gpui::EventEmitter;
 
+/// Maximum number of lines shown in a website preview card.
+const PREVIEW_MAX_LINES: usize = 4;
+/// Maximum number of characters shown in a website preview card.
+const PREVIEW_MAX_CHARS: usize = 300;
+/// Maximum character length for an auto-extracted page title.
+const PREVIEW_TITLE_MAX_CHARS: usize = 80;
+
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
     trace: SystemTrace,
@@ -1341,7 +1348,7 @@ fn try_render_website_preview(
                 .find(|l| !l.trim().is_empty())
                 .unwrap_or("")
                 .chars()
-                .take(80)
+                .take(PREVIEW_TITLE_MAX_CHARS)
                 .collect::<String>();
             let mut meta_parts = Vec::new();
             if status > 0 {
@@ -1364,11 +1371,17 @@ fn try_render_website_preview(
     let preview_text: String = content
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .take(4)
+        .take(PREVIEW_MAX_LINES)
         .collect::<Vec<_>>()
         .join("\n");
-    let preview_text = if preview_text.chars().count() > 300 {
-        format!("{}…", preview_text.chars().take(297).collect::<String>())
+    let preview_text = if preview_text.chars().count() > PREVIEW_MAX_CHARS {
+        format!(
+            "{}…",
+            preview_text
+                .chars()
+                .take(PREVIEW_MAX_CHARS - 3)
+                .collect::<String>()
+        )
     } else {
         preview_text
     };
@@ -1538,22 +1551,33 @@ fn extract_url_from_tool_call(tool_call: &ToolCallBlock) -> Option<String> {
 }
 
 /// Open a URL in the system's default web browser.
+/// Only opens http:// and https:// URLs for security.
 fn open_url_in_system_browser(url: &str) {
+    // Only allow http/https URLs to prevent command injection
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        tracing::warn!(url = %url, "Refusing to open non-HTTP URL in browser");
+        return;
+    }
     let url = url.to_string();
     std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(&url).spawn();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args(["/c", "start", &url])
-                .spawn();
+        let result = {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open").arg(&url).spawn()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                std::process::Command::new("xdg-open").arg(&url).spawn()
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/c", "start", &url])
+                    .spawn()
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = ?e, url = %url, "Failed to open URL in browser");
         }
     });
 }
