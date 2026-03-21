@@ -1505,18 +1505,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dirs 5.0.1",
- "futures",
  "gpui",
- "reqwest 0.13.2",
  "rig-core",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
