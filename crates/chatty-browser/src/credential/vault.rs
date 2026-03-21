@@ -153,7 +153,7 @@ impl CredentialVault {
         store
             .get(name)
             .cloned()
-            .context(format!("No credential found for \"{name}\""))
+            .with_context(|| format!("No credential found for \"{name}\""))
     }
 
     async fn delete_fallback(&self, name: &str) -> Result<()> {

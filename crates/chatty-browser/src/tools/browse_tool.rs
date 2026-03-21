@@ -121,7 +121,9 @@ impl Tool for BrowseTool {
             .map_err(|e| BrowseError::NavigationError(e.to_string()))?;
 
         // Close the tab after use (best effort)
-        let _ = self.session.backend().close_tab(&tab).await;
+        if let Err(e) = self.session.backend().close_tab(&tab).await {
+            tracing::warn!(error = ?e, "Failed to close browse tab");
+        }
 
         Ok(BrowseOutput { snapshot })
     }

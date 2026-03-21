@@ -191,8 +191,8 @@ impl Tool for BrowserAuthTool {
                             el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                             return JSON.stringify({{ success: true }});
                         }})()"#,
-                        user_sel.replace('"', r#"\""#),
-                        username.replace('"', r#"\""#)
+                        crate::session::escape_js_string(user_sel),
+                        crate::session::escape_js_string(username)
                     );
                     self.session
                         .backend()
@@ -210,8 +210,8 @@ impl Tool for BrowserAuthTool {
                             el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                             return JSON.stringify({{ success: true }});
                         }})()"#,
-                        pass_sel.replace('"', r#"\""#),
-                        password.replace('"', r#"\""#)
+                        crate::session::escape_js_string(pass_sel),
+                        crate::session::escape_js_string(password)
                     );
                     self.session
                         .backend()
@@ -229,7 +229,7 @@ impl Tool for BrowserAuthTool {
                             el.click();
                             return JSON.stringify({{ success: true }});
                         }})()"#,
-                        submit_sel.replace('"', r#"\""#)
+                        crate::session::escape_js_string(submit_sel),
                     );
                     self.session
                         .backend()

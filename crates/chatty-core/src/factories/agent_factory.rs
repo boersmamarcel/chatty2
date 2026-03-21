@@ -939,53 +939,54 @@ impl AgentClient {
         };
 
         // ── Browser tools ────────────────────────────────────────────────
-        let browser_tools: Option<BrowserTools> =
-            if browser_settings.as_ref().is_some_and(|s| s.enabled) {
-                tracing::info!("Browser tools enabled");
-                let backend = std::sync::Arc::new(
-                    chatty_browser::backend::wry_backend::WryBackend::default(),
-                );
-                let engine = chatty_browser::BrowserEngine::new(backend);
-                let session = engine.session().clone();
-                let active_tab = engine.active_tab().clone();
+        let browser_tools: Option<BrowserTools> = if browser_settings
+            .as_ref()
+            .is_some_and(|s| s.enabled)
+        {
+            tracing::info!("Browser tools enabled");
+            let backend =
+                std::sync::Arc::new(chatty_browser::backend::wry_backend::WryBackend::default());
+            let engine = chatty_browser::BrowserEngine::new(backend);
+            let session = engine.session().clone();
+            let active_tab = engine.active_tab().clone();
 
-                // Load login profiles for browse tool's login detection
-                let login_profiles = match chatty_browser::settings::LoginProfileRepository::new() {
-                    Ok(repo) => repo.load_all().await.unwrap_or_default(),
-                    Err(e) => {
-                        tracing::warn!(error = ?e, "Failed to init login profile repo");
-                        Vec::new()
-                    }
-                };
+            // Load login profiles for browse tool's login detection
+            let login_profiles = match chatty_browser::settings::LoginProfileRepository::new() {
+                Ok(repo) => repo.load_all().await.unwrap_or_default(),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to init login profile repo");
+                    Vec::new()
+                }
+            };
 
-                // Credential vault + profile repo for auth tool
-                let vault = std::sync::Arc::new(
-                    chatty_browser::credential::vault::CredentialVault::new().unwrap_or_else(|e| {
-                        tracing::warn!(error = ?e, "CredentialVault fallback");
-                        // Re-try will likely succeed; vault handles missing dir gracefully
-                        chatty_browser::credential::vault::CredentialVault::new()
-                            .expect("CredentialVault init")
-                    }),
-                );
-                let profiles_repo = std::sync::Arc::new(
-                    chatty_browser::settings::LoginProfileRepository::new().unwrap_or_else(|e| {
-                        tracing::warn!(error = ?e, "LoginProfileRepository fallback");
-                        chatty_browser::settings::LoginProfileRepository::new()
-                            .expect("LoginProfileRepository init")
-                    }),
-                );
+            // Credential vault + profile repo for auth tool
+            let auth_components = chatty_browser::credential::vault::CredentialVault::new()
+                .and_then(|vault| {
+                    chatty_browser::settings::LoginProfileRepository::new()
+                        .map(|repo| (std::sync::Arc::new(vault), std::sync::Arc::new(repo)))
+                });
 
-                Some((
+            match auth_components {
+                Ok((vault, profiles_repo)) => Some((
                     BrowseTool::new(session.clone(), login_profiles),
                     BrowserActionTool::new(session.clone(), active_tab.clone()),
                     BrowserExtractTool::new(session.clone(), active_tab.clone()),
                     BrowserAuthTool::new(session.clone(), active_tab.clone(), vault, profiles_repo),
                     BrowserTabsTool::new(session, active_tab),
-                ))
-            } else {
-                tracing::info!("Browser tools disabled");
-                None
-            };
+                )),
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "Failed to initialize credential vault or profile repo — \
+                         check config directory permissions. Browser tools disabled."
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Browser tools disabled");
+            None
+        };
 
         // Create git tools from the handle started before the filesystem block.
         // GitService ran concurrently with FileSystemService + CodeSearchService.

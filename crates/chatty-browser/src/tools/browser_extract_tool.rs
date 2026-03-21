@@ -215,7 +215,12 @@ impl Tool for BrowserExtractTool {
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join("chatty")
                     .join("browser_screenshots");
-                let _ = tokio::fs::create_dir_all(&cache_dir).await;
+                tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
+                    BrowserExtractError::ExtractionFailed(format!(
+                        "Failed to create screenshot directory {}: {e}",
+                        cache_dir.display()
+                    ))
+                })?;
                 let filename = format!(
                     "screenshot_{}.png",
                     std::time::SystemTime::now()

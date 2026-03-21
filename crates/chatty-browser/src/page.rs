@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct PageSnapshot {
     pub url: String,
     pub title: String,
-    /// Main text content, truncated to ~3 000 chars.
+    /// Main text content, truncated to ~3000 chars.
     pub text_content: String,
     /// Interactive elements (buttons, inputs, links) with stable IDs.
     /// Capped at 50 elements.

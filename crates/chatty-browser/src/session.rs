@@ -17,6 +17,56 @@ const MAX_ELEMENTS: usize = 50;
 const MAX_LINKS: usize = 50;
 /// Default page load timeout in milliseconds.
 const DEFAULT_LOAD_TIMEOUT_MS: u64 = 15_000;
+/// Redaction sentinel for password fields.
+pub const PASSWORD_REDACTED: &str = "●●●●";
+
+/// Escape a string for safe embedding in a JavaScript string literal.
+///
+/// Handles: backslashes, quotes, newlines, carriage returns, tabs, and
+/// other control characters that could break a JS string or enable injection.
+pub fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
+            c if c.is_control() => {
+                // Escape other control chars as \uXXXX
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Truncate a string to approximately `max_len` characters at a word boundary,
+/// respecting UTF-8 boundaries. Appends '…' if truncated.
+fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    // Find a safe char boundary at or before max_len
+    let safe_end = text
+        .char_indices()
+        .take_while(|(i, _)| *i <= max_len)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    // Try to break at a word boundary
+    let truncation_point = text[..safe_end].rfind(' ').unwrap_or(safe_end);
+    let mut result = text[..truncation_point].to_string();
+    result.push('…');
+    result
+}
 
 /// High-level browser session wrapping a [`BrowserBackend`].
 ///
@@ -64,16 +114,10 @@ impl BrowserSession {
         let url = data["url"].as_str().unwrap_or_default().to_string();
         let title = data["title"].as_str().unwrap_or_default().to_string();
 
-        let mut text_content = data["textContent"].as_str().unwrap_or_default().to_string();
-        if text_content.len() > MAX_TEXT_CONTENT_LEN {
-            // Truncate at a word boundary
-            if let Some(pos) = text_content[..MAX_TEXT_CONTENT_LEN].rfind(' ') {
-                text_content.truncate(pos);
-            } else {
-                text_content.truncate(MAX_TEXT_CONTENT_LEN);
-            }
-            text_content.push('…');
-        }
+        let text_content = truncate_text(
+            data["textContent"].as_str().unwrap_or_default(),
+            MAX_TEXT_CONTENT_LEN,
+        );
 
         // Parse interactive elements
         let elements = Self::parse_elements(&data["elements"]);
@@ -153,12 +197,7 @@ impl BrowserSession {
         element_id: &str,
         value: &str,
     ) -> anyhow::Result<String> {
-        // Escape the value for safe JS string embedding
-        let escaped = value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
+        let escaped = escape_js_string(value);
         let js = format!(
             r#"(() => {{
                 const els = document.querySelectorAll(
@@ -194,7 +233,7 @@ impl BrowserSession {
         element_id: &str,
         option_value: &str,
     ) -> anyhow::Result<String> {
-        let escaped = option_value.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = escape_js_string(option_value);
         let js = format!(
             r#"(() => {{
                 const els = document.querySelectorAll(
@@ -237,7 +276,7 @@ impl BrowserSession {
         selector: &str,
         timeout_ms: u64,
     ) -> anyhow::Result<String> {
-        let escaped = selector.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = escape_js_string(selector);
         let js = format!(
             r#"(async () => {{
                 const deadline = Date.now() + {timeout};
@@ -524,5 +563,49 @@ mod tests {
         let links = BrowserSession::parse_links(&val);
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].text, "Home");
+    }
+
+    #[test]
+    fn test_escape_js_string_basic() {
+        assert_eq!(escape_js_string("hello"), "hello");
+        assert_eq!(escape_js_string(r#"he"llo"#), r#"he\"llo"#);
+        assert_eq!(escape_js_string("he\\llo"), "he\\\\llo");
+    }
+
+    #[test]
+    fn test_escape_js_string_special_chars() {
+        assert_eq!(escape_js_string("line1\nline2"), "line1\\nline2");
+        assert_eq!(escape_js_string("tab\there"), "tab\\there");
+        assert_eq!(escape_js_string("cr\rhere"), "cr\\rhere");
+        assert_eq!(escape_js_string("it's"), "it\\'s");
+    }
+
+    #[test]
+    fn test_escape_js_string_control_chars() {
+        let input = "hello\x00world";
+        let escaped = escape_js_string(input);
+        assert!(escaped.contains("\\u0000"));
+    }
+
+    #[test]
+    fn test_truncate_text_short() {
+        let text = "Hello, world!";
+        assert_eq!(truncate_text(text, 100), "Hello, world!");
+    }
+
+    #[test]
+    fn test_truncate_text_long() {
+        let text = "word1 word2 word3 word4 word5";
+        let truncated = truncate_text(text, 15);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.len() < 20);
+    }
+
+    #[test]
+    fn test_truncate_text_multibyte() {
+        // This should not panic even with multi-byte chars
+        let text = "こんにちは世界 Hello 你好世界";
+        let truncated = truncate_text(text, 10);
+        assert!(truncated.ends_with('…'));
     }
 }
