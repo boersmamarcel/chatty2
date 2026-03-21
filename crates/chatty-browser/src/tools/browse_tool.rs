@@ -111,7 +111,7 @@ impl Tool for BrowseTool {
             Ok(snapshot) => Ok(BrowseOutput { snapshot }),
             Err(backend_err) => {
                 // Fall back to HTTP fetch + HTML parsing
-                tracing::info!(
+                tracing::debug!(
                     url = %args.url,
                     backend_error = %backend_err,
                     "Browser backend unavailable, falling back to HTTP fetch"
