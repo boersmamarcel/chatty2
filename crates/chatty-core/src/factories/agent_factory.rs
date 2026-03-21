@@ -1186,12 +1186,8 @@ impl AgentClient {
                     mock_mode,
                     ..chatty_browser::BrowserEngineConfig::default()
                 };
-                let engine =
-                    std::sync::Arc::new(chatty_browser::BrowserEngine::new(config));
-                tracing::info!(
-                    credential_count = stored.len(),
-                    "Browser auth tool enabled"
-                );
+                let engine = std::sync::Arc::new(chatty_browser::BrowserEngine::new(config));
+                tracing::info!(credential_count = stored.len(), "Browser auth tool enabled");
                 Some(BrowserAuthTool::new(engine, stored))
             }
         } else {

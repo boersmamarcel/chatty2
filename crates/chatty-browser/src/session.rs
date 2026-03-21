@@ -118,9 +118,7 @@ impl BrowserSession {
     /// are returned (HttpOnly cookies are excluded by browsers).
     pub async fn get_cookies(&self) -> Result<Vec<(String, String)>, BrowserError> {
         if self.mock_mode {
-            return Ok(vec![
-                ("mock_session".to_string(), "test_value".to_string()),
-            ]);
+            return Ok(vec![("mock_session".to_string(), "test_value".to_string())]);
         }
 
         let raw = self.evaluate_js("document.cookie").await?;

@@ -1,6 +1,7 @@
 use crate::settings::controllers::SettingsView;
 use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
+use crate::settings::views::browser_credentials_page::browser_credentials_page;
 use crate::settings::views::execution_settings_page::execution_settings_page;
 use crate::settings::views::mcp_tools_page::mcp_tools_page;
 use crate::settings::views::memory_settings_page::memory_settings_page;
@@ -9,7 +10,6 @@ use crate::settings::views::providers_view::providers_page;
 use crate::settings::views::search_settings_page::search_settings_page;
 use crate::settings::views::training_settings_page::training_settings_page;
 use crate::settings::views::user_secrets_page::user_secrets_page;
-use crate::settings::views::browser_credentials_page::browser_credentials_page;
 
 use gpui::*;
 

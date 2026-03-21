@@ -118,10 +118,7 @@ mod tests {
 
         assert_eq!(loaded.credentials.len(), 1);
         assert_eq!(loaded.credentials[0].name, "komoot");
-        assert_eq!(
-            loaded.credentials[0].url_pattern,
-            "https://komoot.com/*"
-        );
+        assert_eq!(loaded.credentials[0].url_pattern, "https://komoot.com/*");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

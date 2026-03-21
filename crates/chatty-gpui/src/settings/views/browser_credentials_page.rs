@@ -1,7 +1,5 @@
 use crate::settings::controllers::browser_credentials_controller;
-use crate::settings::models::browser_credentials_store::{
-    AuthType, BrowserCredentialsModel,
-};
+use crate::settings::models::browser_credentials_store::{AuthType, BrowserCredentialsModel};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, IntoElement, Render,
     SharedString, Styled, Window, div, prelude::*, px,
@@ -40,8 +38,7 @@ impl BrowserCredentialsTableView {
     fn show_add_credential_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
         let name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("e.g. komoot, strava"));
-        let url_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. komoot.com"));
+        let url_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. komoot.com"));
         let view_entity = cx.entity().clone();
 
         window.open_dialog(cx, move |dialog, _, _| {
@@ -101,14 +98,12 @@ impl BrowserCredentialsTableView {
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("How Session Capture Works"),
                                     )
-                                    .child(
-                                        div().text_xs().child(
-                                            "1. A browser window will open to the website\n\
+                                    .child(div().text_xs().child(
+                                        "1. A browser window will open to the website\n\
                                              2. Log in manually (handles 2FA, CAPTCHAs, etc.)\n\
                                              3. Click \"Capture Session\" when done\n\
                                              4. Cookies are stored for the AI to use later",
-                                        ),
-                                    ),
+                                    )),
                             )
                             .child(
                                 h_flex()
@@ -116,11 +111,11 @@ impl BrowserCredentialsTableView {
                                     .justify_end()
                                     .pt_4()
                                     .child(
-                                        Button::new("cancel-credential")
-                                            .label("Cancel")
-                                            .on_click(move |_, window, cx| {
+                                        Button::new("cancel-credential").label("Cancel").on_click(
+                                            move |_, window, cx| {
                                                 window.close_dialog(cx);
-                                            }),
+                                            },
+                                        ),
                                     )
                                     .child(
                                         Button::new("capture-credential")
@@ -136,8 +131,11 @@ impl BrowserCredentialsTableView {
                                                         .value()
                                                         .trim()
                                                         .to_string();
-                                                    let domain =
-                                                        url_input.read(cx).value().trim().to_string();
+                                                    let domain = url_input
+                                                        .read(cx)
+                                                        .value()
+                                                        .trim()
+                                                        .to_string();
 
                                                     if name.is_empty() {
                                                         window.push_notification(
@@ -273,22 +271,16 @@ impl BrowserCredentialsTableView {
                     .child(info_text),
             )
             .child(
-                h_flex()
-                    .w(px(60.))
-                    .justify_end()
-                    .child(
-                        Button::new(SharedString::from(format!("del-cred-{}", row_ix)))
-                            .icon(Icon::new(IconName::Close))
-                            .ghost()
-                            .xsmall()
-                            .on_click(move |_, _, cx| {
-                                browser_credentials_controller::remove_credential(
-                                    &name_for_delete,
-                                    cx,
-                                );
-                                view_for_delete.update(cx, |_, cx| cx.notify());
-                            }),
-                    ),
+                h_flex().w(px(60.)).justify_end().child(
+                    Button::new(SharedString::from(format!("del-cred-{}", row_ix)))
+                        .icon(Icon::new(IconName::Close))
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, _, cx| {
+                            browser_credentials_controller::remove_credential(&name_for_delete, cx);
+                            view_for_delete.update(cx, |_, cx| cx.notify());
+                        }),
+                ),
             )
     }
 
@@ -408,14 +400,10 @@ fn start_session_capture(
                     v_flex()
                         .gap_3()
                         .p_4()
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(
-                                    "A browser window is opening. Please log in to the website, \
+                        .child(div().text_sm().child(
+                            "A browser window is opening. Please log in to the website, \
                                      then click \"Capture Now\" when you're done.",
-                                ),
-                        )
+                        ))
                         .child(
                             div()
                                 .text_xs()
@@ -429,20 +417,14 @@ fn start_session_capture(
                                 .gap_2()
                                 .justify_end()
                                 .pt_4()
-                                .child(
-                                    Button::new("cancel-capture")
-                                        .label("Cancel")
-                                        .on_click({
-                                            let cancel_flag = cancel_flag_for_dialog.clone();
-                                            move |_, window, cx| {
-                                                cancel_flag.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                                window.close_dialog(cx);
-                                            }
-                                        }),
-                                )
+                                .child(Button::new("cancel-capture").label("Cancel").on_click({
+                                    let cancel_flag = cancel_flag_for_dialog.clone();
+                                    move |_, window, cx| {
+                                        cancel_flag
+                                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                                        window.close_dialog(cx);
+                                    }
+                                }))
                                 .child(
                                     Button::new("capture-now-btn")
                                         .primary()
@@ -562,16 +544,18 @@ pub fn browser_credentials_page() -> SettingPage {
              use those cookies to access authenticated pages.",
         )
         .resettable(false)
-        .groups(vec![SettingGroup::new()
-            .title("Captured Sessions")
-            .description(
-                "Each credential stores cookies from a manual login session. \
+        .groups(vec![
+            SettingGroup::new()
+                .title("Captured Sessions")
+                .description(
+                    "Each credential stores cookies from a manual login session. \
                  When the AI calls browser_auth with a credential name, those \
                  cookies are injected so it can access authenticated content.",
-            )
-            .items(vec![SettingItem::render(|_options, window, cx| {
-                let view =
-                    if let Some(existing) = cx.try_global::<GlobalBrowserCredentialsView>() {
+                )
+                .items(vec![SettingItem::render(|_options, window, cx| {
+                    let view = if let Some(existing) =
+                        cx.try_global::<GlobalBrowserCredentialsView>()
+                    {
                         if let Some(view) = existing.view.clone() {
                             view
                         } else {
@@ -590,6 +574,7 @@ pub fn browser_credentials_page() -> SettingPage {
                         new_view
                     };
 
-                div().w_full().child(view)
-            })])])
+                    div().w_full().child(view)
+                })]),
+        ])
 }

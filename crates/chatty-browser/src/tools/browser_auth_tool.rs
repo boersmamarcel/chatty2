@@ -5,13 +5,12 @@
 //! cookies, and then reloads the page so the server sees the authenticated session.
 
 use crate::engine::BrowserEngine;
-use crate::page_repr::PageSnapshot;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Arguments for the browser_auth tool.
 #[derive(Deserialize, Serialize)]
@@ -90,9 +89,7 @@ impl BrowserAuthTool {
     }
 
     /// Get or create a browser session.
-    async fn get_or_create_session(
-        &self,
-    ) -> Result<(), BrowserAuthToolError> {
+    async fn get_or_create_session(&self) -> Result<(), BrowserAuthToolError> {
         let mut session_guard = self.session.lock().await;
         if session_guard.is_none() {
             if !self.engine.is_running().await {
@@ -192,9 +189,10 @@ impl Tool for BrowserAuthTool {
             .expect("session should be initialized");
 
         // Step 1: Navigate to the target URL first (to establish the domain context)
-        let snapshot = session.navigate(&args.url).await.map_err(|e| {
-            BrowserAuthToolError::AuthError(format!("Navigation failed: {}", e))
-        })?;
+        let _initial_snapshot = session
+            .navigate(&args.url)
+            .await
+            .map_err(|e| BrowserAuthToolError::AuthError(format!("Navigation failed: {}", e)))?;
 
         // Step 2: Inject cookies
         let cookie_count = credential.cookies.len();
@@ -318,7 +316,12 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No stored credential"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No stored credential")
+        );
     }
 
     #[tokio::test]
