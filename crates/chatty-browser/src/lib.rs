@@ -36,3 +36,4 @@ pub use error::BrowserError;
 pub use page_repr::PageSnapshot;
 pub use session::BrowserSession;
 pub use tools::browse_tool::BrowseTool;
+pub use tools::browser_auth_tool::{BrowserAuthTool, StoredCredential};

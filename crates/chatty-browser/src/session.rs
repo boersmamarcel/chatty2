@@ -100,6 +100,79 @@ impl BrowserSession {
         Ok(result.value)
     }
 
+    /// Get the current page URL (resolved from JS `window.location.href`).
+    pub async fn current_url_from_js(&self) -> Result<String, BrowserError> {
+        let raw = self.evaluate_js("window.location.href").await?;
+        Ok(strip_js_quotes(&raw))
+    }
+
+    /// Extract the domain from the current page URL.
+    pub async fn current_url_domain(&self) -> Result<String, BrowserError> {
+        let raw = self.evaluate_js("window.location.hostname").await?;
+        Ok(strip_js_quotes(&raw))
+    }
+
+    /// Get all cookies for the current page via `document.cookie`.
+    ///
+    /// Returns a list of (name, value) pairs. Only cookies visible to JS
+    /// are returned (HttpOnly cookies are excluded by browsers).
+    pub async fn get_cookies(&self) -> Result<Vec<(String, String)>, BrowserError> {
+        if self.mock_mode {
+            return Ok(vec![
+                ("mock_session".to_string(), "test_value".to_string()),
+            ]);
+        }
+
+        let raw = self.evaluate_js("document.cookie").await?;
+        let cookie_str = strip_js_quotes(&raw);
+
+        let cookies: Vec<(String, String)> = cookie_str
+            .split(';')
+            .filter_map(|pair| {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    return None;
+                }
+                let mut parts = pair.splitn(2, '=');
+                let name = parts.next()?.trim().to_string();
+                let value = parts.next().unwrap_or("").trim().to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                Some((name, value))
+            })
+            .collect();
+
+        Ok(cookies)
+    }
+
+    /// Set cookies on the current page via `document.cookie`.
+    ///
+    /// Each (name, value, domain, path) tuple is set individually.
+    /// Note: HttpOnly cookies cannot be set via JS — this only sets
+    /// cookies visible to JavaScript.
+    pub async fn set_cookies(
+        &self,
+        cookies: &[(String, String, String, String)],
+    ) -> Result<(), BrowserError> {
+        if self.mock_mode {
+            return Ok(());
+        }
+
+        for (name, value, domain, path) in cookies {
+            let js = format!(
+                "document.cookie = '{}={}; domain={}; path={}; SameSite=Lax'",
+                escape_cookie_value(name),
+                escape_cookie_value(value),
+                escape_cookie_value(domain),
+                escape_cookie_value(path),
+            );
+            self.evaluate_js(&js).await?;
+        }
+
+        Ok(())
+    }
+
     /// Build a structured snapshot of the current page by evaluating JavaScript.
     pub async fn build_page_snapshot(&mut self) -> Result<PageSnapshot, BrowserError> {
         // Reset element ID counter for each snapshot
@@ -492,6 +565,12 @@ fn strip_js_quotes(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Escape a cookie name or value for safe inclusion in a `document.cookie` assignment.
+/// Replaces single quotes and semicolons to prevent JS injection.
+fn escape_cookie_value(s: &str) -> String {
+    s.replace('\'', "%27").replace(';', "%3B")
 }
 
 /// Parse a `document.readyState` value into a [`PageState`].

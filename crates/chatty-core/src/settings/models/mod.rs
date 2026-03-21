@@ -1,3 +1,4 @@
+pub mod browser_credentials_store;
 pub mod execution_settings;
 pub mod general_model;
 pub mod mcp_store;
@@ -8,6 +9,7 @@ pub mod token_tracking_settings;
 pub mod training_settings;
 pub mod user_secrets_store;
 
+pub use browser_credentials_store::BrowserCredentialsModel;
 pub use execution_settings::ExecutionSettingsModel;
 pub use general_model::GeneralSettingsModel;
 pub use mcp_store::McpServersModel;
