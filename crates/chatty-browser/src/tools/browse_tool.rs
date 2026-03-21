@@ -10,7 +10,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Maximum characters of text content returned in the tool output.
 /// Shorter than the LLM snapshot rendering (4000) because the full snapshot
@@ -158,18 +158,44 @@ impl Tool for BrowseTool {
 
         info!(url = %url, "Browse tool: navigating");
 
-        // Try the full browser engine first; fall back to HTTP if unavailable
+        // Try the full browser engine first; fall back to HTTP if unavailable.
+        // If the browser session errors mid-navigation (e.g. DevTools "early eof"),
+        // invalidate the session and fall back to HTTP so the LLM still gets a result.
         let snapshot = match self.get_or_create_session().await {
             Ok(()) => {
                 // Navigate and build snapshot via browser engine
-                let mut guard = self.session.lock().await;
-                let session = guard.as_mut().ok_or_else(|| {
-                    BrowseToolError::BrowseError("Session unexpectedly missing".to_string())
-                })?;
+                let nav_result = {
+                    let mut guard = self.session.lock().await;
+                    let session = guard.as_mut().ok_or_else(|| {
+                        BrowseToolError::BrowseError("Session unexpectedly missing".to_string())
+                    })?;
 
-                session.navigate(&url).await.map_err(|e| {
-                    BrowseToolError::BrowseError(format!("Navigation failed: {}", e))
-                })?
+                    session.navigate(&url).await
+                };
+
+                match nav_result {
+                    Ok(snapshot) => snapshot,
+                    Err(e) => {
+                        // DevTools connection may have broken (early eof, timeout, etc.)
+                        // Invalidate the session so the next call will reconnect.
+                        warn!(
+                            url = %url,
+                            error = %e,
+                            "Browser navigation failed, invalidating session and falling back to HTTP"
+                        );
+                        {
+                            let mut guard = self.session.lock().await;
+                            *guard = None;
+                        }
+
+                        // Fall back to HTTP fetch
+                        crate::http_fallback::fetch_and_snapshot(&url)
+                            .await
+                            .map_err(|e| {
+                                BrowseToolError::BrowseError(format!("HTTP fallback failed: {}", e))
+                            })?
+                    }
+                }
             }
             Err(_engine_err) => {
                 // Browser engine unavailable — fall back to plain HTTP fetch

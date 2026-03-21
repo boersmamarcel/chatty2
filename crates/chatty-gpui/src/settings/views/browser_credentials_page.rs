@@ -447,6 +447,8 @@ fn start_session_capture(
 
     // Spawn the async capture task
     cx.spawn(async move |cx: &mut AsyncApp| {
+        // Pass the URL as initial_url so versoview opens it directly at launch.
+        // We do NOT navigate again via DevTools — the page is already loaded.
         let config = chatty_browser::BrowserEngineConfig {
             headless: false, // Visible window for manual login
             initial_url: Some(url.clone()),
@@ -455,7 +457,7 @@ fn start_session_capture(
 
         let engine = chatty_browser::BrowserEngine::new(config);
 
-        // Start the browser engine
+        // Start the browser engine (launches versoview with the URL)
         if let Err(e) = engine.start().await {
             tracing::warn!(
                 error = %e,
@@ -469,13 +471,9 @@ fn start_session_capture(
             return;
         }
 
-        // Create a session and navigate to the target URL via DevTools
-        let mut session = engine.create_session();
-        if let Err(e) = session.navigate(&url).await {
-            tracing::warn!(error = %e, "Failed to navigate for session capture");
-            engine.stop().await;
-            return;
-        }
+        // Create a session — the page is already loaded via initial_url,
+        // so we just need a session handle to extract cookies later.
+        let session = engine.create_session();
 
         // Poll until the user clicks "Capture Now" or "Cancel"
         loop {

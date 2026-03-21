@@ -19,6 +19,8 @@ use tracing::{debug, warn};
 const MAX_DEVTOOLS_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Maximum digits in the length prefix (prevents unbounded reads).
 const MAX_LENGTH_PREFIX_DIGITS: usize = 20;
+/// Timeout for a single DevTools read operation (seconds).
+const DEVTOOLS_READ_TIMEOUT_SECS: u64 = 30;
 
 /// Client for the Firefox Remote Debug Protocol used by Verso's DevTools server.
 pub struct DevToolsClient {
@@ -120,6 +122,9 @@ impl DevToolsClient {
     }
 
     /// Send a raw request to the DevTools server and return the response.
+    ///
+    /// Includes a read timeout to prevent indefinite hangs when the browser
+    /// process crashes or the DevTools connection drops.
     pub async fn send_request(
         &self,
         method: &str,
@@ -153,8 +158,17 @@ impl DevToolsClient {
             .await
             .map_err(|e| BrowserError::DevToolsProtocol(format!("Write failed: {}", e)))?;
 
-        // Read the response (also length-prefixed)
-        let response = Self::read_message(stream).await?;
+        // Read the response with a timeout to avoid indefinite hangs.
+        let timeout = std::time::Duration::from_secs(DEVTOOLS_READ_TIMEOUT_SECS);
+        let response = match tokio::time::timeout(timeout, Self::read_message(stream)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(BrowserError::DevToolsProtocol(format!(
+                    "Read timed out after {}s waiting for response to '{}'",
+                    DEVTOOLS_READ_TIMEOUT_SECS, method
+                )));
+            }
+        };
         debug!(id, method, "DevTools response received");
 
         Ok(response)
