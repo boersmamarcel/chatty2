@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 chatty-core = { path = "../chatty-core", features = ["gpui-globals"] }
+chatty-browser = { path = "../chatty-browser" }
 
 # GPUI framework
 gpui.workspace = true

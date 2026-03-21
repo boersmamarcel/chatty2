@@ -27,6 +27,10 @@ pub struct BrowserEngineConfig {
     pub headless: bool,
     /// Page load timeout in milliseconds.
     pub page_load_timeout_ms: u64,
+    /// Initial URL to open when the browser starts. Passed as a command-line
+    /// argument to versoview so the correct page is loaded from the start,
+    /// avoiding reliance on DevTools navigation commands.
+    pub initial_url: Option<String>,
     /// Mock mode: return realistic fake page data without launching versoview.
     /// Useful for testing the full tool pipeline and LLM integration.
     /// Enable via `BrowserEngineConfig { mock_mode: true, .. }` or by setting
@@ -42,6 +46,7 @@ impl Default for BrowserEngineConfig {
             devtools_port: 0,
             headless: false,
             page_load_timeout_ms: 30_000,
+            initial_url: None,
             mock_mode: false,
         }
     }
@@ -98,6 +103,12 @@ impl BrowserEngine {
         info!(path = %binary_path.display(), port = self.resolved_port, "Starting versoview");
 
         let mut cmd = Command::new(&binary_path);
+
+        // URL is versoview's positional argument — must come before flags
+        if let Some(ref url) = self.config.initial_url {
+            cmd.arg(url);
+        }
+
         cmd.arg("--devtools-port")
             .arg(self.resolved_port.to_string());
 
@@ -190,7 +201,8 @@ impl BrowserEngine {
     /// Search order:
     /// 1. Explicit path from config
     /// 2. `VERSOVIEW_PATH` environment variable
-    /// 3. `versoview` on `$PATH`
+    /// 3. Bundled binary downloaded at build time
+    /// 4. `versoview` on `$PATH`
     fn resolve_versoview_path(&self) -> Result<PathBuf, BrowserError> {
         // 1. Explicit config path
         if let Some(ref path) = self.config.versoview_path {
@@ -212,7 +224,15 @@ impl BrowserEngine {
             );
         }
 
-        // 3. Search $PATH
+        // 3. Bundled binary (downloaded at build time)
+        if let Some(bundled) = option_env!("VERSOVIEW_BUNDLED_PATH") {
+            let path = PathBuf::from(bundled);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // 4. Search $PATH
         if let Ok(which_path) = which_versoview() {
             return Ok(which_path);
         }

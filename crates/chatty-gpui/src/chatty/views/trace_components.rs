@@ -1878,6 +1878,9 @@ fn render_html_preview(
 
     // Body content
     let mut body = div()
+        .id(ElementId::Name(
+            format!("{}-body", element_id_prefix).into(),
+        ))
         .flex()
         .flex_col()
         .px_3()

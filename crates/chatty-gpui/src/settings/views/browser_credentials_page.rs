@@ -1,8 +1,8 @@
 use crate::settings::controllers::browser_credentials_controller;
 use crate::settings::models::browser_credentials_store::{AuthType, BrowserCredentialsModel};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, IntoElement, Render,
-    SharedString, Styled, Window, div, prelude::*, px,
+    App, AsyncApp, Context, Entity, FocusHandle, Focusable, FontWeight, Global, IntoElement,
+    Render, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Sizable, WindowExt as _,
@@ -446,9 +446,10 @@ fn start_session_capture(
     });
 
     // Spawn the async capture task
-    cx.spawn(|cx: &mut AsyncApp| async move {
+    cx.spawn(async move |cx: &mut AsyncApp| {
         let config = chatty_browser::BrowserEngineConfig {
             headless: false, // Visible window for manual login
+            initial_url: Some(url.clone()),
             ..chatty_browser::BrowserEngineConfig::default()
         };
 
@@ -468,13 +469,8 @@ fn start_session_capture(
             return;
         }
 
-        // Create a session and navigate to the target URL
-        let mut session = engine.create_session();
-        if let Err(e) = session.navigate(&url).await {
-            tracing::warn!(error = %e, "Failed to navigate for session capture");
-            engine.stop().await;
-            return;
-        }
+        // Create a session (URL was passed directly to versoview at launch)
+        let session = engine.create_session();
 
         // Poll until the user clicks "Capture Now" or "Cancel"
         loop {
