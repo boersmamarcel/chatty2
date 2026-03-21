@@ -71,6 +71,7 @@ pub async fn fetch_and_snapshot(url: &str) -> Result<PageSnapshot, String> {
         state: PageState::Complete,
         og_image_url,
         description,
+        raw_html: Some(body),
     })
 }
 

@@ -18,6 +18,12 @@ const PREVIEW_MAX_LINES: usize = 4;
 const PREVIEW_MAX_CHARS: usize = 300;
 /// Maximum character length for an auto-extracted page title.
 const PREVIEW_TITLE_MAX_CHARS: usize = 80;
+/// Maximum characters of raw HTML to process for the rendered preview.
+const HTML_PREVIEW_MAX_CHARS: usize = 50_000;
+/// Maximum lines to show in the rendered HTML preview body.
+const HTML_PREVIEW_MAX_BODY_LINES: usize = 25;
+/// Maximum links to show in the rendered HTML preview.
+const HTML_PREVIEW_MAX_LINKS: usize = 12;
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
@@ -1295,12 +1301,21 @@ fn try_render_website_preview(
 ) -> Option<AnyElement> {
     let json: serde_json::Value = serde_json::from_str(output).ok()?;
 
-    // Extract screenshot path for visual preview (from browse tool OG image cache)
-    let screenshot_path = json
+    // Extract screenshot path for visual preview (from browse tool OG image cache).
+    // IMPORTANT: Must be PathBuf, not String — GPUI's img(String) does asset lookup,
+    // while img(PathBuf) loads from the filesystem.
+    let screenshot_path: Option<std::path::PathBuf> = json
         .get("screenshot_path")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|p| std::path::Path::new(p).exists());
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists());
+
+    // Extract cached HTML path for rendered website preview
+    let html_cache_path: Option<std::path::PathBuf> = json
+        .get("html_cache_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists());
 
     // Extract fields based on tool type
     let (title, url, content, meta_line) = match tool_name {
@@ -1395,6 +1410,7 @@ fn try_render_website_preview(
     let accent = cx.theme().primary;
 
     let url_for_click = url.clone();
+    let html_cache_path_exists = html_cache_path.is_some();
 
     Some(
         div()
@@ -1477,8 +1493,17 @@ fn try_render_website_preview(
                         ),
                 )
             })
-            // Content preview
-            .when(!preview_text.is_empty(), |this| {
+            // Rendered HTML preview (visual website rendering)
+            .when_some(
+                html_cache_path.and_then(|p| render_html_preview(&p, element_id_prefix, cx)),
+                |this, preview_el| {
+                    this.child(
+                        div().mt_1().child(preview_el),
+                    )
+                },
+            )
+            // Fallback: plain text content preview (only if no HTML preview)
+            .when(!html_cache_path_exists && !preview_text.is_empty(), |this| {
                 this.child(
                     div()
                         .text_xs()
@@ -1600,4 +1625,367 @@ fn open_url_in_system_browser(url: &str) {
             tracing::warn!(error = ?e, url = %url, "Failed to open URL in browser");
         }
     });
+}
+
+/// Build a visual rendering of a cached HTML file as GPUI elements.
+///
+/// This parses the raw HTML and renders a styled "browser-like" preview
+/// showing headings, text paragraphs, and links in a visually distinct layout
+/// that approximates the rendered website within the trace card.
+fn render_html_preview(
+    html_path: &std::path::Path,
+    element_id_prefix: &str,
+    cx: &App,
+) -> Option<AnyElement> {
+    let html = std::fs::read_to_string(html_path).ok()?;
+    let html = if html.len() > HTML_PREVIEW_MAX_CHARS {
+        &html[..HTML_PREVIEW_MAX_CHARS]
+    } else {
+        &html
+    };
+
+    let bg = cx.theme().background;
+    let text_color = cx.theme().foreground;
+    let muted_text = cx.theme().muted_foreground;
+    let accent = cx.theme().primary;
+    let border = cx.theme().border;
+
+    // Simple HTML element extraction
+    let mut body_lines: Vec<HtmlLine> = Vec::new();
+    let mut link_list: Vec<(String, String)> = Vec::new();
+    let lower = html.to_ascii_lowercase();
+
+    // Find body content (skip head)
+    let body_start = lower.find("<body").unwrap_or(0);
+    let content = &html[body_start..];
+
+    // Strip all tags and extract structure
+    let mut in_tag = false;
+    let mut current_text = String::new();
+    let mut current_tag = String::new();
+    let mut tag_name = String::new();
+    let mut i = 0;
+    let chars: Vec<char> = content.chars().collect();
+
+    while i < chars.len() && body_lines.len() < HTML_PREVIEW_MAX_BODY_LINES + 20 {
+        let ch = chars[i];
+        if ch == '<' {
+            // Flush current text
+            let trimmed = current_text.trim().to_string();
+            if !trimmed.is_empty() {
+                body_lines.push(HtmlLine::Text(trimmed));
+                current_text.clear();
+            }
+            in_tag = true;
+            current_tag.clear();
+        } else if ch == '>' && in_tag {
+            in_tag = false;
+            let tag_lower = current_tag.to_ascii_lowercase();
+
+            // Extract tag name
+            tag_name = tag_lower
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_string();
+
+            // Handle specific tags
+            match tag_name.as_str() {
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    // Collect text until closing tag
+                    let close_tag = format!("</{}", tag_name);
+                    let rest = &content[content.len().min(
+                        content.char_indices().nth(i + 1).map(|(idx, _)| idx).unwrap_or(content.len()),
+                    )..];
+                    let rest_lower = rest.to_ascii_lowercase();
+                    if let Some(end) = rest_lower.find(&close_tag) {
+                        let heading_html = &rest[..end];
+                        let heading_text = strip_tags(heading_html).trim().to_string();
+                        if !heading_text.is_empty() {
+                            let level: u8 = tag_name[1..].parse().unwrap_or(2);
+                            body_lines.push(HtmlLine::Heading(level, heading_text));
+                        }
+                        // Skip past closing tag
+                        if let Some(close_end) = rest_lower[end..].find('>') {
+                            let skip_chars = rest[..end + close_end + 1].chars().count();
+                            i += skip_chars;
+                        }
+                    }
+                }
+                "br" => {
+                    body_lines.push(HtmlLine::Break);
+                }
+                "hr" => {
+                    body_lines.push(HtmlLine::Separator);
+                }
+                "a" => {
+                    // Extract href for link list
+                    if let Some(href) = extract_tag_attr(&current_tag, "href") {
+                        if !href.starts_with('#')
+                            && !href.starts_with("javascript:")
+                            && link_list.len() < HTML_PREVIEW_MAX_LINKS
+                        {
+                            // Collect link text
+                            let rest = &content[content.len().min(
+                                content.char_indices().nth(i + 1).map(|(idx, _)| idx).unwrap_or(content.len()),
+                            )..];
+                            let rest_lower = rest.to_ascii_lowercase();
+                            if let Some(end) = rest_lower.find("</a") {
+                                let link_text = strip_tags(&rest[..end]).trim().to_string();
+                                if !link_text.is_empty() {
+                                    link_list.push((link_text, href));
+                                }
+                            }
+                        }
+                    }
+                }
+                "script" | "style" | "noscript" => {
+                    // Skip content of these tags
+                    let close_tag = format!("</{}", tag_name);
+                    let rest = &content[content.len().min(
+                        content.char_indices().nth(i + 1).map(|(idx, _)| idx).unwrap_or(content.len()),
+                    )..];
+                    let rest_lower = rest.to_ascii_lowercase();
+                    if let Some(end) = rest_lower.find(&close_tag) {
+                        if let Some(close_end) = rest_lower[end..].find('>') {
+                            let skip_chars = rest[..end + close_end + 1].chars().count();
+                            i += skip_chars;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            current_tag.clear();
+        } else if in_tag {
+            current_tag.push(ch);
+        } else {
+            // Decode basic HTML entities
+            if ch == '&' {
+                let rest: String = chars[i..].iter().take(10).collect();
+                if rest.starts_with("&amp;") {
+                    current_text.push('&');
+                    i += 4;
+                } else if rest.starts_with("&lt;") {
+                    current_text.push('<');
+                    i += 3;
+                } else if rest.starts_with("&gt;") {
+                    current_text.push('>');
+                    i += 3;
+                } else if rest.starts_with("&nbsp;") {
+                    current_text.push(' ');
+                    i += 5;
+                } else if rest.starts_with("&quot;") {
+                    current_text.push('"');
+                    i += 5;
+                } else {
+                    current_text.push(ch);
+                }
+            } else {
+                current_text.push(ch);
+            }
+        }
+        i += 1;
+    }
+
+    // Flush remaining text
+    let trimmed = current_text.trim().to_string();
+    if !trimmed.is_empty() {
+        body_lines.push(HtmlLine::Text(trimmed));
+    }
+
+    // Collapse consecutive blank/empty lines and limit total
+    let mut filtered_lines: Vec<HtmlLine> = Vec::new();
+    for line in body_lines {
+        match &line {
+            HtmlLine::Text(t) if t.is_empty() => continue,
+            HtmlLine::Break if filtered_lines.last().map_or(true, |l| matches!(l, HtmlLine::Break)) => continue,
+            _ => filtered_lines.push(line),
+        }
+    }
+    filtered_lines.truncate(HTML_PREVIEW_MAX_BODY_LINES);
+
+    if filtered_lines.is_empty() && link_list.is_empty() {
+        return None;
+    }
+
+    // Build GPUI elements
+    let mut container = div()
+        .id(ElementId::Name(
+            format!("{}-html-preview", element_id_prefix).into(),
+        ))
+        .flex()
+        .flex_col()
+        .w_full()
+        .bg(bg)
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .overflow_hidden()
+        .max_h(px(400.0));
+
+    // Browser chrome bar
+    container = container.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .bg(cx.theme().muted)
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::hsla(0.0, 0.7, 0.55, 1.0)))
+                    .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::hsla(0.12, 0.8, 0.55, 1.0)))
+                    .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::hsla(0.32, 0.7, 0.55, 1.0)))
+            )
+    );
+
+    // Body content
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .px_3()
+        .py_2()
+        .gap_0p5()
+        .overflow_y_scroll();
+
+    for (idx, line) in filtered_lines.iter().enumerate() {
+        match line {
+            HtmlLine::Heading(level, text) => {
+                let font_size = match level {
+                    1 => px(18.0),
+                    2 => px(16.0),
+                    3 => px(14.0),
+                    _ => px(13.0),
+                };
+                body = body.child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("{}-hline-{}", element_id_prefix, idx).into(),
+                        ))
+                        .text_size(font_size)
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(text_color)
+                        .mt_1()
+                        .mb_0p5()
+                        .child(text.clone()),
+                );
+            }
+            HtmlLine::Text(text) => {
+                let display_text = if text.chars().count() > 200 {
+                    format!("{}…", text.chars().take(197).collect::<String>())
+                } else {
+                    text.clone()
+                };
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .child(display_text),
+                );
+            }
+            HtmlLine::Separator => {
+                body = body.child(
+                    div().w_full().h(px(1.0)).bg(border).my_1(),
+                );
+            }
+            HtmlLine::Break => {}
+        }
+    }
+
+    // Links section
+    if !link_list.is_empty() {
+        body = body.child(
+            div().w_full().h(px(1.0)).bg(border).my_1(),
+        );
+        body = body.child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(text_color)
+                .mb_0p5()
+                .child(format!("Links ({})", link_list.len())),
+        );
+        for (text, href) in &link_list {
+            let display_href = if href.len() > 60 {
+                format!("{}…", &href[..57])
+            } else {
+                href.clone()
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(accent)
+                            .child(format!("• {}", text)),
+                    )
+                    .child(
+                        div()
+                            .text_color(muted_text)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .flex_shrink_0()
+                            .child(display_href),
+                    ),
+            );
+        }
+    }
+
+    container = container.child(body);
+    Some(container.into_any_element())
+}
+
+/// Parsed HTML line types for the visual preview.
+enum HtmlLine {
+    Heading(u8, String),
+    Text(String),
+    Separator,
+    Break,
+}
+
+/// Strip all HTML tags from a string, returning only text content.
+fn strip_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        if ch == '<' {
+            in_tag = true;
+        } else if ch == '>' && in_tag {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Extract an attribute value from an HTML tag string (e.g. `href` from `a href="..."`).
+fn extract_tag_attr(tag: &str, attr: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let search = format!("{}=", attr);
+    let pos = lower.find(&search)?;
+    let rest = &tag[pos + search.len()..];
+    let rest = rest.trim_start();
+    if rest.starts_with('"') {
+        let end = rest[1..].find('"')?;
+        Some(rest[1..1 + end].to_string())
+    } else if rest.starts_with('\'') {
+        let end = rest[1..].find('\'')?;
+        Some(rest[1..1 + end].to_string())
+    } else {
+        let end = rest.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
 }

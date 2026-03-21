@@ -32,6 +32,10 @@ pub struct PageSnapshot {
     /// Page description from `<meta name="description">` or `<meta property="og:description">`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Raw HTML body (not serialized to LLM output).
+    /// Kept in memory for caching to disk by the browse tool.
+    #[serde(skip)]
+    pub raw_html: Option<String>,
 }
 
 impl PageSnapshot {
@@ -194,6 +198,7 @@ mod tests {
             state: PageState::Complete,
             og_image_url: None,
             description: None,
+            raw_html: None,
         };
 
         let text = snapshot.to_llm_text();
@@ -215,6 +220,7 @@ mod tests {
             state: PageState::Complete,
             og_image_url: None,
             description: None,
+            raw_html: None,
         };
 
         let text = snapshot.to_llm_text();
@@ -251,6 +257,7 @@ mod tests {
             state: PageState::Complete,
             og_image_url: None,
             description: None,
+            raw_html: None,
         };
 
         let text = snapshot.to_llm_text();

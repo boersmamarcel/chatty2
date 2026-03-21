@@ -45,6 +45,10 @@ pub struct BrowseToolOutput {
     /// The UI uses this to display a visual preview of the page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot_path: Option<String>,
+    /// Local file path to a cached copy of the page's raw HTML.
+    /// The UI uses this to render a visual website preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html_cache_path: Option<String>,
 }
 
 impl BrowseToolOutput {
@@ -66,6 +70,7 @@ impl BrowseToolOutput {
             link_count: snapshot.links.len(),
             page_snapshot: snapshot.to_llm_text(),
             screenshot_path: None, // Set by call() after OG image download
+            html_cache_path: None, // Set by call() after HTML caching
         }
     }
 }
@@ -196,12 +201,58 @@ impl Tool for BrowseTool {
             }
         }
 
+        // Cache the raw HTML for visual rendering in the UI
+        if let Some(ref html) = snapshot.raw_html {
+            match cache_html(html, &snapshot.url) {
+                Ok(path) => {
+                    debug!(path = %path, "Cached HTML for visual preview");
+                    output.html_cache_path = Some(path);
+                }
+                Err(e) => {
+                    debug!(error = %e, "Failed to cache HTML");
+                }
+            }
+        }
+
         Ok(output)
     }
 }
 
 /// Maximum OG image file size (2 MB).
 const MAX_OG_IMAGE_BYTES: usize = 2_000_000;
+
+/// Maximum raw HTML cache size (2 MB).
+const MAX_HTML_CACHE_BYTES: usize = 2_000_000;
+
+/// Cache raw HTML to disk for visual rendering in the UI.
+///
+/// HTML is stored in the same browse cache directory as OG images,
+/// using a hash of the page URL as filename with `.html` extension.
+fn cache_html(html: &str, page_url: &str) -> Result<String, String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    if html.len() > MAX_HTML_CACHE_BYTES {
+        return Err(format!("HTML too large to cache: {} bytes", html.len()));
+    }
+
+    let cache_dir = dirs::cache_dir()
+        .ok_or("No cache directory")?
+        .join("chatty")
+        .join("browse_cache");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create browse cache dir: {}", e))?;
+
+    let mut hasher = DefaultHasher::new();
+    page_url.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let cache_path = cache_dir.join(format!("{:016x}.html", hash));
+
+    std::fs::write(&cache_path, html).map_err(|e| format!("Failed to write HTML cache: {}", e))?;
+
+    Ok(cache_path.to_string_lossy().to_string())
+}
 
 /// Download an OG image and cache it locally, returning the file path.
 ///
@@ -341,6 +392,7 @@ mod tests {
             state: PageState::Complete,
             og_image_url: None,
             description: None,
+            raw_html: None,
         };
 
         let output = BrowseToolOutput::from_snapshot(&snapshot);
@@ -362,6 +414,7 @@ mod tests {
             state: PageState::Complete,
             og_image_url: None,
             description: None,
+            raw_html: None,
         };
 
         let output = BrowseToolOutput::from_snapshot(&snapshot);

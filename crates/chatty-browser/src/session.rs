@@ -271,6 +271,7 @@ impl BrowserSession {
             state,
             og_image_url,
             description,
+            raw_html: None,
         })
     }
 
@@ -378,6 +379,7 @@ impl BrowserSession {
                 "Mock page snapshot for {} — browse tool running in test mode.",
                 domain
             )),
+            raw_html: None,
         }
     }
 
