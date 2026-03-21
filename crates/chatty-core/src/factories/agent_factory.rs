@@ -25,6 +25,8 @@ use crate::tools::{
     SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
+use chatty_browser::BrowseTool;
+use chatty_browser::BrowserAuthTool;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -170,6 +172,8 @@ fn active_native_tool_names(
     has_memory: bool,
     has_search_web: bool,
     has_sub_agent: bool,
+    has_browse: bool,
+    has_browser_auth: bool,
 ) -> HashSet<String> {
     let mut names = HashSet::from([String::from("list_tools"), String::from("read_skill")]);
 
@@ -280,6 +284,12 @@ fn active_native_tool_names(
     }
     if has_sub_agent {
         names.insert(String::from("sub_agent"));
+    }
+    if has_browse {
+        names.insert(String::from("browse"));
+    }
+    if has_browser_auth {
+        names.insert(String::from("browser_auth"));
     }
 
     names
@@ -427,6 +437,8 @@ fn collect_tools(
     read_skill_tool: ReadSkillTool,
     search_web_tool: Option<SearchWebTool>,
     sub_agent_tool: Option<SubAgentTool>,
+    browse_tool: Option<BrowseTool>,
+    browser_auth_tool: Option<BrowserAuthTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -524,6 +536,12 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = sub_agent_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = browse_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = browser_auth_tool {
         tools.push(Box::new(t));
     }
     tools
@@ -1092,6 +1110,90 @@ impl AgentClient {
                 None
             };
 
+        // Create browse tool if enabled in settings
+        let browse_tool: Option<BrowseTool> = if exec_settings
+            .as_ref()
+            .map(|s| s.browser_enabled)
+            .unwrap_or(false)
+        {
+            let mock_mode = std::env::var("CHATTY_BROWSER_MOCK")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let config = chatty_browser::BrowserEngineConfig {
+                mock_mode,
+                ..chatty_browser::BrowserEngineConfig::default()
+            };
+            let engine = std::sync::Arc::new(chatty_browser::BrowserEngine::new(config));
+            if mock_mode {
+                tracing::info!("Browse tool enabled (MOCK mode — no real browser)");
+            } else {
+                tracing::info!("Browse tool enabled");
+            }
+            Some(BrowseTool::new(engine))
+        } else {
+            tracing::info!("Browse tool disabled by execution settings");
+            None
+        };
+
+        // Create browser_auth tool if browser is enabled and credentials exist
+        let browser_auth_tool: Option<BrowserAuthTool> = if browse_tool.is_some() {
+            // Load stored credentials
+            let creds_model = {
+                let repo = crate::browser_credentials_repository();
+                match repo.load().await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "Failed to load browser credentials");
+                        crate::settings::models::BrowserCredentialsModel::default()
+                    }
+                }
+            };
+
+            if creds_model.credentials.is_empty() {
+                tracing::info!("Browser auth tool: no credentials stored, skipping");
+                None
+            } else {
+                let stored: Vec<chatty_browser::StoredCredential> = creds_model
+                    .credentials
+                    .iter()
+                    .map(|c| {
+                        use crate::settings::models::browser_credentials_store::AuthType;
+                        let cookies = match &c.auth_type {
+                            AuthType::CapturedSession { cookies, .. } => cookies
+                                .iter()
+                                .map(|ck| {
+                                    (
+                                        ck.name.clone(),
+                                        ck.value.clone(),
+                                        ck.domain.clone(),
+                                        ck.path.clone(),
+                                    )
+                                })
+                                .collect(),
+                        };
+                        chatty_browser::StoredCredential {
+                            name: c.name.clone(),
+                            url_pattern: c.url_pattern.clone(),
+                            cookies,
+                        }
+                    })
+                    .collect();
+
+                let mock_mode = std::env::var("CHATTY_BROWSER_MOCK")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let config = chatty_browser::BrowserEngineConfig {
+                    mock_mode,
+                    ..chatty_browser::BrowserEngineConfig::default()
+                };
+                let engine = std::sync::Arc::new(chatty_browser::BrowserEngine::new(config));
+                tracing::info!(credential_count = stored.len(), "Browser auth tool enabled");
+                Some(BrowserAuthTool::new(engine, stored))
+            }
+        } else {
+            None
+        };
+
         let native_tool_names = active_native_tool_names(
             fs_read_tools.is_some(),
             fs_write_tools.is_some(),
@@ -1112,6 +1214,8 @@ impl AgentClient {
             remember_tool.is_some(),
             search_web_tool.is_some(),
             sub_agent_tool.is_some(),
+            browse_tool.is_some(),
+            browser_auth_tool.is_some(),
         );
         let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
 
@@ -1136,6 +1240,8 @@ impl AgentClient {
             remember_tool.is_some(),
             search_web_tool.is_some(),
             sub_agent_tool.is_some(),
+            browse_tool.is_some(),
+            browser_auth_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -1314,6 +1420,23 @@ impl AgentClient {
              call this tool to get the complete procedure before executing it."
                 .to_string(),
         );
+        if browse_tool.is_some() {
+            tool_sections.push(
+                "- **browse**: Navigate to a URL using a built-in browser engine that executes \
+                 JavaScript. Returns structured page content including text, interactive elements, \
+                 forms, and links. Use this for dynamic web pages and SPAs that require JS rendering."
+                    .to_string(),
+            );
+        }
+        if browser_auth_tool.is_some() {
+            tool_sections.push(
+                "- **browser_auth**: Navigate to a URL using stored browser credentials (cookies \
+                 from a captured login session). This lets you access authenticated pages without \
+                 handling login forms. Use this when you need to access a website that requires \
+                 login and the user has captured credentials for it."
+                    .to_string(),
+            );
+        }
         // Always present
         tool_sections.push(
             "- **list_tools**: Call this at any time to get the full, up-to-date list of \
@@ -1458,6 +1581,8 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browse_tool.clone(),
+                    browser_auth_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1534,6 +1659,8 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browse_tool.clone(),
+                    browser_auth_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1577,6 +1704,8 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browse_tool.clone(),
+                    browser_auth_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1623,6 +1752,8 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browse_tool.clone(),
+                    browser_auth_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1668,6 +1799,8 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browse_tool.clone(),
+                    browser_auth_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1851,6 +1984,8 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browse_tool.clone(),
+                    browser_auth_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1979,7 +2114,7 @@ mod tests {
         // regardless of which optional tools are enabled.
         let names = active_native_tool_names(
             false, false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
         );
         assert!(
             names.contains("read_skill"),
@@ -1992,7 +2127,7 @@ mod tests {
     fn active_native_tool_names_includes_search_tools() {
         let names = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
         );
 
         assert!(names.contains("list_tools"));
@@ -2005,7 +2140,7 @@ mod tests {
     fn filter_mcp_tool_info_skips_native_and_mcp_duplicates() {
         let reserved = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
         );
 
         let filtered = filter_mcp_tool_info(

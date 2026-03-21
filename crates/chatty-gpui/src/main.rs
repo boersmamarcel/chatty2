@@ -441,6 +441,9 @@ fn main() {
         // Initialize user secrets with empty state - will be populated async
         cx.set_global(settings::models::UserSecretsModel::default());
 
+        // Initialize browser credentials with empty state - will be populated async
+        cx.set_global(settings::models::BrowserCredentialsModel::default());
+
         // Initialize agent memory service asynchronously.
         // A watch channel is stored as a global so that conversation creation can await
         // completion, preventing a race where the agent would be built without memory tools.
@@ -1018,6 +1021,26 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load user secrets, using defaults");
+                }
+            }
+        })
+        .detach();
+
+        // Load browser credentials asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = chatty_core::browser_credentials_repository();
+            match repo.load().await {
+                Ok(creds) => {
+                    let count = creds.credentials.len();
+                    cx.update(|cx| {
+                        info!(count, "Browser credentials loaded from disk");
+                        cx.set_global(creds);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global browser credentials"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load browser credentials, using defaults");
                 }
             }
         })

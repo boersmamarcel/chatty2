@@ -1499,6 +1499,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatty-browser"
+version = "0.1.121"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "flate2",
+ "reqwest 0.13.2",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "tar",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "chatty-core"
 version = "0.1.122"
 dependencies = [
@@ -1510,6 +1528,7 @@ dependencies = [
  "base64 0.22.1",
  "bollard",
  "calamine 0.33.0",
+ "chatty-browser",
  "chrono",
  "comemo 0.4.0",
  "dirs 5.0.1",
@@ -1563,6 +1582,7 @@ dependencies = [
  "base64 0.22.1",
  "bollard",
  "calamine 0.33.0",
+ "chatty-browser",
  "chatty-core",
  "chrono",
  "comemo 0.4.0",

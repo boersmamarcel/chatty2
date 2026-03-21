@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Browser automation
+chatty-browser = { path = "../chatty-browser" }
+
 # Core agent dependencies
 rig-core.workspace = true
 rmcp.workspace = true

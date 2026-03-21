@@ -1,3 +1,5 @@
+pub mod browser_credentials_json_repository;
+pub mod browser_credentials_repository;
 pub mod execution_settings_json_repository;
 pub mod execution_settings_repository;
 pub mod general_settings_json_repository;
@@ -15,6 +17,8 @@ pub mod training_settings_repository;
 pub mod user_secrets_json_repository;
 pub mod user_secrets_repository;
 
+pub use browser_credentials_json_repository::BrowserCredentialsJsonRepository;
+pub use browser_credentials_repository::BrowserCredentialsRepository;
 pub use execution_settings_json_repository::ExecutionSettingsJsonRepository;
 pub use execution_settings_repository::ExecutionSettingsRepository;
 pub use general_settings_json_repository::GeneralSettingsJsonRepository;

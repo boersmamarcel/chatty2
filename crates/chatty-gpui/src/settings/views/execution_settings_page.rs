@@ -61,6 +61,21 @@ pub fn execution_settings_page() -> SettingPage {
                          and API responses without requiring an MCP fetch server.",
                     ),
                     SettingItem::new(
+                        "Enable Web Browser",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().browser_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_browser(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Built-in browser tool for navigating web pages. Uses the Verso browser \
+                         engine when available, with automatic HTTP fallback for basic page \
+                         retrieval when Verso is not installed.",
+                    ),
+                    SettingItem::new(
                         "Enable Git Integration",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().git_enabled,

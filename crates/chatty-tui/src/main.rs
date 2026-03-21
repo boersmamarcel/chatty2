@@ -59,6 +59,7 @@ TOOL GROUPS:
     git          Git operations (status, diff, log, add, branch, commit)
     mcp-manage   Add/edit/delete/list MCP server configurations
     docker-exec  Run code in a Docker sandbox (requires Docker)
+    browser      Browse web pages with Verso browser engine (requires versoview)
 
   Defaults come from the persisted Chatty execution settings. CLI flags override
   those defaults for the session.
@@ -109,7 +110,7 @@ struct Cli {
     ///
     /// Overrides the persisted Chatty execution settings. Multiple groups
     /// can be specified as a comma-separated list. Valid tool group names:
-    ///   shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec
+    ///   shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec, browser
     ///
     /// Example: --enable shell,git,fetch
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
@@ -425,10 +426,11 @@ fn apply_tool_overrides(
             "git" => settings.git_enabled = true,
             "mcp-manage" => settings.mcp_service_tool_enabled = true,
             "docker-exec" => settings.docker_code_execution_enabled = true,
+            "browser" => settings.browser_enabled = true,
             other => {
                 tracing::warn!(
                     name = other,
-                    "Unknown tool group in --enable (valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec)"
+                    "Unknown tool group in --enable (valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec, browser)"
                 );
             }
         }
@@ -442,10 +444,11 @@ fn apply_tool_overrides(
             "git" => settings.git_enabled = false,
             "mcp-manage" => settings.mcp_service_tool_enabled = false,
             "docker-exec" => settings.docker_code_execution_enabled = false,
+            "browser" => settings.browser_enabled = false,
             other => {
                 tracing::warn!(
                     name = other,
-                    "Unknown tool group in --disable (valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec)"
+                    "Unknown tool group in --disable (valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec, browser)"
                 );
             }
         }

@@ -1,0 +1,36 @@
+[package]
+name = "chatty-browser"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+reqwest = { version = "0.13", features = ["blocking", "rustls"] }
+flate2 = "1.0"
+tar = "0.4"
+
+[dependencies]
+# Core agent dependencies (for Tool trait)
+rig-core.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async runtime (needs process, io-util, net, time beyond workspace defaults)
+tokio = { workspace = true, features = ["process", "io-util", "net", "time"] }
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# HTTP client (used for fallback when browser engine is unavailable)
+reqwest.workspace = true
+
+# Unique IDs
+uuid.workspace = true
+
+# Platform-specific directories (for OG image cache)
+dirs.workspace = true

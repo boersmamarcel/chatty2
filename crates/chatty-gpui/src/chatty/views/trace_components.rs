@@ -12,6 +12,26 @@ use super::message_types::{
 };
 use gpui::EventEmitter;
 
+/// Maximum number of lines shown in a website preview card.
+const PREVIEW_MAX_LINES: usize = 4;
+/// Maximum number of characters shown in a website preview card.
+const PREVIEW_MAX_CHARS: usize = 300;
+/// Maximum character length for an auto-extracted page title.
+const PREVIEW_TITLE_MAX_CHARS: usize = 80;
+/// Maximum characters of raw HTML to process for the rendered preview.
+const HTML_PREVIEW_MAX_CHARS: usize = 50_000;
+/// Maximum lines to show in the rendered HTML preview body.
+const HTML_PREVIEW_MAX_BODY_LINES: usize = 25;
+/// Extra lines to parse beyond the display limit (covers headings/links that
+/// follow visible content).
+const HTML_PARSE_BUFFER_LINES: usize = 20;
+/// Maximum links to show in the rendered HTML preview.
+const HTML_PREVIEW_MAX_LINKS: usize = 12;
+/// Maximum characters per text line in the HTML preview.
+const HTML_TEXT_LINE_MAX_CHARS: usize = 200;
+/// Maximum characters for a displayed link URL.
+const HTML_LINK_URL_MAX_CHARS: usize = 60;
+
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
     trace: SystemTrace,
@@ -352,6 +372,8 @@ impl SystemTraceView {
             .text_color(badge_text)
             .child(state_label);
 
+        let tool_url = extract_url_from_tool_call(tool_call);
+
         let mut container = div().flex().flex_col().gap_1().child(
             // Command invocation line
             div()
@@ -394,6 +416,29 @@ impl SystemTraceView {
                             .text_color(muted_text)
                             .child(format!("({:.1}s)", duration.as_secs_f32())),
                     )
+                })
+                .when_some(tool_url, |this, url| {
+                    this.child(
+                        div()
+                            .id(ElementId::Name(format!("trace-open-url-{}", index).into()))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .rounded_sm()
+                            .hover(|s| s.bg(panel_bg))
+                            .p(px(2.0))
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("Open in browser")
+                                    .build(window, cx)
+                            })
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                                open_url_in_system_browser(&url);
+                            })
+                            .child(
+                                Icon::new(CustomIcon::ExternalLink)
+                                    .size_3p5()
+                                    .text_color(muted_text),
+                            ),
+                    )
                 }),
         );
 
@@ -416,38 +461,64 @@ impl SystemTraceView {
             .as_ref()
             .or(tool_call.output_preview.as_ref())
         {
-            let formatted_output = format_tool_output(output);
-            container = container.child(
-                div()
-                    .ml_4()
-                    .pl_3()
-                    .border_l_2()
-                    .border_color(border_color)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_xs()
-                            .text_color(muted_text)
-                            .child("output:"),
-                    )
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_xs()
-                            .px_2()
-                            .py_1()
-                            .bg(panel_bg)
-                            .rounded_sm()
-                            .text_color(text_color)
-                            .child(SelectableText::new(
-                                ElementId::Name(format!("tool-output-{}", index).into()),
-                                formatted_output,
-                            )),
-                    ),
-            );
+            // For browse/fetch tools, try to render a styled website preview card
+            let is_web_tool = tool_call.tool_name == "browse" || tool_call.tool_name == "fetch";
+            let url_from_input = extract_url_from_tool_call(tool_call);
+            let preview = if is_web_tool {
+                try_render_website_preview(
+                    &tool_call.tool_name,
+                    output,
+                    url_from_input.as_deref(),
+                    &format!("trace-{}", index),
+                    cx,
+                )
+            } else {
+                None
+            };
+
+            if let Some(card) = preview {
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .child(card),
+                );
+            } else {
+                let formatted_output = format_tool_output(output);
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_xs()
+                                .text_color(muted_text)
+                                .child("output:"),
+                        )
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_xs()
+                                .px_2()
+                                .py_1()
+                                .bg(panel_bg)
+                                .rounded_sm()
+                                .text_color(text_color)
+                                .child(SelectableText::new(
+                                    ElementId::Name(format!("tool-output-{}", index).into()),
+                                    formatted_output,
+                                )),
+                        ),
+                );
+            }
         }
 
         // Error section (if error state)
@@ -841,24 +912,44 @@ where
             .as_ref()
             .or(tool_call.output_preview.as_ref())
         {
-            let formatted_output = format_tool_output(output);
-            content_children.push(
-                div()
-                    .font_family("monospace")
-                    .text_xs()
-                    .px_2()
-                    .py_1()
-                    .bg(panel_bg)
-                    .rounded_sm()
-                    .text_color(text_color)
-                    .child(SelectableText::new(
-                        ElementId::Name(
-                            format!("inline-tool-output-{}-{}", message_index, tool_index).into(),
-                        ),
-                        formatted_output,
-                    ))
-                    .into_any_element(),
-            );
+            // For browse/fetch tools, try to render a styled website preview card
+            let is_web_tool = tool_call.tool_name == "browse" || tool_call.tool_name == "fetch";
+            let url_from_input = extract_url_from_tool_call(tool_call);
+            let preview = if is_web_tool {
+                try_render_website_preview(
+                    &tool_call.tool_name,
+                    output,
+                    url_from_input.as_deref(),
+                    &format!("inline-{}-{}", message_index, tool_index),
+                    cx,
+                )
+            } else {
+                None
+            };
+
+            if let Some(card) = preview {
+                content_children.push(card);
+            } else {
+                let formatted_output = format_tool_output(output);
+                content_children.push(
+                    div()
+                        .font_family("monospace")
+                        .text_xs()
+                        .px_2()
+                        .py_1()
+                        .bg(panel_bg)
+                        .rounded_sm()
+                        .text_color(text_color)
+                        .child(SelectableText::new(
+                            ElementId::Name(
+                                format!("inline-tool-output-{}-{}", message_index, tool_index)
+                                    .into(),
+                            ),
+                            formatted_output,
+                        ))
+                        .into_any_element(),
+                );
+            }
         } else if matches!(tool_call.state, ToolCallState::Running) {
             // Show "Running..." for running tools
             content_children.push(
@@ -911,6 +1002,41 @@ where
         );
     }
 
+    // Extract URL for the external link icon (browse/fetch tools)
+    let tool_url = extract_url_from_tool_call(tool_call);
+
+    // Wrap header in a row that includes the optional external link icon
+    let header_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(div().flex_1().min_w_0().child(header))
+        .when_some(tool_url, |this, url| {
+            this.child(
+                div()
+                    .id(ElementId::Name(
+                        format!("open-url-{}-{}", message_index, tool_index).into(),
+                    ))
+                    .flex_shrink_0()
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .p(px(2.0))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Open in browser").build(window, cx)
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                        open_url_in_system_browser(&url);
+                    })
+                    .child(
+                        Icon::new(CustomIcon::ExternalLink)
+                            .size_3p5()
+                            .text_color(muted_text),
+                    ),
+            )
+        });
+
     // Return header + conditionally visible content
     div()
         .flex()
@@ -922,7 +1048,7 @@ where
         .border_color(cx.theme().border)
         .rounded_md()
         .bg(panel_bg.opacity(0.3))
-        .child(header)
+        .child(header_row)
         .when(!collapsed && !content_children.is_empty(), |this| {
             this.child(
                 div()
@@ -1176,6 +1302,245 @@ fn format_tool_output(output: &str) -> String {
     output.to_string()
 }
 
+/// Try to render a website preview card from a browse or fetch tool's output.
+/// Returns `Some(element)` if the output can be parsed, `None` otherwise.
+fn try_render_website_preview(
+    tool_name: &str,
+    output: &str,
+    url_from_input: Option<&str>,
+    element_id_prefix: &str,
+    cx: &App,
+) -> Option<AnyElement> {
+    let json: serde_json::Value = serde_json::from_str(output).ok()?;
+
+    // Extract screenshot path for visual preview (from browse tool OG image cache).
+    // IMPORTANT: Must be PathBuf, not String — GPUI's img(String) does asset lookup,
+    // while img(PathBuf) loads from the filesystem.
+    let screenshot_path: Option<std::path::PathBuf> = json
+        .get("screenshot_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists());
+
+    // Extract cached HTML path for rendered website preview
+    let html_cache_path: Option<std::path::PathBuf> = json
+        .get("html_cache_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists());
+
+    // Extract fields based on tool type
+    let (title, url, content, meta_line) = match tool_name {
+        "browse" => {
+            let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let url = json.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let link_count = json.get("link_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let form_count = json.get("form_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mut meta_parts = Vec::new();
+            if link_count > 0 {
+                meta_parts.push(format!(
+                    "{} link{}",
+                    link_count,
+                    if link_count == 1 { "" } else { "s" }
+                ));
+            }
+            if form_count > 0 {
+                meta_parts.push(format!(
+                    "{} form{}",
+                    form_count,
+                    if form_count == 1 { "" } else { "s" }
+                ));
+            }
+            let meta = if meta_parts.is_empty() {
+                None
+            } else {
+                Some(meta_parts.join(" · "))
+            };
+            (
+                title.to_string(),
+                url.to_string(),
+                content.to_string(),
+                meta,
+            )
+        }
+        "fetch" => {
+            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let status = json.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+            let content_type = json
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let url = url_from_input.unwrap_or("").to_string();
+            // Extract a pseudo-title from the first non-empty line of content
+            let title = content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .chars()
+                .take(PREVIEW_TITLE_MAX_CHARS)
+                .collect::<String>();
+            let mut meta_parts = Vec::new();
+            if status > 0 {
+                meta_parts.push(format!("HTTP {}", status));
+            }
+            if !content_type.is_empty() {
+                meta_parts.push(content_type.to_string());
+            }
+            let meta = if meta_parts.is_empty() {
+                None
+            } else {
+                Some(meta_parts.join(" · "))
+            };
+            (title, url, content.to_string(), meta)
+        }
+        _ => return None,
+    };
+
+    // Truncate content for preview
+    let preview_text: String = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(PREVIEW_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview_text = if preview_text.chars().count() > PREVIEW_MAX_CHARS {
+        format!(
+            "{}…",
+            preview_text
+                .chars()
+                .take(PREVIEW_MAX_CHARS - 3)
+                .collect::<String>()
+        )
+    } else {
+        preview_text
+    };
+
+    let muted_text = cx.theme().muted_foreground;
+    let text_color = cx.theme().foreground;
+    let card_bg = cx.theme().muted;
+    let accent = cx.theme().primary;
+
+    let url_for_click = url.clone();
+    let html_cache_path_exists = html_cache_path.is_some();
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .bg(card_bg)
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            // Title row with globe icon
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(CustomIcon::Earth).size_4().text_color(accent))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(text_color)
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(if title.is_empty() { url.clone() } else { title }),
+                    ),
+            )
+            // URL line (clickable)
+            .when(!url.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("{}-preview-url", element_id_prefix).into(),
+                        ))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .pl_6() // align with title text (past icon)
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                            open_url_in_system_browser(&url_for_click);
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(accent)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(url.clone()),
+                        )
+                        .child(
+                            Icon::new(CustomIcon::ExternalLink)
+                                .size_3()
+                                .text_color(accent),
+                        ),
+                )
+            })
+            // OG image preview (visual website thumbnail)
+            .when_some(screenshot_path, |this, path| {
+                this.child(
+                    div().pl_6().mt_1().overflow_hidden().rounded_sm().child(
+                        img(path)
+                            .w_full()
+                            .max_h(px(200.0))
+                            .rounded_sm()
+                            .object_fit(ObjectFit::Cover),
+                    ),
+                )
+            })
+            // Rendered HTML preview (visual website rendering)
+            .when_some(
+                html_cache_path.and_then(|p| render_html_preview(&p, element_id_prefix, cx)),
+                |this, preview_el| this.child(div().mt_1().child(preview_el)),
+            )
+            // Fallback: plain text content preview (only if no HTML preview)
+            .when(
+                !html_cache_path_exists && !preview_text.is_empty(),
+                |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_text)
+                            .pl_6()
+                            .mt_1()
+                            .max_h(px(80.0))
+                            .overflow_hidden()
+                            .child(SelectableText::new(
+                                ElementId::Name(
+                                    format!("{}-preview-content", element_id_prefix).into(),
+                                ),
+                                preview_text,
+                            )),
+                    )
+                },
+            )
+            // Meta line (link count, form count, status, etc.)
+            .when_some(meta_line, |this, meta| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .pl_6()
+                        .mt_1()
+                        .child(meta),
+                )
+            })
+            .into_any_element(),
+    )
+}
+
 /// A simple `RenderOnce` wrapper that renders plain text using `TextView` with
 /// text selection enabled. Using a struct defers the `window`/`cx` requirement
 /// of `TextView::markdown` to render time, so callers don't need `&mut Window`.
@@ -1218,4 +1583,452 @@ fn escape_markdown(s: &str) -> SharedString {
         }
     }
     SharedString::from(out)
+}
+
+/// Extract a URL from a tool call's input, if the tool is URL-bearing (browse, fetch).
+fn extract_url_from_tool_call(tool_call: &ToolCallBlock) -> Option<String> {
+    match tool_call.tool_name.as_str() {
+        "browse" | "fetch" => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool_call.input) {
+                json.get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Open a URL in the system's default web browser.
+/// Only opens http:// and https:// URLs for security.
+fn open_url_in_system_browser(url: &str) {
+    // Only allow http/https URLs to prevent command injection
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        tracing::warn!(url = %url, "Refusing to open non-HTTP URL in browser");
+        return;
+    }
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let result = {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open").arg(&url).spawn()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                std::process::Command::new("xdg-open").arg(&url).spawn()
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/c", "start", &url])
+                    .spawn()
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = ?e, url = %url, "Failed to open URL in browser");
+        }
+    });
+}
+
+/// Build a visual rendering of a cached HTML file as GPUI elements.
+///
+/// This parses the raw HTML and renders a styled "browser-like" preview
+/// showing headings, text paragraphs, and links in a visually distinct layout
+/// that approximates the rendered website within the trace card.
+fn render_html_preview(
+    html_path: &std::path::Path,
+    element_id_prefix: &str,
+    cx: &App,
+) -> Option<AnyElement> {
+    let html = std::fs::read_to_string(html_path).ok()?;
+    let html = if html.len() > HTML_PREVIEW_MAX_CHARS {
+        &html[..HTML_PREVIEW_MAX_CHARS]
+    } else {
+        &html
+    };
+
+    let bg = cx.theme().background;
+    let text_color = cx.theme().foreground;
+    let muted_text = cx.theme().muted_foreground;
+    let accent = cx.theme().primary;
+    let border = cx.theme().border;
+
+    // Simple HTML element extraction
+    let mut body_lines: Vec<HtmlLine> = Vec::new();
+    let mut link_list: Vec<(String, String)> = Vec::new();
+    let lower = html.to_ascii_lowercase();
+
+    // Find body content (skip head)
+    let body_start = lower.find("<body").unwrap_or(0);
+    let content = &html[body_start..];
+
+    // Strip all tags and extract structure
+    let mut in_tag = false;
+    let mut current_text = String::new();
+    let mut current_tag = String::new();
+    let mut tag_name = String::new();
+    let mut i = 0;
+    let chars: Vec<char> = content.chars().collect();
+
+    while i < chars.len()
+        && body_lines.len() < HTML_PREVIEW_MAX_BODY_LINES + HTML_PARSE_BUFFER_LINES
+    {
+        let ch = chars[i];
+        if ch == '<' {
+            // Flush current text
+            let trimmed = current_text.trim().to_string();
+            if !trimmed.is_empty() {
+                body_lines.push(HtmlLine::Text(trimmed));
+                current_text.clear();
+            }
+            in_tag = true;
+            current_tag.clear();
+        } else if ch == '>' && in_tag {
+            in_tag = false;
+            let tag_lower = current_tag.to_ascii_lowercase();
+
+            // Extract tag name
+            tag_name = tag_lower
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_string();
+
+            // Handle specific tags
+            match tag_name.as_str() {
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    // Collect text until closing tag
+                    let close_tag = format!("</{}", tag_name);
+                    let rest = content_after_char(content, i + 1);
+                    let rest_lower = rest.to_ascii_lowercase();
+                    if let Some(end) = rest_lower.find(&close_tag) {
+                        let heading_html = &rest[..end];
+                        let heading_text = strip_tags(heading_html).trim().to_string();
+                        if !heading_text.is_empty() {
+                            // Default to h2 for malformed heading tags
+                            let level: u8 = tag_name[1..].parse().unwrap_or(2);
+                            body_lines.push(HtmlLine::Heading(level, heading_text));
+                        }
+                        // Skip past closing tag
+                        if let Some(close_end) = rest_lower[end..].find('>') {
+                            let skip_chars = rest[..end + close_end + 1].chars().count();
+                            i += skip_chars;
+                        }
+                    }
+                }
+                "br" => {
+                    body_lines.push(HtmlLine::Break);
+                }
+                "hr" => {
+                    body_lines.push(HtmlLine::Separator);
+                }
+                "a" => {
+                    // Extract href for link list
+                    if let Some(href) = extract_tag_attr(&current_tag, "href") {
+                        if !href.starts_with('#')
+                            && !href.starts_with("javascript:")
+                            && link_list.len() < HTML_PREVIEW_MAX_LINKS
+                        {
+                            // Collect link text
+                            let rest = content_after_char(content, i + 1);
+                            let rest_lower = rest.to_ascii_lowercase();
+                            if let Some(end) = rest_lower.find("</a") {
+                                let link_text = strip_tags(&rest[..end]).trim().to_string();
+                                if !link_text.is_empty() {
+                                    link_list.push((link_text, href));
+                                }
+                            }
+                        }
+                    }
+                }
+                "script" | "style" | "noscript" => {
+                    // Skip content of these tags
+                    let close_tag = format!("</{}", tag_name);
+                    let rest = content_after_char(content, i + 1);
+                    let rest_lower = rest.to_ascii_lowercase();
+                    if let Some(end) = rest_lower.find(&close_tag) {
+                        if let Some(close_end) = rest_lower[end..].find('>') {
+                            let skip_chars = rest[..end + close_end + 1].chars().count();
+                            i += skip_chars;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            current_tag.clear();
+        } else if in_tag {
+            current_tag.push(ch);
+        } else {
+            // Decode basic HTML entities
+            // Decode basic HTML entities (max 10 chars covers &quot; + buffer)
+            if ch == '&' {
+                let rest: String = chars[i..].iter().take(10).collect();
+                if rest.starts_with("&amp;") {
+                    current_text.push('&');
+                    i += 4;
+                } else if rest.starts_with("&lt;") {
+                    current_text.push('<');
+                    i += 3;
+                } else if rest.starts_with("&gt;") {
+                    current_text.push('>');
+                    i += 3;
+                } else if rest.starts_with("&nbsp;") {
+                    current_text.push(' ');
+                    i += 5;
+                } else if rest.starts_with("&quot;") {
+                    current_text.push('"');
+                    i += 5;
+                } else {
+                    current_text.push(ch);
+                }
+            } else {
+                current_text.push(ch);
+            }
+        }
+        i += 1;
+    }
+
+    // Flush remaining text
+    let trimmed = current_text.trim().to_string();
+    if !trimmed.is_empty() {
+        body_lines.push(HtmlLine::Text(trimmed));
+    }
+
+    // Collapse consecutive blank/empty lines and limit total
+    let mut filtered_lines: Vec<HtmlLine> = Vec::new();
+    for line in body_lines {
+        match &line {
+            HtmlLine::Text(t) if t.is_empty() => continue,
+            HtmlLine::Break
+                if filtered_lines
+                    .last()
+                    .map_or(true, |l| matches!(l, HtmlLine::Break)) =>
+            {
+                continue;
+            }
+            _ => filtered_lines.push(line),
+        }
+    }
+    filtered_lines.truncate(HTML_PREVIEW_MAX_BODY_LINES);
+
+    if filtered_lines.is_empty() && link_list.is_empty() {
+        return None;
+    }
+
+    // Build GPUI elements
+    let mut container = div()
+        .id(ElementId::Name(
+            format!("{}-html-preview", element_id_prefix).into(),
+        ))
+        .flex()
+        .flex_col()
+        .w_full()
+        .bg(bg)
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .overflow_hidden()
+        .max_h(px(400.0));
+
+    // Browser chrome bar
+    container = container.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .bg(cx.theme().muted)
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    // macOS-style traffic light dots (red, yellow, green)
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.0, 0.7, 0.55, 1.0)),
+                    )
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.12, 0.8, 0.55, 1.0)),
+                    )
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.32, 0.7, 0.55, 1.0)),
+                    ),
+            ),
+    );
+
+    // Body content
+    let mut body = div()
+        .id(ElementId::Name(
+            format!("{}-body", element_id_prefix).into(),
+        ))
+        .flex()
+        .flex_col()
+        .px_3()
+        .py_2()
+        .gap_0p5()
+        .overflow_y_scroll();
+
+    for (idx, line) in filtered_lines.iter().enumerate() {
+        match line {
+            HtmlLine::Heading(level, text) => {
+                let font_size = match level {
+                    1 => px(18.0),
+                    2 => px(16.0),
+                    3 => px(14.0),
+                    _ => px(13.0),
+                };
+                body = body.child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("{}-hline-{}", element_id_prefix, idx).into(),
+                        ))
+                        .text_size(font_size)
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(text_color)
+                        .mt_1()
+                        .mb_0p5()
+                        .child(text.clone()),
+                );
+            }
+            HtmlLine::Text(text) => {
+                let display_text = if text.chars().count() > HTML_TEXT_LINE_MAX_CHARS {
+                    format!(
+                        "{}…",
+                        text.chars()
+                            .take(HTML_TEXT_LINE_MAX_CHARS - 3)
+                            .collect::<String>()
+                    )
+                } else {
+                    text.clone()
+                };
+                body = body.child(div().text_xs().text_color(muted_text).child(display_text));
+            }
+            HtmlLine::Separator => {
+                body = body.child(div().w_full().h(px(1.0)).bg(border).my_1());
+            }
+            HtmlLine::Break => {}
+        }
+    }
+
+    // Links section
+    if !link_list.is_empty() {
+        body = body.child(div().w_full().h(px(1.0)).bg(border).my_1());
+        body = body.child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(text_color)
+                .mb_0p5()
+                .child(format!("Links ({})", link_list.len())),
+        );
+        for (text, href) in &link_list {
+            let display_href = if href.chars().count() > HTML_LINK_URL_MAX_CHARS {
+                format!(
+                    "{}…",
+                    href.chars()
+                        .take(HTML_LINK_URL_MAX_CHARS - 3)
+                        .collect::<String>()
+                )
+            } else {
+                href.clone()
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .text_xs()
+                    .child(div().text_color(accent).child(format!("• {}", text)))
+                    .child(
+                        div()
+                            .text_color(muted_text)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .flex_shrink_0()
+                            .child(display_href),
+                    ),
+            );
+        }
+    }
+
+    container = container.child(body);
+    Some(container.into_any_element())
+}
+
+/// Parsed HTML line types for the visual preview.
+enum HtmlLine {
+    Heading(u8, String),
+    Text(String),
+    Separator,
+    Break,
+}
+
+/// Get the substring of `content` starting after the `char_index`-th character.
+///
+/// Uses `char_indices` to handle multi-byte UTF-8 correctly, returning an empty
+/// slice if the index is past the end of the string.
+fn content_after_char(content: &str, char_index: usize) -> &str {
+    content
+        .char_indices()
+        .nth(char_index)
+        .map(|(byte_idx, _)| &content[byte_idx..])
+        .unwrap_or("")
+}
+
+/// Strip all HTML tags from a string, returning only text content.
+fn strip_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        if ch == '<' {
+            in_tag = true;
+        } else if ch == '>' && in_tag {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Extract an attribute value from an HTML tag string (e.g. `href` from `a href="..."`).
+fn extract_tag_attr(tag: &str, attr: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let search = format!("{}=", attr);
+    let pos = lower.find(&search)?;
+    let rest = &tag[pos + search.len()..];
+    let rest = rest.trim_start();
+    if rest.starts_with('"') {
+        let end = rest[1..].find('"')?;
+        Some(rest[1..1 + end].to_string())
+    } else if rest.starts_with('\'') {
+        let end = rest[1..].find('\'')?;
+        Some(rest[1..1 + end].to_string())
+    } else {
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
 }
