@@ -235,6 +235,32 @@ impl BrowserSession {
         let title = strip_js_quotes(&title);
         let url = strip_js_quotes(&url);
 
+        // Extract Open Graph metadata for visual preview
+        let og_image_url = self
+            .evaluate_js(
+                r#"(function() {
+                    var el = document.querySelector('meta[property="og:image"]');
+                    return el ? el.getAttribute('content') : '';
+                })()"#,
+            )
+            .await
+            .ok()
+            .map(|s| strip_js_quotes(&s))
+            .filter(|s| !s.is_empty());
+
+        let description = self
+            .evaluate_js(
+                r#"(function() {
+                    var el = document.querySelector('meta[property="og:description"]')
+                          || document.querySelector('meta[name="description"]');
+                    return el ? el.getAttribute('content') : '';
+                })()"#,
+            )
+            .await
+            .ok()
+            .map(|s| strip_js_quotes(&s))
+            .filter(|s| !s.is_empty());
+
         Ok(PageSnapshot {
             url,
             title,
@@ -243,6 +269,8 @@ impl BrowserSession {
             forms,
             links,
             state,
+            og_image_url,
+            description,
         })
     }
 
@@ -345,6 +373,11 @@ impl BrowserSession {
             forms,
             links,
             state: PageState::Complete,
+            og_image_url: None,
+            description: Some(format!(
+                "Mock page snapshot for {} — browse tool running in test mode.",
+                domain
+            )),
         }
     }
 

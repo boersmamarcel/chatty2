@@ -1295,6 +1295,13 @@ fn try_render_website_preview(
 ) -> Option<AnyElement> {
     let json: serde_json::Value = serde_json::from_str(output).ok()?;
 
+    // Extract screenshot path for visual preview (from browse tool OG image cache)
+    let screenshot_path = json
+        .get("screenshot_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|p| std::path::Path::new(p).exists());
+
     // Extract fields based on tool type
     let (title, url, content, meta_line) = match tool_name {
         "browse" => {
@@ -1450,6 +1457,23 @@ fn try_render_website_preview(
                             Icon::new(CustomIcon::ExternalLink)
                                 .size_3()
                                 .text_color(accent),
+                        ),
+                )
+            })
+            // OG image preview (visual website thumbnail)
+            .when_some(screenshot_path, |this, path| {
+                this.child(
+                    div()
+                        .pl_6()
+                        .mt_1()
+                        .overflow_hidden()
+                        .rounded_sm()
+                        .child(
+                            img(path)
+                                .w_full()
+                                .max_h(px(200.0))
+                                .rounded_sm()
+                                .object_fit(ObjectFit::Cover),
                         ),
                 )
             })

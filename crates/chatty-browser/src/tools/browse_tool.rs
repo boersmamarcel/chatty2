@@ -10,7 +10,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Maximum characters of text content returned in the tool output.
 /// Shorter than the LLM snapshot rendering (4000) because the full snapshot
@@ -41,6 +41,10 @@ pub struct BrowseToolOutput {
     pub link_count: usize,
     /// Human-readable page representation for the LLM.
     pub page_snapshot: String,
+    /// Local file path to a cached preview image (OG image), if available.
+    /// The UI uses this to display a visual preview of the page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot_path: Option<String>,
 }
 
 impl BrowseToolOutput {
@@ -61,6 +65,7 @@ impl BrowseToolOutput {
             form_count: snapshot.forms.len(),
             link_count: snapshot.links.len(),
             page_snapshot: snapshot.to_llm_text(),
+            screenshot_path: None, // Set by call() after OG image download
         }
     }
 }
@@ -149,7 +154,7 @@ impl Tool for BrowseTool {
         info!(url = %url, "Browse tool: navigating");
 
         // Try the full browser engine first; fall back to HTTP if unavailable
-        match self.get_or_create_session().await {
+        let snapshot = match self.get_or_create_session().await {
             Ok(()) => {
                 // Navigate and build snapshot via browser engine
                 let mut guard = self.session.lock().await;
@@ -157,11 +162,9 @@ impl Tool for BrowseTool {
                     BrowseToolError::BrowseError("Session unexpectedly missing".to_string())
                 })?;
 
-                let snapshot = session.navigate(&url).await.map_err(|e| {
+                session.navigate(&url).await.map_err(|e| {
                     BrowseToolError::BrowseError(format!("Navigation failed: {}", e))
-                })?;
-
-                Ok(BrowseToolOutput::from_snapshot(&snapshot))
+                })?
             }
             Err(_engine_err) => {
                 // Browser engine unavailable — fall back to plain HTTP fetch
@@ -170,16 +173,120 @@ impl Tool for BrowseTool {
                     "Browser engine unavailable, using HTTP fallback"
                 );
 
-                let snapshot = crate::http_fallback::fetch_and_snapshot(&url)
+                crate::http_fallback::fetch_and_snapshot(&url)
                     .await
                     .map_err(|e| {
                         BrowseToolError::BrowseError(format!("HTTP fallback failed: {}", e))
-                    })?;
+                    })?
+            }
+        };
 
-                Ok(BrowseToolOutput::from_snapshot(&snapshot))
+        let mut output = BrowseToolOutput::from_snapshot(&snapshot);
+
+        // Try to download and cache the OG image for visual preview
+        if let Some(ref og_url) = snapshot.og_image_url {
+            match download_og_image(og_url, &snapshot.url).await {
+                Ok(path) => {
+                    debug!(path = %path, og_url = %og_url, "Cached OG image for preview");
+                    output.screenshot_path = Some(path);
+                }
+                Err(e) => {
+                    debug!(error = %e, og_url = %og_url, "Failed to download OG image");
+                }
             }
         }
+
+        Ok(output)
     }
+}
+
+/// Maximum OG image file size (2 MB).
+const MAX_OG_IMAGE_BYTES: usize = 2_000_000;
+
+/// Download an OG image and cache it locally, returning the file path.
+///
+/// Images are cached in the platform-specific data directory under
+/// `chatty/browse_cache/`. The filename is a hash of the page URL to
+/// ensure deterministic lookups from the trace view.
+async fn download_og_image(og_url: &str, page_url: &str) -> Result<String, String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Validate the OG image URL
+    if !og_url.starts_with("http://") && !og_url.starts_with("https://") {
+        return Err("OG image URL must be http/https".to_string());
+    }
+
+    // Determine cache directory
+    let cache_dir = dirs::config_dir()
+        .ok_or("No config directory")?
+        .join("chatty")
+        .join("browse_cache");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create browse cache dir: {}", e))?;
+
+    // Hash the page URL for the filename
+    let mut hasher = DefaultHasher::new();
+    page_url.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    // Determine file extension from the OG image URL
+    let ext = og_url
+        .rsplit('.')
+        .next()
+        .and_then(|e| {
+            let e = e.split('?').next().unwrap_or(e).to_lowercase();
+            match e.as_str() {
+                "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" => Some(e),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| "jpg".to_string());
+
+    let cache_path = cache_dir.join(format!("{:016x}.{}", hash, ext));
+
+    // Return cached file if it already exists
+    if cache_path.exists() {
+        return Ok(cache_path.to_string_lossy().to_string());
+    }
+
+    // Download the image
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Chatty/1.0 (Desktop AI Assistant)")
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let response = client
+        .get(og_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch OG image: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("OG image HTTP {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read OG image body: {}", e))?;
+
+    if bytes.len() > MAX_OG_IMAGE_BYTES {
+        return Err(format!("OG image too large: {} bytes", bytes.len()));
+    }
+
+    if bytes.is_empty() {
+        return Err("OG image is empty".to_string());
+    }
+
+    std::fs::write(&cache_path, &bytes)
+        .map_err(|e| format!("Failed to write OG image to cache: {}", e))?;
+
+    info!(path = %cache_path.display(), size = bytes.len(), "Downloaded OG image for preview");
+
+    Ok(cache_path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -202,6 +309,8 @@ mod tests {
                 href: "https://www.iana.org/domains/example".to_string(),
             }],
             state: PageState::Complete,
+            og_image_url: None,
+            description: None,
         };
 
         let output = BrowseToolOutput::from_snapshot(&snapshot);
@@ -221,6 +330,8 @@ mod tests {
             forms: vec![],
             links: vec![],
             state: PageState::Complete,
+            og_image_url: None,
+            description: None,
         };
 
         let output = BrowseToolOutput::from_snapshot(&snapshot);

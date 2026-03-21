@@ -26,3 +26,6 @@ reqwest.workspace = true
 
 # Unique IDs
 uuid.workspace = true
+
+# Platform-specific directories (for OG image cache)
+dirs.workspace = true

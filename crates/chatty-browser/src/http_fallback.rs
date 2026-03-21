@@ -57,6 +57,9 @@ pub async fn fetch_and_snapshot(url: &str) -> Result<PageSnapshot, String> {
     let title = extract_title(&body).unwrap_or_else(|| url.to_string());
     let links = extract_links(&body, url);
     let text_content = html_to_text(&body);
+    let og_image_url = extract_meta_content(&body, "og:image");
+    let description = extract_meta_content(&body, "og:description")
+        .or_else(|| extract_meta_name_content(&body, "description"));
 
     Ok(PageSnapshot {
         url: final_url,
@@ -66,6 +69,8 @@ pub async fn fetch_and_snapshot(url: &str) -> Result<PageSnapshot, String> {
         forms: vec![],    // No form detection without DOM access
         links,
         state: PageState::Complete,
+        og_image_url,
+        description,
     })
 }
 
@@ -88,6 +93,72 @@ fn extract_title(html: &str) -> Option<String> {
     } else {
         Some(decode_entities(&text))
     }
+}
+
+/// Extract `content` from `<meta property="<prop>" content="...">` tags.
+/// Used for Open Graph metadata like og:image, og:description.
+fn extract_meta_content(html: &str, property: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut search_from = 0;
+
+    while let Some(meta_pos) = lower[search_from..].find("<meta ") {
+        let abs_pos = search_from + meta_pos;
+        let tag_end = match lower[abs_pos..].find('>') {
+            Some(p) => abs_pos + p + 1,
+            None => break,
+        };
+
+        let tag = &html[abs_pos..tag_end];
+        let tag_lower = &lower[abs_pos..tag_end];
+
+        // Check if this meta tag has the right property and extract content
+        let prop_match = format!("property=\"{}\"", property);
+        if tag_lower.contains(&prop_match)
+            && let Some(content) = extract_attr(tag, "content")
+        {
+            let content = decode_entities(&content);
+            if !content.is_empty() {
+                return Some(content);
+            }
+        }
+
+        search_from = tag_end;
+    }
+
+    None
+}
+
+/// Extract `content` from `<meta name="<name>" content="...">` tags.
+/// Used for standard meta tags like description.
+fn extract_meta_name_content(html: &str, name: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut search_from = 0;
+
+    while let Some(meta_pos) = lower[search_from..].find("<meta ") {
+        let abs_pos = search_from + meta_pos;
+        let tag_end = match lower[abs_pos..].find('>') {
+            Some(p) => abs_pos + p + 1,
+            None => break,
+        };
+
+        let tag = &html[abs_pos..tag_end];
+        let tag_lower = &lower[abs_pos..tag_end];
+
+        // Check if this meta tag has the right name and extract content
+        let name_match = format!("name=\"{}\"", name);
+        if tag_lower.contains(&name_match)
+            && let Some(content) = extract_attr(tag, "content")
+        {
+            let content = decode_entities(&content);
+            if !content.is_empty() {
+                return Some(content);
+            }
+        }
+
+        search_from = tag_end;
+    }
+
+    None
 }
 
 /// Extract `<a href="...">text</a>` links from HTML.
@@ -441,6 +512,54 @@ mod tests {
         assert_eq!(
             extract_attr(r#"<a href='single.html'>"#, "href"),
             Some("single.html".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_meta_content_og_image() {
+        let html = r#"<html><head>
+            <meta property="og:image" content="https://example.com/image.jpg">
+        </head></html>"#;
+        assert_eq!(
+            extract_meta_content(html, "og:image"),
+            Some("https://example.com/image.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_meta_content_og_description() {
+        let html = r#"<html><head>
+            <meta property="og:description" content="A test page">
+        </head></html>"#;
+        assert_eq!(
+            extract_meta_content(html, "og:description"),
+            Some("A test page".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_meta_content_missing() {
+        let html = "<html><head><title>No OG</title></head></html>";
+        assert_eq!(extract_meta_content(html, "og:image"), None);
+    }
+
+    #[test]
+    fn test_extract_meta_name_content_description() {
+        let html = r#"<html><head>
+            <meta name="description" content="Page description here">
+        </head></html>"#;
+        assert_eq!(
+            extract_meta_name_content(html, "description"),
+            Some("Page description here".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_meta_content_with_entities() {
+        let html = r#"<meta property="og:image" content="https://example.com/img?a=1&amp;b=2">"#;
+        assert_eq!(
+            extract_meta_content(html, "og:image"),
+            Some("https://example.com/img?a=1&b=2".to_string())
         );
     }
 }

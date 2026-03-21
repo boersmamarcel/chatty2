@@ -25,6 +25,13 @@ pub struct PageSnapshot {
     pub links: Vec<LinkInfo>,
     /// Current page loading state.
     pub state: PageState,
+    /// Open Graph image URL extracted from `<meta property="og:image">`.
+    /// Used by the UI to display a visual preview of the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub og_image_url: Option<String>,
+    /// Page description from `<meta name="description">` or `<meta property="og:description">`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl PageSnapshot {
@@ -185,6 +192,8 @@ mod tests {
                 href: "/about".to_string(),
             }],
             state: PageState::Complete,
+            og_image_url: None,
+            description: None,
         };
 
         let text = snapshot.to_llm_text();
@@ -204,6 +213,8 @@ mod tests {
             forms: vec![],
             links: vec![],
             state: PageState::Complete,
+            og_image_url: None,
+            description: None,
         };
 
         let text = snapshot.to_llm_text();
@@ -238,6 +249,8 @@ mod tests {
             }],
             links: vec![],
             state: PageState::Complete,
+            og_image_url: None,
+            description: None,
         };
 
         let text = snapshot.to_llm_text();
