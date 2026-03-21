@@ -122,14 +122,30 @@ impl Tool for BrowserAuthTool {
             .find_by_name(name)
             .await
             .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?
-            .ok_or_else(|| BrowserAuthError::CredentialNotFound(name.clone()))?;
+            .ok_or_else(|| {
+                BrowserAuthError::CredentialNotFound(format!(
+                    "No login profile named \"{name}\" exists. \
+                     Please add it in Settings → Browser Credentials."
+                ))
+            })?;
 
         // Load the secret from vault
-        let secret = self
-            .vault
-            .load(name)
-            .await
-            .map_err(|e| BrowserAuthError::CredentialNotFound(format!("{name}: {e}")))?;
+        let secret = self.vault.load(name).await.map_err(|_| {
+            let hint = match profile.auth_method {
+                AuthMethod::SessionCapture => {
+                    "Session cookies have not been captured yet for this profile. \
+                     Please complete the session capture flow in Settings → Browser Credentials."
+                }
+                AuthMethod::FormLogin => {
+                    "Login credentials (username/password) are missing for this profile. \
+                     Please re-add the credential with username and password in \
+                     Settings → Browser Credentials."
+                }
+            };
+            BrowserAuthError::CredentialNotFound(format!(
+                "Profile \"{name}\" exists but has no stored secret. {hint}"
+            ))
+        })?;
 
         // Get or create a tab
         let mut tab_guard = self.active_tab.write().await;

@@ -254,6 +254,30 @@ impl CredentialsTableView {
                                                     // Determine auth method based on selectors
                                                     let has_user_sel = !user_sel.is_empty();
                                                     let has_pass_sel = !pass_sel.is_empty();
+                                                    let has_credentials =
+                                                        !username.is_empty()
+                                                            && !password.is_empty();
+
+                                                    // If user provided credentials but no CSS
+                                                    // selectors, auto-fill common defaults so it
+                                                    // behaves as form-login instead of silently
+                                                    // creating a session-capture profile.
+                                                    let (user_sel, pass_sel, submit_sel) =
+                                                        if !has_user_sel
+                                                            && !has_pass_sel
+                                                            && has_credentials
+                                                        {
+                                                            (
+                                                                "input[type=\"email\"], input[name=\"email\"], input[name=\"username\"], #email, #username".to_string(),
+                                                                "input[type=\"password\"]".to_string(),
+                                                                "button[type=\"submit\"], input[type=\"submit\"]".to_string(),
+                                                            )
+                                                        } else {
+                                                            (user_sel, pass_sel, submit_sel)
+                                                        };
+
+                                                    let has_user_sel = !user_sel.is_empty();
+                                                    let has_pass_sel = !pass_sel.is_empty();
                                                     let is_form_login =
                                                         has_user_sel || has_pass_sel;
 
@@ -279,9 +303,7 @@ impl CredentialsTableView {
                                                             cx,
                                                         );
                                                         // Store credentials in vault if provided
-                                                        if !username.is_empty()
-                                                            && !password.is_empty()
-                                                        {
+                                                        if has_credentials {
                                                             browser_credentials_controller::store_form_credentials(
                                                                 name,
                                                                 username,
