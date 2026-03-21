@@ -125,7 +125,7 @@ impl Tool for BrowserAuthTool {
             .ok_or_else(|| {
                 BrowserAuthError::CredentialNotFound(format!(
                     "No login profile named \"{name}\" exists. \
-                     Please add it in Settings → Browser Credentials."
+                     Please add it in Settings > Browser Credentials."
                 ))
             })?;
 
@@ -134,12 +134,12 @@ impl Tool for BrowserAuthTool {
             let hint = match profile.auth_method {
                 AuthMethod::SessionCapture => {
                     "Session cookies have not been captured yet for this profile. \
-                     Please complete the session capture flow in Settings → Browser Credentials."
+                     Please complete the session capture flow in Settings > Browser Credentials."
                 }
                 AuthMethod::FormLogin => {
                     "Login credentials (username/password) are missing for this profile. \
                      Please re-add the credential with username and password in \
-                     Settings → Browser Credentials."
+                     Settings > Browser Credentials."
                 }
             };
             BrowserAuthError::CredentialNotFound(format!(

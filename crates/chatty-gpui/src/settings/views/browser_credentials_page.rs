@@ -15,6 +15,13 @@ use gpui_component::{
 };
 use gpui_component::{Icon, IconName};
 
+/// Default CSS selectors used when the user provides login credentials
+/// but no explicit selectors (auto-detected form login).
+const DEFAULT_USERNAME_SELECTOR: &str =
+    r#"input[type="email"], input[name="email"], input[name="username"], #email, #username"#;
+const DEFAULT_PASSWORD_SELECTOR: &str = r#"input[type="password"]"#;
+const DEFAULT_SUBMIT_SELECTOR: &str = r#"button[type="submit"], input[type="submit"]"#;
+
 // ── Global singleton ────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -268,9 +275,9 @@ impl CredentialsTableView {
                                                             && has_credentials
                                                         {
                                                             (
-                                                                "input[type=\"email\"], input[name=\"email\"], input[name=\"username\"], #email, #username".to_string(),
-                                                                "input[type=\"password\"]".to_string(),
-                                                                "button[type=\"submit\"], input[type=\"submit\"]".to_string(),
+                                                                DEFAULT_USERNAME_SELECTOR.to_string(),
+                                                                DEFAULT_PASSWORD_SELECTOR.to_string(),
+                                                                DEFAULT_SUBMIT_SELECTOR.to_string(),
                                                             )
                                                         } else {
                                                             (user_sel, pass_sel, submit_sel)
