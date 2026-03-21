@@ -105,9 +105,11 @@ pub struct WryBackend {
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Convenience impl for tests. Panics if the display server is unavailable.
+/// Production code should use `WryBackend::new()` and handle the error.
 impl Default for WryBackend {
     fn default() -> Self {
-        Self::new().expect("Failed to create WryBackend")
+        Self::new().expect("WryBackend::new() failed — display server required")
     }
 }
 
@@ -371,7 +373,7 @@ fn handle_command(
             let result = (|| -> anyhow::Result<TabId> {
                 let window = WindowBuilder::new()
                     .with_title("Chatty Browser")
-                    .with_visible(false) // headless — no visible window
+                    .with_visible(false) // Hidden window — requires display server
                     .build(event_loop)
                     .map_err(|e| anyhow::anyhow!("Failed to create window: {e}"))?;
 
