@@ -1,3 +1,4 @@
+pub mod browser_credentials_page;
 pub mod execution_settings_page;
 pub mod mcp_tools_page;
 pub mod memory_settings_page;

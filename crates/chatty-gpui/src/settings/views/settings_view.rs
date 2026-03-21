@@ -9,6 +9,7 @@ use crate::settings::views::providers_view::providers_page;
 use crate::settings::views::search_settings_page::search_settings_page;
 use crate::settings::views::training_settings_page::training_settings_page;
 use crate::settings::views::user_secrets_page::user_secrets_page;
+use crate::settings::views::browser_credentials_page::browser_credentials_page;
 
 use gpui::*;
 
@@ -174,6 +175,7 @@ impl Render for SettingsView {
                 memory_settings_page(),
                 training_settings_page(),
                 user_secrets_page(),
+                browser_credentials_page(),
             ]))
             .children(dialog_layer)
     }

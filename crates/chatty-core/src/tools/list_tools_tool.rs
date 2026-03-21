@@ -63,6 +63,7 @@ impl ListToolsTool {
         has_search_web: bool,
         has_sub_agent: bool,
         has_browse: bool,
+        has_browser_auth: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -378,6 +379,13 @@ impl ListToolsTool {
                 source: "native".to_string(),
             });
         }
+        if has_browser_auth {
+            native_tools.push(ToolInfo {
+                name: "browser_auth".to_string(),
+                description: "Navigate to a URL using stored browser credentials (cookies from a captured login session). This lets you access authenticated pages without handling login forms. The user has pre-captured login sessions in Settings > Browser Credentials.".to_string(),
+                source: "native".to_string(),
+            });
+        }
 
         // read_skill is always available — it's the on-demand companion to the slim
         // skill descriptions shown in the automatic context block.
@@ -408,6 +416,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,
