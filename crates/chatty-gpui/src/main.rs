@@ -1060,7 +1060,10 @@ fn main() {
                         let names_with_secrets =
                             match chatty_browser::credential::vault::CredentialVault::new() {
                                 Ok(vault) => vault.names_with_secrets().await,
-                                Err(_) => std::collections::HashSet::new(),
+                                Err(e) => {
+                                    warn!(error = ?e, "Failed to create CredentialVault for status check");
+                                    std::collections::HashSet::new()
+                                }
                             };
 
                         cx.update(|cx| {

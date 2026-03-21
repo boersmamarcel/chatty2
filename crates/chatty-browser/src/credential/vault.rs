@@ -122,6 +122,10 @@ impl CredentialVault {
     }
 
     /// Return the set of names that have stored secrets (from fallback store).
+    ///
+    /// Note: currently only checks the fallback file, not the OS keyring
+    /// (keyring is stubbed). When keyring support is added, this should
+    /// check both locations.
     pub async fn names_with_secrets(&self) -> std::collections::HashSet<String> {
         self.load_fallback_store().await.keys().cloned().collect()
     }

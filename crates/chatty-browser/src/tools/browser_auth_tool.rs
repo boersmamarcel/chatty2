@@ -130,7 +130,12 @@ impl Tool for BrowserAuthTool {
             })?;
 
         // Load the secret from vault
-        let secret = self.vault.load(name).await.map_err(|_| {
+        let secret = self.vault.load(name).await.map_err(|e| {
+            tracing::warn!(
+                credential = name,
+                error = ?e,
+                "Failed to load secret from vault"
+            );
             let hint = match profile.auth_method {
                 AuthMethod::SessionCapture => {
                     "Session cookies have not been captured yet for this profile. \
