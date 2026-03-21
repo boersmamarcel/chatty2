@@ -1413,7 +1413,9 @@ fn render_website_preview_card(
                     .xsmall()
                     .ghost()
                     .on_click(move |_, _, _cx| {
-                        let _ = open::that(&link_url);
+                        if let Err(e) = open::that(&link_url) {
+                            tracing::warn!(url = %link_url, error = %e, "Failed to open URL in browser");
+                        }
                     }),
             ),
         )
