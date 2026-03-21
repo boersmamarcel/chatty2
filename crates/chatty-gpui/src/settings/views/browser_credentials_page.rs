@@ -469,8 +469,13 @@ fn start_session_capture(
             return;
         }
 
-        // Create a session (URL was passed directly to versoview at launch)
-        let session = engine.create_session();
+        // Create a session and navigate to the target URL via DevTools
+        let mut session = engine.create_session();
+        if let Err(e) = session.navigate(&url).await {
+            tracing::warn!(error = %e, "Failed to navigate for session capture");
+            engine.stop().await;
+            return;
+        }
 
         // Poll until the user clicks "Capture Now" or "Cancel"
         loop {

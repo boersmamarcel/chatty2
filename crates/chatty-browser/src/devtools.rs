@@ -91,7 +91,12 @@ impl DevToolsClient {
         for attempt in 1..=max_retries {
             match TcpStream::connect(&addr).await {
                 Ok(stream) => {
-                    let reader = BufReader::new(stream);
+                    let mut reader = BufReader::new(stream);
+                    // Firefox RDP sends an initial greeting packet immediately on
+                    // connect (e.g. {"from":"root","applicationType":"browser",...}).
+                    // Consume it now so subsequent send_request() calls read the
+                    // correct response instead of this greeting.
+                    let _ = Self::read_message(&mut reader).await;
                     let mut guard = self.stream.lock().await;
                     *guard = Some(reader);
                     debug!(attempt, "Connected to DevTools server");
