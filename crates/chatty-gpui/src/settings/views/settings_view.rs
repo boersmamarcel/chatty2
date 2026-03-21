@@ -1,6 +1,7 @@
 use crate::settings::controllers::SettingsView;
 use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
+use crate::settings::views::browser_credentials_page::browser_credentials_page;
 use crate::settings::views::browser_settings_page::browser_settings_page;
 use crate::settings::views::execution_settings_page::execution_settings_page;
 use crate::settings::views::mcp_tools_page::mcp_tools_page;
@@ -173,6 +174,7 @@ impl Render for SettingsView {
                 execution_settings_page(),
                 search_settings_page(),
                 browser_settings_page(),
+                browser_credentials_page(),
                 memory_settings_page(),
                 training_settings_page(),
                 user_secrets_page(),

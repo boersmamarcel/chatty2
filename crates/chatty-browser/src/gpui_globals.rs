@@ -5,3 +5,4 @@
 use gpui::Global;
 
 impl Global for crate::settings::BrowserSettingsModel {}
+impl Global for crate::settings::BrowserCredentialsModel {}

@@ -438,6 +438,9 @@ fn main() {
         // Initialize browser settings with default - will be populated async
         cx.set_global(chatty_browser::settings::BrowserSettingsModel::default());
 
+        // Initialize browser credentials with empty state - will be populated async
+        cx.set_global(chatty_browser::settings::BrowserCredentialsModel::default());
+
         // Initialize training settings with default - will be populated async
         cx.set_global(settings::models::TrainingSettingsModel::default());
 
@@ -1041,6 +1044,33 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load user secrets, using defaults");
+                }
+            }
+        })
+        .detach();
+
+        // Load browser login profiles asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            match chatty_browser::settings::LoginProfileRepository::new() {
+                Ok(repo) => match repo.load_all().await {
+                    Ok(profiles) => {
+                        let count = profiles.len();
+                        cx.update(|cx| {
+                            info!(count, "Browser login profiles loaded from disk");
+                            let model = cx.global_mut::<chatty_browser::settings::BrowserCredentialsModel>();
+                            model.replace_all(profiles);
+                        })
+                        .map_err(|e| {
+                            warn!(error = ?e, "Failed to update global browser credentials")
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to load browser login profiles");
+                    }
+                },
+                Err(e) => {
+                    warn!(error = ?e, "Failed to create LoginProfileRepository");
                 }
             }
         })
