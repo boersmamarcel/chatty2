@@ -959,24 +959,42 @@ where
         .bg(panel_bg.opacity(0.3))
         .child(header);
 
-    // Always-visible "Open in Browser" link for browse tools
+    // Always-visible compact URL row for browse tools
     if is_browse_tool(&tool_call.tool_name) {
         if let Some(url) = extract_browse_url(tool_call) {
             let link_url = url.clone();
+            let domain = extract_domain(&url);
             result = result.child(
                 div()
-                    .pl_4()
+                    .id(ElementId::Name(
+                        format!("open-browse-inline-{}-{}", message_index, tool_index).into(),
+                    ))
+                    .pl_6()
+                    .pt(px(2.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
+                        if let Err(e) = open::that(&link_url) {
+                            tracing::warn!(url = %link_url, error = %e, "Failed to open URL in browser");
+                        }
+                    })
                     .child(
-                        Button::new(ElementId::Name(format!("open-browse-inline-{}-{}", message_index, tool_index).into()))
-                        .label(truncate_url_for_display(&url, 50))
-                        .icon(Icon::new(CustomIcon::ExternalLink))
-                        .xsmall()
-                        .ghost()
-                        .on_click(move |_, _, _cx| {
-                            if let Err(e) = open::that(&link_url) {
-                                tracing::warn!(url = %link_url, error = %e, "Failed to open URL in browser");
-                            }
-                        }),
+                        Icon::new(CustomIcon::Earth)
+                            .size(px(12.0))
+                            .text_color(muted_text),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_text)
+                            .child(domain),
+                    )
+                    .child(
+                        Icon::new(CustomIcon::ExternalLink)
+                            .size(px(10.0))
+                            .text_color(muted_text),
                     ),
             );
         }
@@ -1331,6 +1349,17 @@ struct BrowsePreview {
     description: Option<String>,
 }
 
+/// Extract the domain name from a URL (e.g. "https://nos.nl/path" → "nos.nl").
+fn extract_domain(url: &str) -> String {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
 /// Check whether a tool name is a browser navigation tool.
 fn is_browse_tool(tool_name: &str) -> bool {
     tool_name == "browse"
@@ -1352,16 +1381,6 @@ fn extract_browse_url(tool_call: &ToolCallBlock) -> Option<String> {
     json.get("url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-}
-
-/// Truncate a URL for display in a compact label.
-fn truncate_url_for_display(url: &str, max_chars: usize) -> String {
-    if url.chars().count() > max_chars {
-        let truncated: String = url.chars().take(max_chars - 1).collect();
-        format!("{}…", truncated)
-    } else {
-        url.to_string()
-    }
 }
 
 /// Extract preview data from a browse tool's JSON output.
@@ -1390,8 +1409,9 @@ fn extract_browse_preview(tool_call: &ToolCallBlock) -> Option<BrowsePreview> {
     })
 }
 
-/// Render a compact website preview card with title, URL, description,
-/// and an "Open in Browser" button.
+/// Render a website preview card styled like a link unfurl (Slack/Discord style).
+///
+/// Shows a left accent bar, domain, title, description, and "Open in Browser" action.
 fn render_website_preview_card(
     index: usize,
     preview: &BrowsePreview,
@@ -1401,85 +1421,106 @@ fn render_website_preview_card(
     let text_color = cx.theme().foreground;
     let muted_text = cx.theme().muted_foreground;
     let panel_bg = cx.theme().muted;
-    let border_color = cx.theme().border;
     let accent = cx.theme().accent;
 
-    // Truncate long URLs for display
-    let display_url = truncate_url_for_display(&preview.url, 60);
+    let domain = extract_domain(&preview.url);
+    let link_url_for_click = link_url.clone();
 
     div()
-        .id(ElementId::Name(format!("browse-preview-{}", index).into()))
+        .id(ElementId::Name(
+            format!("browse-preview-{}", index).into(),
+        ))
         .mt_1()
-        .px_3()
-        .py_2()
-        .bg(panel_bg)
-        .rounded_md()
-        .border_1()
-        .border_color(border_color)
         .flex()
-        .flex_col()
-        .gap_1()
-        // Title row
+        .flex_row()
+        // Left accent bar (link unfurl style)
         .child(
             div()
+                .w(px(3.0))
+                .flex_shrink_0()
+                .bg(accent)
+                .rounded_l_sm(),
+        )
+        // Content area
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .px_3()
+                .py_2()
+                .bg(panel_bg)
+                .rounded_r_md()
                 .flex()
-                .items_center()
-                .gap_2()
-                .child(Icon::new(CustomIcon::Earth).size_4().text_color(accent))
+                .flex_col()
+                .gap(px(4.0))
+                // Domain row with Earth icon
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(text_color)
-                        .overflow_hidden()
-                        .child(if preview.title.is_empty() {
-                            display_url.clone()
-                        } else {
-                            preview.title.clone()
-                        }),
-                ),
-        )
-        // URL row
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted_text)
-                .overflow_hidden()
-                .child(display_url),
-        )
-        // Description row (if available)
-        .when_some(preview.description.clone(), |this, desc| {
-            if desc.is_empty() {
-                this
-            } else {
-                let truncated = if desc.chars().count() > 150 {
-                    let t: String = desc.chars().take(149).collect();
-                    format!("{}…", t)
-                } else {
-                    desc
-                };
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_text)
-                        .mt_1()
-                        .child(truncated),
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(CustomIcon::Earth)
+                                .size(px(12.0))
+                                .text_color(muted_text),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_text)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(domain),
+                        ),
                 )
-            }
-        })
-        // Open in Browser button
-        .child(
-            div().mt_1().child(
-                Button::new(ElementId::Name(format!("open-browse-{}", index).into()))
-                    .label("Open in Browser")
-                    .icon(Icon::new(CustomIcon::ExternalLink))
-                    .xsmall()
-                    .ghost()
-                    .on_click(move |_, _, _cx| {
-                        if let Err(e) = open::that(&link_url) {
-                            tracing::warn!(url = %link_url, error = %e, "Failed to open URL in browser");
-                        }
-                    }),
-            ),
+                // Title
+                .when(!preview.title.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text_color)
+                            .overflow_hidden()
+                            .child(preview.title.clone()),
+                    )
+                })
+                // Description (if available)
+                .when_some(preview.description.clone(), |this, desc| {
+                    if desc.is_empty() {
+                        this
+                    } else {
+                        let truncated = if desc.chars().count() > 200 {
+                            let t: String = desc.chars().take(199).collect();
+                            format!("{}…", t)
+                        } else {
+                            desc
+                        };
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_text)
+                                .line_height(rems(1.4))
+                                .child(truncated),
+                        )
+                    }
+                })
+                // "Open in Browser" action row
+                .child(
+                    div().mt(px(2.0)).child(
+                        Button::new(ElementId::Name(
+                            format!("open-browse-{}", index).into(),
+                        ))
+                        .label("Open in Browser")
+                        .icon(Icon::new(CustomIcon::ExternalLink))
+                        .xsmall()
+                        .ghost()
+                        .on_click(move |_, _, _cx| {
+                            if let Err(e) = open::that(&link_url_for_click) {
+                                tracing::warn!(url = %link_url_for_click, error = %e, "Failed to open URL in browser");
+                            }
+                        }),
+                    ),
+                ),
         )
 }
