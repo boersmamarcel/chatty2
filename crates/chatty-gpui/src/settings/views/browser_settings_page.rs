@@ -1,0 +1,116 @@
+use crate::settings::controllers::browser_settings_controller;
+use chatty_browser::settings::BrowserSettingsModel;
+use gpui::{App, IntoElement};
+use gpui_component::setting::{
+    NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
+};
+
+pub fn browser_settings_page() -> SettingPage {
+    SettingPage::new("Browser")
+        .description("Configure the browser engine for web browsing, form interaction, and authentication")
+        .resettable(false)
+        .groups(vec![
+            SettingGroup::new()
+                .title("Browser Engine")
+                .description(
+                    "Enable the browser engine to allow the AI to navigate websites, \
+                     interact with forms, and extract structured data from web pages.",
+                )
+                .items(vec![
+                    SettingItem::new(
+                        "Enable Browser",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<BrowserSettingsModel>().enabled,
+                            |_val: bool, cx: &mut App| {
+                                browser_settings_controller::toggle_browser(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "When enabled, the AI can browse websites, click elements, fill forms, \
+                         and extract content. Tools: browse, browser_action, browser_extract, \
+                         browser_auth, browser_tabs.",
+                    ),
+                    SettingItem::new(
+                        "Headless Mode",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<BrowserSettingsModel>().headless,
+                            |_val: bool, cx: &mut App| {
+                                browser_settings_controller::toggle_headless(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Run the browser without a visible window. Session capture always \
+                         uses a visible window regardless of this setting.",
+                    ),
+                    SettingItem::new(
+                        "Max Tabs",
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 1.0,
+                                max: 20.0,
+                                ..Default::default()
+                            },
+                            |cx: &App| cx.global::<BrowserSettingsModel>().max_tabs as f64,
+                            |val: f64, cx: &mut App| {
+                                browser_settings_controller::set_max_tabs(val as u32, cx);
+                            },
+                        )
+                        .default_value(5.0),
+                    )
+                    .description("Maximum number of concurrent browser tabs (1-20)."),
+                    SettingItem::new(
+                        "Page Load Timeout",
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 5.0,
+                                max: 120.0,
+                                ..Default::default()
+                            },
+                            |cx: &App| cx.global::<BrowserSettingsModel>().timeout_seconds as f64,
+                            |val: f64, cx: &mut App| {
+                                browser_settings_controller::set_timeout(val as u32, cx);
+                            },
+                        )
+                        .default_value(30.0),
+                    )
+                    .description("Seconds to wait for a page to load before timing out (5-120)."),
+                ]),
+            SettingGroup::new()
+                .title("Approval Settings")
+                .description(
+                    "Control which browser actions require user approval before executing.",
+                )
+                .items(vec![
+                    SettingItem::new(
+                        "Require Auth Approval",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<BrowserSettingsModel>().require_auth_approval,
+                            |_val: bool, cx: &mut App| {
+                                browser_settings_controller::toggle_auth_approval(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Require user approval before the AI authenticates with stored credentials.",
+                    ),
+                    SettingItem::new(
+                        "Require Action Approval",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<BrowserSettingsModel>().require_action_approval,
+                            |_val: bool, cx: &mut App| {
+                                browser_settings_controller::toggle_action_approval(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Require user approval before the AI clicks, fills, or selects elements on a page.",
+                    ),
+                ]),
+        ])
+}
