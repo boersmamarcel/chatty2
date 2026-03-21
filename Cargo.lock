@@ -1564,6 +1564,7 @@ dependencies = [
  "async-trait",
  "dirs 5.0.1",
  "gpui",
+ "raw-window-handle",
  "reqwest 0.13.2",
  "rig-core",
  "serde",

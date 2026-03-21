@@ -27,6 +27,10 @@ reqwest.workspace = true
 wry.workspace = true
 tao.workspace = true
 
+# macOS: raw window handle for creating hidden NSWindow for wry
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+
 # Optional: GPUI integration
 gpui = { workspace = true, optional = true }
 

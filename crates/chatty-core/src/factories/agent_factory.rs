@@ -944,7 +944,7 @@ impl AgentClient {
             .is_some_and(|s| s.enabled)
         {
             tracing::info!("Browser tools enabled");
-            match chatty_browser::backend::wry_backend::WryBackend::new() {
+            match chatty_browser::backend::wry_backend::WryBackend::new().await {
                 Ok(wry_backend) => {
                     let backend = std::sync::Arc::new(wry_backend);
                     let engine = chatty_browser::BrowserEngine::new(backend);

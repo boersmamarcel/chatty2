@@ -78,11 +78,11 @@ mod tests {
     use super::*;
     use crate::backend::wry_backend::WryBackend;
 
-    #[test]
-    fn test_browser_engine_creation() {
+    #[tokio::test]
+    async fn test_browser_engine_creation() {
         // WryBackend::new() requires a display server (X11/Wayland/macOS/Windows).
         // In headless CI it may fail — that's expected. Only test when it succeeds.
-        match WryBackend::new() {
+        match WryBackend::new().await {
             Ok(backend) => {
                 let engine = BrowserEngine::new(Arc::new(backend));
                 assert!(engine.session().backend().list_tabs().is_empty());

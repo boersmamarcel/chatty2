@@ -1,4 +1,4 @@
-//! Wry/tao browser backend — real WebView integration.
+//! Wry browser backend — real WebView integration.
 //!
 //! # Architecture (Linux / Windows)
 //!
@@ -17,22 +17,440 @@
 //!
 //! # macOS
 //!
-//! On macOS, tao requires `EventLoop` on the main thread. Since GPUI already
-//! occupies the main thread, `WryBackend::new()` returns an error and the
-//! caller falls back to HTTP mode. A future phase will integrate WebViews
-//! via GPUI's main-thread dispatch.
+//! On macOS, tao's `EventLoop` must run on the main thread — which GPUI
+//! already occupies. Instead we bypass tao entirely and use wry's `WebView`
+//! with a hidden `NSWindow` created via `objc2`. All WebView operations are
+//! dispatched to the main thread via GCD (`dispatch_async`), where they
+//! integrate naturally with GPUI's Cocoa run loop. Communication uses the
+//! same oneshot-channel pattern as the Linux/Windows backend.
 
 use async_trait::async_trait;
 
 use super::{BrowserBackend, Cookie, TabId, TabInfo};
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Platform-specific inner module
+// macOS: native WKWebView via objc2 + wry, dispatched to main thread via GCD
 // ══════════════════════════════════════════════════════════════════════════════
 
-// On Linux/Windows we have the full tao + wry event loop implementation.
-// On macOS the inner module is empty — WryBackend::new() always bails before
-// any tao/wry types are touched.
+#[cfg(target_os = "macos")]
+mod inner_macos {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::oneshot;
+
+    use crate::backend::{Cookie, TabId, TabInfo};
+
+    // ── GCD dispatch helpers ────────────────────────────────────────────
+
+    #[link(name = "System", kind = "dylib")]
+    unsafe extern "C" {
+        fn dispatch_get_main_queue() -> *mut c_void;
+        fn dispatch_async_f(
+            queue: *mut c_void,
+            context: *mut c_void,
+            work: unsafe extern "C" fn(*mut c_void),
+        );
+    }
+
+    /// Dispatch a `Send + 'static` closure to the main thread asynchronously.
+    fn dispatch_main_async<F: FnOnce() + Send + 'static>(f: F) {
+        let boxed: Box<F> = Box::new(f);
+        let raw = Box::into_raw(boxed) as *mut c_void;
+
+        unsafe extern "C" fn trampoline<F: FnOnce() + Send + 'static>(ctx: *mut c_void) {
+            let f = unsafe { Box::from_raw(ctx as *mut F) };
+            f();
+        }
+
+        unsafe {
+            dispatch_async_f(dispatch_get_main_queue(), raw, trampoline::<F>);
+        }
+    }
+
+    /// Dispatch a closure to the main thread and await the result.
+    pub(super) async fn dispatch_main<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = oneshot::channel();
+        dispatch_main_async(move || {
+            let result = f();
+            let _ = tx.send(result);
+        });
+        rx.await.expect("GCD dispatch callback was dropped")
+    }
+
+    // ── Thread-local WebView state (main thread only) ───────────────────
+
+    struct TabState {
+        #[allow(dead_code)]
+        window: HiddenWindow,
+        webview: wry::WebView,
+        url: String,
+        title: String,
+    }
+
+    struct MainThreadState {
+        tabs: HashMap<String, TabState>,
+        next_tab_id: u64,
+        js_callbacks: HashMap<String, Vec<oneshot::Sender<anyhow::Result<String>>>>,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<MainThreadState>> = const { RefCell::new(None) };
+    }
+
+    /// Ensure the thread-local state is initialized.
+    fn with_state<R>(f: impl FnOnce(&mut MainThreadState) -> R) -> R {
+        STATE.with_borrow_mut(|opt| {
+            let state = opt.get_or_insert_with(|| MainThreadState {
+                tabs: HashMap::new(),
+                next_tab_id: 1,
+                js_callbacks: HashMap::new(),
+            });
+            f(state)
+        })
+    }
+
+    // ── Hidden NSWindow via objc2 ───────────────────────────────────────
+
+    /// A minimal hidden NSWindow for hosting a wry WebView.
+    struct HiddenWindow {
+        /// Pointer to the NSWindow instance.
+        ns_window: *mut c_void,
+    }
+
+    // Safety: HiddenWindow is only used on the main thread (enforced by GCD dispatch).
+    // The raw pointer is to an NSWindow which is retained by the struct.
+    unsafe impl Send for HiddenWindow {}
+
+    impl HiddenWindow {
+        /// Create a hidden 1×1 NSWindow on the current thread (must be main).
+        fn new() -> anyhow::Result<Self> {
+            // Use Objective-C runtime to create a minimal NSWindow.
+            // NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1,1)
+            //                styleMask:NSWindowStyleMaskBorderless
+            //                backing:NSBackingStoreBuffered
+            //                defer:NO];
+
+            #[link(name = "objc", kind = "dylib")]
+            unsafe extern "C" {
+                fn objc_getClass(name: *const u8) -> *mut c_void;
+                fn sel_registerName(name: *const u8) -> *mut c_void;
+                fn objc_msgSend() -> *mut c_void; // varargs – called via transmute
+            }
+
+            // CGRect struct matching NSRect layout
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct CGPoint {
+                x: f64,
+                y: f64,
+            }
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct CGSize {
+                width: f64,
+                height: f64,
+            }
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct CGRect {
+                origin: CGPoint,
+                size: CGSize,
+            }
+
+            unsafe {
+                let ns_window_class = objc_getClass(b"NSWindow\0".as_ptr());
+                if ns_window_class.is_null() {
+                    anyhow::bail!("Failed to get NSWindow class");
+                }
+
+                let alloc_sel = sel_registerName(b"alloc\0".as_ptr());
+                let init_sel =
+                    sel_registerName(b"initWithContentRect:styleMask:backing:defer:\0".as_ptr());
+                let set_released_sel = sel_registerName(b"setReleasedWhenClosed:\0".as_ptr());
+
+                // [NSWindow alloc]
+                let alloc_fn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let raw_window = alloc_fn(ns_window_class, alloc_sel);
+                if raw_window.is_null() {
+                    anyhow::bail!("NSWindow alloc returned nil");
+                }
+
+                // initWithContentRect:styleMask:backing:defer:
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                };
+                let style_mask: u64 = 0; // NSWindowStyleMaskBorderless
+                let backing: u64 = 2; // NSBackingStoreBuffered
+                let defer: i8 = 0; // NO
+
+                let init_fn: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    CGRect,
+                    u64,
+                    u64,
+                    i8,
+                ) -> *mut c_void = std::mem::transmute(objc_msgSend as *const ());
+                let window = init_fn(raw_window, init_sel, rect, style_mask, backing, defer);
+                if window.is_null() {
+                    anyhow::bail!("NSWindow init returned nil");
+                }
+
+                // [window setReleasedWhenClosed:NO]
+                let set_fn: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                set_fn(window, set_released_sel, 0);
+
+                Ok(HiddenWindow { ns_window: window })
+            }
+        }
+    }
+
+    impl Drop for HiddenWindow {
+        fn drop(&mut self) {
+            if !self.ns_window.is_null() {
+                // [window close] then release
+                #[link(name = "objc", kind = "dylib")]
+                unsafe extern "C" {
+                    fn sel_registerName(name: *const u8) -> *mut c_void;
+                    fn objc_msgSend() -> *mut c_void;
+                }
+                unsafe {
+                    let close_sel = sel_registerName(b"close\0".as_ptr());
+                    let send: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+                        std::mem::transmute(objc_msgSend as *const ());
+                    send(self.ns_window, close_sel);
+
+                    let release_sel = sel_registerName(b"release\0".as_ptr());
+                    send(self.ns_window, release_sel);
+                }
+            }
+        }
+    }
+
+    unsafe impl raw_window_handle::HasWindowHandle for HiddenWindow {
+        fn window_handle(
+            &self,
+        ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let raw = raw_window_handle::RawWindowHandle::AppKit(
+                raw_window_handle::AppKitWindowHandle::new(
+                    std::ptr::NonNull::new(self.ns_window as *mut _)
+                        .ok_or(raw_window_handle::HandleError::Unavailable)?,
+                ),
+            );
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+        }
+    }
+
+    unsafe impl raw_window_handle::HasDisplayHandle for HiddenWindow {
+        fn display_handle(
+            &self,
+        ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            Ok(unsafe {
+                raw_window_handle::DisplayHandle::borrow_raw(
+                    raw_window_handle::RawDisplayHandle::AppKit(
+                        raw_window_handle::AppKitDisplayHandle::new(),
+                    ),
+                )
+            })
+        }
+    }
+
+    // ── Public operations (called from dispatch_main closures) ──────────
+
+    /// Create a new tab on the main thread. Returns (TabId, snapshot update).
+    pub(super) fn create_tab(
+        tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>,
+        js_proxy_snapshot: Arc<Mutex<Vec<TabInfo>>>,
+    ) -> anyhow::Result<TabId> {
+        with_state(|state| {
+            let tab_id_str = format!("tab-{}", state.next_tab_id);
+            state.next_tab_id += 1;
+
+            let window = HiddenWindow::new()?;
+
+            let tab_id_for_ipc = tab_id_str.clone();
+            let webview = wry::WebViewBuilder::new()
+                .with_url("about:blank")
+                .with_ipc_handler(move |msg| {
+                    let body = msg.body();
+                    if let Some(result) = body.strip_prefix("__chatty_js_result:") {
+                        handle_js_result(&tab_id_for_ipc, result.to_string());
+                    }
+                })
+                .build(&window)
+                .map_err(|e| anyhow::anyhow!("Failed to create WebView: {e}"))?;
+
+            state.tabs.insert(
+                tab_id_str.clone(),
+                TabState {
+                    window,
+                    webview,
+                    url: "about:blank".to_string(),
+                    title: String::new(),
+                },
+            );
+
+            update_snapshot(state, tabs_snapshot);
+            let _ = update_snapshot(state, &js_proxy_snapshot);
+            Ok(TabId(tab_id_str))
+        })
+    }
+
+    pub(super) fn close_tab(
+        tab_id: &str,
+        tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>,
+    ) -> anyhow::Result<()> {
+        with_state(|state| {
+            if state.tabs.remove(tab_id).is_some() {
+                state.js_callbacks.remove(tab_id);
+                update_snapshot(state, tabs_snapshot);
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("Tab {} not found", tab_id))
+            }
+        })
+    }
+
+    pub(super) fn navigate(
+        tab_id: &str,
+        url: &str,
+        tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>,
+    ) -> anyhow::Result<()> {
+        with_state(|state| {
+            if let Some(tab) = state.tabs.get_mut(tab_id) {
+                tab.url = url.to_string();
+                tab.webview
+                    .load_url(url)
+                    .map_err(|e| anyhow::anyhow!("Navigate failed: {e}"))?;
+                update_snapshot(state, tabs_snapshot);
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("Tab {} not found", tab_id))
+            }
+        })
+    }
+
+    pub(super) fn current_url(tab_id: &str) -> anyhow::Result<String> {
+        with_state(|state| {
+            if let Some(tab) = state.tabs.get(tab_id) {
+                Ok(tab.url.clone())
+            } else {
+                Err(anyhow::anyhow!("Tab {} not found", tab_id))
+            }
+        })
+    }
+
+    pub(super) fn evaluate_js(
+        tab_id: &str,
+        script: &str,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    ) {
+        with_state(|state| {
+            if let Some(tab) = state.tabs.get(tab_id) {
+                let wrapped = format!(
+                    r#"(function() {{
+                        try {{
+                            var __r = (function() {{ {script} }})();
+                            if (__r === undefined) __r = null;
+                            window.ipc.postMessage("__chatty_js_result:" + JSON.stringify(__r));
+                        }} catch(e) {{
+                            window.ipc.postMessage("__chatty_js_result:" + JSON.stringify("__error:" + e.toString()));
+                        }}
+                    }})()"#
+                );
+                match tab.webview.evaluate_script(&wrapped) {
+                    Ok(()) => {
+                        state
+                            .js_callbacks
+                            .entry(tab_id.to_string())
+                            .or_default()
+                            .push(reply);
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("evaluate_script failed: {e}")));
+                    }
+                }
+            } else {
+                let _ = reply.send(Err(anyhow::anyhow!("Tab {} not found", tab_id)));
+            }
+        });
+    }
+
+    pub(super) fn shutdown_all(tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>) {
+        with_state(|state| {
+            state.tabs.clear();
+            state.js_callbacks.clear();
+            update_snapshot(state, tabs_snapshot);
+        });
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────
+
+    fn handle_js_result(tab_id: &str, result: String) {
+        with_state(|state| {
+            if let Some(waiters) = state.js_callbacks.get_mut(tab_id) {
+                if let Some(reply) = waiters.pop() {
+                    if let Some(err_msg) = result.strip_prefix("\"__error:") {
+                        let err_msg = err_msg.trim_end_matches('"');
+                        let _ = reply.send(Err(anyhow::anyhow!("JS error: {err_msg}")));
+                    } else {
+                        let _ = reply.send(Ok(result));
+                    }
+                }
+                if waiters.is_empty() {
+                    state.js_callbacks.remove(tab_id);
+                }
+            }
+        });
+    }
+
+    fn update_snapshot(state: &MainThreadState, snapshot: &Arc<Mutex<Vec<TabInfo>>>) {
+        let infos: Vec<TabInfo> = state
+            .tabs
+            .iter()
+            .map(|(id, tab)| TabInfo {
+                id: TabId(id.clone()),
+                url: tab.url.clone(),
+                title: tab.title.clone(),
+            })
+            .collect();
+        if let Ok(mut guard) = snapshot.lock() {
+            *guard = infos;
+        }
+    }
+
+    /// Verify the backend can create a WebView on the main thread.
+    /// Called during WryBackend::new() to fail early if display is unavailable.
+    pub(super) async fn verify_main_thread_webview(
+        tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>,
+    ) -> anyhow::Result<()> {
+        let snap = tabs_snapshot.clone();
+        let result = dispatch_main(move || -> anyhow::Result<()> {
+            let _window = HiddenWindow::new()?;
+            // Initialize the thread-local state
+            with_state(|_| {});
+            Ok(())
+        })
+        .await;
+        result
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Linux / Windows: tao event loop on dedicated thread
+// ══════════════════════════════════════════════════════════════════════════════
 
 #[cfg(not(target_os = "macos"))]
 mod inner {
@@ -390,108 +808,115 @@ mod inner {
 // Public WryBackend type
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Wry/tao-based browser backend.
+/// Wry-based browser backend.
 ///
-/// Manages OS-native WebViews via wry, with tao providing the windowing
-/// layer. The event loop runs on a dedicated thread; all async methods
-/// communicate with it via `EventLoopProxy` + oneshot channels.
+/// **Linux / Windows**: Manages OS-native WebViews via wry+tao. The tao event
+/// loop runs on a dedicated thread; all async methods communicate with it via
+/// `EventLoopProxy` + oneshot channels.
 ///
-/// On macOS, `new()` returns an error because tao requires the main thread
-/// (which is occupied by GPUI). The caller should fall back to HTTP mode.
+/// **macOS**: Uses wry WebViews hosted in a hidden `NSWindow`, with all
+/// operations dispatched to the main thread via GCD. This avoids conflicting
+/// with GPUI's ownership of the main thread.
 pub struct WryBackend {
-    /// Proxy to send commands to the event loop thread.
-    /// `None` on macOS (construction always fails before this is set).
+    tabs_snapshot: std::sync::Arc<std::sync::Mutex<Vec<TabInfo>>>,
+
+    /// Proxy to send commands to the event loop thread (Linux/Windows only).
     #[cfg(not(target_os = "macos"))]
     proxy: tao::event_loop::EventLoopProxy<inner::WryCommand>,
     #[cfg(not(target_os = "macos"))]
-    tabs_snapshot: std::sync::Arc<std::sync::Mutex<Vec<TabInfo>>>,
-    #[cfg(not(target_os = "macos"))]
     _thread: Option<std::thread::JoinHandle<()>>,
-
-    // macOS: zero-size struct — new() always bails.
-    #[cfg(target_os = "macos")]
-    _private: (),
 }
 
-/// Convenience impl for tests. Panics if the display server is unavailable
-/// or on macOS. Production code should use `WryBackend::new()` and handle
-/// the error.
+/// Convenience impl for tests. Panics if the display server is unavailable.
+/// Production code should use `WryBackend::new()` and handle the error.
 impl Default for WryBackend {
     fn default() -> Self {
-        Self::new().expect("WryBackend::new() failed — display server required")
+        // For macOS, new() is async. Use block_on in tests.
+        #[cfg(target_os = "macos")]
+        {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(Self::new()).expect("WryBackend::new() failed")
+        }
+        #[cfg(not(target_os = "macos"))]
+        Self::new_sync().expect("WryBackend::new() failed — display server required")
     }
 }
 
 impl WryBackend {
-    /// Create a new wry backend.
+    /// Create a new wry backend (async version, required on macOS).
     ///
     /// # Platform notes
     ///
-    /// - **macOS**: Returns an error. tao requires `EventLoop` on the main
-    ///   thread, which is occupied by GPUI. Browser tools use HTTP fallback.
+    /// - **macOS**: Dispatches to the main thread via GCD to create hidden
+    ///   NSWindow + WKWebView. Works within GPUI's Cocoa run loop.
     /// - **Linux**: Spawns a background thread with tao + wry. Requires
     ///   WebKitGTK (`libwebkit2gtk-4.1-dev`).
     /// - **Windows**: Spawns a background thread with tao + wry. Requires
     ///   WebView2 (bundled with Windows 10+).
-    pub fn new() -> anyhow::Result<Self> {
+    pub async fn new() -> anyhow::Result<Self> {
         #[cfg(target_os = "macos")]
         {
-            // On macOS, tao's EventLoop must be created on the main thread.
-            // GPUI already owns the main thread, so we can't use tao here.
-            // Attempting to create tao's EventLoop on a background thread
-            // panics and corrupts tao's global state, crashing the process.
-            anyhow::bail!(
-                "WryBackend is not yet supported on macOS. \
-                 The tao event loop must run on the main thread, which is \
-                 occupied by GPUI. Browser tools will use HTTP fallback."
-            );
+            let tabs_snapshot = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            // Verify that we can create WebViews on the main thread.
+            inner_macos::verify_main_thread_webview(&tabs_snapshot).await?;
+
+            tracing::info!("WryBackend created — macOS native WebView (GCD dispatch)");
+
+            Ok(Self { tabs_snapshot })
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            use std::sync::{Arc, Mutex};
-
-            let tabs_snapshot: Arc<Mutex<Vec<TabInfo>>> = Arc::new(Mutex::new(Vec::new()));
-            let tabs_snapshot_clone = tabs_snapshot.clone();
-
-            let (proxy_tx, proxy_rx) =
-                std::sync::mpsc::channel::<tao::event_loop::EventLoopProxy<inner::WryCommand>>();
-
-            let thread = std::thread::Builder::new()
-                .name("wry-event-loop".into())
-                .spawn(move || {
-                    // Catch panics so they don't corrupt global state or
-                    // propagate to the main thread.
-                    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        inner::run_event_loop(proxy_tx.clone(), tabs_snapshot_clone);
-                    })) {
-                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = e.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "unknown panic".to_string()
-                        };
-                        tracing::error!(error = %msg, "wry event loop panicked");
-                    }
-                })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn wry event loop thread: {e}"))?;
-
-            let proxy = proxy_rx.recv().map_err(|_| {
-                anyhow::anyhow!(
-                    "Event loop thread died before sending proxy. \
-                     Check that system WebView libraries are installed."
-                )
-            })?;
-
-            tracing::info!("WryBackend created — event loop thread running");
-
-            Ok(Self {
-                proxy,
-                tabs_snapshot,
-                _thread: Some(thread),
-            })
+            Self::new_sync()
         }
+    }
+
+    /// Synchronous constructor (Linux/Windows only).
+    #[cfg(not(target_os = "macos"))]
+    fn new_sync() -> anyhow::Result<Self> {
+        use std::sync::{Arc, Mutex};
+
+        let tabs_snapshot: Arc<Mutex<Vec<TabInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        let tabs_snapshot_clone = tabs_snapshot.clone();
+
+        let (proxy_tx, proxy_rx) =
+            std::sync::mpsc::channel::<tao::event_loop::EventLoopProxy<inner::WryCommand>>();
+
+        let thread = std::thread::Builder::new()
+            .name("wry-event-loop".into())
+            .spawn(move || {
+                // Catch panics so they don't corrupt global state or
+                // propagate to the main thread.
+                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    inner::run_event_loop(proxy_tx.clone(), tabs_snapshot_clone);
+                })) {
+                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    tracing::error!(error = %msg, "wry event loop panicked");
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to spawn wry event loop thread: {e}"))?;
+
+        let proxy = proxy_rx.recv().map_err(|_| {
+            anyhow::anyhow!(
+                "Event loop thread died before sending proxy. \
+                 Check that system WebView libraries are installed."
+            )
+        })?;
+
+        tracing::info!("WryBackend created — event loop thread running");
+
+        Ok(Self {
+            proxy,
+            tabs_snapshot,
+            _thread: Some(thread),
+        })
     }
 
     /// Send a command to the event loop and await the reply.
@@ -513,14 +938,15 @@ impl WryBackend {
 // BrowserBackend trait implementation
 // ══════════════════════════════════════════════════════════════════════════════
 
-// On macOS, all methods are unreachable (new() always fails), but they must
-// exist to satisfy the trait.
-
 #[async_trait]
 impl BrowserBackend for WryBackend {
     async fn new_tab(&self) -> anyhow::Result<TabId> {
         #[cfg(target_os = "macos")]
-        anyhow::bail!("WryBackend is not available on macOS");
+        {
+            let snap = self.tabs_snapshot.clone();
+            let snap2 = self.tabs_snapshot.clone();
+            inner_macos::dispatch_main(move || inner_macos::create_tab(&snap, snap2)).await
+        }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::NewTab { reply })
             .await?
@@ -529,8 +955,9 @@ impl BrowserBackend for WryBackend {
     async fn close_tab(&self, tab: &TabId) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let _ = tab;
-            anyhow::bail!("WryBackend is not available on macOS");
+            let tab_id = tab.0.clone();
+            let snap = self.tabs_snapshot.clone();
+            inner_macos::dispatch_main(move || inner_macos::close_tab(&tab_id, &snap)).await
         }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::CloseTab {
@@ -543,8 +970,10 @@ impl BrowserBackend for WryBackend {
     async fn navigate(&self, tab: &TabId, url: &str) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (tab, url);
-            anyhow::bail!("WryBackend is not available on macOS");
+            let tab_id = tab.0.clone();
+            let url = url.to_string();
+            let snap = self.tabs_snapshot.clone();
+            inner_macos::dispatch_main(move || inner_macos::navigate(&tab_id, &url, &snap)).await
         }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::Navigate {
@@ -558,8 +987,8 @@ impl BrowserBackend for WryBackend {
     async fn current_url(&self, tab: &TabId) -> anyhow::Result<String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = tab;
-            anyhow::bail!("WryBackend is not available on macOS");
+            let tab_id = tab.0.clone();
+            inner_macos::dispatch_main(move || inner_macos::current_url(&tab_id)).await
         }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::CurrentUrl {
@@ -572,8 +1001,17 @@ impl BrowserBackend for WryBackend {
     async fn evaluate_js(&self, tab: &TabId, script: &str) -> anyhow::Result<String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (tab, script);
-            anyhow::bail!("WryBackend is not available on macOS");
+            let tab_id = tab.0.clone();
+            let script = script.to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // Dispatch the script evaluation to the main thread; the result
+            // comes back asynchronously via the IPC handler.
+            inner_macos::dispatch_main(move || {
+                inner_macos::evaluate_js(&tab_id, &script, tx);
+            })
+            .await;
+            rx.await
+                .map_err(|_| anyhow::anyhow!("JS eval reply channel dropped"))?
         }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::EvaluateJs {
@@ -585,58 +1023,42 @@ impl BrowserBackend for WryBackend {
     }
 
     async fn get_cookies(&self, tab: &TabId) -> anyhow::Result<Vec<Cookie>> {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = tab;
-            anyhow::bail!("WryBackend is not available on macOS");
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let script = r#"
-                (function() {
-                    var cookies = document.cookie.split('; ').filter(Boolean).map(function(c) {
-                        var parts = c.split('=');
-                        return {
-                            name: parts[0],
-                            value: parts.slice(1).join('='),
-                            domain: window.location.hostname,
-                            path: '/',
-                            secure: window.location.protocol === 'https:',
-                            http_only: false
-                        };
-                    });
-                    return JSON.stringify(cookies);
-                })()
-            "#;
-            let result = self.evaluate_js(tab, script).await?;
-            let cleaned = result.trim().trim_matches('"');
-            let unescaped = cleaned.replace("\\\"", "\"").replace("\\\\", "\\");
-            let cookies: Vec<Cookie> = serde_json::from_str(&unescaped).unwrap_or_default();
-            Ok(cookies)
-        }
+        let script = r#"
+            (function() {
+                var cookies = document.cookie.split('; ').filter(Boolean).map(function(c) {
+                    var parts = c.split('=');
+                    return {
+                        name: parts[0],
+                        value: parts.slice(1).join('='),
+                        domain: window.location.hostname,
+                        path: '/',
+                        secure: window.location.protocol === 'https:',
+                        http_only: false
+                    };
+                });
+                return JSON.stringify(cookies);
+            })()
+        "#;
+        let result = self.evaluate_js(tab, script).await?;
+        let cleaned = result.trim().trim_matches('"');
+        let unescaped = cleaned.replace("\\\"", "\"").replace("\\\\", "\\");
+        let cookies: Vec<Cookie> = serde_json::from_str(&unescaped).unwrap_or_default();
+        Ok(cookies)
     }
 
     async fn set_cookies(&self, tab: &TabId, cookies: &[Cookie]) -> anyhow::Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = (tab, cookies);
-            anyhow::bail!("WryBackend is not available on macOS");
+        for cookie in cookies {
+            let js = format!(
+                "document.cookie = '{}={}; path={}; domain={}{}'",
+                crate::session::escape_js_string(&cookie.name),
+                crate::session::escape_js_string(&cookie.value),
+                crate::session::escape_js_string(&cookie.path),
+                crate::session::escape_js_string(&cookie.domain),
+                if cookie.secure { "; secure" } else { "" },
+            );
+            self.evaluate_js(tab, &js).await?;
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            for cookie in cookies {
-                let js = format!(
-                    "document.cookie = '{}={}; path={}; domain={}{}'",
-                    crate::session::escape_js_string(&cookie.name),
-                    crate::session::escape_js_string(&cookie.value),
-                    crate::session::escape_js_string(&cookie.path),
-                    crate::session::escape_js_string(&cookie.domain),
-                    if cookie.secure { "; secure" } else { "" },
-                );
-                self.evaluate_js(tab, &js).await?;
-            }
-            Ok(())
-        }
+        Ok(())
     }
 
     async fn screenshot(&self, _tab: &TabId) -> anyhow::Result<Vec<u8>> {
@@ -646,8 +1068,10 @@ impl BrowserBackend for WryBackend {
     async fn wait_for_load(&self, tab: &TabId, timeout_ms: u64) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (tab, timeout_ms);
-            anyhow::bail!("WryBackend is not available on macOS");
+            // On macOS, use a simple polling approach: wait for the specified
+            // duration, letting WKWebView process events on the main thread.
+            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms.min(5000))).await;
+            Ok(())
         }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::WaitForLoad {
@@ -659,22 +1083,17 @@ impl BrowserBackend for WryBackend {
     }
 
     fn list_tabs(&self) -> Vec<TabInfo> {
-        #[cfg(target_os = "macos")]
-        {
-            Vec::new()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.tabs_snapshot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-        }
+        self.tabs_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     async fn shutdown(&self) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
+            let snap = self.tabs_snapshot.clone();
+            inner_macos::dispatch_main(move || inner_macos::shutdown_all(&snap)).await;
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]
