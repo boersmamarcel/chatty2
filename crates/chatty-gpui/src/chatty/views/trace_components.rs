@@ -891,6 +891,22 @@ where
         }
     }
 
+    // Website preview card for browse tool (inline rendering)
+    if is_browse_tool(&tool_call.tool_name) {
+        if let Some(preview) = extract_browse_preview(tool_call) {
+            let link_url = preview.url.clone();
+            content_children.push(
+                render_website_preview_card(
+                    message_index * 1000 + tool_index,
+                    &preview,
+                    link_url,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+    }
+
     // Add error section if error state
     if let ToolCallState::Error(error) = &tool_call.state {
         let error_color = cx.theme().ring;
@@ -931,7 +947,7 @@ where
     }
 
     // Return header + conditionally visible content
-    div()
+    let mut result = div()
         .flex()
         .flex_col()
         .gap_1()
@@ -941,17 +957,44 @@ where
         .border_color(cx.theme().border)
         .rounded_md()
         .bg(panel_bg.opacity(0.3))
-        .child(header)
-        .when(!collapsed && !content_children.is_empty(), |this| {
-            this.child(
+        .child(header);
+
+    // Always-visible "Open in Browser" link for browse tools
+    if is_browse_tool(&tool_call.tool_name) {
+        if let Some(url) = extract_browse_url(tool_call) {
+            let link_url = url.clone();
+            result = result.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .pl_4() // Indent content slightly
-                    .children(content_children),
-            )
-        })
+                    .pl_4()
+                    .child(
+                        Button::new(format!(
+                            "open-browse-inline-{}-{}",
+                            message_index, tool_index
+                        ))
+                        .label(truncate_url_for_display(&url, 50))
+                        .icon(Icon::new(CustomIcon::ExternalLink))
+                        .xsmall()
+                        .ghost()
+                        .on_click(move |_, _, _cx| {
+                            if let Err(e) = open::that(&link_url) {
+                                tracing::warn!(url = %link_url, error = %e, "Failed to open URL in browser");
+                            }
+                        }),
+                    ),
+            );
+        }
+    }
+
+    result.when(!collapsed && !content_children.is_empty(), |this| {
+        this.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .pl_4() // Indent content slightly
+                .children(content_children),
+        )
+    })
 }
 
 /// Try to build a diff view from apply_diff tool input JSON.
@@ -1296,6 +1339,34 @@ fn is_browse_tool(tool_name: &str) -> bool {
     tool_name == "browse"
 }
 
+/// Extract the URL from a browse tool's input JSON.
+fn extract_browse_url(tool_call: &ToolCallBlock) -> Option<String> {
+    // First try the output (has the final URL after redirects)
+    if let Some(output) = tool_call.output.as_ref() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+            let snapshot = json.get("snapshot").unwrap_or(&json);
+            if let Some(url) = snapshot.get("url").and_then(|v| v.as_str()) {
+                return Some(url.to_string());
+            }
+        }
+    }
+    // Fall back to the input URL
+    let json: serde_json::Value = serde_json::from_str(&tool_call.input).ok()?;
+    json.get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Truncate a URL for display in a compact label.
+fn truncate_url_for_display(url: &str, max_chars: usize) -> String {
+    if url.chars().count() > max_chars {
+        let truncated: String = url.chars().take(max_chars - 1).collect();
+        format!("{}…", truncated)
+    } else {
+        url.to_string()
+    }
+}
+
 /// Extract preview data from a browse tool's JSON output.
 fn extract_browse_preview(tool_call: &ToolCallBlock) -> Option<BrowsePreview> {
     let output = tool_call.output.as_ref()?;
@@ -1337,12 +1408,7 @@ fn render_website_preview_card(
     let accent = cx.theme().accent;
 
     // Truncate long URLs for display
-    let display_url = if preview.url.chars().count() > 60 {
-        let truncated: String = preview.url.chars().take(59).collect();
-        format!("{}…", truncated)
-    } else {
-        preview.url.clone()
-    };
+    let display_url = truncate_url_for_display(&preview.url, 60);
 
     div()
         .id(ElementId::Name(format!("browse-preview-{}", index).into()))
