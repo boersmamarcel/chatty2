@@ -6,6 +6,7 @@
 //! a full browser engine.
 
 use crate::page::{LinkInfo, PageSnapshot};
+use crate::session::SharedCookieJar;
 use tracing::debug;
 
 /// Request timeout for HTTP fallback.
@@ -19,11 +20,27 @@ const MAX_LINKS: usize = 50;
 
 /// Fetch a URL via HTTP GET and build a [`PageSnapshot`] from the HTML response.
 pub async fn fetch_and_snapshot(url: &str) -> anyhow::Result<PageSnapshot> {
-    let client = reqwest::Client::builder()
+    fetch_and_snapshot_with_cookies(url, None).await
+}
+
+/// Fetch a URL via HTTP GET with optional cookie jar, building a [`PageSnapshot`].
+///
+/// When a cookie jar is provided, request and response cookies are stored in it,
+/// enabling authenticated browsing after `browser_auth` has logged in via HTTP.
+pub async fn fetch_and_snapshot_with_cookies(
+    url: &str,
+    cookie_jar: Option<SharedCookieJar>,
+) -> anyhow::Result<PageSnapshot> {
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()?;
+        .redirect(reqwest::redirect::Policy::limited(10));
+
+    if let Some(jar) = cookie_jar {
+        builder = builder.cookie_provider(jar);
+    }
+
+    let client = builder.build()?;
 
     debug!(url = %url, "HTTP fallback: fetching page");
 

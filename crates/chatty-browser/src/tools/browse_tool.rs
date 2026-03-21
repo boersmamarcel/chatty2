@@ -110,15 +110,18 @@ impl Tool for BrowseTool {
         match self.try_browser_backend(&args.url).await {
             Ok(snapshot) => Ok(BrowseOutput { snapshot }),
             Err(backend_err) => {
-                // Fall back to HTTP fetch + HTML parsing
+                // Fall back to HTTP fetch + HTML parsing (with shared cookie jar
+                // so cookies from browser_auth are sent with the request)
                 tracing::debug!(
                     url = %args.url,
                     backend_error = %backend_err,
                     "Browser backend unavailable, falling back to HTTP fetch"
                 );
-                let snapshot = crate::http_fallback::fetch_and_snapshot(&args.url)
-                    .await
-                    .map_err(|e| BrowseError::NavigationError(e.to_string()))?;
+                let jar = self.session.cookie_jar().clone();
+                let snapshot =
+                    crate::http_fallback::fetch_and_snapshot_with_cookies(&args.url, Some(jar))
+                        .await
+                        .map_err(|e| BrowseError::NavigationError(e.to_string()))?;
                 Ok(BrowseOutput { snapshot })
             }
         }

@@ -115,12 +115,13 @@ impl Tool for BrowserTabsTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         match args.action.as_str() {
             "new" => {
-                let tab = self
-                    .session
-                    .backend()
-                    .new_tab()
-                    .await
-                    .map_err(|e| BrowserTabsError::OperationFailed(e.to_string()))?;
+                let tab = self.session.backend().new_tab().await.map_err(|e| {
+                    BrowserTabsError::OperationFailed(format!(
+                        "{e}. Tab management is not available in HTTP fallback mode. \
+                         Use the `browse` tool to visit URLs directly, and \
+                         `browser_auth` to authenticate first if needed."
+                    ))
+                })?;
 
                 if let Some(url) = &args.url {
                     self.session

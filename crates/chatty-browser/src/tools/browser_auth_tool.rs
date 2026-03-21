@@ -152,6 +152,30 @@ impl Tool for BrowserAuthTool {
             ))
         })?;
 
+        // Try the full browser backend first
+        match self.try_backend_auth(&profile, &secret, name).await {
+            Ok(output) => Ok(output),
+            Err(backend_err) => {
+                // Fall back to HTTP-based authentication
+                tracing::debug!(
+                    credential = name,
+                    error = %backend_err,
+                    "Browser backend unavailable, falling back to HTTP auth"
+                );
+                self.try_http_auth(&profile, &secret, name).await
+            }
+        }
+    }
+}
+
+impl BrowserAuthTool {
+    /// Try authentication using the full browser backend (WebView).
+    async fn try_backend_auth(
+        &self,
+        profile: &crate::credential::types::LoginProfile,
+        secret: &LoginSecret,
+        name: &str,
+    ) -> Result<BrowserAuthOutput, BrowserAuthError> {
         // Get or create a tab
         let mut tab_guard = self.active_tab.write().await;
         let tab = if let Some(existing) = tab_guard.as_ref() {
@@ -168,7 +192,7 @@ impl Tool for BrowserAuthTool {
         };
         drop(tab_guard);
 
-        match (&profile.auth_method, &secret) {
+        match (&profile.auth_method, secret) {
             (AuthMethod::SessionCapture, LoginSecret::SessionCookies(cookies)) => {
                 // Inject cookies, then navigate to the site
                 self.session
@@ -287,5 +311,153 @@ impl Tool for BrowserAuthTool {
             url: current_url,
             message: format!("Authenticated as \"{name}\""),
         })
+    }
+
+    /// Fallback: authenticate via HTTP using reqwest.
+    ///
+    /// For **form_login** profiles, POSTs credentials to the login URL and
+    /// stores response cookies in the session's shared cookie jar. Subsequent
+    /// `browse` calls use that jar so pages are fetched authenticated.
+    ///
+    /// For **session_capture** profiles with stored cookies, injects them into
+    /// the shared jar directly.
+    async fn try_http_auth(
+        &self,
+        profile: &crate::credential::types::LoginProfile,
+        secret: &LoginSecret,
+        name: &str,
+    ) -> Result<BrowserAuthOutput, BrowserAuthError> {
+        let jar = self.session.cookie_jar().clone();
+
+        match (&profile.auth_method, secret) {
+            (AuthMethod::SessionCapture, LoginSecret::SessionCookies(cookies)) => {
+                // Inject stored cookies into the shared jar
+                let url = url::Url::parse(&profile.url_pattern).map_err(|e| {
+                    BrowserAuthError::AuthFailed(format!("Invalid URL pattern: {e}"))
+                })?;
+                for cookie in cookies {
+                    let cookie_str = format!("{}={}", cookie.name, cookie.value);
+                    jar.add_cookie_str(&cookie_str, &url);
+                }
+                tracing::info!(
+                    credential = name,
+                    cookies = cookies.len(),
+                    "Injected session cookies into HTTP cookie jar"
+                );
+                Ok(BrowserAuthOutput {
+                    success: true,
+                    url: profile.url_pattern.clone(),
+                    message: format!(
+                        "Authenticated as \"{name}\" (session cookies injected into HTTP client)"
+                    ),
+                })
+            }
+            (AuthMethod::FormLogin, LoginSecret::FormCredentials { username, password }) => {
+                // POST credentials via HTTP
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .user_agent("Chatty/1.0 (Desktop AI Assistant)")
+                    .redirect(reqwest::redirect::Policy::limited(10))
+                    .cookie_provider(jar.clone())
+                    .build()
+                    .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
+
+                // First fetch the login page to get any CSRF tokens/cookies
+                let login_url = &profile.url_pattern;
+                let _get_resp = client.get(login_url).send().await.map_err(|e| {
+                    BrowserAuthError::AuthFailed(format!("Failed to load login page: {e}"))
+                })?;
+
+                // Determine form field names from selectors (best-effort extraction)
+                let username_field =
+                    Self::selector_to_field_name(profile.username_selector.as_deref())
+                        .unwrap_or("email");
+                let password_field =
+                    Self::selector_to_field_name(profile.password_selector.as_deref())
+                        .unwrap_or("password");
+
+                // POST the login form
+                let form_data = [
+                    (username_field.to_string(), username.clone()),
+                    (password_field.to_string(), password.clone()),
+                ];
+
+                let response = client
+                    .post(login_url)
+                    .form(&form_data)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        BrowserAuthError::AuthFailed(format!("HTTP form login failed: {e}"))
+                    })?;
+
+                let final_url = response.url().to_string();
+                let status = response.status();
+
+                tracing::info!(
+                    credential = name,
+                    status = %status,
+                    final_url = %final_url,
+                    "HTTP form login completed"
+                );
+
+                if status.is_success() || status.is_redirection() {
+                    Ok(BrowserAuthOutput {
+                        success: true,
+                        url: final_url,
+                        message: format!(
+                            "Authenticated as \"{name}\" via HTTP (cookies stored for subsequent browse calls)"
+                        ),
+                    })
+                } else {
+                    Ok(BrowserAuthOutput {
+                        success: false,
+                        url: final_url,
+                        message: format!(
+                            "HTTP login returned status {status}. \
+                             The site may require JavaScript or OAuth. \
+                             Try using the browse tool to visit the site directly."
+                        ),
+                    })
+                }
+            }
+            _ => Err(BrowserAuthError::AuthFailed(format!(
+                "Auth method {:?} does not match stored secret type for \"{name}\"",
+                profile.auth_method
+            ))),
+        }
+    }
+
+    /// Best-effort extraction of a form field name from a CSS selector.
+    ///
+    /// For selectors like `input[name="email"]`, extracts `"email"`.
+    /// For `#username`, returns `"username"`.
+    /// Falls back to `None` for complex selectors.
+    fn selector_to_field_name(selector: Option<&str>) -> Option<&str> {
+        let sel = selector?.trim();
+
+        // Try to extract from name="..." pattern
+        if let Some(start) = sel.find("name=\"") {
+            let rest = &sel[start + 6..];
+            if let Some(end) = rest.find('"') {
+                return Some(&rest[..end]);
+            }
+        }
+        if let Some(start) = sel.find("name='") {
+            let rest = &sel[start + 6..];
+            if let Some(end) = rest.find('\'') {
+                return Some(&rest[..end]);
+            }
+        }
+
+        // Try #id selector → use id as field name
+        if let Some(id) = sel.strip_prefix('#') {
+            // Only use simple IDs (no spaces/combinators)
+            if !id.contains(' ') && !id.contains(',') {
+                return Some(id);
+            }
+        }
+
+        None
     }
 }

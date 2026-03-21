@@ -20,6 +20,14 @@ const DEFAULT_LOAD_TIMEOUT_MS: u64 = 15_000;
 /// Redaction sentinel for password fields.
 pub const PASSWORD_REDACTED: &str = "●●●●";
 
+/// Shared cookie jar for HTTP-based authentication.
+///
+/// When the browser backend is unavailable (WryBackend stub), the
+/// `browser_auth` tool authenticates via HTTP and stores session cookies
+/// here. The `browse` tool's HTTP fallback reads cookies from the same jar
+/// so subsequent page fetches are authenticated.
+pub type SharedCookieJar = Arc<reqwest::cookie::Jar>;
+
 /// Escape a string for safe embedding in a JavaScript string literal.
 ///
 /// Handles: backslashes, quotes, newlines, carriage returns, tabs, and
@@ -72,18 +80,30 @@ fn truncate_text(text: &str, max_len: usize) -> String {
 ///
 /// Provides navigate, click, fill, extract, and snapshot operations by
 /// building JavaScript snippets and evaluating them via the backend.
+///
+/// Also carries a [`SharedCookieJar`] for HTTP-based fallback authentication.
 pub struct BrowserSession {
     backend: Arc<dyn BrowserBackend>,
+    /// Cookie jar shared between the auth tool and browse tool's HTTP fallback.
+    cookie_jar: SharedCookieJar,
 }
 
 impl BrowserSession {
     pub fn new(backend: Arc<dyn BrowserBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            cookie_jar: Arc::new(reqwest::cookie::Jar::default()),
+        }
     }
 
     /// Get a reference to the underlying backend.
     pub fn backend(&self) -> &Arc<dyn BrowserBackend> {
         &self.backend
+    }
+
+    /// Get a reference to the shared cookie jar used by HTTP fallbacks.
+    pub fn cookie_jar(&self) -> &SharedCookieJar {
+        &self.cookie_jar
     }
 
     /// Navigate a tab to `url`, wait for load, and return a [`PageSnapshot`].

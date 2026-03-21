@@ -35,7 +35,7 @@ mod gpui_globals;
 // ── Re-exports ───────────────────────────────────────────────────────────────
 pub use backend::{BrowserBackend, Cookie, TabId, TabInfo};
 pub use page::PageSnapshot;
-pub use session::BrowserSession;
+pub use session::{BrowserSession, SharedCookieJar};
 pub use settings::BrowserSettingsModel;
 
 /// Singleton browser engine.
