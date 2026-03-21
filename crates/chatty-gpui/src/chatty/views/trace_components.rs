@@ -967,10 +967,7 @@ where
                 div()
                     .pl_4()
                     .child(
-                        Button::new(format!(
-                            "open-browse-inline-{}-{}",
-                            message_index, tool_index
-                        ))
+                        Button::new(ElementId::Name(format!("open-browse-inline-{}-{}", message_index, tool_index).into()))
                         .label(truncate_url_for_display(&url, 50))
                         .icon(Icon::new(CustomIcon::ExternalLink))
                         .xsmall()
@@ -1473,7 +1470,7 @@ fn render_website_preview_card(
         // Open in Browser button
         .child(
             div().mt_1().child(
-                Button::new(format!("open-browse-{}", index))
+                Button::new(ElementId::Name(format!("open-browse-{}", index).into()))
                     .label("Open in Browser")
                     .icon(Icon::new(CustomIcon::ExternalLink))
                     .xsmall()
