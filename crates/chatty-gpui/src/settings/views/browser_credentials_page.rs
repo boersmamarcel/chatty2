@@ -113,8 +113,9 @@ impl CredentialsTableView {
                                             .text_xs()
                                             .text_color(gpui::hsla(0., 0., 0.5, 1.))
                                             .child(
-                                                "CSS selectors for the login form fields. \
-                                                 Leave all empty for session-capture mode (cookies only).",
+                                                "Optional: CSS selectors for the login form fields. \
+                                                 If left empty, common selectors are auto-detected \
+                                                 when username and password are provided below.",
                                             ),
                                     )
                                     .child(
@@ -157,7 +158,8 @@ impl CredentialsTableView {
                                             .text_color(gpui::hsla(0., 0., 0.5, 1.))
                                             .child(
                                                 "Stored securely in the OS keyring. \
-                                                 Leave empty for session-capture mode.",
+                                                 Providing credentials is recommended — the AI will \
+                                                 fill the login form automatically.",
                                             ),
                                     )
                                     .child(
@@ -317,10 +319,22 @@ impl CredentialsTableView {
                                                                 password,
                                                                 cx,
                                                             );
+                                                        } else {
+                                                            window.push_notification(
+                                                                "Profile saved without credentials. \
+                                                                 Add username and password to enable authentication.",
+                                                                cx,
+                                                            );
                                                         }
                                                     } else {
                                                         browser_credentials_controller::add_session_capture(
                                                             name, url, cx,
+                                                        );
+                                                        window.push_notification(
+                                                            "Session capture profile created. \
+                                                             Cookie capture requires the browser engine — \
+                                                             consider using Form Login with username and password instead.",
+                                                            cx,
                                                         );
                                                     }
 
@@ -370,6 +384,14 @@ impl CredentialsTableView {
             )
             .child(
                 div()
+                    .w(px(80.))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Status"),
+            )
+            .child(
+                div()
                     .w(px(50.))
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -384,6 +406,7 @@ impl CredentialsTableView {
         name: String,
         url_pattern: String,
         auth_method: AuthMethod,
+        has_secret: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let name_for_delete = name.clone();
@@ -391,6 +414,12 @@ impl CredentialsTableView {
         let method_label = match auth_method {
             AuthMethod::SessionCapture => "Session Capture",
             AuthMethod::FormLogin => "Form Login",
+        };
+
+        let (status_label, status_color) = if has_secret {
+            ("✓ Ready", gpui::hsla(120. / 360., 0.6, 0.4, 1.))
+        } else {
+            ("⚠ Needs setup", gpui::hsla(35. / 360., 0.9, 0.5, 1.))
         };
 
         h_flex()
@@ -420,6 +449,13 @@ impl CredentialsTableView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(method_label),
+            )
+            .child(
+                div()
+                    .w(px(80.))
+                    .text_xs()
+                    .text_color(status_color)
+                    .child(status_label),
             )
             .child(
                 h_flex().w(px(50.)).justify_end().child(
@@ -468,6 +504,7 @@ impl Render for CredentialsTableView {
         let entity = cx.entity().clone();
         let model = cx.global::<BrowserCredentialsModel>();
         let profiles = model.profiles.clone();
+        let names_with_secrets = model.names_with_secrets.clone();
 
         let table = v_flex()
             .w_full()
@@ -481,11 +518,13 @@ impl Render for CredentialsTableView {
                     this.child(self.render_empty(cx))
                 } else {
                     this.children(profiles.iter().enumerate().map(|(ix, profile)| {
+                        let has_secret = names_with_secrets.contains(&profile.name);
                         self.render_row(
                             ix,
                             profile.name.clone(),
                             profile.url_pattern.clone(),
                             profile.auth_method.clone(),
+                            has_secret,
                             cx,
                         )
                         .into_any_element()

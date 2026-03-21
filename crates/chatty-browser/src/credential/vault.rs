@@ -121,6 +121,11 @@ impl CredentialVault {
         Self::load_keyring(name).is_ok() || self.load_fallback(name).await.is_ok()
     }
 
+    /// Return the set of names that have stored secrets (from fallback store).
+    pub async fn names_with_secrets(&self) -> std::collections::HashSet<String> {
+        self.load_fallback_store().await.keys().cloned().collect()
+    }
+
     // ── Keyring operations ───────────────────────────────────────────────
 
     fn store_keyring(name: &str, json: &str) -> Result<()> {

@@ -1055,10 +1055,23 @@ fn main() {
                 Ok(repo) => match repo.load_all().await {
                     Ok(profiles) => {
                         let count = profiles.len();
+
+                        // Also check which profiles have stored secrets
+                        let names_with_secrets =
+                            match chatty_browser::credential::vault::CredentialVault::new() {
+                                Ok(vault) => vault.names_with_secrets().await,
+                                Err(_) => std::collections::HashSet::new(),
+                            };
+
                         cx.update(|cx| {
-                            info!(count, "Browser login profiles loaded from disk");
+                            info!(
+                                count,
+                                secrets = names_with_secrets.len(),
+                                "Browser login profiles loaded from disk"
+                            );
                             let model = cx.global_mut::<chatty_browser::settings::BrowserCredentialsModel>();
                             model.replace_all(profiles);
+                            model.names_with_secrets = names_with_secrets;
                         })
                         .map_err(|e| {
                             warn!(error = ?e, "Failed to update global browser credentials")

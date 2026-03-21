@@ -112,6 +112,11 @@ pub fn remove_credential(name: &str, cx: &mut App) {
 /// Store form credentials (username/password) in the OS keyring.
 pub fn store_form_credentials(name: String, username: String, password: String, cx: &mut App) {
     info!(name = %name, "Storing form credentials in vault");
+
+    // Optimistically mark as having a secret in the model
+    let model = cx.global_mut::<BrowserCredentialsModel>();
+    model.set_has_secret(&name, true);
+
     cx.spawn(|_cx: &mut AsyncApp| async move {
         match chatty_browser::credential::vault::CredentialVault::new() {
             Ok(vault) => {

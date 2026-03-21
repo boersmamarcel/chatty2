@@ -21,6 +21,10 @@ pub struct BrowserCredentialsModel {
 
     /// Profile names whose details are being inspected in the UI.
     pub revealed_names: HashSet<String>,
+
+    /// Profile names that have a stored secret in the vault.
+    /// Used by the UI to show status indicators (✓ Ready vs ⚠ Needs setup).
+    pub names_with_secrets: HashSet<String>,
 }
 
 impl BrowserCredentialsModel {
@@ -54,6 +58,20 @@ impl BrowserCredentialsModel {
     /// Return profile names suitable for the `browser_auth` tool.
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// Check whether a profile has a stored secret in the vault.
+    pub fn has_secret(&self, name: &str) -> bool {
+        self.names_with_secrets.contains(name)
+    }
+
+    /// Mark a profile as having (or not having) a stored secret.
+    pub fn set_has_secret(&mut self, name: &str, has: bool) {
+        if has {
+            self.names_with_secrets.insert(name.to_string());
+        } else {
+            self.names_with_secrets.remove(name);
+        }
     }
 }
 
