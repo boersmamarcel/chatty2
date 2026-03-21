@@ -994,7 +994,7 @@ impl AgentClient {
                 Err(e) => {
                     tracing::warn!(
                         error = ?e,
-                        "WryBackend failed to start. \
+                        "WryBackend failed to start (no display server?). \
                          Browser tools will use HTTP fallback."
                     );
                     None

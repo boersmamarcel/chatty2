@@ -37,12 +37,11 @@ mod inner_macos {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use tokio::sync::oneshot;
 
-    use crate::backend::{Cookie, TabId, TabInfo};
+    use crate::backend::{TabId, TabInfo};
 
     // ── GCD dispatch helpers ────────────────────────────────────────────
 
@@ -140,7 +139,7 @@ mod inner_macos {
             unsafe extern "C" {
                 fn objc_getClass(name: *const u8) -> *mut c_void;
                 fn sel_registerName(name: *const u8) -> *mut c_void;
-                fn objc_msgSend() -> *mut c_void; // varargs – called via transmute
+                fn objc_msgSend() -> *mut c_void; // C varargs ABI – transmuted to match each call site
             }
 
             // CGRect struct matching NSRect layout
@@ -269,11 +268,8 @@ mod inner_macos {
 
     // ── Public operations (called from dispatch_main closures) ──────────
 
-    /// Create a new tab on the main thread. Returns (TabId, snapshot update).
-    pub(super) fn create_tab(
-        tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>,
-        js_proxy_snapshot: Arc<Mutex<Vec<TabInfo>>>,
-    ) -> anyhow::Result<TabId> {
+    /// Create a new tab on the main thread.
+    pub(super) fn create_tab(tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>) -> anyhow::Result<TabId> {
         with_state(|state| {
             let tab_id_str = format!("tab-{}", state.next_tab_id);
             state.next_tab_id += 1;
@@ -303,7 +299,6 @@ mod inner_macos {
             );
 
             update_snapshot(state, tabs_snapshot);
-            let _ = update_snapshot(state, &js_proxy_snapshot);
             Ok(TabId(tab_id_str))
         })
     }
@@ -433,18 +428,14 @@ mod inner_macos {
 
     /// Verify the backend can create a WebView on the main thread.
     /// Called during WryBackend::new() to fail early if display is unavailable.
-    pub(super) async fn verify_main_thread_webview(
-        tabs_snapshot: &Arc<Mutex<Vec<TabInfo>>>,
-    ) -> anyhow::Result<()> {
-        let snap = tabs_snapshot.clone();
-        let result = dispatch_main(move || -> anyhow::Result<()> {
+    pub(super) async fn verify_main_thread_webview() -> anyhow::Result<()> {
+        dispatch_main(move || -> anyhow::Result<()> {
             let _window = HiddenWindow::new()?;
             // Initialize the thread-local state
             with_state(|_| {});
             Ok(())
         })
-        .await;
-        result
+        .await
     }
 }
 
@@ -859,7 +850,7 @@ impl WryBackend {
             let tabs_snapshot = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
             // Verify that we can create WebViews on the main thread.
-            inner_macos::verify_main_thread_webview(&tabs_snapshot).await?;
+            inner_macos::verify_main_thread_webview().await?;
 
             tracing::info!("WryBackend created — macOS native WebView (GCD dispatch)");
 
@@ -944,8 +935,7 @@ impl BrowserBackend for WryBackend {
         #[cfg(target_os = "macos")]
         {
             let snap = self.tabs_snapshot.clone();
-            let snap2 = self.tabs_snapshot.clone();
-            inner_macos::dispatch_main(move || inner_macos::create_tab(&snap, snap2)).await
+            inner_macos::dispatch_main(move || inner_macos::create_tab(&snap)).await
         }
         #[cfg(not(target_os = "macos"))]
         self.send(|reply| inner::WryCommand::NewTab { reply })
@@ -1068,9 +1058,11 @@ impl BrowserBackend for WryBackend {
     async fn wait_for_load(&self, tab: &TabId, timeout_ms: u64) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            // On macOS, use a simple polling approach: wait for the specified
-            // duration, letting WKWebView process events on the main thread.
-            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms.min(5000))).await;
+            let _ = tab;
+            // On macOS, WKWebView navigation is asynchronous but doesn't expose
+            // a page-load callback via the wry IPC path. Sleep for the requested
+            // duration, letting the Cocoa run loop process navigation events.
+            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]
