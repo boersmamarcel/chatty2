@@ -60,20 +60,16 @@ impl MathComponent {
         let content = self.content.clone();
 
         if self.is_inline {
-            div()
-                .id(id.clone())
-                .flex()
-                .items_center()
-                .child(
-                    img(svg_path)
-                        .max_h(px(INLINE_MATH_MAX_HEIGHT))
-                        .max_w(px(INLINE_MATH_MAX_WIDTH))
-                        .object_fit(gpui::ObjectFit::Contain),
-                )
-                .child(self.build_copy_button(&id, &content, cx))
+            div().id(id.clone()).flex().flex_row().items_center().child(
+                img(svg_path)
+                    .max_h(px(INLINE_MATH_MAX_HEIGHT))
+                    .max_w(px(INLINE_MATH_MAX_WIDTH))
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
         } else {
             div()
                 .id(id.clone())
+                .w_full()
                 .relative()
                 .flex()
                 .justify_center()
