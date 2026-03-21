@@ -14,7 +14,9 @@ pub fn browser_settings_page() -> SettingPage {
                 .title("Browser Engine")
                 .description(
                     "Enable the browser engine to allow the AI to navigate websites, \
-                     interact with forms, and extract structured data from web pages.",
+                     interact with forms, and extract structured data from web pages. \
+                     When the full browser engine is not available, the browse tool \
+                     falls back to HTTP fetching (read-only, no JavaScript execution).",
                 )
                 .items(vec![
                     SettingItem::new(
@@ -112,5 +114,33 @@ pub fn browser_settings_page() -> SettingPage {
                         "Require user approval before the AI clicks, fills, or selects elements on a page.",
                     ),
                 ]),
+            SettingGroup::new()
+                .title("Credentials")
+                .description(
+                    "Browser credentials let the AI authenticate to websites on your behalf. \
+                     Secrets (passwords, session cookies) are stored in your OS keyring — \
+                     they are never written to disk or exposed to the LLM.\n\n\
+                     To add credentials, create a login profile in:\n\
+                     ~/.config/chatty/login_profiles.json\n\n\
+                     Example entry:\n\
+                     [\n\
+                       {\n\
+                         \"name\": \"example\",\n\
+                         \"url_pattern\": \"https://example.com\",\n\
+                         \"auth_method\": \"form_login\",\n\
+                         \"username_selector\": \"#email\",\n\
+                         \"password_selector\": \"#password\",\n\
+                         \"submit_selector\": \"button[type=submit]\"\n\
+                       }\n\
+                     ]\n\n\
+                     Auth methods:\n\
+                     • session_capture — Capture cookies from a manual browser login \
+                     (recommended for OAuth / 2FA sites)\n\
+                     • form_login — Automated login using stored username + password\n\n\
+                     After creating a profile, the browser_auth tool will appear when \
+                     the AI visits a matching URL. Secrets are stored in the OS keyring \
+                     under the service name \"chatty-browser\".",
+                )
+                .items(vec![]),
         ])
 }

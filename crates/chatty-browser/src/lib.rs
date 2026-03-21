@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 pub mod backend;
 pub mod credential;
+pub mod http_fallback;
 pub mod page;
 pub mod session;
 pub mod settings;

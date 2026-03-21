@@ -20,6 +20,9 @@ rig-core.workspace = true
 # URL parsing
 url = "2.5"
 
+# HTTP fallback when browser backend is unavailable
+reqwest.workspace = true
+
 # Optional: GPUI integration
 gpui = { workspace = true, optional = true }
 

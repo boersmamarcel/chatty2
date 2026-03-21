@@ -78,8 +78,8 @@ impl Tool for BrowseTool {
             description: "Navigate to a URL and return a structured page snapshot. \
                 Returns the page title, text content (truncated), interactive elements \
                 (with stable IDs like e1, e2), forms, and links. Use this to read \
-                web pages. For JS-heavy sites, this renders the full page including \
-                client-side content."
+                web pages. Falls back to HTTP fetch when the browser engine is \
+                unavailable (interactive elements will be empty in fallback mode)."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -106,7 +106,28 @@ impl Tool for BrowseTool {
             )));
         }
 
-        // Open a tab, navigate, and snapshot
+        // Try the full browser backend first
+        match self.try_browser_backend(&args.url).await {
+            Ok(snapshot) => Ok(BrowseOutput { snapshot }),
+            Err(backend_err) => {
+                // Fall back to HTTP fetch + HTML parsing
+                tracing::info!(
+                    url = %args.url,
+                    backend_error = %backend_err,
+                    "Browser backend unavailable, falling back to HTTP fetch"
+                );
+                let snapshot = crate::http_fallback::fetch_and_snapshot(&args.url)
+                    .await
+                    .map_err(|e| BrowseError::NavigationError(e.to_string()))?;
+                Ok(BrowseOutput { snapshot })
+            }
+        }
+    }
+}
+
+impl BrowseTool {
+    /// Try to use the full browser backend (WebView) for navigation and snapshot.
+    async fn try_browser_backend(&self, url: &str) -> Result<PageSnapshot, BrowseError> {
         let tab = self
             .session
             .backend()
@@ -116,7 +137,7 @@ impl Tool for BrowseTool {
 
         let snapshot = self
             .session
-            .navigate_and_snapshot(&tab, &args.url, &self.login_profiles)
+            .navigate_and_snapshot(&tab, url, &self.login_profiles)
             .await
             .map_err(|e| BrowseError::NavigationError(e.to_string()))?;
 
@@ -125,6 +146,6 @@ impl Tool for BrowseTool {
             tracing::warn!(error = ?e, "Failed to close browse tab");
         }
 
-        Ok(BrowseOutput { snapshot })
+        Ok(snapshot)
     }
 }
