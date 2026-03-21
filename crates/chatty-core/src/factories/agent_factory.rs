@@ -1140,21 +1140,12 @@ impl AgentClient {
             // Load stored credentials
             let creds_model = {
                 let repo = crate::browser_credentials_repository();
-                match tokio::runtime::Handle::try_current() {
-                    Ok(_handle) => {
-                        // We're in an async context; use spawn_blocking to avoid
-                        // blocking the executor.
-                        match tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(repo.load())
-                        }) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!(error = ?e, "Failed to load browser credentials");
-                                crate::settings::models::BrowserCredentialsModel::default()
-                            }
-                        }
+                match repo.load().await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "Failed to load browser credentials");
+                        crate::settings::models::BrowserCredentialsModel::default()
                     }
-                    Err(_) => crate::settings::models::BrowserCredentialsModel::default(),
                 }
             };
 

@@ -568,9 +568,23 @@ fn strip_js_quotes(s: &str) -> String {
 }
 
 /// Escape a cookie name or value for safe inclusion in a `document.cookie` assignment.
-/// Replaces single quotes and semicolons to prevent JS injection.
+/// Escapes characters that could break the JS string literal or cookie parsing.
 fn escape_cookie_value(s: &str) -> String {
-    s.replace('\'', "%27").replace(';', "%3B")
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\'' => result.push_str("%27"),
+            ';' => result.push_str("%3B"),
+            '\\' => result.push_str("%5C"),
+            '"' => result.push_str("%22"),
+            '\n' => result.push_str("%0A"),
+            '\r' => result.push_str("%0D"),
+            '=' => result.push_str("%3D"),
+            ' ' => result.push_str("%20"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 /// Parse a `document.readyState` value into a [`PageState`].
@@ -596,6 +610,19 @@ mod tests {
         assert_eq!(strip_js_quotes(r#""""#), ""); // JS empty string
         assert_eq!(strip_js_quotes(""), "");
         assert_eq!(strip_js_quotes(r#""abc""#), "abc");
+    }
+
+    #[test]
+    fn test_escape_cookie_value() {
+        assert_eq!(escape_cookie_value("simple"), "simple");
+        assert_eq!(escape_cookie_value("a;b"), "a%3Bb");
+        assert_eq!(escape_cookie_value("a'b"), "a%27b");
+        assert_eq!(escape_cookie_value("a\\b"), "a%5Cb");
+        assert_eq!(escape_cookie_value("a\"b"), "a%22b");
+        assert_eq!(escape_cookie_value("a\nb"), "a%0Ab");
+        assert_eq!(escape_cookie_value("a\rb"), "a%0Db");
+        assert_eq!(escape_cookie_value("a=b"), "a%3Db");
+        assert_eq!(escape_cookie_value("a b"), "a%20b");
     }
 
     #[test]

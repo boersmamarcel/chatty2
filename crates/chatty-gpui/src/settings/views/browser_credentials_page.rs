@@ -376,7 +376,8 @@ impl Render for BrowserCredentialsTableView {
 /// Start a browser session capture flow.
 ///
 /// Opens a visible Verso browser window to the target domain, lets the user
-/// log in manually, then captures cookies when they're done.
+/// log in manually, then shows a notification with a "Capture" button to
+/// extract cookies when the user is done.
 fn start_session_capture(
     credential_name: String,
     domain: String,
@@ -386,6 +387,83 @@ fn start_session_capture(
 ) {
     let url = format!("https://{}", domain);
 
+    // Create a shared signal: the capture dialog will set this to true
+    // when the user clicks "Capture Now".
+    let capture_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Show a dialog that tells the user to log in, with a "Capture Now" button
+    let capture_flag_for_dialog = capture_flag.clone();
+    let cancel_flag_for_dialog = cancel_flag.clone();
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Session Capture In Progress")
+            .overlay(true)
+            .keyboard(true)
+            .close_button(false)
+            .overlay_closable(false)
+            .w(px(450.))
+            .child(
+                div().id("capture-progress").child(
+                    v_flex()
+                        .gap_3()
+                        .p_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(
+                                    "A browser window is opening. Please log in to the website, \
+                                     then click \"Capture Now\" when you're done.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(gpui::hsla(0., 0., 0.5, 1.))
+                                .child(
+                                    "Tip: Complete any 2FA or CAPTCHA challenges before capturing.",
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .justify_end()
+                                .pt_4()
+                                .child(
+                                    Button::new("cancel-capture")
+                                        .label("Cancel")
+                                        .on_click({
+                                            let cancel_flag = cancel_flag_for_dialog.clone();
+                                            move |_, window, cx| {
+                                                cancel_flag.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                window.close_dialog(cx);
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("capture-now-btn")
+                                        .primary()
+                                        .label("Capture Now")
+                                        .on_click({
+                                            let capture_flag = capture_flag_for_dialog.clone();
+                                            move |_, window, cx| {
+                                                capture_flag.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                window.close_dialog(cx);
+                                            }
+                                        }),
+                                ),
+                        ),
+                ),
+            )
+    });
+
+    // Spawn the async capture task
     cx.spawn(|cx: &mut AsyncApp| async move {
         let config = chatty_browser::BrowserEngineConfig {
             headless: false, // Visible window for manual login
@@ -416,14 +494,20 @@ fn start_session_capture(
             return;
         }
 
-        // Wait for the user to log in — poll for cookies periodically.
-        // In a real implementation, a "Capture Session" button in the UI overlay
-        // would signal when the user is done. For now, we wait a fixed amount of
-        // time, then capture what we have.
-        //
-        // TODO: Add a UI overlay bar with a "Capture Session" button that signals
-        // when the user has finished logging in. For now, we capture after navigating.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Poll until the user clicks "Capture Now" or "Cancel"
+        loop {
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!("Session capture cancelled by user");
+                engine.stop().await;
+                return;
+            }
+
+            if capture_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
 
         // Extract cookies from the session
         let cookies = match session.get_cookies().await {
@@ -447,12 +531,10 @@ fn start_session_capture(
         engine.stop().await;
 
         // Store the credential
-        let name = credential_name.clone();
-        let domain_for_store = actual_domain.clone();
         cx.update(|cx| {
             browser_credentials_controller::store_captured_session(
-                name,
-                domain_for_store,
+                credential_name.clone(),
+                actual_domain.clone(),
                 cookies,
                 cx,
             );

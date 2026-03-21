@@ -160,9 +160,10 @@ impl Tool for BrowserAuthTool {
 
         // Validate URL
         if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
-            return Err(BrowserAuthToolError::AuthError(
-                "URL must start with http:// or https://".to_string(),
-            ));
+            return Err(BrowserAuthToolError::AuthError(format!(
+                "URL must start with http:// or https://, got: {}",
+                args.url
+            )));
         }
 
         // Find the credential

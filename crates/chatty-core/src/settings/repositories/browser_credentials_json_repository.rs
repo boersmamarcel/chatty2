@@ -65,7 +65,7 @@ impl BrowserCredentialsRepository for BrowserCredentialsJsonRepository {
             }
 
             // Write atomically using temp file + rename
-            let temp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
+            let temp_path = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
             tokio::fs::write(&temp_path, &json)
                 .await
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
