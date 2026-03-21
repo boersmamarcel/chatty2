@@ -92,6 +92,9 @@ memvid-core = { version = "2.0", default-features = false, features = ["lex", "v
 # URL parsing
 url = "2.5"
 
+# Open URLs in system browser
+open = "5.3"
+
 # GPUI (UI only)
 gpui = "0.2.2"
 gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }

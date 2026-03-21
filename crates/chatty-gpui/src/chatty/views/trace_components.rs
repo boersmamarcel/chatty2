@@ -3,7 +3,11 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
+use gpui_component::{
+    ActiveTheme, Icon, Sizable,
+    button::{Button, ButtonVariants},
+    text::TextView,
+};
 use std::time::Duration;
 
 use super::diff_view_component::DiffViewComponent;
@@ -448,6 +452,21 @@ impl SystemTraceView {
                             )),
                     ),
             );
+        }
+
+        // Website preview card for browse tool
+        if is_browse_tool(&tool_call.tool_name) {
+            if let Some(preview) = extract_browse_preview(tool_call) {
+                let link_url = preview.url.clone();
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .child(render_website_preview_card(index, &preview, link_url, cx)),
+                );
+            }
         }
 
         // Error section (if error state)
@@ -1057,6 +1076,13 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             }
         }
 
+        // For browse: extract the URL
+        if tool_call.tool_name == "browse" {
+            if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
+                return url.to_string();
+            }
+        }
+
         // For fetch: extract the URL
         if tool_call.tool_name == "fetch" {
             if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
@@ -1091,6 +1117,42 @@ fn format_tool_output(output: &str) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
         // If it's an object with common result fields, extract them
         if let Some(obj) = json.as_object() {
+            // browse output: show a compact text summary instead of full JSON
+            if let Some(snapshot) = obj.get("snapshot").and_then(|v| v.as_object()) {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(title) = snapshot.get("title").and_then(|v| v.as_str()) {
+                    if !title.is_empty() {
+                        parts.push(format!("Title: {}", title));
+                    }
+                }
+                if let Some(text) = snapshot.get("text_content").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        let truncated: String = text.chars().take(300).collect();
+                        let suffix = if text.len() > 300 { "…" } else { "" };
+                        parts.push(format!("{}{}", truncated, suffix));
+                    }
+                }
+                let element_count = snapshot
+                    .get("elements")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len());
+                let link_count = snapshot
+                    .get("links")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len());
+                if element_count > 0 || link_count > 0 {
+                    parts.push(format!(
+                        "[{} interactive elements, {} links]",
+                        element_count, link_count
+                    ));
+                }
+                return if parts.is_empty() {
+                    "(empty page)".to_string()
+                } else {
+                    parts.join("\n")
+                };
+            }
+
             // execute_code output: show stdout + stderr + exit_code + port_mappings
             if obj.contains_key("exit_code") && obj.contains_key("timed_out") {
                 let mut parts: Vec<String> = Vec::new();
@@ -1218,4 +1280,141 @@ fn escape_markdown(s: &str) -> SharedString {
         }
     }
     SharedString::from(out)
+}
+
+// ── Browse tool website preview ─────────────────────────────────────────────
+
+/// Data extracted from a browse tool output for the preview card.
+struct BrowsePreview {
+    url: String,
+    title: String,
+    description: Option<String>,
+}
+
+/// Check whether a tool name is a browser navigation tool.
+fn is_browse_tool(tool_name: &str) -> bool {
+    tool_name == "browse"
+}
+
+/// Extract preview data from a browse tool's JSON output.
+fn extract_browse_preview(tool_call: &ToolCallBlock) -> Option<BrowsePreview> {
+    let output = tool_call.output.as_ref()?;
+    let json: serde_json::Value = serde_json::from_str(output).ok()?;
+
+    // BrowseOutput wraps a PageSnapshot under "snapshot"
+    let snapshot = json.get("snapshot").unwrap_or(&json);
+
+    let url = snapshot.get("url").and_then(|v| v.as_str())?.to_string();
+    let title = snapshot
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let description = snapshot
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Some(BrowsePreview {
+        url,
+        title,
+        description,
+    })
+}
+
+/// Render a compact website preview card with title, URL, description,
+/// and an "Open in Browser" button.
+fn render_website_preview_card(
+    index: usize,
+    preview: &BrowsePreview,
+    link_url: String,
+    cx: &App,
+) -> impl IntoElement {
+    let text_color = cx.theme().foreground;
+    let muted_text = cx.theme().muted_foreground;
+    let panel_bg = cx.theme().muted;
+    let border_color = cx.theme().border;
+    let accent = cx.theme().accent;
+
+    // Truncate long URLs for display
+    let display_url = if preview.url.chars().count() > 60 {
+        let truncated: String = preview.url.chars().take(59).collect();
+        format!("{}…", truncated)
+    } else {
+        preview.url.clone()
+    };
+
+    div()
+        .id(ElementId::Name(format!("browse-preview-{}", index).into()))
+        .mt_1()
+        .px_3()
+        .py_2()
+        .bg(panel_bg)
+        .rounded_md()
+        .border_1()
+        .border_color(border_color)
+        .flex()
+        .flex_col()
+        .gap_1()
+        // Title row
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(CustomIcon::Earth).size_4().text_color(accent))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_color)
+                        .overflow_hidden()
+                        .child(if preview.title.is_empty() {
+                            display_url.clone()
+                        } else {
+                            preview.title.clone()
+                        }),
+                ),
+        )
+        // URL row
+        .child(
+            div()
+                .text_xs()
+                .text_color(muted_text)
+                .overflow_hidden()
+                .child(display_url),
+        )
+        // Description row (if available)
+        .when_some(preview.description.clone(), |this, desc| {
+            if desc.is_empty() {
+                this
+            } else {
+                let truncated = if desc.chars().count() > 150 {
+                    let t: String = desc.chars().take(149).collect();
+                    format!("{}…", t)
+                } else {
+                    desc
+                };
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_text)
+                        .mt_1()
+                        .child(truncated),
+                )
+            }
+        })
+        // Open in Browser button
+        .child(
+            div().mt_1().child(
+                Button::new(format!("open-browse-{}", index))
+                    .label("Open in Browser")
+                    .icon(Icon::new(CustomIcon::ExternalLink))
+                    .xsmall()
+                    .ghost()
+                    .on_click(move |_, _, _cx| {
+                        let _ = open::that(&link_url);
+                    }),
+            ),
+        )
 }

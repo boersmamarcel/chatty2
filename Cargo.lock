@@ -1598,6 +1598,7 @@ dependencies = [
  "mermaid-rs-renderer",
  "mitex",
  "nix 0.29.0",
+ "open",
  "pdfium-render",
  "regex",
  "reqwest 0.13.2",

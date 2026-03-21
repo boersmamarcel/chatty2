@@ -36,6 +36,7 @@ async-stream.workspace = true
 reqwest.workspace = true
 glob.workspace = true
 similar.workspace = true
+open.workspace = true
 
 # Auto-updater
 semver.workspace = true
