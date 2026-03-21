@@ -3,7 +3,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{button::Button, text::TextView, ActiveTheme, Icon, Sizable};
+use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
 use std::time::Duration;
 
 use super::diff_view_component::DiffViewComponent;
@@ -22,8 +22,15 @@ const PREVIEW_TITLE_MAX_CHARS: usize = 80;
 const HTML_PREVIEW_MAX_CHARS: usize = 50_000;
 /// Maximum lines to show in the rendered HTML preview body.
 const HTML_PREVIEW_MAX_BODY_LINES: usize = 25;
+/// Extra lines to parse beyond the display limit (covers headings/links that
+/// follow visible content).
+const HTML_PARSE_BUFFER_LINES: usize = 20;
 /// Maximum links to show in the rendered HTML preview.
 const HTML_PREVIEW_MAX_LINKS: usize = 12;
+/// Maximum characters per text line in the HTML preview.
+const HTML_TEXT_LINE_MAX_CHARS: usize = 200;
+/// Maximum characters for a displayed link URL.
+const HTML_LINK_URL_MAX_CHARS: usize = 60;
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
@@ -419,7 +426,10 @@ impl SystemTraceView {
                             .rounded_sm()
                             .hover(|s| s.bg(panel_bg))
                             .p(px(2.0))
-                            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Open in browser").build(window, cx))
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("Open in browser")
+                                    .build(window, cx)
+                            })
                             .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
                                 open_url_in_system_browser(&url);
                             })
@@ -1013,7 +1023,9 @@ where
                     .rounded_sm()
                     .hover(|s| s.bg(cx.theme().muted))
                     .p(px(2.0))
-                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Open in browser").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Open in browser").build(window, cx)
+                    })
                     .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
                         open_url_in_system_browser(&url);
                     })
@@ -1479,47 +1491,41 @@ fn try_render_website_preview(
             // OG image preview (visual website thumbnail)
             .when_some(screenshot_path, |this, path| {
                 this.child(
-                    div()
-                        .pl_6()
-                        .mt_1()
-                        .overflow_hidden()
-                        .rounded_sm()
-                        .child(
-                            img(path)
-                                .w_full()
-                                .max_h(px(200.0))
-                                .rounded_sm()
-                                .object_fit(ObjectFit::Cover),
-                        ),
+                    div().pl_6().mt_1().overflow_hidden().rounded_sm().child(
+                        img(path)
+                            .w_full()
+                            .max_h(px(200.0))
+                            .rounded_sm()
+                            .object_fit(ObjectFit::Cover),
+                    ),
                 )
             })
             // Rendered HTML preview (visual website rendering)
             .when_some(
                 html_cache_path.and_then(|p| render_html_preview(&p, element_id_prefix, cx)),
-                |this, preview_el| {
+                |this, preview_el| this.child(div().mt_1().child(preview_el)),
+            )
+            // Fallback: plain text content preview (only if no HTML preview)
+            .when(
+                !html_cache_path_exists && !preview_text.is_empty(),
+                |this| {
                     this.child(
-                        div().mt_1().child(preview_el),
+                        div()
+                            .text_xs()
+                            .text_color(muted_text)
+                            .pl_6()
+                            .mt_1()
+                            .max_h(px(80.0))
+                            .overflow_hidden()
+                            .child(SelectableText::new(
+                                ElementId::Name(
+                                    format!("{}-preview-content", element_id_prefix).into(),
+                                ),
+                                preview_text,
+                            )),
                     )
                 },
             )
-            // Fallback: plain text content preview (only if no HTML preview)
-            .when(!html_cache_path_exists && !preview_text.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_text)
-                        .pl_6()
-                        .mt_1()
-                        .max_h(px(80.0))
-                        .overflow_hidden()
-                        .child(SelectableText::new(
-                            ElementId::Name(
-                                format!("{}-preview-content", element_id_prefix).into(),
-                            ),
-                            preview_text,
-                        )),
-                )
-            })
             // Meta line (link count, form count, status, etc.)
             .when_some(meta_line, |this, meta| {
                 this.child(
@@ -1667,7 +1673,9 @@ fn render_html_preview(
     let mut i = 0;
     let chars: Vec<char> = content.chars().collect();
 
-    while i < chars.len() && body_lines.len() < HTML_PREVIEW_MAX_BODY_LINES + 20 {
+    while i < chars.len()
+        && body_lines.len() < HTML_PREVIEW_MAX_BODY_LINES + HTML_PARSE_BUFFER_LINES
+    {
         let ch = chars[i];
         if ch == '<' {
             // Flush current text
@@ -1695,14 +1703,13 @@ fn render_html_preview(
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     // Collect text until closing tag
                     let close_tag = format!("</{}", tag_name);
-                    let rest = &content[content.len().min(
-                        content.char_indices().nth(i + 1).map(|(idx, _)| idx).unwrap_or(content.len()),
-                    )..];
+                    let rest = content_after_char(content, i + 1);
                     let rest_lower = rest.to_ascii_lowercase();
                     if let Some(end) = rest_lower.find(&close_tag) {
                         let heading_html = &rest[..end];
                         let heading_text = strip_tags(heading_html).trim().to_string();
                         if !heading_text.is_empty() {
+                            // Default to h2 for malformed heading tags
                             let level: u8 = tag_name[1..].parse().unwrap_or(2);
                             body_lines.push(HtmlLine::Heading(level, heading_text));
                         }
@@ -1727,9 +1734,7 @@ fn render_html_preview(
                             && link_list.len() < HTML_PREVIEW_MAX_LINKS
                         {
                             // Collect link text
-                            let rest = &content[content.len().min(
-                                content.char_indices().nth(i + 1).map(|(idx, _)| idx).unwrap_or(content.len()),
-                            )..];
+                            let rest = content_after_char(content, i + 1);
                             let rest_lower = rest.to_ascii_lowercase();
                             if let Some(end) = rest_lower.find("</a") {
                                 let link_text = strip_tags(&rest[..end]).trim().to_string();
@@ -1743,9 +1748,7 @@ fn render_html_preview(
                 "script" | "style" | "noscript" => {
                     // Skip content of these tags
                     let close_tag = format!("</{}", tag_name);
-                    let rest = &content[content.len().min(
-                        content.char_indices().nth(i + 1).map(|(idx, _)| idx).unwrap_or(content.len()),
-                    )..];
+                    let rest = content_after_char(content, i + 1);
                     let rest_lower = rest.to_ascii_lowercase();
                     if let Some(end) = rest_lower.find(&close_tag) {
                         if let Some(close_end) = rest_lower[end..].find('>') {
@@ -1761,6 +1764,7 @@ fn render_html_preview(
             current_tag.push(ch);
         } else {
             // Decode basic HTML entities
+            // Decode basic HTML entities (max 10 chars covers &quot; + buffer)
             if ch == '&' {
                 let rest: String = chars[i..].iter().take(10).collect();
                 if rest.starts_with("&amp;") {
@@ -1799,7 +1803,13 @@ fn render_html_preview(
     for line in body_lines {
         match &line {
             HtmlLine::Text(t) if t.is_empty() => continue,
-            HtmlLine::Break if filtered_lines.last().map_or(true, |l| matches!(l, HtmlLine::Break)) => continue,
+            HtmlLine::Break
+                if filtered_lines
+                    .last()
+                    .map_or(true, |l| matches!(l, HtmlLine::Break)) =>
+            {
+                continue;
+            }
             _ => filtered_lines.push(line),
         }
     }
@@ -1841,10 +1851,29 @@ fn render_html_preview(
                     .flex()
                     .flex_row()
                     .gap_1()
-                    .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::hsla(0.0, 0.7, 0.55, 1.0)))
-                    .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::hsla(0.12, 0.8, 0.55, 1.0)))
-                    .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::hsla(0.32, 0.7, 0.55, 1.0)))
-            )
+                    // macOS-style traffic light dots (red, yellow, green)
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.0, 0.7, 0.55, 1.0)),
+                    )
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.12, 0.8, 0.55, 1.0)),
+                    )
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.32, 0.7, 0.55, 1.0)),
+                    ),
+            ),
     );
 
     // Body content
@@ -1879,22 +1908,20 @@ fn render_html_preview(
                 );
             }
             HtmlLine::Text(text) => {
-                let display_text = if text.chars().count() > 200 {
-                    format!("{}…", text.chars().take(197).collect::<String>())
+                let display_text = if text.chars().count() > HTML_TEXT_LINE_MAX_CHARS {
+                    format!(
+                        "{}…",
+                        text.chars()
+                            .take(HTML_TEXT_LINE_MAX_CHARS - 3)
+                            .collect::<String>()
+                    )
                 } else {
                     text.clone()
                 };
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_text)
-                        .child(display_text),
-                );
+                body = body.child(div().text_xs().text_color(muted_text).child(display_text));
             }
             HtmlLine::Separator => {
-                body = body.child(
-                    div().w_full().h(px(1.0)).bg(border).my_1(),
-                );
+                body = body.child(div().w_full().h(px(1.0)).bg(border).my_1());
             }
             HtmlLine::Break => {}
         }
@@ -1902,9 +1929,7 @@ fn render_html_preview(
 
     // Links section
     if !link_list.is_empty() {
-        body = body.child(
-            div().w_full().h(px(1.0)).bg(border).my_1(),
-        );
+        body = body.child(div().w_full().h(px(1.0)).bg(border).my_1());
         body = body.child(
             div()
                 .text_xs()
@@ -1914,8 +1939,13 @@ fn render_html_preview(
                 .child(format!("Links ({})", link_list.len())),
         );
         for (text, href) in &link_list {
-            let display_href = if href.len() > 60 {
-                format!("{}…", &href[..57])
+            let display_href = if href.chars().count() > HTML_LINK_URL_MAX_CHARS {
+                format!(
+                    "{}…",
+                    href.chars()
+                        .take(HTML_LINK_URL_MAX_CHARS - 3)
+                        .collect::<String>()
+                )
             } else {
                 href.clone()
             };
@@ -1925,11 +1955,7 @@ fn render_html_preview(
                     .flex_row()
                     .gap_1()
                     .text_xs()
-                    .child(
-                        div()
-                            .text_color(accent)
-                            .child(format!("• {}", text)),
-                    )
+                    .child(div().text_color(accent).child(format!("• {}", text)))
                     .child(
                         div()
                             .text_color(muted_text)
@@ -1953,6 +1979,18 @@ enum HtmlLine {
     Text(String),
     Separator,
     Break,
+}
+
+/// Get the substring of `content` starting after the `char_index`-th character.
+///
+/// Uses `char_indices` to handle multi-byte UTF-8 correctly, returning an empty
+/// slice if the index is past the end of the string.
+fn content_after_char(content: &str, char_index: usize) -> &str {
+    content
+        .char_indices()
+        .nth(char_index)
+        .map(|(byte_idx, _)| &content[byte_idx..])
+        .unwrap_or("")
 }
 
 /// Strip all HTML tags from a string, returning only text content.
@@ -1985,7 +2023,9 @@ fn extract_tag_attr(tag: &str, attr: &str) -> Option<String> {
         let end = rest[1..].find('\'')?;
         Some(rest[1..1 + end].to_string())
     } else {
-        let end = rest.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(rest.len());
         Some(rest[..end].to_string())
     }
 }

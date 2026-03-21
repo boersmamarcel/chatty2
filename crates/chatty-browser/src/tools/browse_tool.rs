@@ -233,7 +233,11 @@ fn cache_html(html: &str, page_url: &str) -> Result<String, String> {
     use std::hash::{Hash, Hasher};
 
     if html.len() > MAX_HTML_CACHE_BYTES {
-        return Err(format!("HTML too large to cache: {} bytes", html.len()));
+        return Err(format!(
+            "HTML too large to cache: {} bytes (max: {} bytes)",
+            html.len(),
+            MAX_HTML_CACHE_BYTES
+        ));
     }
 
     let cache_dir = dirs::cache_dir()
@@ -479,5 +483,34 @@ mod tests {
         let def = tool.definition("test".to_string()).await;
         assert_eq!(def.name, "browse");
         assert!(def.description.contains("Navigate"));
+    }
+
+    #[test]
+    fn test_cache_html_writes_file() {
+        let html = "<html><head><title>Test</title></head><body><h1>Hello</h1></body></html>";
+        let url = "https://test-cache-html.example.com";
+        let result = super::cache_html(html, url);
+        assert!(result.is_ok(), "cache_html should succeed");
+        let path = result.unwrap();
+        assert!(
+            path.ends_with(".html"),
+            "Cached file should have .html extension"
+        );
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "Cached file should exist on disk"
+        );
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, html, "Cached contents should match input HTML");
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cache_html_rejects_oversized() {
+        let html = "x".repeat(super::MAX_HTML_CACHE_BYTES + 1);
+        let result = super::cache_html(&html, "https://example.com/big");
+        assert!(result.is_err(), "Should reject HTML exceeding max size");
+        assert!(result.unwrap_err().contains("too large"));
     }
 }
