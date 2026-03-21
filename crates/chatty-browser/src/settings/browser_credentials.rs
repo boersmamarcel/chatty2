@@ -19,9 +19,7 @@ pub struct BrowserCredentialsModel {
     /// Login profiles loaded from `~/.config/chatty/login_profiles.json`.
     pub profiles: Vec<LoginProfile>,
 
-    /// Profile names whose URL patterns are temporarily revealed in the UI
-    /// (not really secret, but keeps the UI pattern consistent).
-    #[allow(dead_code)]
+    /// Profile names whose details are being inspected in the UI.
     pub revealed_names: HashSet<String>,
 }
 

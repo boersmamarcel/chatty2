@@ -252,8 +252,22 @@ impl CredentialsTableView {
                                                     }
 
                                                     // Determine auth method based on selectors
+                                                    let has_user_sel = !user_sel.is_empty();
+                                                    let has_pass_sel = !pass_sel.is_empty();
                                                     let is_form_login =
-                                                        !user_sel.is_empty() || !pass_sel.is_empty();
+                                                        has_user_sel || has_pass_sel;
+
+                                                    // Validate: if one selector provided, both are required
+                                                    if is_form_login
+                                                        && (!has_user_sel || !has_pass_sel)
+                                                    {
+                                                        window.push_notification(
+                                                            "Both username and password selectors \
+                                                             are required for form login",
+                                                            cx,
+                                                        );
+                                                        return;
+                                                    }
 
                                                     if is_form_login {
                                                         browser_credentials_controller::add_form_login(
