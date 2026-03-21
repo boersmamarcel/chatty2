@@ -205,21 +205,34 @@ const MAX_OG_IMAGE_BYTES: usize = 2_000_000;
 
 /// Download an OG image and cache it locally, returning the file path.
 ///
-/// Images are cached in the platform-specific data directory under
+/// Images are cached in the platform-specific cache directory under
 /// `chatty/browse_cache/`. The filename is a hash of the page URL to
 /// ensure deterministic lookups from the trace view.
 async fn download_og_image(og_url: &str, page_url: &str) -> Result<String, String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Validate the OG image URL
+    // Validate the OG image URL — must be external http/https
     if !og_url.starts_with("http://") && !og_url.starts_with("https://") {
         return Err("OG image URL must be http/https".to_string());
     }
 
-    // Determine cache directory
-    let cache_dir = dirs::config_dir()
-        .ok_or("No config directory")?
+    // Block requests to localhost and link-local addresses to prevent SSRF
+    let url_lower = og_url.to_ascii_lowercase();
+    if url_lower.contains("://localhost")
+        || url_lower.contains("://127.")
+        || url_lower.contains("://0.")
+        || url_lower.contains("://[::1]")
+        || url_lower.contains("://169.254.")
+        || url_lower.contains("://10.")
+        || url_lower.contains("://192.168.")
+    {
+        return Err("OG image URL points to a local/private address".to_string());
+    }
+
+    // Determine cache directory (use cache_dir, not config_dir)
+    let cache_dir = dirs::cache_dir()
+        .ok_or("No cache directory")?
         .join("chatty")
         .join("browse_cache");
     std::fs::create_dir_all(&cache_dir)
@@ -230,24 +243,16 @@ async fn download_og_image(og_url: &str, page_url: &str) -> Result<String, Strin
     page_url.hash(&mut hasher);
     let hash = hasher.finish();
 
-    // Determine file extension from the OG image URL
-    let ext = og_url
-        .rsplit('.')
-        .next()
-        .and_then(|e| {
-            let e = e.split('?').next().unwrap_or(e).to_lowercase();
-            match e.as_str() {
-                "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" => Some(e),
-                _ => None,
+    // Check if any cached file already exists for this hash
+    let cache_prefix = format!("{:016x}.", hash);
+    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(&cache_prefix)
+            {
+                return Ok(entry.path().to_string_lossy().to_string());
             }
-        })
-        .unwrap_or_else(|| "jpg".to_string());
-
-    let cache_path = cache_dir.join(format!("{:016x}.{}", hash, ext));
-
-    // Return cached file if it already exists
-    if cache_path.exists() {
-        return Ok(cache_path.to_string_lossy().to_string());
+        }
     }
 
     // Download the image
@@ -268,6 +273,29 @@ async fn download_og_image(og_url: &str, page_url: &str) -> Result<String, Strin
         return Err(format!("OG image HTTP {}", response.status()));
     }
 
+    // Validate Content-Type to ensure it's actually an image (not SVG/HTML/etc.)
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let ext = if content_type.starts_with("image/png") {
+        "png"
+    } else if content_type.starts_with("image/gif") {
+        "gif"
+    } else if content_type.starts_with("image/webp") {
+        "webp"
+    } else if content_type.starts_with("image/jpeg") || content_type.starts_with("image/jpg") {
+        "jpg"
+    } else {
+        return Err(format!(
+            "OG image has unsupported Content-Type: {}",
+            content_type
+        ));
+    };
+
     let bytes = response
         .bytes()
         .await
@@ -280,6 +308,8 @@ async fn download_og_image(og_url: &str, page_url: &str) -> Result<String, Strin
     if bytes.is_empty() {
         return Err("OG image is empty".to_string());
     }
+
+    let cache_path = cache_dir.join(format!("{:016x}.{}", hash, ext));
 
     std::fs::write(&cache_path, &bytes)
         .map_err(|e| format!("Failed to write OG image to cache: {}", e))?;

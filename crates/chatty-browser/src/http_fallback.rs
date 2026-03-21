@@ -97,6 +97,7 @@ fn extract_title(html: &str) -> Option<String> {
 
 /// Extract `content` from `<meta property="<prop>" content="...">` tags.
 /// Used for Open Graph metadata like og:image, og:description.
+/// Handles both double-quoted and single-quoted attribute values.
 fn extract_meta_content(html: &str, property: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
     let mut search_from = 0;
@@ -111,11 +112,11 @@ fn extract_meta_content(html: &str, property: &str) -> Option<String> {
         let tag = &html[abs_pos..tag_end];
         let tag_lower = &lower[abs_pos..tag_end];
 
-        // Check if this meta tag has the right property and extract content
-        let prop_match = format!("property=\"{}\"", property);
-        if tag_lower.contains(&prop_match)
-            && let Some(content) = extract_attr(tag, "content")
-        {
+        // Check if this meta tag has the right property (double or single quotes)
+        let has_property = tag_lower.contains(&format!("property=\"{}\"", property))
+            || tag_lower.contains(&format!("property='{}'", property));
+
+        if has_property && let Some(content) = extract_attr(tag, "content") {
             let content = decode_entities(&content);
             if !content.is_empty() {
                 return Some(content);
@@ -130,6 +131,7 @@ fn extract_meta_content(html: &str, property: &str) -> Option<String> {
 
 /// Extract `content` from `<meta name="<name>" content="...">` tags.
 /// Used for standard meta tags like description.
+/// Handles both double-quoted and single-quoted attribute values.
 fn extract_meta_name_content(html: &str, name: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
     let mut search_from = 0;
@@ -144,11 +146,11 @@ fn extract_meta_name_content(html: &str, name: &str) -> Option<String> {
         let tag = &html[abs_pos..tag_end];
         let tag_lower = &lower[abs_pos..tag_end];
 
-        // Check if this meta tag has the right name and extract content
-        let name_match = format!("name=\"{}\"", name);
-        if tag_lower.contains(&name_match)
-            && let Some(content) = extract_attr(tag, "content")
-        {
+        // Check if this meta tag has the right name (double or single quotes)
+        let has_name = tag_lower.contains(&format!("name=\"{}\"", name))
+            || tag_lower.contains(&format!("name='{}'", name));
+
+        if has_name && let Some(content) = extract_attr(tag, "content") {
             let content = decode_entities(&content);
             if !content.is_empty() {
                 return Some(content);
@@ -560,6 +562,24 @@ mod tests {
         assert_eq!(
             extract_meta_content(html, "og:image"),
             Some("https://example.com/img?a=1&b=2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_meta_content_single_quotes() {
+        let html = "<meta property='og:image' content='https://example.com/photo.jpg'>";
+        assert_eq!(
+            extract_meta_content(html, "og:image"),
+            Some("https://example.com/photo.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_meta_name_content_single_quotes() {
+        let html = "<meta name='description' content='A page'>";
+        assert_eq!(
+            extract_meta_name_content(html, "description"),
+            Some("A page".to_string())
         );
     }
 }
