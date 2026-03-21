@@ -83,7 +83,9 @@ impl Tool for BrowserTabsTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "browser_tabs".to_string(),
-            description: "Manage browser tabs.\n\
+            description: "Manage browser tabs. Note: tab management requires the full \
+                browser engine. When running in HTTP fallback mode, use the `browse` \
+                tool to visit URLs directly and `browser_auth` to authenticate.\n\
                 Actions:\n\
                 - new: Open a new tab (optionally navigate to a URL)\n\
                 - close: Close a tab by ID\n\

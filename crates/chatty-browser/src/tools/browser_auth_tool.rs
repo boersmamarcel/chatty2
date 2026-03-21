@@ -368,7 +368,11 @@ impl BrowserAuthTool {
                     BrowserAuthError::AuthFailed(format!("Failed to load login page: {e}"))
                 })?;
 
-                // Determine form field names from selectors (best-effort extraction)
+                // Determine form field names from selectors (best-effort extraction).
+                // Common defaults used as fallback: most login forms use "email" and
+                // "password" as field names. Sites with non-standard names (e.g.
+                // "login", "user_name") should have CSS selectors with name= attributes
+                // configured in their credential profile.
                 let username_field =
                     Self::selector_to_field_name(profile.username_selector.as_deref())
                         .unwrap_or("email");
@@ -459,5 +463,73 @@ impl BrowserAuthTool {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_selector_to_field_name_with_name_attr() {
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some(r#"input[name="email"]"#)),
+            Some("email")
+        );
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some(r#"input[name="username"]"#)),
+            Some("username")
+        );
+    }
+
+    #[test]
+    fn test_selector_to_field_name_with_single_quotes() {
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some("input[name='password']")),
+            Some("password")
+        );
+    }
+
+    #[test]
+    fn test_selector_to_field_name_with_id() {
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some("#email")),
+            Some("email")
+        );
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some("#username")),
+            Some("username")
+        );
+    }
+
+    #[test]
+    fn test_selector_to_field_name_complex_selector_returns_none() {
+        // Multiple selectors (comma-separated) → too ambiguous
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some(
+                r#"input[type="email"], input[name="email"]"#
+            )),
+            // Finds name="email" in the second part
+            Some("email")
+        );
+    }
+
+    #[test]
+    fn test_selector_to_field_name_type_only_returns_none() {
+        // Type-only selectors don't tell us the field name
+        assert_eq!(
+            BrowserAuthTool::selector_to_field_name(Some(r#"input[type="password"]"#)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_selector_to_field_name_none_input() {
+        assert_eq!(BrowserAuthTool::selector_to_field_name(None), None);
+    }
+
+    #[test]
+    fn test_selector_to_field_name_empty() {
+        assert_eq!(BrowserAuthTool::selector_to_field_name(Some("")), None);
     }
 }
