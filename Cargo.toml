@@ -92,6 +92,10 @@ memvid-core = { version = "2.0", default-features = false, features = ["lex", "v
 # URL parsing
 url = "2.5"
 
+# Browser backend (WebView)
+wry = "0.54"
+tao = "0.34"
+
 # Open URLs in system browser
 open = "5.3"
 

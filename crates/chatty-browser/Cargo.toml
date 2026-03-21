@@ -23,6 +23,10 @@ url = "2.5"
 # HTTP fallback when browser backend is unavailable
 reqwest.workspace = true
 
+# Browser backend (WebView)
+wry.workspace = true
+tao.workspace = true
+
 # Optional: GPUI integration
 gpui = { workspace = true, optional = true }
 
