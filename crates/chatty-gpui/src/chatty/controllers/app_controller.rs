@@ -179,6 +179,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         theme_colors,
         search_settings,
         built_workspace_dir,
+        browser_settings,
     ) = cx
         .update(|cx| {
             let mut settings = cx
@@ -235,6 +236,9 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             let search_cfg = cx
                 .try_global::<crate::settings::models::SearchSettingsModel>()
                 .cloned();
+            let browser_cfg = cx
+                .try_global::<chatty_browser::settings::BrowserSettingsModel>()
+                .cloned();
             (
                 Some(settings),
                 Some(approvals),
@@ -245,6 +249,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 Some(colors),
                 search_cfg,
                 built_workspace_dir,
+                browser_cfg,
             )
         })
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -266,6 +271,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         memory_service,
         search_settings,
         embedding_service,
+        browser_settings,
     )
     .await?;
 
@@ -709,6 +715,7 @@ impl ChattyApp {
         memory_service: Option<crate::chatty::services::MemoryService>,
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
+        browser_settings: Option<chatty_browser::settings::BrowserSettingsModel>,
     ) -> anyhow::Result<Conversation> {
         let mut effective_exec_settings = exec_settings.clone();
         if let Some(working_dir) = data.working_dir.as_ref() {
@@ -760,6 +767,7 @@ impl ChattyApp {
             memory_service,
             search_settings,
             embedding_service,
+            browser_settings,
         )
         .await
     }
@@ -1030,6 +1038,13 @@ impl ChattyApp {
                     // Wait for memory service init to complete before building the agent
                     let memory_service = await_memory_service(cx).await;
                     let embedding_service = get_embedding_service(cx);
+                    let browser_settings = cx
+                        .update(|cx| {
+                            cx.try_global::<chatty_browser::settings::BrowserSettingsModel>()
+                                .cloned()
+                        })
+                        .ok()
+                        .flatten();
 
                     let mut conversation = Conversation::new(
                         conv_id.clone(),
@@ -1045,6 +1060,7 @@ impl ChattyApp {
                         memory_service,
                         search_settings,
                         embedding_service,
+                        browser_settings,
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1156,6 +1172,9 @@ impl ChattyApp {
                 let search_settings = cx.update(|cx| {
                     cx.try_global::<crate::settings::models::SearchSettingsModel>().cloned()
                 }).ok().flatten();
+                let browser_settings = cx.update(|cx| {
+                    cx.try_global::<chatty_browser::settings::BrowserSettingsModel>().cloned()
+                }).ok().flatten();
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
@@ -1164,6 +1183,7 @@ impl ChattyApp {
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
                             theme_colors, memory_service, search_settings, embedding_service,
+                            browser_settings,
                         )
                         .await
                         {
@@ -1472,6 +1492,7 @@ impl ChattyApp {
                             theme_colors,
                             search_settings,
                             built_workspace_dir,
+                            browser_settings,
                         ) = cx
                             .update(|cx| {
                                 let mut settings = cx
@@ -1505,6 +1526,9 @@ impl ChattyApp {
                                 let search_cfg = cx
                                     .try_global::<crate::settings::models::SearchSettingsModel>()
                                     .cloned();
+                                let browser_cfg = cx
+                                    .try_global::<chatty_browser::settings::BrowserSettingsModel>()
+                                    .cloned();
                                 (
                                     Some(settings),
                                     Some(approvals),
@@ -1515,6 +1539,7 @@ impl ChattyApp {
                                     Some(colors),
                                     search_cfg,
                                     built_workspace_dir,
+                                    browser_cfg,
                                 )
                             })
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1540,6 +1565,7 @@ impl ChattyApp {
                                 memory_service,
                                 search_settings,
                                 embedding_service,
+                                browser_settings,
                             )
                             .await?;
 

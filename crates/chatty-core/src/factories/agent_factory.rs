@@ -25,6 +25,9 @@ use crate::tools::{
     SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
+use chatty_browser::tools::{
+    BrowseTool, BrowserActionTool, BrowserAuthTool, BrowserExtractTool, BrowserTabsTool,
+};
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -72,6 +75,15 @@ type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 type DataQueryTools = (QueryDataTool, DescribeDataTool);
+
+/// Browser tools (gated on browser_settings.enabled)
+type BrowserTools = (
+    BrowseTool,
+    BrowserActionTool,
+    BrowserExtractTool,
+    BrowserAuthTool,
+    BrowserTabsTool,
+);
 
 /// All four MCP management tools bundled together.
 ///
@@ -427,6 +439,7 @@ fn collect_tools(
     read_skill_tool: ReadSkillTool,
     search_web_tool: Option<SearchWebTool>,
     sub_agent_tool: Option<SubAgentTool>,
+    browser_tools: Option<BrowserTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -526,6 +539,13 @@ fn collect_tools(
     if let Some(t) = sub_agent_tool {
         tools.push(Box::new(t));
     }
+    if let Some((browse, action, extract, auth, tabs)) = browser_tools {
+        tools.push(Box::new(browse));
+        tools.push(Box::new(action));
+        tools.push(Box::new(extract));
+        tools.push(Box::new(auth));
+        tools.push(Box::new(tabs));
+    }
     tools
 }
 
@@ -557,6 +577,7 @@ impl AgentClient {
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
+        browser_settings: Option<chatty_browser::settings::BrowserSettingsModel>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -916,6 +937,55 @@ impl AgentClient {
             tracing::info!("Search web tool disabled (internet access is off)");
             None
         };
+
+        // ── Browser tools ────────────────────────────────────────────────
+        let browser_tools: Option<BrowserTools> =
+            if browser_settings.as_ref().is_some_and(|s| s.enabled) {
+                tracing::info!("Browser tools enabled");
+                let backend = std::sync::Arc::new(
+                    chatty_browser::backend::wry_backend::WryBackend::default(),
+                );
+                let engine = chatty_browser::BrowserEngine::new(backend);
+                let session = engine.session().clone();
+                let active_tab = engine.active_tab().clone();
+
+                // Load login profiles for browse tool's login detection
+                let login_profiles = match chatty_browser::settings::LoginProfileRepository::new() {
+                    Ok(repo) => repo.load_all().await.unwrap_or_default(),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "Failed to init login profile repo");
+                        Vec::new()
+                    }
+                };
+
+                // Credential vault + profile repo for auth tool
+                let vault = std::sync::Arc::new(
+                    chatty_browser::credential::vault::CredentialVault::new().unwrap_or_else(|e| {
+                        tracing::warn!(error = ?e, "CredentialVault fallback");
+                        // Re-try will likely succeed; vault handles missing dir gracefully
+                        chatty_browser::credential::vault::CredentialVault::new()
+                            .expect("CredentialVault init")
+                    }),
+                );
+                let profiles_repo = std::sync::Arc::new(
+                    chatty_browser::settings::LoginProfileRepository::new().unwrap_or_else(|e| {
+                        tracing::warn!(error = ?e, "LoginProfileRepository fallback");
+                        chatty_browser::settings::LoginProfileRepository::new()
+                            .expect("LoginProfileRepository init")
+                    }),
+                );
+
+                Some((
+                    BrowseTool::new(session.clone(), login_profiles),
+                    BrowserActionTool::new(session.clone(), active_tab.clone()),
+                    BrowserExtractTool::new(session.clone(), active_tab.clone()),
+                    BrowserAuthTool::new(session.clone(), active_tab.clone(), vault, profiles_repo),
+                    BrowserTabsTool::new(session, active_tab),
+                ))
+            } else {
+                tracing::info!("Browser tools disabled");
+                None
+            };
 
         // Create git tools from the handle started before the filesystem block.
         // GitService ran concurrently with FileSystemService + CodeSearchService.
@@ -1458,6 +1528,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1534,6 +1605,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1577,6 +1649,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1623,6 +1696,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1668,6 +1742,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1851,6 +1926,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =

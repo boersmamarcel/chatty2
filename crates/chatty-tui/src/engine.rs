@@ -305,6 +305,7 @@ impl ChatEngine {
             self.memory_service.clone(),
             self.search_settings.clone(),
             self.embedding_service.clone(),
+            None, // browser_settings (not yet configurable in TUI)
         )
         .await
         .context("Failed to create conversation")?;
@@ -384,6 +385,7 @@ impl ChatEngine {
                 memory_service,
                 search_settings,
                 embedding_service,
+                None, // browser_settings (not yet configurable in TUI)
             )
             .await;
 

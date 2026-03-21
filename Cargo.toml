@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui"]
+members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui", "crates/chatty-browser"]
 resolver = "2"
 
 [workspace.package]
@@ -88,6 +88,9 @@ tiktoken-rs = "0.9"
 
 # Agent memory
 memvid-core = { version = "2.0", default-features = false, features = ["lex", "vec", "temporal_track"] }
+
+# URL parsing
+url = "2.5"
 
 # GPUI (UI only)
 gpui = "0.2.2"

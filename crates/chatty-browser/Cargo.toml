@@ -1,0 +1,33 @@
+[package]
+name = "chatty-browser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Core workspace deps
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+dirs.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+
+# Agent tools
+rig-core.workspace = true
+
+# URL parsing
+url = "2.5"
+
+# Optional: GPUI integration
+gpui = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable this feature to get `impl gpui::Global` on browser types.
+gpui-globals = ["dep:gpui"]
