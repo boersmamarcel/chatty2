@@ -47,7 +47,9 @@ mod inner_macos {
 
     #[link(name = "System", kind = "dylib")]
     unsafe extern "C" {
-        fn dispatch_get_main_queue() -> *mut c_void;
+        // `dispatch_get_main_queue()` is a C inline function / macro, not a
+        // linkable symbol.  The underlying exported symbol is `_dispatch_main_q`.
+        static _dispatch_main_q: c_void;
         fn dispatch_async_f(
             queue: *mut c_void,
             context: *mut c_void,
@@ -66,7 +68,8 @@ mod inner_macos {
         }
 
         unsafe {
-            dispatch_async_f(dispatch_get_main_queue(), raw, trampoline::<F>);
+            let main_queue = &raw const _dispatch_main_q as *mut c_void;
+            dispatch_async_f(main_queue, raw, trampoline::<F>);
         }
     }
 
