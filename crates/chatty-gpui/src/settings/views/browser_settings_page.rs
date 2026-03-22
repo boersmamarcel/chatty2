@@ -1,6 +1,6 @@
 use crate::settings::controllers::browser_settings_controller;
 use chatty_browser::settings::BrowserSettingsModel;
-use gpui::{App, IntoElement};
+use gpui::App;
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };

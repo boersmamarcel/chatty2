@@ -1,5 +1,4 @@
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
-use chatty_browser::credential::types::{AuthMethod, LoginProfile};
 use chatty_browser::settings::BrowserCredentialsModel;
 use chatty_browser::settings::browser_credentials::{
     new_form_login_profile, new_session_capture_profile,
