@@ -1370,12 +1370,23 @@ fn is_browse_tool(tool_name: &str) -> bool {
 
 /// Extract the URL from a browse tool's input JSON.
 fn extract_browse_url(tool_call: &ToolCallBlock) -> Option<String> {
-    // First try the output (has the final URL after redirects)
     if let Some(output) = tool_call.output.as_ref() {
+        // Try JSON first (serialized BrowseOutput)
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
             let snapshot = json.get("snapshot").unwrap_or(&json);
             if let Some(url) = snapshot.get("url").and_then(|v| v.as_str()) {
-                return Some(url.to_string());
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+        // Try Display-formatted text: "URL: https://..."
+        for line in output.lines() {
+            if let Some(url) = line.strip_prefix("URL: ") {
+                let url = url.trim();
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
             }
         }
     }
@@ -1386,34 +1397,60 @@ fn extract_browse_url(tool_call: &ToolCallBlock) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Extract preview data from a browse tool's JSON output.
+/// Extract preview data from a browse tool's output (JSON or Display text).
 fn extract_browse_preview(tool_call: &ToolCallBlock) -> Option<BrowsePreview> {
     let output = tool_call.output.as_ref()?;
-    let json: serde_json::Value = serde_json::from_str(output).ok()?;
 
-    // BrowseOutput wraps a PageSnapshot under "snapshot"
-    let snapshot = json.get("snapshot").unwrap_or(&json);
+    // Try JSON first (serialized BrowseOutput)
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        let snapshot = json.get("snapshot").unwrap_or(&json);
 
-    let url = snapshot.get("url").and_then(|v| v.as_str())?.to_string();
-    let title = snapshot
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let description = snapshot
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let screenshot_path = snapshot
-        .get("screenshot_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        if let Some(url) = snapshot.get("url").and_then(|v| v.as_str()) {
+            if !url.is_empty() {
+                let title = snapshot
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = snapshot
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let screenshot_path = snapshot
+                    .get("screenshot_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
+                return Some(BrowsePreview {
+                    url: url.to_string(),
+                    title,
+                    description,
+                    screenshot_path,
+                });
+            }
+        }
+    }
+
+    // Fall back to Display-formatted text parsing:
+    // # Page Title
+    // URL: https://...
+    let mut title = String::new();
+    let mut url = String::new();
+    for line in output.lines() {
+        if let Some(t) = line.strip_prefix("# ") {
+            title = t.trim().to_string();
+        } else if let Some(u) = line.strip_prefix("URL: ") {
+            url = u.trim().to_string();
+        }
+    }
+    if url.is_empty() {
+        return None;
+    }
     Some(BrowsePreview {
         url,
         title,
-        description,
-        screenshot_path,
+        description: None,
+        screenshot_path: None,
     })
 }
 
