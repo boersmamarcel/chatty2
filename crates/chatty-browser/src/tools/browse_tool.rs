@@ -104,15 +104,8 @@ impl Tool for BrowseTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         // Validate URL
-        let parsed = url::Url::parse(&args.url)
-            .map_err(|e| BrowseError::InvalidUrl(format!("{}: {}", args.url, e)))?;
-
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            return Err(BrowseError::InvalidUrl(format!(
-                "Only http:// and https:// URLs are supported, got {scheme}://"
-            )));
-        }
+        crate::session::validate_url_scheme(&args.url)
+            .map_err(|e| BrowseError::InvalidUrl(e.to_string()))?;
 
         // Try the full browser backend first
         match self.try_browser_backend(&args.url).await {

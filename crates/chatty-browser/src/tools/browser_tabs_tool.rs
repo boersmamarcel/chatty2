@@ -126,6 +126,8 @@ impl Tool for BrowserTabsTool {
                 })?;
 
                 if let Some(url) = &args.url {
+                    crate::session::validate_url_scheme(url)
+                        .map_err(|e| BrowserTabsError::OperationFailed(e.to_string()))?;
                     self.session
                         .backend()
                         .navigate(&tab, url)

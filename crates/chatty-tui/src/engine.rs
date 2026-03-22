@@ -1373,11 +1373,11 @@ fn common_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
 fn copy_text_to_clipboard(text: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return copy_via_command("pbcopy", &[], text);
+        copy_via_command("pbcopy", &[], text)
     }
     #[cfg(target_os = "windows")]
     {
-        return copy_via_command("clip", &[], text);
+        copy_via_command("clip", &[], text)
     }
     #[cfg(target_os = "linux")]
     {
@@ -1450,7 +1450,7 @@ fn run_sub_agent_process(
     let stderr_thread = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let _ = event_tx.send(AppEvent::SubAgentProgress(line));
             }
         }

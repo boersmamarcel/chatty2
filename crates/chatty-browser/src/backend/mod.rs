@@ -65,7 +65,12 @@ pub trait BrowserBackend: Send + Sync + 'static {
     /// JSON-encoded string.
     async fn evaluate_js(&self, tab: &TabId, script: &str) -> anyhow::Result<String>;
 
-    /// Retrieve all cookies visible to a tab.
+    /// Retrieve cookies visible to a tab via `document.cookie`.
+    ///
+    /// **Known limitation**: `document.cookie` cannot access `HttpOnly` cookies.
+    /// Sites that set session tokens with the `HttpOnly` flag will have those
+    /// cookies silently omitted from the result. This means session captures
+    /// may be incomplete for such sites.
     async fn get_cookies(&self, tab: &TabId) -> anyhow::Result<Vec<Cookie>>;
 
     /// Inject cookies into a tab's context.

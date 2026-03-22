@@ -5,6 +5,8 @@
 //! [`PageSnapshot`]. This gives the LLM useful page content without requiring
 //! a full browser engine.
 
+use std::sync::OnceLock;
+
 use crate::constants::{BROWSER_USER_AGENT, MAX_LINKS, MAX_TEXT_CONTENT_LEN};
 use crate::page::{LinkInfo, PageSnapshot};
 use crate::session::SharedCookieJar;
@@ -13,6 +15,20 @@ use tracing::debug;
 
 /// Request timeout for HTTP fallback.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Shared HTTP client for requests that don't need a cookie jar.
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .user_agent(BROWSER_USER_AGENT)
+            .default_headers(crate::constants::default_browser_headers())
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("Failed to build shared HTTP client")
+    })
+}
 
 /// Fetch a URL via HTTP GET and build a [`PageSnapshot`] from the HTML response.
 pub async fn fetch_and_snapshot(url: &str) -> anyhow::Result<PageSnapshot> {
@@ -23,21 +39,22 @@ pub async fn fetch_and_snapshot(url: &str) -> anyhow::Result<PageSnapshot> {
 ///
 /// When a cookie jar is provided, request and response cookies are stored in it,
 /// enabling authenticated browsing after `browser_auth` has logged in via HTTP.
+/// When no cookie jar is needed, a shared client is reused for connection pooling.
 pub async fn fetch_and_snapshot_with_cookies(
     url: &str,
     cookie_jar: Option<SharedCookieJar>,
 ) -> anyhow::Result<PageSnapshot> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .user_agent(BROWSER_USER_AGENT)
-        .default_headers(crate::constants::default_browser_headers())
-        .redirect(reqwest::redirect::Policy::limited(10));
-
-    if let Some(jar) = cookie_jar {
-        builder = builder.cookie_provider(jar);
-    }
-
-    let client = builder.build()?;
+    let client = if let Some(jar) = cookie_jar {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .user_agent(BROWSER_USER_AGENT)
+            .default_headers(crate::constants::default_browser_headers())
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .cookie_provider(jar)
+            .build()?
+    } else {
+        shared_client().clone()
+    };
 
     debug!(url = %url, "HTTP fallback: fetching page");
 

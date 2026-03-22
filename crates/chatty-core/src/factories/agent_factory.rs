@@ -31,6 +31,13 @@ use chatty_browser::tools::{
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
+type CachedBrowserComponents = (
+    std::sync::Arc<chatty_browser::session::BrowserSession>,
+    std::sync::Arc<tokio::sync::RwLock<Option<chatty_browser::backend::TabId>>>,
+);
+
+static BROWSER_COMPONENTS: OnceLock<CachedBrowserComponents> = OnceLock::new();
+
 /// Filesystem read tool set
 type FsReadTools = (
     ReadFileTool,
@@ -944,69 +951,80 @@ impl AgentClient {
             .is_some_and(|s| s.enabled)
         {
             tracing::info!("Browser tools enabled");
-            match chatty_browser::backend::wry_backend::WryBackend::new().await {
-                Ok(wry_backend) => {
-                    let backend = std::sync::Arc::new(wry_backend);
-                    let engine = chatty_browser::BrowserEngine::new(backend);
-                    let session = engine.session().clone();
-                    let active_tab = engine.active_tab().clone();
 
-                    // Load login profiles for browse tool's login detection
-                    let login_profiles =
-                        match chatty_browser::settings::LoginProfileRepository::new() {
-                            Ok(repo) => repo.load_all().await.unwrap_or_default(),
-                            Err(e) => {
-                                tracing::warn!(error = ?e, "Failed to init login profile repo");
-                                Vec::new()
-                            }
-                        };
-
-                    // Credential vault + profile repo for auth tool
-                    let auth_components = chatty_browser::credential::vault::CredentialVault::new()
-                        .and_then(|vault| {
-                            chatty_browser::settings::LoginProfileRepository::new()
-                                .map(|repo| (std::sync::Arc::new(vault), std::sync::Arc::new(repo)))
-                        });
-
-                    match auth_components {
-                        Ok((vault, profiles_repo)) => Some((
-                            BrowseTool::new(
-                                session.clone(),
-                                active_tab.clone(),
-                                login_profiles.clone(),
-                            ),
-                            BrowserActionTool::new(
-                                session.clone(),
-                                active_tab.clone(),
-                                login_profiles,
-                            ),
-                            BrowserExtractTool::new(session.clone(), active_tab.clone()),
-                            BrowserAuthTool::new(
-                                session.clone(),
-                                active_tab.clone(),
-                                vault,
-                                profiles_repo,
-                            ),
-                            BrowserTabsTool::new(session, active_tab),
-                        )),
-                        Err(e) => {
-                            tracing::error!(
-                                error = ?e,
-                                "Failed to initialize credential vault or profile repo — \
-                                 check config directory permissions. Browser tools disabled."
-                            );
-                            None
-                        }
+            // Reuse cached WryBackend/BrowserEngine across agent rebuilds
+            let browser_components = if let Some(cached) = BROWSER_COMPONENTS.get() {
+                Some(cached.clone())
+            } else {
+                match chatty_browser::backend::wry_backend::WryBackend::new().await {
+                    Ok(wry_backend) => {
+                        let backend = std::sync::Arc::new(wry_backend);
+                        let engine = chatty_browser::BrowserEngine::new(backend);
+                        let session = engine.session().clone();
+                        let active_tab = engine.active_tab().clone();
+                        let components = (session, active_tab);
+                        let _ = BROWSER_COMPONENTS.set(components.clone());
+                        Some(components)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "WryBackend failed to start (no display server?). \
+                             Browser tools will use HTTP fallback."
+                        );
+                        None
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "WryBackend failed to start (no display server?). \
-                         Browser tools will use HTTP fallback."
-                    );
-                    None
+            };
+
+            if let Some((session, active_tab)) = browser_components {
+                // Single LoginProfileRepository for both browse and auth tools
+                let profiles_repo = match chatty_browser::settings::LoginProfileRepository::new() {
+                    Ok(repo) => Some(std::sync::Arc::new(repo)),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "Failed to init login profile repo");
+                        None
+                    }
+                };
+
+                let login_profiles = if let Some(ref repo) = profiles_repo {
+                    repo.load_all().await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Credential vault for auth tool
+                let auth_components = chatty_browser::credential::vault::CredentialVault::new()
+                    .map(|vault| (std::sync::Arc::new(vault), profiles_repo))
+                    .ok();
+
+                match auth_components {
+                    Some((vault, Some(profiles_repo))) => Some((
+                        BrowseTool::new(
+                            session.clone(),
+                            active_tab.clone(),
+                            login_profiles.clone(),
+                        ),
+                        BrowserActionTool::new(session.clone(), active_tab.clone(), login_profiles),
+                        BrowserExtractTool::new(session.clone(), active_tab.clone()),
+                        BrowserAuthTool::new(
+                            session.clone(),
+                            active_tab.clone(),
+                            vault,
+                            profiles_repo,
+                        ),
+                        BrowserTabsTool::new(session, active_tab),
+                    )),
+                    _ => {
+                        tracing::error!(
+                            "Failed to initialize credential vault or profile repo — \
+                             check config directory permissions. Browser tools disabled."
+                        );
+                        None
+                    }
                 }
+            } else {
+                None
             }
         } else {
             tracing::info!("Browser tools disabled");

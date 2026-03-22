@@ -178,10 +178,10 @@ async fn main() -> Result<()> {
     let mut execution_settings = exec_settings_result.unwrap_or_default();
 
     // Default workspace_dir to CWD at launch so tools have an explicit root
-    if execution_settings.workspace_dir.is_none() {
-        if let Ok(cwd) = std::env::current_dir() {
-            execution_settings.workspace_dir = Some(cwd.to_string_lossy().to_string());
-        }
+    if execution_settings.workspace_dir.is_none()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        execution_settings.workspace_dir = Some(cwd.to_string_lossy().to_string());
     }
 
     // Apply CLI tool overrides

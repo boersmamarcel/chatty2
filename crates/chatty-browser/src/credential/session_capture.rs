@@ -32,6 +32,7 @@ impl SessionCapture {
     ///
     /// Returns the `TabId` so the caller can later call `capture_and_store`.
     pub async fn open_login_page(&self, url: &str) -> anyhow::Result<TabId> {
+        crate::session::validate_url_scheme(url)?;
         let tab = self.backend.new_tab().await?;
         self.backend.navigate(&tab, url).await?;
         Ok(tab)

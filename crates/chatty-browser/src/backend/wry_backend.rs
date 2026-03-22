@@ -1031,21 +1031,6 @@ pub struct WryBackend {
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Convenience impl for tests. Panics if the display server is unavailable.
-/// Production code should use `WryBackend::new()` and handle the error.
-impl Default for WryBackend {
-    fn default() -> Self {
-        // For macOS, new() is async. Use block_on in tests.
-        #[cfg(target_os = "macos")]
-        {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            rt.block_on(Self::new()).expect("WryBackend::new() failed")
-        }
-        #[cfg(not(target_os = "macos"))]
-        Self::new_sync().expect("WryBackend::new() failed — display server required")
-    }
-}
-
 impl WryBackend {
     /// Create a new wry backend (async version, required on macOS).
     ///
@@ -1188,17 +1173,32 @@ impl BrowserBackend for WryBackend {
     }
 
     async fn current_url(&self, tab: &TabId) -> anyhow::Result<String> {
-        #[cfg(target_os = "macos")]
-        {
-            let tab_id = tab.0.clone();
-            inner_macos::dispatch_main(move || inner_macos::current_url(&tab_id)).await
+        // Evaluate window.location.href to get the live URL, which accounts
+        // for redirects and history.pushState() changes that the cached
+        // tab.url would miss.
+        let result = self
+            .evaluate_js(tab, "return window.location.href;")
+            .await?;
+        // evaluate_js returns the result as a JSON-encoded string (quoted),
+        // so strip the outer quotes.
+        let url = result.trim().trim_matches('"').to_string();
+        if url.is_empty() || url == "null" || url == "undefined" {
+            // Fallback: if JS eval fails (e.g., about:blank before navigation),
+            // use the cached URL from the navigate call.
+            #[cfg(target_os = "macos")]
+            {
+                let tab_id = tab.0.clone();
+                return inner_macos::dispatch_main(move || inner_macos::current_url(&tab_id)).await;
+            }
+            #[cfg(not(target_os = "macos"))]
+            return self
+                .send(|reply| inner::WryCommand::CurrentUrl {
+                    tab_id: tab.clone(),
+                    reply,
+                })
+                .await?;
         }
-        #[cfg(not(target_os = "macos"))]
-        self.send(|reply| inner::WryCommand::CurrentUrl {
-            tab_id: tab.clone(),
-            reply,
-        })
-        .await?
+        Ok(url)
     }
 
     async fn evaluate_js(&self, tab: &TabId, script: &str) -> anyhow::Result<String> {

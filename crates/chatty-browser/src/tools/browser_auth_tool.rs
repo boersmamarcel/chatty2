@@ -200,6 +200,8 @@ impl BrowserAuthTool {
                     .await
                     .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
 
+                crate::session::validate_url_scheme(&profile.url_pattern)
+                    .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
                 self.session
                     .backend()
                     .navigate(&tab, &profile.url_pattern)
@@ -214,6 +216,8 @@ impl BrowserAuthTool {
             }
             (AuthMethod::FormLogin, LoginSecret::FormCredentials { username, password }) => {
                 // Navigate to login page
+                crate::session::validate_url_scheme(&profile.url_pattern)
+                    .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
                 self.session
                     .backend()
                     .navigate(&tab, &profile.url_pattern)

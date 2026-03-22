@@ -24,6 +24,20 @@ pub const PASSWORD_REDACTED: &str = "●●●●";
 /// so subsequent page fetches are authenticated.
 pub type SharedCookieJar = Arc<reqwest::cookie::Jar>;
 
+/// Validate that a URL uses an allowed scheme (http or https).
+///
+/// Prevents SSRF and local-file-read attacks when the LLM controls the URL.
+/// Rejects `file://`, `javascript:`, `data:`, and other dangerous schemes.
+pub fn validate_url_scheme(url: &str) -> anyhow::Result<()> {
+    let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL '{url}': {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => anyhow::bail!(
+            "URL scheme '{scheme}://' is not allowed. Only http:// and https:// URLs are supported."
+        ),
+    }
+}
+
 /// Escape a string for safe embedding in a JavaScript string literal.
 ///
 /// Handles: backslashes, quotes, newlines, carriage returns, tabs, and
@@ -89,6 +103,7 @@ impl BrowserSession {
         url: &str,
         login_profiles: &[crate::credential::types::LoginProfile],
     ) -> anyhow::Result<PageSnapshot> {
+        validate_url_scheme(url)?;
         self.backend.navigate(tab, url).await?;
         self.backend
             .wait_for_load(tab, DEFAULT_LOAD_TIMEOUT_MS)
@@ -492,7 +507,10 @@ impl BrowserSession {
 
     // ── Cookie helpers ───────────────────────────────────────────────────
 
-    /// Get all cookies for the current tab.
+    /// Get cookies for the current tab via `document.cookie`.
+    ///
+    /// **Note**: `HttpOnly` cookies are not visible to JavaScript and will be
+    /// omitted. See [`BrowserBackend::get_cookies`](crate::backend::BrowserBackend::get_cookies).
     pub async fn get_cookies(&self, tab: &TabId) -> anyhow::Result<Vec<Cookie>> {
         self.backend.get_cookies(tab).await
     }

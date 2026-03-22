@@ -17,6 +17,11 @@ thiserror.workspace = true
 # Agent tools
 rig-core.workspace = true
 
+# Encryption
+aes-gcm.workspace = true
+rand.workspace = true
+base64.workspace = true
+
 # URL parsing
 url = "2.5"
 
@@ -40,3 +45,6 @@ gpui = { workspace = true, optional = true }
 default = []
 # Enable this feature to get `impl gpui::Global` on browser types.
 gpui-globals = ["dep:gpui"]
+
+[dev-dependencies]
+tempfile.workspace = true
