@@ -208,7 +208,7 @@ impl BrowserAuthTool {
 
                 self.session
                     .backend()
-                    .wait_for_load(&tab, 15_000)
+                    .wait_for_load(&tab, crate::constants::PAGE_LOAD_TIMEOUT_MS)
                     .await
                     .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
             }
@@ -222,39 +222,19 @@ impl BrowserAuthTool {
 
                 self.session
                     .backend()
-                    .wait_for_load(&tab, 15_000)
+                    .wait_for_load(&tab, crate::constants::PAGE_LOAD_TIMEOUT_MS)
                     .await
                     .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
 
                 // Small delay for JS frameworks to hydrate the page
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    crate::constants::HYDRATION_DELAY_MS,
+                ))
+                .await;
 
                 // Fill username using nativeInputValueSetter for React/Vue/Angular compatibility
                 if let Some(user_sel) = &profile.username_selector {
-                    let js = format!(
-                        r#"(() => {{
-                            const el = document.querySelector("{}");
-                            if (!el) return JSON.stringify({{ error: "Username field not found: {}" }});
-                            const setter = Object.getOwnPropertyDescriptor(
-                                window.HTMLInputElement.prototype, 'value'
-                            )?.set || Object.getOwnPropertyDescriptor(
-                                window.HTMLTextAreaElement.prototype, 'value'
-                            )?.set;
-                            if (setter) {{
-                                setter.call(el, "{}");
-                            }} else {{
-                                el.value = "{}";
-                            }}
-                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                            return JSON.stringify({{ success: true }});
-                        }})()"#,
-                        crate::session::escape_js_string(user_sel),
-                        crate::session::escape_js_string(user_sel),
-                        crate::session::escape_js_string(username),
-                        crate::session::escape_js_string(username)
-                    );
+                    let js = crate::utils::fill_field_js(user_sel, username, "Username");
                     let result = self
                         .session
                         .backend()
@@ -265,34 +245,14 @@ impl BrowserAuthTool {
                 }
 
                 // Brief pause between fields
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    crate::constants::INTER_FIELD_DELAY_MS,
+                ))
+                .await;
 
                 // Fill password
                 if let Some(pass_sel) = &profile.password_selector {
-                    let js = format!(
-                        r#"(() => {{
-                            const el = document.querySelector("{}");
-                            if (!el) return JSON.stringify({{ error: "Password field not found: {}" }});
-                            const setter = Object.getOwnPropertyDescriptor(
-                                window.HTMLInputElement.prototype, 'value'
-                            )?.set || Object.getOwnPropertyDescriptor(
-                                window.HTMLTextAreaElement.prototype, 'value'
-                            )?.set;
-                            if (setter) {{
-                                setter.call(el, "{}");
-                            }} else {{
-                                el.value = "{}";
-                            }}
-                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                            return JSON.stringify({{ success: true }});
-                        }})()"#,
-                        crate::session::escape_js_string(pass_sel),
-                        crate::session::escape_js_string(pass_sel),
-                        crate::session::escape_js_string(password),
-                        crate::session::escape_js_string(password)
-                    );
+                    let js = crate::utils::fill_field_js(pass_sel, password, "Password");
                     let result = self
                         .session
                         .backend()
@@ -303,7 +263,10 @@ impl BrowserAuthTool {
                 }
 
                 // Brief pause before submit
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    crate::constants::INTER_FIELD_DELAY_MS,
+                ))
+                .await;
 
                 // Capture the URL before submitting so we can detect navigation
                 let url_before = self
@@ -337,7 +300,7 @@ impl BrowserAuthTool {
                 // Wait for navigation after login
                 self.session
                     .backend()
-                    .wait_for_load(&tab, 15_000)
+                    .wait_for_load(&tab, crate::constants::PAGE_LOAD_TIMEOUT_MS)
                     .await
                     .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
 
@@ -387,13 +350,13 @@ impl BrowserAuthTool {
 
     /// Check a JS evaluation result for errors returned by our form-fill snippets.
     fn check_js_result(result: &str, field_name: &str) -> Result<(), BrowserAuthError> {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
-            if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
-                tracing::warn!(field = field_name, error = error, "Form field JS error");
-                return Err(BrowserAuthError::AuthFailed(format!(
-                    "Failed to fill {field_name}: {error}"
-                )));
-            }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(result)
+            && let Some(error) = json.get("error").and_then(|v| v.as_str())
+        {
+            tracing::warn!(field = field_name, error = error, "Form field JS error");
+            return Err(BrowserAuthError::AuthFailed(format!(
+                "Failed to fill {field_name}: {error}"
+            )));
         }
         Ok(())
     }
@@ -441,19 +404,8 @@ impl BrowserAuthTool {
                 // POST credentials via HTTP
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
-                    .user_agent(crate::http_fallback::BROWSER_USER_AGENT)
-                    .default_headers({
-                        let mut headers = reqwest::header::HeaderMap::new();
-                        headers.insert(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8".parse().unwrap());
-                        headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
-                        headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, br".parse().unwrap());
-                        headers.insert("Sec-Fetch-Dest", "document".parse().unwrap());
-                        headers.insert("Sec-Fetch-Mode", "navigate".parse().unwrap());
-                        headers.insert("Sec-Fetch-Site", "none".parse().unwrap());
-                        headers.insert("Sec-Fetch-User", "?1".parse().unwrap());
-                        headers.insert("Upgrade-Insecure-Requests", "1".parse().unwrap());
-                        headers
-                    })
+                    .user_agent(crate::constants::BROWSER_USER_AGENT)
+                    .default_headers(crate::constants::default_browser_headers())
                     .redirect(reqwest::redirect::Policy::limited(10))
                     .cookie_provider(jar.clone())
                     .build()

@@ -992,12 +992,7 @@ where
                             .size(px(12.0))
                             .text_color(muted_text),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_text)
-                            .child(domain),
-                    )
+                    .child(div().text_xs().text_color(muted_text).child(domain))
                     .child(
                         Icon::new(CustomIcon::ExternalLink)
                             .size(px(10.0))

@@ -12,11 +12,10 @@ fn main() {
         if let Ok(output) = std::process::Command::new("xcrun")
             .args(["--show-sdk-path"])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                println!("cargo:rustc-link-search=native={sdk_path}/usr/lib");
-            }
+            let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            println!("cargo:rustc-link-search=native={sdk_path}/usr/lib");
         }
     }
 }

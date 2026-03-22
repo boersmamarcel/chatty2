@@ -27,10 +27,10 @@
 use async_trait::async_trait;
 
 use super::{BrowserBackend, Cookie, TabId, TabInfo};
-
-/// User agent string for the WebView — matches a real Chrome browser.
-const WEBVIEW_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-    AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+use crate::constants::{
+    BROWSER_USER_AGENT, INITIAL_TAB_URL, IPC_RESULT_PREFIX, JS_ERROR_PREFIX, MAX_STABILIZE_SECS,
+    MIN_CONTENT_LENGTH, POLL_INTERVAL_MS, STABLE_CHECK_COUNT,
+};
 
 /// Anti-fingerprint JavaScript injected on every page load via
 /// `with_initialization_script`. Masks common bot-detection signals.
@@ -78,15 +78,28 @@ mod inner_macos {
     }
 
     /// Dispatch a `Send + 'static` closure to the main thread asynchronously.
+    ///
+    /// # Safety contract (upheld by construction)
+    ///
+    /// `Box::into_raw` produces a `*mut F` that is cast to `*mut c_void` and
+    /// passed to `dispatch_async_f`. The GCD runtime later calls `trampoline::<F>`
+    /// with the same pointer, where `Box::from_raw` reclaims ownership. Type
+    /// safety holds because `trampoline` is monomorphised with the same `F` that
+    /// was boxed — the pointer is never shared or reused.
     fn dispatch_main_async<F: FnOnce() + Send + 'static>(f: F) {
         let boxed: Box<F> = Box::new(f);
         let raw = Box::into_raw(boxed) as *mut c_void;
 
         unsafe extern "C" fn trampoline<F: FnOnce() + Send + 'static>(ctx: *mut c_void) {
+            // SAFETY: `ctx` is the pointer returned by `Box::into_raw` above,
+            // and GCD guarantees the callback fires exactly once.
             let f = unsafe { Box::from_raw(ctx as *mut F) };
             f();
         }
 
+        // SAFETY: `_dispatch_main_q` is a valid dispatch queue provided by
+        // libdispatch. `raw` is a heap-allocated `Box<F>` that will be
+        // reclaimed in `trampoline`.
         unsafe {
             let main_queue = &raw const _dispatch_main_q as *mut c_void;
             dispatch_async_f(main_queue, raw, trampoline::<F>);
@@ -163,8 +176,8 @@ mod inner_macos {
 
             #[link(name = "objc", kind = "dylib")]
             unsafe extern "C" {
-                fn objc_getClass(name: *const u8) -> *mut c_void;
-                fn sel_registerName(name: *const u8) -> *mut c_void;
+                fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
+                fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
                 fn objc_msgSend() -> *mut c_void; // C varargs ABI – transmuted to match each call site
             }
 
@@ -189,15 +202,15 @@ mod inner_macos {
             }
 
             unsafe {
-                let ns_window_class = objc_getClass(b"NSWindow\0".as_ptr());
+                let ns_window_class = objc_getClass(c"NSWindow".as_ptr());
                 if ns_window_class.is_null() {
                     anyhow::bail!("Failed to get NSWindow class");
                 }
 
-                let alloc_sel = sel_registerName(b"alloc\0".as_ptr());
+                let alloc_sel = sel_registerName(c"alloc".as_ptr());
                 let init_sel =
-                    sel_registerName(b"initWithContentRect:styleMask:backing:defer:\0".as_ptr());
-                let set_released_sel = sel_registerName(b"setReleasedWhenClosed:\0".as_ptr());
+                    sel_registerName(c"initWithContentRect:styleMask:backing:defer:".as_ptr());
+                let set_released_sel = sel_registerName(c"setReleasedWhenClosed:".as_ptr());
 
                 // [NSWindow alloc]
                 let alloc_fn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
@@ -238,7 +251,7 @@ mod inner_macos {
                 set_fn(window, set_released_sel, 0);
 
                 // [window contentView] — AppKitWindowHandle requires the NSView
-                let content_view_sel = sel_registerName(b"contentView\0".as_ptr());
+                let content_view_sel = sel_registerName(c"contentView".as_ptr());
                 let view_fn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
                     std::mem::transmute(objc_msgSend as *const ());
                 let content_view = view_fn(window, content_view_sel);
@@ -260,16 +273,16 @@ mod inner_macos {
                 // [window close] then release
                 #[link(name = "objc", kind = "dylib")]
                 unsafe extern "C" {
-                    fn sel_registerName(name: *const u8) -> *mut c_void;
+                    fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
                     fn objc_msgSend() -> *mut c_void;
                 }
                 unsafe {
-                    let close_sel = sel_registerName(b"close\0".as_ptr());
+                    let close_sel = sel_registerName(c"close".as_ptr());
                     let send: unsafe extern "C" fn(*mut c_void, *mut c_void) =
                         std::mem::transmute(objc_msgSend as *const ());
                     send(self.ns_window, close_sel);
 
-                    let release_sel = sel_registerName(b"release\0".as_ptr());
+                    let release_sel = sel_registerName(c"release".as_ptr());
                     send(self.ns_window, release_sel);
                 }
             }
@@ -316,12 +329,12 @@ mod inner_macos {
 
             let tab_id_for_ipc = tab_id_str.clone();
             let webview = wry::WebViewBuilder::new()
-                .with_url("about:blank")
-                .with_user_agent(super::WEBVIEW_USER_AGENT)
+                .with_url(super::INITIAL_TAB_URL)
+                .with_user_agent(super::BROWSER_USER_AGENT)
                 .with_initialization_script(super::ANTI_FINGERPRINT_JS)
                 .with_ipc_handler(move |msg| {
                     let body = msg.body();
-                    if let Some(result) = body.strip_prefix("__chatty_js_result:") {
+                    if let Some(result) = body.strip_prefix(super::IPC_RESULT_PREFIX) {
                         handle_js_result(&tab_id_for_ipc, result.to_string());
                     }
                 })
@@ -333,7 +346,7 @@ mod inner_macos {
                 TabState {
                     window,
                     webview,
-                    url: "about:blank".to_string(),
+                    url: super::INITIAL_TAB_URL.to_string(),
                     title: String::new(),
                 },
             );
@@ -394,14 +407,16 @@ mod inner_macos {
     ) {
         with_state(|state| {
             if let Some(tab) = state.tabs.get(tab_id) {
+                let ipc_prefix = super::IPC_RESULT_PREFIX;
+                let err_prefix = super::JS_ERROR_PREFIX;
                 let wrapped = format!(
                     r#"(function() {{
                         try {{
                             var __r = (function() {{ {script} }})();
                             if (__r === undefined) __r = null;
-                            window.ipc.postMessage("__chatty_js_result:" + JSON.stringify(__r));
+                            window.ipc.postMessage("{ipc_prefix}" + JSON.stringify(__r));
                         }} catch(e) {{
-                            window.ipc.postMessage("__chatty_js_result:" + JSON.stringify("__error:" + e.toString()));
+                            window.ipc.postMessage("{ipc_prefix}" + JSON.stringify("{err_prefix}" + e.toString()));
                         }}
                     }})()"#
                 );
@@ -434,10 +449,11 @@ mod inner_macos {
     // ── Internal helpers ────────────────────────────────────────────────
 
     fn handle_js_result(tab_id: &str, result: String) {
+        let quoted_err_prefix = format!("\"{}", super::JS_ERROR_PREFIX);
         with_state(|state| {
             if let Some(waiters) = state.js_callbacks.get_mut(tab_id) {
                 if let Some(reply) = waiters.pop() {
-                    if let Some(err_msg) = result.strip_prefix("\"__error:") {
+                    if let Some(err_msg) = result.strip_prefix(&quoted_err_prefix) {
                         let err_msg = err_msg.trim_end_matches('"');
                         let _ = reply.send(Err(anyhow::anyhow!("JS error: {err_msg}")));
                     } else {
@@ -485,13 +501,10 @@ mod inner_macos {
     /// Dispatched to the main thread. The WKWebView `takeSnapshot` callback
     /// fires asynchronously on the main thread; the result is sent back via
     /// the `reply` oneshot channel.
-    pub(super) fn screenshot(
-        tab_id: &str,
-        reply: oneshot::Sender<anyhow::Result<Vec<u8>>>,
-    ) {
+    pub(super) fn screenshot(tab_id: &str, reply: oneshot::Sender<anyhow::Result<Vec<u8>>>) {
         #[link(name = "objc", kind = "dylib")]
         unsafe extern "C" {
-            fn sel_registerName(name: *const u8) -> *mut c_void;
+            fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
             fn objc_msgSend() -> *mut c_void;
         }
 
@@ -501,24 +514,28 @@ mod inner_macos {
                 return;
             };
 
+            // SAFETY: `wk_webview` is a retained WKWebView from wry. We cast
+            // its raw pointer to `*mut c_void` for the objc_msgSend call.
+            // The `reply_cell` Mutex<Option<Sender>> pattern gives FnOnce
+            // semantics inside a Fn closure: the first invocation takes the
+            // Sender, subsequent invocations (if any) are no-ops.
             unsafe {
                 use wry::WebViewExtMacOS;
                 let wk_webview = tab.webview.webview();
                 let wk_ptr = objc2::rc::Retained::as_ptr(&wk_webview) as *mut c_void;
 
-                // Wrap the oneshot sender for use inside a Fn closure (block2 requires Fn, not FnOnce).
                 let reply_cell = Mutex::new(Some(reply));
 
                 let handler = block2::RcBlock::new(
                     move |image: *mut objc2::runtime::AnyObject,
                           _error: *mut objc2::runtime::AnyObject| {
                         let Some(tx) = reply_cell.lock().ok().and_then(|mut g| g.take()) else {
+                            tracing::debug!("screenshot callback fired more than once — ignoring");
                             return;
                         };
 
                         if image.is_null() {
-                            let _ =
-                                tx.send(Err(anyhow::anyhow!("Screenshot returned nil image")));
+                            let _ = tx.send(Err(anyhow::anyhow!("Screenshot returned nil image")));
                             return;
                         }
 
@@ -534,33 +551,35 @@ mod inner_macos {
                 );
 
                 // [wkWebView takeSnapshotWithConfiguration:nil completionHandler:handler]
-                let sel = sel_registerName(
-                    b"takeSnapshotWithConfiguration:completionHandler:\0".as_ptr(),
-                );
+                let sel =
+                    sel_registerName(c"takeSnapshotWithConfiguration:completionHandler:".as_ptr());
                 type TakeSnapshotFn = unsafe extern "C" fn(
                     *mut c_void,
                     *mut c_void,
                     *mut c_void,
                     &block2::Block<
-                        dyn Fn(
-                            *mut objc2::runtime::AnyObject,
-                            *mut objc2::runtime::AnyObject,
-                        ),
+                        dyn Fn(*mut objc2::runtime::AnyObject, *mut objc2::runtime::AnyObject),
                     >,
                 );
-                let send_fn: TakeSnapshotFn =
-                    std::mem::transmute(objc_msgSend as *const ());
+                let send_fn: TakeSnapshotFn = std::mem::transmute(objc_msgSend as *const ());
                 send_fn(wk_ptr, sel, std::ptr::null_mut(), &handler);
             }
         });
     }
 
     /// Convert an NSImage to PNG bytes via TIFFRepresentation → NSBitmapImageRep → PNG.
+    ///
+    /// # Safety
+    ///
+    /// `nsimage` must be a valid, retained `NSImage *` (non-null). The caller
+    /// must ensure the image is not deallocated for the duration of this call.
+    /// All intermediate ObjC objects (`tiff_data`, `bitmap_rep`, `png_data`)
+    /// are autoreleased by the runtime and remain valid within this scope.
     unsafe fn nsimage_to_png(nsimage: *mut c_void) -> anyhow::Result<Vec<u8>> {
         #[link(name = "objc", kind = "dylib")]
         unsafe extern "C" {
-            fn objc_getClass(name: *const u8) -> *mut c_void;
-            fn sel_registerName(name: *const u8) -> *mut c_void;
+            fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
+            fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
             fn objc_msgSend() -> *mut c_void;
         }
 
@@ -576,33 +595,33 @@ mod inner_macos {
             let send_len: MsgSendLen = std::mem::transmute(objc_msgSend as *const ());
 
             // [nsimage TIFFRepresentation] → NSData*
-            let tiff_sel = sel_registerName(b"TIFFRepresentation\0".as_ptr());
+            let tiff_sel = sel_registerName(c"TIFFRepresentation".as_ptr());
             let tiff_data = send0(nsimage, tiff_sel);
             if tiff_data.is_null() {
                 anyhow::bail!("TIFFRepresentation returned nil");
             }
 
             // [NSBitmapImageRep imageRepWithData:tiffData] → NSBitmapImageRep*
-            let bitmap_class = objc_getClass(b"NSBitmapImageRep\0".as_ptr());
+            let bitmap_class = objc_getClass(c"NSBitmapImageRep".as_ptr());
             if bitmap_class.is_null() {
                 anyhow::bail!("Failed to get NSBitmapImageRep class");
             }
-            let image_rep_sel = sel_registerName(b"imageRepWithData:\0".as_ptr());
+            let image_rep_sel = sel_registerName(c"imageRepWithData:".as_ptr());
             let bitmap_rep = send1(bitmap_class, image_rep_sel, tiff_data);
             if bitmap_rep.is_null() {
                 anyhow::bail!("imageRepWithData: returned nil");
             }
 
             // [bitmapRep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
-            let repr_sel = sel_registerName(b"representationUsingType:properties:\0".as_ptr());
+            let repr_sel = sel_registerName(c"representationUsingType:properties:".as_ptr());
             let png_type: u64 = 4; // NSBitmapImageFileTypePNG
 
             // Create empty NSDictionary: [NSDictionary dictionary]
-            let ns_dict_class = objc_getClass(b"NSDictionary\0".as_ptr());
+            let ns_dict_class = objc_getClass(c"NSDictionary".as_ptr());
             if ns_dict_class.is_null() {
                 anyhow::bail!("Failed to get NSDictionary class");
             }
-            let dict_sel = sel_registerName(b"dictionary\0".as_ptr());
+            let dict_sel = sel_registerName(c"dictionary".as_ptr());
             let empty_dict = send0(ns_dict_class, dict_sel);
 
             type MsgSendRepr =
@@ -614,10 +633,10 @@ mod inner_macos {
             }
 
             // Extract raw bytes from NSData
-            let length_sel = sel_registerName(b"length\0".as_ptr());
+            let length_sel = sel_registerName(c"length".as_ptr());
             let length = send_len(png_data, length_sel) as usize;
 
-            let bytes_sel = sel_registerName(b"bytes\0".as_ptr());
+            let bytes_sel = sel_registerName(c"bytes".as_ptr());
             let bytes_ptr = send0(png_data, bytes_sel) as *const u8;
             if bytes_ptr.is_null() || length == 0 {
                 anyhow::bail!("NSData bytes returned null or zero length");
@@ -808,12 +827,12 @@ mod inner {
                     let proxy = ipc_proxy.clone();
 
                     let webview = wry::WebViewBuilder::new()
-                        .with_url("about:blank")
-                        .with_user_agent(super::WEBVIEW_USER_AGENT)
+                        .with_url(super::INITIAL_TAB_URL)
+                        .with_user_agent(super::BROWSER_USER_AGENT)
                         .with_initialization_script(super::ANTI_FINGERPRINT_JS)
                         .with_ipc_handler(move |msg| {
                             let body = msg.body();
-                            if let Some(result) = body.strip_prefix("__chatty_js_result:") {
+                            if let Some(result) = body.strip_prefix(super::IPC_RESULT_PREFIX) {
                                 let _ = proxy.send_event(WryCommand::JsResult {
                                     tab_id: tab_id_for_ipc.clone(),
                                     result: result.to_string(),
@@ -828,7 +847,7 @@ mod inner {
                         TabState {
                             window,
                             webview,
-                            url: "about:blank".to_string(),
+                            url: super::INITIAL_TAB_URL.to_string(),
                             title: String::new(),
                         },
                     );
@@ -881,14 +900,16 @@ mod inner {
                 reply,
             } => {
                 if let Some(tab) = tabs.get(&tab_id.0) {
+                    let ipc_prefix = super::IPC_RESULT_PREFIX;
+                    let err_prefix = super::JS_ERROR_PREFIX;
                     let wrapped = format!(
                         r#"(function() {{
                             try {{
                                 var __r = (function() {{ {script} }})();
                                 if (__r === undefined) __r = null;
-                                window.ipc.postMessage("__chatty_js_result:" + JSON.stringify(__r));
+                                window.ipc.postMessage("{ipc_prefix}" + JSON.stringify(__r));
                             }} catch(e) {{
-                                window.ipc.postMessage("__chatty_js_result:" + JSON.stringify("__error:" + e.toString()));
+                                window.ipc.postMessage("{ipc_prefix}" + JSON.stringify("{err_prefix}" + e.toString()));
                             }}
                         }})()"#
                     );
@@ -947,9 +968,10 @@ mod inner {
             }
 
             WryCommand::JsResult { tab_id, result } => {
+                let quoted_err_prefix = format!("\"{}", super::JS_ERROR_PREFIX);
                 if let Some(waiters) = js_callbacks.get_mut(&tab_id) {
                     if let Some(reply) = waiters.pop() {
-                        if let Some(err_msg) = result.strip_prefix("\"__error:") {
+                        if let Some(err_msg) = result.strip_prefix(&quoted_err_prefix) {
                             let err_msg = err_msg.trim_end_matches('"');
                             let _ = reply.send(Err(anyhow::anyhow!("JS error: {err_msg}")));
                         } else {
@@ -1268,7 +1290,7 @@ impl BrowserBackend for WryBackend {
             // has actually rendered (handles SPAs that render after DOMContentLoaded).
             let deadline =
                 tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-            let poll_interval = std::time::Duration::from_millis(500);
+            let poll_interval = std::time::Duration::from_millis(POLL_INTERVAL_MS);
 
             // Phase 1: Wait for document.readyState == "complete"
             loop {
@@ -1276,9 +1298,7 @@ impl BrowserBackend for WryBackend {
                     tracing::debug!("wait_for_load: timed out waiting for readyState=complete");
                     break;
                 }
-                let result = self.evaluate_js(tab,
-                    r#"document.readyState"#
-                ).await;
+                let result = self.evaluate_js(tab, r#"document.readyState"#).await;
                 if let Ok(state) = &result {
                     let s = state.trim().trim_matches('"');
                     if s == "complete" {
@@ -1292,21 +1312,23 @@ impl BrowserBackend for WryBackend {
             let mut last_len: usize = 0;
             let mut stable_count = 0u32;
             let stabilize_deadline = deadline.min(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(MAX_STABILIZE_SECS),
             );
             loop {
                 if tokio::time::Instant::now() >= stabilize_deadline {
                     break;
                 }
-                let result = self.evaluate_js(tab,
-                    r#"(document.body && document.body.innerText || "").length"#
-                ).await;
+                let result = self
+                    .evaluate_js(
+                        tab,
+                        r#"(document.body && document.body.innerText || "").length"#,
+                    )
+                    .await;
                 if let Ok(len_str) = &result {
                     let len = len_str.trim().parse::<usize>().unwrap_or(0);
-                    if len > 100 && len == last_len {
+                    if len > MIN_CONTENT_LENGTH && len == last_len {
                         stable_count += 1;
-                        if stable_count >= 3 {
-                            // Content has been stable for 3 polls (~1.5s)
+                        if stable_count >= STABLE_CHECK_COUNT {
                             tracing::debug!(
                                 content_length = len,
                                 "wait_for_load: content stabilized"

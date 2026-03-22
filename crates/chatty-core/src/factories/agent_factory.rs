@@ -2073,7 +2073,7 @@ mod tests {
         // regardless of which optional tools are enabled.
         let names = active_native_tool_names(
             false, false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
         );
         assert!(
             names.contains("read_skill"),
@@ -2086,7 +2086,7 @@ mod tests {
     fn active_native_tool_names_includes_search_tools() {
         let names = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
         );
 
         assert!(names.contains("list_tools"));
@@ -2099,7 +2099,7 @@ mod tests {
     fn filter_mcp_tool_info_skips_native_and_mcp_duplicates() {
         let reserved = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
         );
 
         let filtered = filter_mcp_tool_info(

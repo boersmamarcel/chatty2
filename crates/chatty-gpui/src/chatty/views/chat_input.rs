@@ -290,7 +290,7 @@ pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> 
                     .to_ascii_lowercase()
                     .starts_with(&query)
         })
-        .map(|cmd| SlashMenuItem::Command(cmd))
+        .map(SlashMenuItem::Command)
         .collect();
 
     let skill_items = skills
@@ -1286,24 +1286,22 @@ impl RenderOnce for ChatInput {
 
                                                                     if let Ok(Some(paths)) =
                                                                         receiver.await.ok()?
-                                                                    {
-                                                                        if let Some(path) =
+                                                                        && let Some(path) =
                                                                             paths.into_iter().next()
-                                                                        {
-                                                                            state
-                                                                                .update(
-                                                                                    cx,
-                                                                                    |state, cx| {
-                                                                                        state.set_working_dir(
-                                                                                            Some(
-                                                                                                path,
-                                                                                            ),
-                                                                                            cx,
-                                                                                        );
-                                                                                    },
-                                                                                )
-                                                                                .ok()?;
-                                                                        }
+                                                                    {
+                                                                        state
+                                                                            .update(
+                                                                                cx,
+                                                                                |state, cx| {
+                                                                                    state.set_working_dir(
+                                                                                        Some(
+                                                                                            path,
+                                                                                        ),
+                                                                                        cx,
+                                                                                    );
+                                                                                },
+                                                                            )
+                                                                            .ok()?;
                                                                     }
                                                                     Some(())
                                                                 })

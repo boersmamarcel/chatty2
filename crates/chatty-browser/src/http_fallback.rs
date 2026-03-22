@@ -5,21 +5,14 @@
 //! [`PageSnapshot`]. This gives the LLM useful page content without requiring
 //! a full browser engine.
 
+use crate::constants::{BROWSER_USER_AGENT, MAX_LINKS, MAX_TEXT_CONTENT_LEN};
 use crate::page::{LinkInfo, PageSnapshot};
 use crate::session::SharedCookieJar;
+use crate::utils::truncate_text;
 use tracing::debug;
-
-/// Realistic browser User-Agent string used for HTTP requests.
-pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// Request timeout for HTTP fallback.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
-
-/// Maximum text content length in characters.
-const MAX_TEXT_LEN: usize = 3_000;
-
-/// Maximum number of links to extract.
-const MAX_LINKS: usize = 50;
 
 /// Fetch a URL via HTTP GET and build a [`PageSnapshot`] from the HTML response.
 pub async fn fetch_and_snapshot(url: &str) -> anyhow::Result<PageSnapshot> {
@@ -37,18 +30,7 @@ pub async fn fetch_and_snapshot_with_cookies(
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent(BROWSER_USER_AGENT)
-        .default_headers({
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8".parse().unwrap());
-            headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
-            headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, br".parse().unwrap());
-            headers.insert("Sec-Fetch-Dest", "document".parse().unwrap());
-            headers.insert("Sec-Fetch-Mode", "navigate".parse().unwrap());
-            headers.insert("Sec-Fetch-Site", "none".parse().unwrap());
-            headers.insert("Sec-Fetch-User", "?1".parse().unwrap());
-            headers.insert("Upgrade-Insecure-Requests", "1".parse().unwrap());
-            headers
-        })
+        .default_headers(crate::constants::default_browser_headers())
         .redirect(reqwest::redirect::Policy::limited(10));
 
     if let Some(jar) = cookie_jar {
@@ -76,7 +58,7 @@ pub async fn fetch_and_snapshot_with_cookies(
 
     // Extract text content
     let text_content = html_to_text(&body);
-    let text_content = truncate_text(&text_content, MAX_TEXT_LEN);
+    let text_content = truncate_text(&text_content, MAX_TEXT_CONTENT_LEN);
 
     // Extract links
     let links = extract_links(&body, url);
@@ -381,23 +363,6 @@ fn html_to_text(html: &str) -> String {
     }
 
     cleaned.trim().to_string()
-}
-
-/// Truncate text at a word boundary, appending '…' if truncated.
-fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
-    }
-    let safe_end = text
-        .char_indices()
-        .take_while(|(i, _)| *i <= max_len)
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let truncation_point = text[..safe_end].rfind(' ').unwrap_or(safe_end);
-    let mut result = text[..truncation_point].to_string();
-    result.push('…');
-    result
 }
 
 #[cfg(test)]

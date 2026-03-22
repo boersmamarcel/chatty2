@@ -21,6 +21,20 @@ const DEFAULT_USERNAME_SELECTOR: &str =
 const DEFAULT_PASSWORD_SELECTOR: &str = r#"input[type="password"]"#;
 const DEFAULT_SUBMIT_SELECTOR: &str = r#"button[type="submit"], input[type="submit"]"#;
 
+/// Status indicator colors (no theme success/warning tokens available).
+const STATUS_READY_COLOR: gpui::Hsla = gpui::Hsla {
+    h: 120. / 360.,
+    s: 0.6,
+    l: 0.4,
+    a: 1.,
+};
+const STATUS_NEEDS_SETUP_COLOR: gpui::Hsla = gpui::Hsla {
+    h: 35. / 360.,
+    s: 0.9,
+    l: 0.5,
+    a: 1.,
+};
+
 // ── Global singleton ────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -57,6 +71,7 @@ impl CredentialsTableView {
         let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
 
         let view_entity = cx.entity().clone();
+        let muted_fg = cx.theme().muted_foreground;
 
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
@@ -80,7 +95,7 @@ impl CredentialsTableView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(gpui::hsla(0., 0., 0.5, 1.))
+                                            .text_color(muted_fg)
                                             .child("A short unique name (e.g. github, strava)"),
                                     ),
                             )
@@ -93,7 +108,7 @@ impl CredentialsTableView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(gpui::hsla(0., 0., 0.5, 1.))
+                                            .text_color(muted_fg)
                                             .child("The login page URL that triggers authentication"),
                                     ),
                             )
@@ -110,7 +125,7 @@ impl CredentialsTableView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(gpui::hsla(0., 0., 0.5, 1.))
+                                            .text_color(muted_fg)
                                             .child(
                                                 "Optional: CSS selectors for the login form fields. \
                                                  If left empty, common selectors are auto-detected \
@@ -154,7 +169,7 @@ impl CredentialsTableView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(gpui::hsla(0., 0., 0.5, 1.))
+                                            .text_color(muted_fg)
                                             .child(
                                                 "Stored securely in the OS keyring. \
                                                  Providing credentials is recommended — the AI will \
@@ -416,9 +431,9 @@ impl CredentialsTableView {
         };
 
         let (status_label, status_color) = if has_secret {
-            ("✓ Ready", gpui::hsla(120. / 360., 0.6, 0.4, 1.))
+            ("✓ Ready", STATUS_READY_COLOR)
         } else {
-            ("⚠ Needs setup", gpui::hsla(35. / 360., 0.9, 0.5, 1.))
+            ("⚠ Needs setup", STATUS_NEEDS_SETUP_COLOR)
         };
 
         h_flex()

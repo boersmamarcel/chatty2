@@ -7,14 +7,10 @@
 use std::sync::Arc;
 
 use crate::backend::{BrowserBackend, Cookie, TabId};
+use crate::constants::{MAX_ELEMENTS, MAX_LINKS, MAX_TEXT_CONTENT_LEN};
 use crate::page::{FormField, FormInfo, InteractiveElement, LinkInfo, LoginHint, PageSnapshot};
+use crate::utils::truncate_text;
 
-/// Maximum characters for `text_content` in a page snapshot.
-const MAX_TEXT_CONTENT_LEN: usize = 3_000;
-/// Maximum number of interactive elements to include.
-const MAX_ELEMENTS: usize = 50;
-/// Maximum number of links to include.
-const MAX_LINKS: usize = 50;
 /// Default page load timeout in milliseconds.
 const DEFAULT_LOAD_TIMEOUT_MS: u64 = 15_000;
 /// Redaction sentinel for password fields.
@@ -54,26 +50,6 @@ pub fn escape_js_string(s: &str) -> String {
         }
     }
     out
-}
-
-/// Truncate a string to approximately `max_len` characters at a word boundary,
-/// respecting UTF-8 boundaries. Appends '…' if truncated.
-fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
-    }
-    // Find a safe char boundary at or before max_len
-    let safe_end = text
-        .char_indices()
-        .take_while(|(i, _)| *i <= max_len)
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    // Try to break at a word boundary
-    let truncation_point = text[..safe_end].rfind(' ').unwrap_or(safe_end);
-    let mut result = text[..truncation_point].to_string();
-    result.push('…');
-    result
 }
 
 /// High-level browser session wrapping a [`BrowserBackend`].
@@ -214,17 +190,17 @@ impl BrowserSession {
 
             match self.backend.evaluate_js(tab, &js).await {
                 Ok(result) => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
-                        if json["dismissed"].as_bool() == Some(true) {
-                            tracing::info!(
-                                result = %result,
-                                attempt = attempt,
-                                "Auto-dismissed cookie consent banner"
-                            );
-                            // Wait for dismiss animation
-                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                            return;
-                        }
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result)
+                        && json["dismissed"].as_bool() == Some(true)
+                    {
+                        tracing::info!(
+                            result = %result,
+                            attempt = attempt,
+                            "Auto-dismissed cookie consent banner"
+                        );
+                        // Wait for dismiss animation
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        return;
                     }
                 }
                 Err(e) => {

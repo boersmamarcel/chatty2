@@ -21,12 +21,14 @@
 use std::sync::Arc;
 
 pub mod backend;
+pub mod constants;
 pub mod credential;
 pub mod http_fallback;
 pub mod page;
 pub mod session;
 pub mod settings;
 pub mod tools;
+pub mod utils;
 
 // ── GPUI integration (optional feature) ──────────────────────────────────────
 #[cfg(feature = "gpui-globals")]

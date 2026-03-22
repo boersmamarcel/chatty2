@@ -31,6 +31,7 @@ pub struct PageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// File path to a PNG screenshot of the page (saved to cache directory).
+    /// Skipped during serialization — only used by the UI for thumbnail display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot_path: Option<String>,
 }
