@@ -214,7 +214,7 @@ impl BrowserSession {
 
     /// JavaScript that finds and clicks common cookie consent "accept" buttons.
     fn cookie_dismiss_js() -> String {
-        r#"(() => {
+        r#"
             // Helper: check if element is visible (works for position:fixed too)
             function isVisible(el) {
                 if (!el) return false;
@@ -314,7 +314,7 @@ impl BrowserSession {
             }
 
             return JSON.stringify({ dismissed: false });
-        })()"#
+        "#
             .to_string()
     }
 
@@ -323,7 +323,7 @@ impl BrowserSession {
     /// Click an interactive element by its stable ID (e.g., "e1").
     pub async fn click_element(&self, tab: &TabId, element_id: &str) -> anyhow::Result<String> {
         let js = format!(
-            r#"(() => {{
+            r#"
                 const els = document.querySelectorAll(
                     'a, button, input, select, textarea, [role="button"], [onclick]'
                 );
@@ -332,7 +332,7 @@ impl BrowserSession {
                 const el = els[idx];
                 el.click();
                 return JSON.stringify({{ success: true, tag: el.tagName.toLowerCase() }});
-            }})()"#,
+            "#,
             id = element_id
         );
         self.backend.evaluate_js(tab, &js).await
@@ -347,7 +347,7 @@ impl BrowserSession {
     ) -> anyhow::Result<String> {
         let escaped = escape_js_string(value);
         let js = format!(
-            r#"(() => {{
+            r#"
                 const els = document.querySelectorAll(
                     'a, button, input, select, textarea, [role="button"], [onclick]'
                 );
@@ -367,7 +367,7 @@ impl BrowserSession {
                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 return JSON.stringify({{ success: true, tag: el.tagName.toLowerCase() }});
-            }})()"#,
+            "#,
             id = element_id,
             val = escaped
         );
@@ -383,7 +383,7 @@ impl BrowserSession {
     ) -> anyhow::Result<String> {
         let escaped = escape_js_string(option_value);
         let js = format!(
-            r#"(() => {{
+            r#"
                 const els = document.querySelectorAll(
                     'a, button, input, select, textarea, [role="button"], [onclick]'
                 );
@@ -394,7 +394,7 @@ impl BrowserSession {
                 el.value = "{val}";
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 return JSON.stringify({{ success: true }});
-            }})()"#,
+            "#,
             id = element_id,
             val = escaped
         );
@@ -404,14 +404,14 @@ impl BrowserSession {
     /// Scroll the page by a given number of pixels (positive = down).
     pub async fn scroll(&self, tab: &TabId, pixels: i32) -> anyhow::Result<String> {
         let js = format!(
-            r#"(() => {{
+            r#"
                 window.scrollBy(0, {pixels});
                 return JSON.stringify({{
                     success: true,
                     scrollY: window.scrollY,
                     scrollHeight: document.body.scrollHeight
                 }});
-            }})()"#,
+            "#,
             pixels = pixels
         );
         self.backend.evaluate_js(tab, &js).await
@@ -426,16 +426,19 @@ impl BrowserSession {
     ) -> anyhow::Result<String> {
         let escaped = escape_js_string(selector);
         let js = format!(
-            r#"(async () => {{
+            r#"
                 const deadline = Date.now() + {timeout};
-                while (Date.now() < deadline) {{
-                    if (document.querySelector("{sel}")) {{
-                        return JSON.stringify({{ found: true }});
+                async function poll() {{
+                    while (Date.now() < deadline) {{
+                        if (document.querySelector("{sel}")) {{
+                            return JSON.stringify({{ found: true }});
+                        }}
+                        await new Promise(r => setTimeout(r, 100));
                     }}
-                    await new Promise(r => setTimeout(r, 100));
+                    return JSON.stringify({{ found: false, error: "Timeout waiting for selector: {sel}" }});
                 }}
-                return JSON.stringify({{ found: false, error: "Timeout waiting for selector: {sel}" }});
-            }})()"#,
+                return poll();
+            "#,
             timeout = timeout_ms,
             sel = escaped
         );
@@ -446,11 +449,11 @@ impl BrowserSession {
 
     /// Extract all visible text from the current page.
     pub async fn extract_text(&self, tab: &TabId) -> anyhow::Result<String> {
-        let js = r#"(() => {
+        let js = r#"
             const clone = document.body.cloneNode(true);
             clone.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
             return JSON.stringify({ text: clone.innerText || clone.textContent || "" });
-        })()"#;
+        "#;
         let raw = self.backend.evaluate_js(tab, js).await?;
         let data: serde_json::Value = serde_json::from_str(&raw)?;
         Ok(data["text"].as_str().unwrap_or_default().to_string())
@@ -458,13 +461,13 @@ impl BrowserSession {
 
     /// Extract all links from the current page.
     pub async fn extract_links(&self, tab: &TabId) -> anyhow::Result<Vec<LinkInfo>> {
-        let js = r#"(() => {
+        let js = r#"
             const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map(a => ({
                 text: (a.innerText || a.textContent || "").trim().substring(0, 100),
                 href: a.href
             }));
             return JSON.stringify(links);
-        })()"#;
+        "#;
         let raw = self.backend.evaluate_js(tab, js).await?;
         let links: Vec<LinkInfo> = serde_json::from_str(&raw)?;
         Ok(links)
@@ -472,7 +475,7 @@ impl BrowserSession {
 
     /// Extract tables from the current page as arrays of rows.
     pub async fn extract_tables(&self, tab: &TabId) -> anyhow::Result<Vec<Vec<Vec<String>>>> {
-        let js = r#"(() => {
+        let js = r#"
             const tables = Array.from(document.querySelectorAll('table')).slice(0, 10).map(table => {
                 return Array.from(table.querySelectorAll('tr')).slice(0, 50).map(tr => {
                     return Array.from(tr.querySelectorAll('th, td')).map(cell =>
@@ -481,7 +484,7 @@ impl BrowserSession {
                 });
             });
             return JSON.stringify(tables);
-        })()"#;
+        "#;
         let raw = self.backend.evaluate_js(tab, js).await?;
         let tables: Vec<Vec<Vec<String>>> = serde_json::from_str(&raw)?;
         Ok(tables)
@@ -503,7 +506,7 @@ impl BrowserSession {
 
     /// JavaScript snippet that extracts a full page snapshot.
     fn snapshot_js() -> String {
-        r#"(() => {
+        r#"
             // Text content
             const clone = document.body.cloneNode(true);
             clone.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
@@ -576,7 +579,7 @@ impl BrowserSession {
                 ogImageUrl: ogImageUrl,
                 description: description
             });
-        })()"#
+        "#
         .to_string()
     }
 

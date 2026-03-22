@@ -26,14 +26,15 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
 /// for React/Vue/Angular compatibility, then dispatches `input`, `change`,
 /// and `blur` events.
 ///
-/// Returns a self-invoking JS function that returns JSON:
+/// Returns JS code (not wrapped in IIFE) that returns JSON:
 /// `{ "success": true }` or `{ "error": "..." }`.
+/// The evaluate_js wrapper provides the outer function scope.
 pub fn fill_field_js(selector: &str, value: &str, field_label: &str) -> String {
     let sel = escape_js_string(selector);
     let val = escape_js_string(value);
     let label = escape_js_string(field_label);
     format!(
-        r#"(() => {{
+        r#"
             const el = document.querySelector("{sel}");
             if (!el) return JSON.stringify({{ error: "{label} field not found: {sel}" }});
             const setter = Object.getOwnPropertyDescriptor(
@@ -50,6 +51,6 @@ pub fn fill_field_js(selector: &str, value: &str, field_label: &str) -> String {
             el.dispatchEvent(new Event('change', {{ bubbles: true }}));
             el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
             return JSON.stringify({{ success: true }});
-        }})()"#
+        "#
     )
 }

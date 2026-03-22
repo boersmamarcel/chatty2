@@ -279,12 +279,12 @@ impl BrowserAuthTool {
                 // Submit
                 if let Some(submit_sel) = &profile.submit_selector {
                     let js = format!(
-                        r#"(() => {{
+                        r#"
                             const el = document.querySelector("{}");
                             if (!el) return JSON.stringify({{ error: "Submit button not found: {}" }});
                             el.click();
                             return JSON.stringify({{ success: true }});
-                        }})()"#,
+                        "#,
                         crate::session::escape_js_string(submit_sel),
                         crate::session::escape_js_string(submit_sel),
                     );
