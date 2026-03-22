@@ -970,7 +970,7 @@ impl AgentClient {
 
                     match auth_components {
                         Ok((vault, profiles_repo)) => Some((
-                            BrowseTool::new(session.clone(), login_profiles),
+                            BrowseTool::new(session.clone(), active_tab.clone(), login_profiles),
                             BrowserActionTool::new(session.clone(), active_tab.clone()),
                             BrowserExtractTool::new(session.clone(), active_tab.clone()),
                             BrowserAuthTool::new(

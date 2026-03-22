@@ -1562,8 +1562,10 @@ version = "0.1.122"
 dependencies = [
  "anyhow",
  "async-trait",
+ "block2",
  "dirs 5.0.1",
  "gpui",
+ "objc2",
  "raw-window-handle",
  "reqwest 0.13.2",
  "rig-core",

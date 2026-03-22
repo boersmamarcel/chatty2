@@ -8,7 +8,9 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::RwLock;
 
+use crate::backend::TabId;
 use crate::credential::types::LoginProfile;
 use crate::page::PageSnapshot;
 use crate::session::BrowserSession;
@@ -53,13 +55,19 @@ impl std::fmt::Display for BrowseOutput {
 #[derive(Clone)]
 pub struct BrowseTool {
     session: Arc<BrowserSession>,
+    active_tab: Arc<RwLock<Option<TabId>>>,
     login_profiles: Vec<LoginProfile>,
 }
 
 impl BrowseTool {
-    pub fn new(session: Arc<BrowserSession>, login_profiles: Vec<LoginProfile>) -> Self {
+    pub fn new(
+        session: Arc<BrowserSession>,
+        active_tab: Arc<RwLock<Option<TabId>>>,
+        login_profiles: Vec<LoginProfile>,
+    ) -> Self {
         Self {
             session,
+            active_tab,
             login_profiles,
         }
     }
@@ -112,7 +120,7 @@ impl Tool for BrowseTool {
             Err(backend_err) => {
                 // Fall back to HTTP fetch + HTML parsing (with shared cookie jar
                 // so cookies from browser_auth are sent with the request)
-                tracing::debug!(
+                tracing::warn!(
                     url = %args.url,
                     backend_error = %backend_err,
                     "Browser backend unavailable, falling back to HTTP fetch"
@@ -130,25 +138,71 @@ impl Tool for BrowseTool {
 
 impl BrowseTool {
     /// Try to use the full browser backend (WebView) for navigation and snapshot.
+    ///
+    /// Reuses the shared `active_tab` when available so that authentication
+    /// state (cookies, session) persists across tool calls.
     async fn try_browser_backend(&self, url: &str) -> Result<PageSnapshot, BrowseError> {
-        let tab = self
-            .session
-            .backend()
-            .new_tab()
-            .await
-            .map_err(|e| BrowseError::EngineError(e.to_string()))?;
+        // Reuse the active tab if one exists, otherwise create a new one
+        let tab = {
+            let mut tab_guard = self.active_tab.write().await;
+            if let Some(existing) = tab_guard.as_ref() {
+                existing.clone()
+            } else {
+                let new_tab = self
+                    .session
+                    .backend()
+                    .new_tab()
+                    .await
+                    .map_err(|e| BrowseError::EngineError(e.to_string()))?;
+                *tab_guard = Some(new_tab.clone());
+                new_tab
+            }
+        };
 
-        let snapshot = self
+        let mut snapshot = self
             .session
             .navigate_and_snapshot(&tab, url, &self.login_profiles)
             .await
             .map_err(|e| BrowseError::NavigationError(e.to_string()))?;
 
-        // Close the tab after use (best effort)
-        if let Err(e) = self.session.backend().close_tab(&tab).await {
-            tracing::warn!(error = ?e, "Failed to close browse tab");
+        // Capture screenshot (best effort — don't fail the browse if screenshot fails)
+        match self.session.backend().screenshot(&tab).await {
+            Ok(png_bytes) => match save_screenshot_to_cache(&png_bytes).await {
+                Ok(path) => {
+                    snapshot.screenshot_path = Some(path);
+                }
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to save screenshot to cache");
+                }
+            },
+            Err(e) => {
+                tracing::debug!(error = ?e, "Screenshot capture failed (non-fatal)");
+            }
         }
+
+        // Tab is kept alive for session persistence across calls
 
         Ok(snapshot)
     }
+}
+
+/// Save PNG bytes to the browser screenshots cache directory.
+/// Returns the full file path as a string.
+async fn save_screenshot_to_cache(png_bytes: &[u8]) -> anyhow::Result<String> {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("chatty")
+        .join("browser_screenshots");
+    tokio::fs::create_dir_all(&cache_dir).await?;
+
+    let filename = format!(
+        "browse_{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let path = cache_dir.join(&filename);
+    tokio::fs::write(&path, png_bytes).await?;
+    Ok(path.to_string_lossy().to_string())
 }

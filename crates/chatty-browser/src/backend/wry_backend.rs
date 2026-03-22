@@ -28,6 +28,26 @@ use async_trait::async_trait;
 
 use super::{BrowserBackend, Cookie, TabId, TabInfo};
 
+/// User agent string for the WebView — matches a real Chrome browser.
+const WEBVIEW_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+    AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/// Anti-fingerprint JavaScript injected on every page load via
+/// `with_initialization_script`. Masks common bot-detection signals.
+const ANTI_FINGERPRINT_JS: &str = "\
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });\
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });\
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });\
+    Object.defineProperty(screen, 'width', { get: () => 1920 });\
+    Object.defineProperty(screen, 'height', { get: () => 1080 });\
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });\
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });\
+    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });\
+    window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };\
+    Object.defineProperty(navigator, 'permissions', { get: () => ({\
+        query: (params) => Promise.resolve({ state: 'granted', onchange: null })\
+    })});";
+
 // ══════════════════════════════════════════════════════════════════════════════
 // macOS: native WKWebView via objc2 + wry, dispatched to main thread via GCD
 // ══════════════════════════════════════════════════════════════════════════════
@@ -123,6 +143,9 @@ mod inner_macos {
     struct HiddenWindow {
         /// Pointer to the NSWindow instance.
         ns_window: *mut c_void,
+        /// Pointer to the NSWindow's contentView (NSView).
+        /// `AppKitWindowHandle` requires an NSView, not an NSWindow.
+        ns_view: *mut c_void,
     }
 
     // Safety: HiddenWindow is only used on the main thread (enforced by GCD dispatch).
@@ -188,8 +211,8 @@ mod inner_macos {
                 let rect = CGRect {
                     origin: CGPoint { x: 0.0, y: 0.0 },
                     size: CGSize {
-                        width: 1.0,
-                        height: 1.0,
+                        width: 1920.0,
+                        height: 1080.0,
                     },
                 };
                 let style_mask: u64 = 0; // NSWindowStyleMaskBorderless
@@ -214,7 +237,19 @@ mod inner_macos {
                     std::mem::transmute(objc_msgSend as *const ());
                 set_fn(window, set_released_sel, 0);
 
-                Ok(HiddenWindow { ns_window: window })
+                // [window contentView] — AppKitWindowHandle requires the NSView
+                let content_view_sel = sel_registerName(b"contentView\0".as_ptr());
+                let view_fn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let content_view = view_fn(window, content_view_sel);
+                if content_view.is_null() {
+                    anyhow::bail!("NSWindow contentView returned nil");
+                }
+
+                Ok(HiddenWindow {
+                    ns_window: window,
+                    ns_view: content_view,
+                })
             }
         }
     }
@@ -247,7 +282,7 @@ mod inner_macos {
         ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
             let raw = raw_window_handle::RawWindowHandle::AppKit(
                 raw_window_handle::AppKitWindowHandle::new(
-                    std::ptr::NonNull::new(self.ns_window as *mut _)
+                    std::ptr::NonNull::new(self.ns_view as *mut _)
                         .ok_or(raw_window_handle::HandleError::Unavailable)?,
                 ),
             );
@@ -282,6 +317,8 @@ mod inner_macos {
             let tab_id_for_ipc = tab_id_str.clone();
             let webview = wry::WebViewBuilder::new()
                 .with_url("about:blank")
+                .with_user_agent(super::WEBVIEW_USER_AGENT)
+                .with_initialization_script(super::ANTI_FINGERPRINT_JS)
                 .with_ipc_handler(move |msg| {
                     let body = msg.body();
                     if let Some(result) = body.strip_prefix("__chatty_js_result:") {
@@ -439,6 +476,155 @@ mod inner_macos {
             Ok(())
         })
         .await
+    }
+
+    // ── Screenshot via WKWebView.takeSnapshot ───────────────────────────
+
+    /// Capture a PNG screenshot of a tab's WKWebView.
+    ///
+    /// Dispatched to the main thread. The WKWebView `takeSnapshot` callback
+    /// fires asynchronously on the main thread; the result is sent back via
+    /// the `reply` oneshot channel.
+    pub(super) fn screenshot(
+        tab_id: &str,
+        reply: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+    ) {
+        #[link(name = "objc", kind = "dylib")]
+        unsafe extern "C" {
+            fn sel_registerName(name: *const u8) -> *mut c_void;
+            fn objc_msgSend() -> *mut c_void;
+        }
+
+        with_state(|state| {
+            let Some(tab) = state.tabs.get(tab_id) else {
+                let _ = reply.send(Err(anyhow::anyhow!("Tab {} not found", tab_id)));
+                return;
+            };
+
+            unsafe {
+                use wry::WebViewExtMacOS;
+                let wk_webview = tab.webview.webview();
+                let wk_ptr = objc2::rc::Retained::as_ptr(&wk_webview) as *mut c_void;
+
+                // Wrap the oneshot sender for use inside a Fn closure (block2 requires Fn, not FnOnce).
+                let reply_cell = Mutex::new(Some(reply));
+
+                let handler = block2::RcBlock::new(
+                    move |image: *mut objc2::runtime::AnyObject,
+                          _error: *mut objc2::runtime::AnyObject| {
+                        let Some(tx) = reply_cell.lock().ok().and_then(|mut g| g.take()) else {
+                            return;
+                        };
+
+                        if image.is_null() {
+                            let _ =
+                                tx.send(Err(anyhow::anyhow!("Screenshot returned nil image")));
+                            return;
+                        }
+
+                        match nsimage_to_png(image as *mut c_void) {
+                            Ok(bytes) => {
+                                let _ = tx.send(Ok(bytes));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                            }
+                        }
+                    },
+                );
+
+                // [wkWebView takeSnapshotWithConfiguration:nil completionHandler:handler]
+                let sel = sel_registerName(
+                    b"takeSnapshotWithConfiguration:completionHandler:\0".as_ptr(),
+                );
+                type TakeSnapshotFn = unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    *mut c_void,
+                    &block2::Block<
+                        dyn Fn(
+                            *mut objc2::runtime::AnyObject,
+                            *mut objc2::runtime::AnyObject,
+                        ),
+                    >,
+                );
+                let send_fn: TakeSnapshotFn =
+                    std::mem::transmute(objc_msgSend as *const ());
+                send_fn(wk_ptr, sel, std::ptr::null_mut(), &handler);
+            }
+        });
+    }
+
+    /// Convert an NSImage to PNG bytes via TIFFRepresentation → NSBitmapImageRep → PNG.
+    unsafe fn nsimage_to_png(nsimage: *mut c_void) -> anyhow::Result<Vec<u8>> {
+        #[link(name = "objc", kind = "dylib")]
+        unsafe extern "C" {
+            fn objc_getClass(name: *const u8) -> *mut c_void;
+            fn sel_registerName(name: *const u8) -> *mut c_void;
+            fn objc_msgSend() -> *mut c_void;
+        }
+
+        // Helper type aliases for the objc_msgSend casts
+        type MsgSendNoArgs = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+        type MsgSendOneArg =
+            unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
+        type MsgSendLen = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u64;
+
+        unsafe {
+            let send0: MsgSendNoArgs = std::mem::transmute(objc_msgSend as *const ());
+            let send1: MsgSendOneArg = std::mem::transmute(objc_msgSend as *const ());
+            let send_len: MsgSendLen = std::mem::transmute(objc_msgSend as *const ());
+
+            // [nsimage TIFFRepresentation] → NSData*
+            let tiff_sel = sel_registerName(b"TIFFRepresentation\0".as_ptr());
+            let tiff_data = send0(nsimage, tiff_sel);
+            if tiff_data.is_null() {
+                anyhow::bail!("TIFFRepresentation returned nil");
+            }
+
+            // [NSBitmapImageRep imageRepWithData:tiffData] → NSBitmapImageRep*
+            let bitmap_class = objc_getClass(b"NSBitmapImageRep\0".as_ptr());
+            if bitmap_class.is_null() {
+                anyhow::bail!("Failed to get NSBitmapImageRep class");
+            }
+            let image_rep_sel = sel_registerName(b"imageRepWithData:\0".as_ptr());
+            let bitmap_rep = send1(bitmap_class, image_rep_sel, tiff_data);
+            if bitmap_rep.is_null() {
+                anyhow::bail!("imageRepWithData: returned nil");
+            }
+
+            // [bitmapRep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+            let repr_sel = sel_registerName(b"representationUsingType:properties:\0".as_ptr());
+            let png_type: u64 = 4; // NSBitmapImageFileTypePNG
+
+            // Create empty NSDictionary: [NSDictionary dictionary]
+            let ns_dict_class = objc_getClass(b"NSDictionary\0".as_ptr());
+            if ns_dict_class.is_null() {
+                anyhow::bail!("Failed to get NSDictionary class");
+            }
+            let dict_sel = sel_registerName(b"dictionary\0".as_ptr());
+            let empty_dict = send0(ns_dict_class, dict_sel);
+
+            type MsgSendRepr =
+                unsafe extern "C" fn(*mut c_void, *mut c_void, u64, *mut c_void) -> *mut c_void;
+            let send_repr: MsgSendRepr = std::mem::transmute(objc_msgSend as *const ());
+            let png_data = send_repr(bitmap_rep, repr_sel, png_type, empty_dict);
+            if png_data.is_null() {
+                anyhow::bail!("representationUsingType:properties: returned nil");
+            }
+
+            // Extract raw bytes from NSData
+            let length_sel = sel_registerName(b"length\0".as_ptr());
+            let length = send_len(png_data, length_sel) as usize;
+
+            let bytes_sel = sel_registerName(b"bytes\0".as_ptr());
+            let bytes_ptr = send0(png_data, bytes_sel) as *const u8;
+            if bytes_ptr.is_null() || length == 0 {
+                anyhow::bail!("NSData bytes returned null or zero length");
+            }
+
+            Ok(std::slice::from_raw_parts(bytes_ptr, length).to_vec())
+        }
     }
 }
 
@@ -623,6 +809,8 @@ mod inner {
 
                     let webview = wry::WebViewBuilder::new()
                         .with_url("about:blank")
+                        .with_user_agent(super::WEBVIEW_USER_AGENT)
+                        .with_initialization_script(super::ANTI_FINGERPRINT_JS)
                         .with_ipc_handler(move |msg| {
                             let body = msg.body();
                             if let Some(result) = body.strip_prefix("__chatty_js_result:") {
@@ -1054,18 +1242,85 @@ impl BrowserBackend for WryBackend {
         Ok(())
     }
 
-    async fn screenshot(&self, _tab: &TabId) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("Screenshot is not supported by the wry backend")
+    async fn screenshot(&self, tab: &TabId) -> anyhow::Result<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        {
+            let tab_id = tab.0.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            inner_macos::dispatch_main(move || {
+                inner_macos::screenshot(&tab_id, tx);
+            })
+            .await;
+            rx.await
+                .map_err(|_| anyhow::anyhow!("Screenshot reply channel dropped"))?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = tab;
+            anyhow::bail!("Screenshot is not yet supported on this platform")
+        }
     }
 
     async fn wait_for_load(&self, tab: &TabId, timeout_ms: u64) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let _ = tab;
-            // On macOS, WKWebView navigation is asynchronous but doesn't expose
-            // a page-load callback via the wry IPC path. Sleep for the requested
-            // duration, letting the Cocoa run loop process navigation events.
-            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+            // Poll document.readyState and content length to detect when page
+            // has actually rendered (handles SPAs that render after DOMContentLoaded).
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            let poll_interval = std::time::Duration::from_millis(500);
+
+            // Phase 1: Wait for document.readyState == "complete"
+            loop {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::debug!("wait_for_load: timed out waiting for readyState=complete");
+                    break;
+                }
+                let result = self.evaluate_js(tab,
+                    r#"document.readyState"#
+                ).await;
+                if let Ok(state) = &result {
+                    let s = state.trim().trim_matches('"');
+                    if s == "complete" {
+                        break;
+                    }
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+
+            // Phase 2: Wait for body content to stabilize (SPA rendering)
+            let mut last_len: usize = 0;
+            let mut stable_count = 0u32;
+            let stabilize_deadline = deadline.min(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            );
+            loop {
+                if tokio::time::Instant::now() >= stabilize_deadline {
+                    break;
+                }
+                let result = self.evaluate_js(tab,
+                    r#"(document.body && document.body.innerText || "").length"#
+                ).await;
+                if let Ok(len_str) = &result {
+                    let len = len_str.trim().parse::<usize>().unwrap_or(0);
+                    if len > 100 && len == last_len {
+                        stable_count += 1;
+                        if stable_count >= 3 {
+                            // Content has been stable for 3 polls (~1.5s)
+                            tracing::debug!(
+                                content_length = len,
+                                "wait_for_load: content stabilized"
+                            );
+                            break;
+                        }
+                    } else {
+                        stable_count = 0;
+                    }
+                    last_len = len;
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]

@@ -226,61 +226,112 @@ impl BrowserAuthTool {
                     .await
                     .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
 
-                // Fill form using selectors
+                // Small delay for JS frameworks to hydrate the page
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+                // Fill username using nativeInputValueSetter for React/Vue/Angular compatibility
                 if let Some(user_sel) = &profile.username_selector {
                     let js = format!(
                         r#"(() => {{
                             const el = document.querySelector("{}");
-                            if (!el) return JSON.stringify({{ error: "Username field not found" }});
-                            el.value = "{}";
+                            if (!el) return JSON.stringify({{ error: "Username field not found: {}" }});
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value'
+                            )?.set || Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype, 'value'
+                            )?.set;
+                            if (setter) {{
+                                setter.call(el, "{}");
+                            }} else {{
+                                el.value = "{}";
+                            }}
                             el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
                             return JSON.stringify({{ success: true }});
                         }})()"#,
                         crate::session::escape_js_string(user_sel),
+                        crate::session::escape_js_string(user_sel),
+                        crate::session::escape_js_string(username),
                         crate::session::escape_js_string(username)
                     );
-                    self.session
+                    let result = self
+                        .session
                         .backend()
                         .evaluate_js(&tab, &js)
                         .await
                         .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
+                    Self::check_js_result(&result, "username")?;
                 }
 
+                // Brief pause between fields
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+                // Fill password
                 if let Some(pass_sel) = &profile.password_selector {
                     let js = format!(
                         r#"(() => {{
                             const el = document.querySelector("{}");
-                            if (!el) return JSON.stringify({{ error: "Password field not found" }});
-                            el.value = "{}";
+                            if (!el) return JSON.stringify({{ error: "Password field not found: {}" }});
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value'
+                            )?.set || Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype, 'value'
+                            )?.set;
+                            if (setter) {{
+                                setter.call(el, "{}");
+                            }} else {{
+                                el.value = "{}";
+                            }}
                             el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
                             return JSON.stringify({{ success: true }});
                         }})()"#,
                         crate::session::escape_js_string(pass_sel),
+                        crate::session::escape_js_string(pass_sel),
+                        crate::session::escape_js_string(password),
                         crate::session::escape_js_string(password)
                     );
-                    self.session
+                    let result = self
+                        .session
                         .backend()
                         .evaluate_js(&tab, &js)
                         .await
                         .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
+                    Self::check_js_result(&result, "password")?;
                 }
+
+                // Brief pause before submit
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+                // Capture the URL before submitting so we can detect navigation
+                let url_before = self
+                    .session
+                    .backend()
+                    .current_url(&tab)
+                    .await
+                    .unwrap_or_default();
 
                 // Submit
                 if let Some(submit_sel) = &profile.submit_selector {
                     let js = format!(
                         r#"(() => {{
                             const el = document.querySelector("{}");
-                            if (!el) return JSON.stringify({{ error: "Submit button not found" }});
+                            if (!el) return JSON.stringify({{ error: "Submit button not found: {}" }});
                             el.click();
                             return JSON.stringify({{ success: true }});
                         }})()"#,
                         crate::session::escape_js_string(submit_sel),
+                        crate::session::escape_js_string(submit_sel),
                     );
-                    self.session
+                    let result = self
+                        .session
                         .backend()
                         .evaluate_js(&tab, &js)
                         .await
                         .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
+                    Self::check_js_result(&result, "submit")?;
                 }
 
                 // Wait for navigation after login
@@ -289,6 +340,27 @@ impl BrowserAuthTool {
                     .wait_for_load(&tab, 15_000)
                     .await
                     .map_err(|e| BrowserAuthError::AuthFailed(e.to_string()))?;
+
+                // Verify login by checking URL changed or page doesn't have password field
+                let url_after = self
+                    .session
+                    .backend()
+                    .current_url(&tab)
+                    .await
+                    .unwrap_or_default();
+
+                if url_after == url_before {
+                    tracing::warn!(
+                        url = %url_after,
+                        "URL did not change after login submit — login may have failed"
+                    );
+                } else {
+                    tracing::info!(
+                        before = %url_before,
+                        after = %url_after,
+                        "Login navigated to new URL"
+                    );
+                }
             }
             _ => {
                 return Err(BrowserAuthError::AuthFailed(format!(
@@ -311,6 +383,19 @@ impl BrowserAuthTool {
             url: current_url,
             message: format!("Authenticated as \"{name}\""),
         })
+    }
+
+    /// Check a JS evaluation result for errors returned by our form-fill snippets.
+    fn check_js_result(result: &str, field_name: &str) -> Result<(), BrowserAuthError> {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
+            if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
+                tracing::warn!(field = field_name, error = error, "Form field JS error");
+                return Err(BrowserAuthError::AuthFailed(format!(
+                    "Failed to fill {field_name}: {error}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Fallback: authenticate via HTTP using reqwest.
@@ -356,7 +441,19 @@ impl BrowserAuthTool {
                 // POST credentials via HTTP
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
-                    .user_agent("Chatty/1.0 (Desktop AI Assistant)")
+                    .user_agent(crate::http_fallback::BROWSER_USER_AGENT)
+                    .default_headers({
+                        let mut headers = reqwest::header::HeaderMap::new();
+                        headers.insert(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8".parse().unwrap());
+                        headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+                        headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, br".parse().unwrap());
+                        headers.insert("Sec-Fetch-Dest", "document".parse().unwrap());
+                        headers.insert("Sec-Fetch-Mode", "navigate".parse().unwrap());
+                        headers.insert("Sec-Fetch-Site", "none".parse().unwrap());
+                        headers.insert("Sec-Fetch-User", "?1".parse().unwrap());
+                        headers.insert("Upgrade-Insecure-Requests", "1".parse().unwrap());
+                        headers
+                    })
                     .redirect(reqwest::redirect::Policy::limited(10))
                     .cookie_provider(jar.clone())
                     .build()

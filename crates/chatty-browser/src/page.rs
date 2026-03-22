@@ -30,6 +30,9 @@ pub struct PageSnapshot {
     /// Page meta description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// File path to a PNG screenshot of the page (saved to cache directory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot_path: Option<String>,
 }
 
 impl std::fmt::Display for PageSnapshot {

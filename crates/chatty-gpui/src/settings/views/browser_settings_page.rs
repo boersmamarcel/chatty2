@@ -1,13 +1,16 @@
 use crate::settings::controllers::browser_settings_controller;
+use crate::settings::views::browser_credentials_page::{
+    CredentialsTableView, GlobalCredentialsTableView,
+};
 use chatty_browser::settings::BrowserSettingsModel;
-use gpui::App;
+use gpui::{App, AppContext, ParentElement, Styled, div};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
 
 pub fn browser_settings_page() -> SettingPage {
     SettingPage::new("Browser")
-        .description("Configure the browser engine for web browsing, form interaction, and authentication")
+        .description("Configure the browser engine, approval rules, and login credentials")
         .resettable(false)
         .groups(vec![
             SettingGroup::new()
@@ -114,5 +117,38 @@ pub fn browser_settings_page() -> SettingPage {
                         "Require user approval before the AI clicks, fills, or selects elements on a page.",
                     ),
                 ]),
+            SettingGroup::new()
+                .title("Login Profiles")
+                .description(
+                    "Manage login credentials for websites the AI can authenticate to. \
+                     Secrets are stored in the OS keyring — never written to disk.\n\n\
+                     • Form Login — provide CSS selectors and a username/password. \
+                     The AI fills the form automatically.\n\n\
+                     • Session Capture — for OAuth/2FA sites, manually log in and \
+                     capture session cookies.",
+                )
+                .items(vec![SettingItem::render(|_options, window, cx| {
+                    let view =
+                        if let Some(existing) = cx.try_global::<GlobalCredentialsTableView>() {
+                            if let Some(view) = existing.view.clone() {
+                                view
+                            } else {
+                                let new_view =
+                                    cx.new(|cx| CredentialsTableView::new(window, cx));
+                                cx.set_global(GlobalCredentialsTableView {
+                                    view: Some(new_view.clone()),
+                                });
+                                new_view
+                            }
+                        } else {
+                            let new_view = cx.new(|cx| CredentialsTableView::new(window, cx));
+                            cx.set_global(GlobalCredentialsTableView {
+                                view: Some(new_view.clone()),
+                            });
+                            new_view
+                        };
+
+                    div().w_full().child(view)
+                })]),
         ])
 }

@@ -9,6 +9,9 @@ use crate::page::{LinkInfo, PageSnapshot};
 use crate::session::SharedCookieJar;
 use tracing::debug;
 
+/// Realistic browser User-Agent string used for HTTP requests.
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 /// Request timeout for HTTP fallback.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -33,7 +36,19 @@ pub async fn fetch_and_snapshot_with_cookies(
 ) -> anyhow::Result<PageSnapshot> {
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .user_agent("Chatty/1.0 (Desktop AI Assistant)")
+        .user_agent(BROWSER_USER_AGENT)
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8".parse().unwrap());
+            headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+            headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, br".parse().unwrap());
+            headers.insert("Sec-Fetch-Dest", "document".parse().unwrap());
+            headers.insert("Sec-Fetch-Mode", "navigate".parse().unwrap());
+            headers.insert("Sec-Fetch-Site", "none".parse().unwrap());
+            headers.insert("Sec-Fetch-User", "?1".parse().unwrap());
+            headers.insert("Upgrade-Insecure-Requests", "1".parse().unwrap());
+            headers
+        })
         .redirect(reqwest::redirect::Policy::limited(10));
 
     if let Some(jar) = cookie_jar {
@@ -83,6 +98,7 @@ pub async fn fetch_and_snapshot_with_cookies(
         login_hint: None,
         og_image_url,
         description,
+        screenshot_path: None,
     })
 }
 
@@ -492,6 +508,7 @@ mod tests {
             login_hint: None,
             og_image_url: None,
             description: None,
+            screenshot_path: None,
         };
         assert!(snapshot.elements.is_empty());
         assert!(snapshot.forms.is_empty());

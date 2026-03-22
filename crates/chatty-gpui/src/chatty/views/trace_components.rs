@@ -976,8 +976,15 @@ where
                     .gap_1()
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
-                        if let Err(e) = open::that(&link_url) {
-                            tracing::warn!(url = %link_url, error = %e, "Failed to open URL in browser");
+                        let url = if link_url.starts_with("http://")
+                            || link_url.starts_with("https://")
+                        {
+                            link_url.clone()
+                        } else {
+                            format!("https://{}", link_url)
+                        };
+                        if let Err(e) = open::that_detached(&url) {
+                            tracing::warn!(url = %url, error = %e, "Failed to open URL in browser");
                         }
                     })
                     .child(
@@ -1347,6 +1354,7 @@ struct BrowsePreview {
     url: String,
     title: String,
     description: Option<String>,
+    screenshot_path: Option<String>,
 }
 
 /// Extract the domain name from a URL (e.g. "https://nos.nl/path" → "nos.nl").
@@ -1401,11 +1409,16 @@ fn extract_browse_preview(tool_call: &ToolCallBlock) -> Option<BrowsePreview> {
         .get("description")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let screenshot_path = snapshot
+        .get("screenshot_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     Some(BrowsePreview {
         url,
         title,
         description,
+        screenshot_path,
     })
 }
 
@@ -1505,6 +1518,29 @@ fn render_website_preview_card(
                         )
                     }
                 })
+                // Screenshot thumbnail (if available)
+                .when_some(preview.screenshot_path.clone(), |this, path| {
+                    let screenshot_file = std::path::PathBuf::from(&path);
+                    if screenshot_file.exists() {
+                        this.child(
+                            div()
+                                .mt(px(2.0))
+                                .w_full()
+                                .rounded_sm()
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .child(
+                                    img(screenshot_file)
+                                        .w_full()
+                                        .max_h(px(280.0))
+                                        .object_fit(gpui::ObjectFit::Contain),
+                                ),
+                        )
+                    } else {
+                        this
+                    }
+                })
                 // "Open in Browser" action row
                 .child(
                     div().mt(px(2.0)).child(
@@ -1516,8 +1552,15 @@ fn render_website_preview_card(
                         .xsmall()
                         .ghost()
                         .on_click(move |_, _, _cx| {
-                            if let Err(e) = open::that(&link_url_for_click) {
-                                tracing::warn!(url = %link_url_for_click, error = %e, "Failed to open URL in browser");
+                            let url = if link_url_for_click.starts_with("http://")
+                                || link_url_for_click.starts_with("https://")
+                            {
+                                link_url_for_click.clone()
+                            } else {
+                                format!("https://{}", link_url_for_click)
+                            };
+                            if let Err(e) = open::that_detached(&url) {
+                                tracing::warn!(url = %url, error = %e, "Failed to open URL in browser");
                             }
                         }),
                     ),

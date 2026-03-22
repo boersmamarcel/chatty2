@@ -117,6 +117,7 @@ impl BrowserSession {
         self.backend
             .wait_for_load(tab, DEFAULT_LOAD_TIMEOUT_MS)
             .await?;
+        self.try_dismiss_cookie_consent(tab).await;
         self.build_page_snapshot(tab, login_profiles).await
     }
 
@@ -187,7 +188,158 @@ impl BrowserSession {
             login_hint,
             og_image_url,
             description,
+            screenshot_path: None,
         })
+    }
+
+    // ── Cookie consent auto-dismiss ─────────────────────────────────────
+
+    /// Best-effort attempt to dismiss cookie consent banners.
+    ///
+    /// Polls up to 3 seconds for a consent banner to appear, then clicks
+    /// the "accept all" button. Covers popular CMPs (Cookiebot, OneTrust,
+    /// Usercentrics, Quantcast, Didomi, etc.) and generic text-matching.
+    async fn try_dismiss_cookie_consent(&self, tab: &TabId) {
+        // The JS returns { dismissed: true/false } — we retry a few times
+        // because banners often animate in after page load.
+        let js = Self::cookie_dismiss_js();
+
+        for attempt in 0..6 {
+            // Wait before each attempt (banners load lazily)
+            if attempt == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+
+            match self.backend.evaluate_js(tab, &js).await {
+                Ok(result) => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&result) {
+                        if json["dismissed"].as_bool() == Some(true) {
+                            tracing::info!(
+                                result = %result,
+                                attempt = attempt,
+                                "Auto-dismissed cookie consent banner"
+                            );
+                            // Wait for dismiss animation
+                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = ?e, "Cookie consent dismiss JS failed (non-fatal)");
+                    return;
+                }
+            }
+        }
+        tracing::debug!("No cookie consent banner found after retries");
+    }
+
+    /// JavaScript that finds and clicks common cookie consent "accept" buttons.
+    fn cookie_dismiss_js() -> String {
+        r#"(() => {
+            // Helper: check if element is visible (works for position:fixed too)
+            function isVisible(el) {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && style.opacity !== '0'
+                    && el.getBoundingClientRect().height > 0;
+            }
+
+            // 1. Try specific CMP selectors (most reliable)
+            const selectors = [
+                // Usercentrics (Komoot, etc.)
+                '[data-testid="uc-accept-all-button"]',
+                '#uc-btn-accept-banner',
+                '.uc-accept-all-button',
+                'button[data-testid="uc-accept-all-button"]',
+                // Cookiebot
+                '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+                '#CybotCookiebotDialogBodyButtonAccept',
+                // OneTrust
+                '#onetrust-accept-btn-handler',
+                '.onetrust-close-btn-handler',
+                // Cookie Consent (Osano)
+                '.cc-accept', '.cc-btn.cc-allow',
+                '.cc-compliance .cc-btn:first-child',
+                // Quantcast
+                '.qc-cmp2-summary-buttons button:first-child',
+                // Didomi
+                '#didomi-notice-agree-button',
+                // Funding Choices (Google)
+                '.fc-cta-consent', '.fc-button.fc-cta-consent',
+                // Generic IDs/classes
+                '#accept-cookies', '#cookie-accept', '#cookies-accept',
+                '#acceptAll', '#accept-all', '#cookieAcceptAll',
+                '.cookie-accept', '.cookie-consent-accept',
+                '.js-cookie-accept', '.js-accept-cookies',
+                '[data-action="accept-cookies"]',
+                '[data-consent="accept"]',
+                'button[mode="primary"][data-gdpr="accept"]',
+                // GDPR generic
+                '.gdpr-accept', '#gdpr-accept',
+                '.consent-accept', '#consent-accept',
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (isVisible(el)) {
+                    el.click();
+                    return JSON.stringify({ dismissed: true, method: "selector", selector: sel });
+                }
+            }
+
+            // 2. Search inside shadow DOMs of known CMP containers
+            const shadowHosts = document.querySelectorAll(
+                '#usercentrics-root, div[id*="cookie"], div[id*="consent"]'
+            );
+            for (const host of shadowHosts) {
+                if (host.shadowRoot) {
+                    const btns = host.shadowRoot.querySelectorAll('button');
+                    for (const btn of btns) {
+                        const text = (btn.innerText || '').trim().toLowerCase();
+                        if (text.includes('accept') || text.includes('akzeptieren')
+                            || text.includes('allow all') || text.includes('alle')) {
+                            if (isVisible(btn)) {
+                                btn.click();
+                                return JSON.stringify({ dismissed: true, method: "shadow", text: text });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Fallback: find buttons by text content (multilingual)
+            const acceptTexts = [
+                'accept all', 'accept cookies', 'accept all cookies',
+                'accept & close', 'allow all', 'allow all cookies',
+                'allow cookies', 'agree', 'agree to all', 'i agree',
+                'got it', 'ok, got it', 'okay',
+                'alle akzeptieren', 'akzeptieren', 'alles akzeptieren',
+                'zustimmen', 'alle zulassen',
+                'accepter tout', 'tout accepter', 'accepter',
+                'j\'accepte', 'autoriser',
+                'accepteer alles', 'alles accepteren', 'akkoord',
+                'aceptar todo', 'aceptar todas', 'aceptar',
+            ];
+            const buttons = document.querySelectorAll(
+                'button, a[role="button"], [role="button"], input[type="submit"], input[type="button"]'
+            );
+            for (const btn of buttons) {
+                const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                if (text && acceptTexts.some(t => text === t || text.startsWith(t + ' '))) {
+                    if (isVisible(btn)) {
+                        btn.click();
+                        return JSON.stringify({ dismissed: true, method: "text", text: text });
+                    }
+                }
+            }
+
+            return JSON.stringify({ dismissed: false });
+        })()"#
+            .to_string()
     }
 
     // ── Element interaction ──────────────────────────────────────────────

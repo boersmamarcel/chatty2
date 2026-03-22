@@ -10,7 +10,6 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
-    setting::{SettingGroup, SettingItem, SettingPage},
     v_flex,
 };
 use gpui_component::{Icon, IconName};
@@ -546,47 +545,6 @@ impl Render for CredentialsTableView {
 }
 
 // ── Setting page entry point ────────────────────────────────────────────────
-
-pub fn browser_credentials_page() -> SettingPage {
-    SettingPage::new("Browser Credentials")
-        .description(
-            "Manage login credentials for websites the AI can authenticate to. \
-             Secrets (passwords, session cookies) are stored in the OS keyring — \
-             never written to disk or exposed to the AI.",
-        )
-        .resettable(false)
-        .groups(vec![
-            SettingGroup::new()
-                .title("Login Profiles")
-                .description(
-                    "Each credential lets the AI authenticate to a website. \
-                     Two auth methods are available:\n\n\
-                     • Form Login — provide CSS selectors for the login form fields \
-                     and a username/password. The AI fills the form automatically.\n\n\
-                     • Session Capture — for OAuth/2FA sites, manually log in and \
-                     capture session cookies. (Requires browser engine to be enabled.)",
-                )
-                .items(vec![SettingItem::render(|_options, window, cx| {
-                    let view = if let Some(existing) = cx.try_global::<GlobalCredentialsTableView>()
-                    {
-                        if let Some(view) = existing.view.clone() {
-                            view
-                        } else {
-                            let new_view = cx.new(|cx| CredentialsTableView::new(window, cx));
-                            cx.set_global(GlobalCredentialsTableView {
-                                view: Some(new_view.clone()),
-                            });
-                            new_view
-                        }
-                    } else {
-                        let new_view = cx.new(|cx| CredentialsTableView::new(window, cx));
-                        cx.set_global(GlobalCredentialsTableView {
-                            view: Some(new_view.clone()),
-                        });
-                        new_view
-                    };
-
-                    div().w_full().child(view)
-                })]),
-        ])
-}
+// NOTE: Login Profiles group is now rendered as part of the unified Browser
+// settings page in `browser_settings_page.rs`. The `browser_credentials_page()`
+// function has been removed.
