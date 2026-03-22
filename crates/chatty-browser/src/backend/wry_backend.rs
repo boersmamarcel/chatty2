@@ -238,7 +238,7 @@ mod inner_macos {
         }
     }
 
-    unsafe impl raw_window_handle::HasWindowHandle for HiddenWindow {
+    impl raw_window_handle::HasWindowHandle for HiddenWindow {
         fn window_handle(
             &self,
         ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
@@ -252,7 +252,7 @@ mod inner_macos {
         }
     }
 
-    unsafe impl raw_window_handle::HasDisplayHandle for HiddenWindow {
+    impl raw_window_handle::HasDisplayHandle for HiddenWindow {
         fn display_handle(
             &self,
         ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
