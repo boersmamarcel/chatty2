@@ -970,8 +970,16 @@ impl AgentClient {
 
                     match auth_components {
                         Ok((vault, profiles_repo)) => Some((
-                            BrowseTool::new(session.clone(), active_tab.clone(), login_profiles),
-                            BrowserActionTool::new(session.clone(), active_tab.clone()),
+                            BrowseTool::new(
+                                session.clone(),
+                                active_tab.clone(),
+                                login_profiles.clone(),
+                            ),
+                            BrowserActionTool::new(
+                                session.clone(),
+                                active_tab.clone(),
+                                login_profiles,
+                            ),
                             BrowserExtractTool::new(session.clone(), active_tab.clone()),
                             BrowserAuthTool::new(
                                 session.clone(),
@@ -1391,6 +1399,32 @@ impl AgentClient {
                  the same tools. The sub-agent runs autonomously and returns the result. \
                  Use this to parallelize work or isolate complex sub-tasks. Each sub-agent \
                  starts fresh — include all necessary context in the task description."
+                    .to_string(),
+            );
+        }
+        if browser_tools.is_some() {
+            tool_sections.push(
+                "- **browse**: Navigate to a URL and get a structured page snapshot (title, \
+                 text, interactive elements with IDs like e1/e2, forms, links).\n\
+                 - **browser_action**: Interact with page elements — click, fill, select, \
+                 scroll, wait. Reference elements by their ID from the browse output. \
+                 After click/fill/select/scroll the updated page snapshot is returned \
+                 automatically.\n\
+                 - **browser_extract**: Extract structured data (text, links, tables, screenshot) \
+                 from the current page.\n\
+                 - **browser_auth**: Log in to a website using stored credentials.\n\
+                 - **browser_tabs**: Manage browser tabs (new, close, switch, list).\n\
+                 \n\
+                 **Browser workflow:**\n\
+                 1. Start with `browse` to load a page and get the snapshot with element IDs.\n\
+                 2. Use `browser_action` to interact (click links/buttons, fill forms). \
+                 The response includes the updated page state.\n\
+                 3. Use `browser_extract` when you need full text, all links, or tables.\n\
+                 4. If a login form is detected, use `browser_auth` with the suggested credential.\n\
+                 5. Element IDs (e1, e2, …) change when the page changes — always use IDs \
+                 from the most recent snapshot.\n\
+                 6. For forms: fill each field with browser_action fill, then click the submit button.\n\
+                 7. If an element is not visible, scroll first with browser_action scroll."
                     .to_string(),
             );
         }

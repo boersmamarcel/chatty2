@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::backend::TabId;
+use crate::credential::types::LoginProfile;
+use crate::page::PageSnapshot;
 use crate::session::BrowserSession;
 
 // ── Error ────────────────────────────────────────────────────────────────────
@@ -52,11 +54,21 @@ pub struct BrowserActionArgs {
 pub struct BrowserActionOutput {
     pub success: bool,
     pub result: String,
+    /// Updated page snapshot after the action (for click, fill, select, scroll).
+    /// Gives the LLM immediate visibility into the new page state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<PageSnapshot>,
 }
 
 impl std::fmt::Display for BrowserActionOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.result)
+        writeln!(f, "{}", self.result)?;
+        if let Some(snapshot) = &self.snapshot {
+            writeln!(f)?;
+            writeln!(f, "--- Updated page state ---")?;
+            write!(f, "{snapshot}")?;
+        }
+        Ok(())
     }
 }
 
@@ -69,16 +81,19 @@ impl std::fmt::Display for BrowserActionOutput {
 pub struct BrowserActionTool {
     session: Arc<BrowserSession>,
     active_tab: Arc<tokio::sync::RwLock<Option<TabId>>>,
+    login_profiles: Vec<LoginProfile>,
 }
 
 impl BrowserActionTool {
     pub fn new(
         session: Arc<BrowserSession>,
         active_tab: Arc<tokio::sync::RwLock<Option<TabId>>>,
+        login_profiles: Vec<LoginProfile>,
     ) -> Self {
         Self {
             session,
             active_tab,
+            login_profiles,
         }
     }
 }
@@ -100,7 +115,9 @@ impl Tool for BrowserActionTool {
                 - scroll: Scroll the page (positive = down, negative = up)\n\
                 - wait: Wait for a CSS selector to appear\n\
                 \n\
-                Use the element IDs from the browse tool's output."
+                Use the element IDs from the browse tool's output.\n\
+                After click, fill, select, and scroll the updated page snapshot is returned \
+                automatically so you can see the new state without calling browse again."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -142,6 +159,7 @@ impl Tool for BrowserActionTool {
             .as_ref()
             .ok_or_else(|| BrowserActionError::ActionFailed("No active tab".into()))?;
 
+        let action_name = args.action.clone();
         let result = match args.action.as_str() {
             "click" => {
                 let id = args
@@ -198,9 +216,32 @@ impl Tool for BrowserActionTool {
             }
         };
 
+        // Auto-snapshot after state-changing actions so the LLM sees the new page
+        let snapshot = match action_name.as_str() {
+            "click" | "fill" | "select" | "scroll" => {
+                // Brief wait for page to settle after click (navigation, SPA routing, etc.)
+                if action_name == "click" {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                match self
+                    .session
+                    .build_page_snapshot(tab, &self.login_profiles)
+                    .await
+                {
+                    Ok(snap) => Some(snap),
+                    Err(e) => {
+                        tracing::debug!(error = ?e, "Auto-snapshot after action failed (non-fatal)");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         Ok(BrowserActionOutput {
             success: true,
             result,
+            snapshot,
         })
     }
 }
