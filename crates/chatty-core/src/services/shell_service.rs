@@ -88,17 +88,48 @@ impl ShellSession {
         &self.secret_key_names
     }
 
-    /// Check if sandboxing is available on this platform
+    /// Check if sandboxing is available on this platform.
+    ///
+    /// On Linux, this verifies not only that bubblewrap is installed but also
+    /// that it can actually create a sandbox (user namespaces must be enabled).
     pub fn can_sandbox() -> bool {
         #[cfg(target_os = "linux")]
         {
-            std::process::Command::new("bwrap")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            use std::sync::OnceLock;
+            static CAN_SANDBOX: OnceLock<bool> = OnceLock::new();
+            *CAN_SANDBOX.get_or_init(|| {
+                // Run a real sandboxed command to verify user namespace support.
+                // `bwrap --version` only checks if the binary exists; the actual
+                // `--unshare-all` flag can fail when unprivileged user namespaces
+                // are restricted (e.g. on GitHub Actions runners).
+                std::process::Command::new("bwrap")
+                    .args([
+                        "--ro-bind",
+                        "/usr",
+                        "/usr",
+                        "--ro-bind",
+                        "/lib",
+                        "/lib",
+                        "--ro-bind",
+                        "/bin",
+                        "/bin",
+                        "--ro-bind",
+                        "/sbin",
+                        "/sbin",
+                        "--proc",
+                        "/proc",
+                        "--dev",
+                        "/dev",
+                        "--unshare-all",
+                        "--",
+                        "/bin/true",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            })
         }
 
         #[cfg(target_os = "macos")]
@@ -163,9 +194,21 @@ impl ShellSession {
         // Try sandboxed spawn first, fall back to unsandboxed
         let (mut child, is_sandboxed) = if Self::can_sandbox() {
             match Self::spawn_sandboxed(workspace_dir, network_isolation) {
-                Ok(child) => {
-                    info!("Shell session spawned inside sandbox");
-                    (child, true)
+                Ok(mut child) => {
+                    // Give the process a moment to fail if the sandbox setup
+                    // is going to die immediately (e.g. namespace errors).
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            warn!(exit_status = ?status, "Sandboxed shell died immediately, falling back to unsandboxed");
+                            let child = Self::spawn_unsandboxed(workspace_dir)?;
+                            (child, false)
+                        }
+                        _ => {
+                            info!("Shell session spawned inside sandbox");
+                            (child, true)
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
