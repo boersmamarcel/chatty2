@@ -63,6 +63,7 @@ impl ListToolsTool {
         has_search_web: bool,
         has_sub_agent: bool,
         has_browser_use: bool,
+        has_daytona: bool,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -379,6 +380,14 @@ impl ListToolsTool {
             });
         }
 
+        if has_daytona {
+            native_tools.push(ToolInfo {
+                name: "daytona_run".to_string(),
+                description: "Execute code in an isolated Daytona cloud sandbox. Creates a secure, ephemeral environment, runs your code, returns the output, and cleans up automatically.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         // read_skill is always available — it's the on-demand companion to the slim
         // skill descriptions shown in the automatic context block.
         native_tools.push(ToolInfo {
@@ -408,6 +417,7 @@ impl ListToolsTool {
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
         Self::new_with_config(
+            false,
             false,
             false,
             false,

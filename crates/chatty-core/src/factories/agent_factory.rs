@@ -16,7 +16,7 @@ use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConf
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 use crate::tools::{
     AddAttachmentTool, AddMcpTool, ApplyDiffTool, BrowserUseTool, CompileTypstTool, CreateChartTool,
-    CreateDirectoryTool, DeleteFileTool, DeleteMcpTool, DescribeDataTool, EditExcelTool,
+    CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool, DescribeDataTool, EditExcelTool,
     EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool,
     GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
@@ -171,6 +171,7 @@ fn active_native_tool_names(
     has_search_web: bool,
     has_sub_agent: bool,
     has_browser_use: bool,
+    has_daytona: bool,
 ) -> HashSet<String> {
     let mut names = HashSet::from([String::from("list_tools"), String::from("read_skill")]);
 
@@ -284,6 +285,9 @@ fn active_native_tool_names(
     }
     if has_browser_use {
         names.insert(String::from("browser_use"));
+    }
+    if has_daytona {
+        names.insert(String::from("daytona_run"));
     }
 
     names
@@ -432,6 +436,7 @@ fn collect_tools(
     search_web_tool: Option<SearchWebTool>,
     sub_agent_tool: Option<SubAgentTool>,
     browser_use_tool: Option<BrowserUseTool>,
+    daytona_tool: Option<DaytonaTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -532,6 +537,9 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = browser_use_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = daytona_tool {
         tools.push(Box::new(t));
     }
     tools
@@ -950,6 +958,31 @@ impl AgentClient {
             None
         };
 
+        // Create Daytona tool — enabled when internet access is on AND the user has
+        // configured their Daytona API key and toggled the service on.
+        let daytona_tool: Option<DaytonaTool> = if exec_settings
+            .as_ref()
+            .map(|s| s.fetch_enabled)
+            .unwrap_or(true)
+        {
+            search_settings.as_ref().and_then(|s| {
+                if s.daytona_enabled {
+                    s.daytona_api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
+                        .map(|key| {
+                            tracing::info!("Daytona sandbox tool enabled");
+                            DaytonaTool::new(key)
+                        })
+                } else {
+                    None
+                }
+            })
+        } else {
+            tracing::info!("Daytona tool disabled (internet access is off)");
+            None
+        };
+
         // Create git tools from the handle started before the filesystem block.
         // GitService ran concurrently with FileSystemService + CodeSearchService.
         let git_tools: Option<GitTools> = if let Some(handle) = git_service_handle {
@@ -1146,6 +1179,7 @@ impl AgentClient {
             search_web_tool.is_some(),
             sub_agent_tool.is_some(),
             browser_use_tool.is_some(),
+            daytona_tool.is_some(),
         );
         let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
 
@@ -1171,6 +1205,7 @@ impl AgentClient {
             search_web_tool.is_some(),
             sub_agent_tool.is_some(),
             browser_use_tool.is_some(),
+            daytona_tool.is_some(),
             mcp_tool_info,
         );
 
@@ -1349,6 +1384,15 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        if daytona_tool.is_some() {
+            tool_sections.push(
+                "- **daytona_run**: Execute code in an isolated Daytona cloud sandbox. \
+                 Creates a secure, ephemeral environment, runs the code, returns output, \
+                 and cleans up automatically. Useful for running code with internet access \
+                 or in a fresh environment."
+                    .to_string(),
+            );
+        }
         // read_skill is always present — it's the on-demand companion to the slim
         // skill descriptions that appear in the automatic context block.
         tool_sections.push(
@@ -1502,6 +1546,7 @@ impl AgentClient {
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
+                    daytona_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1579,6 +1624,7 @@ impl AgentClient {
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
+                    daytona_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1623,6 +1669,7 @@ impl AgentClient {
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
+                    daytona_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1670,6 +1717,7 @@ impl AgentClient {
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
+                    daytona_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1716,6 +1764,7 @@ impl AgentClient {
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
+                    daytona_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1900,6 +1949,7 @@ impl AgentClient {
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
+                    daytona_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =

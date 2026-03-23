@@ -41,6 +41,12 @@ pub struct SearchSettingsModel {
     /// API key for browser-use cloud service (https://browser-use.com)
     #[serde(default)]
     pub browser_use_api_key: Option<String>,
+    /// Whether Daytona cloud sandbox execution is enabled
+    #[serde(default)]
+    pub daytona_enabled: bool,
+    /// API key for Daytona cloud service (https://app.daytona.io)
+    #[serde(default)]
+    pub daytona_api_key: Option<String>,
 }
 
 fn default_max_results() -> usize {
@@ -57,6 +63,8 @@ impl Default for SearchSettingsModel {
             max_results: default_max_results(),
             browser_use_enabled: false,
             browser_use_api_key: None,
+            daytona_enabled: false,
+            daytona_api_key: None,
         }
     }
 }

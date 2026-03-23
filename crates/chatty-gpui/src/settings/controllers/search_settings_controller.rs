@@ -105,3 +105,24 @@ pub fn set_browser_use_api_key(key: String, cx: &mut App) {
     notify_tool_set_changed(cx);
     save_async(cx);
 }
+
+/// Toggle Daytona enabled/disabled and persist to disk
+pub fn toggle_daytona(cx: &mut App) {
+    let new_enabled = !cx.global::<SearchSettingsModel>().daytona_enabled;
+    info!(new = new_enabled, "Toggling Daytona");
+    cx.global_mut::<SearchSettingsModel>().daytona_enabled = new_enabled;
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}
+
+/// Set the Daytona API key and persist to disk
+pub fn set_daytona_api_key(key: String, cx: &mut App) {
+    let api_key = if key.is_empty() { None } else { Some(key) };
+    cx.global_mut::<SearchSettingsModel>().daytona_api_key = api_key;
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}

@@ -118,8 +118,6 @@ impl BrowserUseTool {
     /// Poll the task status until it completes or times out.
     async fn poll_task(&self, task_id: &str) -> Result<TaskStatusResponse, BrowserUseToolError> {
         for attempt in 0..MAX_POLL_ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
-
             let response = self
                 .client
                 .get(format!("{}/task/{}", BROWSER_USE_API_BASE, task_id))
@@ -158,14 +156,16 @@ impl BrowserUseTool {
                     return Ok(status_response);
                 }
                 _ => {
-                    // still running — keep polling
+                    // still running — wait before next poll
+                    tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
                 }
             }
         }
 
+        let timeout_secs = MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 1000;
         Err(BrowserUseToolError::ApiError(format!(
-            "Task {} timed out after {} polling attempts",
-            task_id, MAX_POLL_ATTEMPTS
+            "Task {} timed out after {} polling attempts (~{} seconds)",
+            task_id, MAX_POLL_ATTEMPTS, timeout_secs
         )))
     }
 }

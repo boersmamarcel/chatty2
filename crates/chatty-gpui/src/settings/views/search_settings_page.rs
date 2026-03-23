@@ -182,5 +182,48 @@ pub fn search_settings_page() -> SettingPage {
                     )
                     .description("Get your API key from browser-use.com/cloud"),
                 ]),
+            SettingGroup::new()
+                .title("Daytona")
+                .description(
+                    "Daytona provides secure, isolated cloud sandbox environments for \
+                     running code. The AI can create an ephemeral sandbox, execute code, \
+                     return the output, and clean up automatically. \
+                     Get your API key from app.daytona.io.",
+                )
+                .items(vec![
+                    SettingItem::new(
+                        "Enable Daytona",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<SearchSettingsModel>().daytona_enabled,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_daytona(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "When enabled and an API key is set, the AI can run code in secure \
+                         Daytona cloud sandboxes with internet access.",
+                    ),
+                    SettingItem::new(
+                        "Daytona API Key",
+                        masked_api_key_field(
+                            |cx: &App| {
+                                cx.global::<SearchSettingsModel>()
+                                    .daytona_api_key
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into()
+                            },
+                            |val: SharedString, cx: &mut App| {
+                                search_settings_controller::set_daytona_api_key(
+                                    val.to_string(),
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
+                    .description("Get your API key from app.daytona.io"),
+                ]),
         ])
 }
