@@ -3,8 +3,8 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-/// Base URL for the browser-use cloud API
-const BROWSER_USE_API_BASE: &str = "https://api.browser-use.com/api/v1";
+/// Base URL for the browser-use cloud API (v2)
+const BROWSER_USE_API_BASE: &str = "https://cloud.browser-use.com/api/v2";
 
 /// Default polling interval in milliseconds
 const POLL_INTERVAL_MS: u64 = 2000;
@@ -88,7 +88,7 @@ impl BrowserUseTool {
 
         let response = self
             .client
-            .post(format!("{}/run-task", BROWSER_USE_API_BASE))
+            .post(format!("{}/tasks", BROWSER_USE_API_BASE))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -120,7 +120,7 @@ impl BrowserUseTool {
         for attempt in 0..MAX_POLL_ATTEMPTS {
             let response = self
                 .client
-                .get(format!("{}/task/{}", BROWSER_USE_API_BASE, task_id))
+                .get(format!("{}/tasks/{}", BROWSER_USE_API_BASE, task_id))
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .send()
                 .await
@@ -152,7 +152,8 @@ impl BrowserUseTool {
             );
 
             match status_response.status.as_str() {
-                "finished" | "failed" | "stopped" => {
+                // "completed" is the v2 API status; keep "finished" for v1 compatibility
+                "completed" | "finished" | "failed" | "stopped" => {
                     return Ok(status_response);
                 }
                 _ => {

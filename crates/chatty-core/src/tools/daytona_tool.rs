@@ -9,6 +9,12 @@ const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
 /// Default timeout for sandbox creation and code execution (seconds)
 const DAYTONA_TIMEOUT_SECS: u64 = 60;
 
+/// Maximum polling attempts when waiting for sandbox to reach "started" state (~30s)
+const DAYTONA_SANDBOX_POLL_ATTEMPTS: u64 = 15;
+
+/// Polling interval in milliseconds while waiting for sandbox start
+const DAYTONA_SANDBOX_POLL_INTERVAL_MS: u64 = 2000;
+
 // ── Tool Args / Output ──────────────────────────────────────────────────────
 
 /// Arguments for the daytona_run tool
@@ -46,6 +52,16 @@ pub enum DaytonaToolError {
 #[derive(Deserialize, Debug)]
 struct SandboxResponse {
     id: String,
+    /// Proxy URL used to reach the sandbox toolbox (e.g. process/code-run endpoint).
+    /// Returned as "toolboxProxyUrl" in the JSON response.
+    #[serde(rename = "toolboxProxyUrl")]
+    toolbox_proxy_url: String,
+}
+
+/// Lightweight response used when polling sandbox state.
+#[derive(Deserialize, Debug)]
+struct SandboxStateResponse {
+    state: String,
 }
 
 #[derive(Serialize)]
@@ -93,8 +109,8 @@ impl DaytonaTool {
         }
     }
 
-    /// Create a new Daytona sandbox and return its ID.
-    async fn create_sandbox(&self) -> Result<String, DaytonaToolError> {
+    /// Create a new Daytona sandbox and return its ID and toolbox proxy URL.
+    async fn create_sandbox(&self) -> Result<(String, String), DaytonaToolError> {
         let response = self
             .client
             .post(format!("{}/sandbox", self.api_base))
@@ -123,13 +139,75 @@ impl DaytonaTool {
             DaytonaToolError::ApiError(format!("Failed to parse sandbox response: {}", e))
         })?;
 
-        Ok(sandbox.id)
+        Ok((sandbox.id, sandbox.toolbox_proxy_url))
     }
 
-    /// Run code in an existing Daytona sandbox.
+    /// Poll until the sandbox reaches the "started" state (up to ~30 seconds).
+    async fn wait_for_started(&self, sandbox_id: &str) -> Result<(), DaytonaToolError> {
+        for attempt in 0..DAYTONA_SANDBOX_POLL_ATTEMPTS {
+            let response = self
+                .client
+                .get(format!("{}/sandbox/{}", self.api_base, sandbox_id))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .send()
+                .await
+                .map_err(|e| {
+                    DaytonaToolError::ApiError(format!(
+                        "Failed to poll sandbox state: {}",
+                        e
+                    ))
+                })?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "(failed to read body)".to_string());
+                return Err(DaytonaToolError::ApiError(format!(
+                    "Daytona sandbox state poll returned {}: {}",
+                    status, body
+                )));
+            }
+
+            let state_resp: SandboxStateResponse = response.json().await.map_err(|e| {
+                DaytonaToolError::ApiError(format!("Failed to parse sandbox state: {}", e))
+            })?;
+
+            info!(
+                sandbox_id,
+                attempt,
+                state = %state_resp.state,
+                "Waiting for Daytona sandbox to start"
+            );
+
+            match state_resp.state.as_str() {
+                "started" => return Ok(()),
+                "error" => {
+                    return Err(DaytonaToolError::ApiError(format!(
+                        "Daytona sandbox {} entered error state",
+                        sandbox_id
+                    )));
+                }
+                _ => {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        DAYTONA_SANDBOX_POLL_INTERVAL_MS,
+                    ))
+                    .await;
+                }
+            }
+        }
+
+        Err(DaytonaToolError::ApiError(format!(
+            "Daytona sandbox {} did not reach 'started' state in time",
+            sandbox_id
+        )))
+    }
+
+    /// Run code in an existing Daytona sandbox via the toolbox proxy URL.
     async fn run_code(
         &self,
-        sandbox_id: &str,
+        toolbox_proxy_url: &str,
         code: &str,
     ) -> Result<CodeRunResponse, DaytonaToolError> {
         let request = CodeRunRequest {
@@ -138,10 +216,7 @@ impl DaytonaTool {
 
         let response = self
             .client
-            .post(format!(
-                "{}/sandbox/{}/process/code-run",
-                self.api_base, sandbox_id
-            ))
+            .post(format!("{}/process/code-run", toolbox_proxy_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -247,10 +322,18 @@ impl Tool for DaytonaTool {
             .to_string();
 
         info!(language = %lang, "Creating Daytona sandbox");
-        let sandbox_id = self.create_sandbox().await?;
-        info!(sandbox_id = %sandbox_id, language = %lang, "Daytona sandbox created, running code");
+        let (sandbox_id, toolbox_proxy_url) = self.create_sandbox().await?;
+        info!(sandbox_id = %sandbox_id, language = %lang, "Daytona sandbox created, waiting for start");
 
-        let run_result = self.run_code(&sandbox_id, &code).await;
+        // Wait for the sandbox to reach "started" state before running code.
+        if let Err(e) = self.wait_for_started(&sandbox_id).await {
+            // Clean up best-effort before returning the error.
+            self.delete_sandbox(&sandbox_id).await;
+            return Err(e);
+        }
+
+        info!(sandbox_id = %sandbox_id, language = %lang, "Daytona sandbox started, running code");
+        let run_result = self.run_code(&toolbox_proxy_url, &code).await;
 
         // Always attempt cleanup regardless of execution result
         let cleaned_up = self.delete_sandbox(&sandbox_id).await;
