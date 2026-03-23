@@ -81,6 +81,7 @@ mod tests {
     use crate::backend::wry_backend::WryBackend;
 
     #[tokio::test]
+    #[ignore = "requires display server and active run loop (hangs on macOS without GPUI)"]
     async fn test_browser_engine_creation() {
         // WryBackend::new() requires a display server (X11/Wayland/macOS/Windows).
         // In headless CI it may fail — that's expected. Only test when it succeeds.

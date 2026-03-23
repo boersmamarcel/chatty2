@@ -27,9 +27,10 @@
 use async_trait::async_trait;
 
 use super::{BrowserBackend, Cookie, TabId, TabInfo};
+use crate::constants::{BROWSER_USER_AGENT, INITIAL_TAB_URL, IPC_RESULT_PREFIX, JS_ERROR_PREFIX};
+#[cfg(target_os = "macos")]
 use crate::constants::{
-    BROWSER_USER_AGENT, INITIAL_TAB_URL, IPC_RESULT_PREFIX, JS_ERROR_PREFIX, MAX_STABILIZE_SECS,
-    MIN_CONTENT_LENGTH, POLL_INTERVAL_MS, STABLE_CHECK_COUNT,
+    MAX_STABILIZE_SECS, MIN_CONTENT_LENGTH, POLL_INTERVAL_MS, STABLE_CHECK_COUNT,
 };
 
 /// Anti-fingerprint JavaScript injected on every page load via
