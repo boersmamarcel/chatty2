@@ -35,14 +35,18 @@ pub struct SearchSettingsModel {
     /// Maximum number of search results to return
     #[serde(default = "default_max_results")]
     pub max_results: usize,
-    /// Whether browser-use cloud automation is enabled
-    #[serde(default)]
+    /// Whether browser-use cloud automation is enabled.
+    /// Defaults to `true` so that setting an API key is sufficient to activate the tool.
+    /// Set to `false` to explicitly disable without removing the key.
+    #[serde(default = "default_true")]
     pub browser_use_enabled: bool,
     /// API key for browser-use cloud service (https://browser-use.com)
     #[serde(default)]
     pub browser_use_api_key: Option<String>,
-    /// Whether Daytona cloud sandbox execution is enabled
-    #[serde(default)]
+    /// Whether Daytona cloud sandbox execution is enabled.
+    /// Defaults to `true` so that setting an API key is sufficient to activate the tool.
+    /// Set to `false` to explicitly disable without removing the key.
+    #[serde(default = "default_true")]
     pub daytona_enabled: bool,
     /// API key for Daytona cloud service (https://app.daytona.io)
     #[serde(default)]
@@ -53,6 +57,10 @@ fn default_max_results() -> usize {
     5
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for SearchSettingsModel {
     fn default() -> Self {
         Self {
@@ -61,9 +69,9 @@ impl Default for SearchSettingsModel {
             tavily_api_key: None,
             brave_api_key: None,
             max_results: default_max_results(),
-            browser_use_enabled: false,
+            browser_use_enabled: true,
             browser_use_api_key: None,
-            daytona_enabled: false,
+            daytona_enabled: true,
             daytona_api_key: None,
         }
     }

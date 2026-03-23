@@ -934,7 +934,9 @@ impl AgentClient {
         };
 
         // Create browser-use tool — enabled when internet access is on AND the user has
-        // configured their browser-use API key and toggled the service on.
+        // configured their browser-use API key. The enabled toggle (browser_use_enabled)
+        // defaults to true, so entering an API key is sufficient to activate the tool.
+        // Users can set the toggle to false to explicitly disable without deleting the key.
         let browser_use_tool: Option<BrowserUseTool> = if exec_settings
             .as_ref()
             .map(|s| s.fetch_enabled)
@@ -950,6 +952,7 @@ impl AgentClient {
                             BrowserUseTool::new(key)
                         })
                 } else {
+                    tracing::info!("browser-use tool disabled (toggle is off)");
                     None
                 }
             })
@@ -959,7 +962,9 @@ impl AgentClient {
         };
 
         // Create Daytona tool — enabled when internet access is on AND the user has
-        // configured their Daytona API key and toggled the service on.
+        // configured their Daytona API key. The enabled toggle (daytona_enabled)
+        // defaults to true, so entering an API key is sufficient to activate the tool.
+        // Users can set the toggle to false to explicitly disable without deleting the key.
         let daytona_tool: Option<DaytonaTool> = if exec_settings
             .as_ref()
             .map(|s| s.fetch_enabled)
@@ -975,6 +980,7 @@ impl AgentClient {
                             DaytonaTool::new(key)
                         })
                 } else {
+                    tracing::info!("Daytona tool disabled (toggle is off)");
                     None
                 }
             })

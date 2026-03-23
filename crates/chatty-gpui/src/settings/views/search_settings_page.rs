@@ -149,20 +149,6 @@ pub fn search_settings_page() -> SettingPage {
                 )
                 .items(vec![
                     SettingItem::new(
-                        "Enable Browser Use",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<SearchSettingsModel>().browser_use_enabled,
-                            |_val: bool, cx: &mut App| {
-                                search_settings_controller::toggle_browser_use(cx);
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(
-                        "When enabled and an API key is set, the AI can use browser-use to \
-                         automate browser tasks (e.g., 'find the contact email on example.com').",
-                    ),
-                    SettingItem::new(
                         "Browser Use API Key",
                         masked_api_key_field(
                             |cx: &App| {
@@ -180,7 +166,23 @@ pub fn search_settings_page() -> SettingPage {
                             },
                         ),
                     )
-                    .description("Get your API key from browser-use.com/cloud"),
+                    .description(
+                        "Enter your API key to activate the browser_use tool. \
+                         Get your key from browser-use.com/cloud",
+                    ),
+                    SettingItem::new(
+                        "Disable Browser Use",
+                        SettingField::switch(
+                            |cx: &App| !cx.global::<SearchSettingsModel>().browser_use_enabled,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_browser_use(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Toggle off to temporarily disable browser-use without removing your API key.",
+                    ),
                 ]),
             SettingGroup::new()
                 .title("Daytona")
@@ -191,20 +193,6 @@ pub fn search_settings_page() -> SettingPage {
                      Get your API key from app.daytona.io.",
                 )
                 .items(vec![
-                    SettingItem::new(
-                        "Enable Daytona",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<SearchSettingsModel>().daytona_enabled,
-                            |_val: bool, cx: &mut App| {
-                                search_settings_controller::toggle_daytona(cx);
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(
-                        "When enabled and an API key is set, the AI can run code in secure \
-                         Daytona cloud sandboxes with internet access.",
-                    ),
                     SettingItem::new(
                         "Daytona API Key",
                         masked_api_key_field(
@@ -223,7 +211,23 @@ pub fn search_settings_page() -> SettingPage {
                             },
                         ),
                     )
-                    .description("Get your API key from app.daytona.io"),
+                    .description(
+                        "Enter your API key to activate the daytona_run tool. \
+                         Get your key from app.daytona.io",
+                    ),
+                    SettingItem::new(
+                        "Disable Daytona",
+                        SettingField::switch(
+                            |cx: &App| !cx.global::<SearchSettingsModel>().daytona_enabled,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_daytona(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Toggle off to temporarily disable Daytona without removing your API key.",
+                    ),
                 ]),
         ])
 }
