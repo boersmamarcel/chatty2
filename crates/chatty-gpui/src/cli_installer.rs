@@ -221,13 +221,13 @@ async fn do_install() -> Result<String, String> {
 /// auto-update replaces the main application binary. No notification is shown
 /// to the user; failures are logged at debug level.
 ///
-/// - macOS:   The CLI is a symlink into the `.app` bundle, so it is
-///            automatically correct after the bundle is replaced in-place.
-///            No action needed.
-/// - Linux:   The CLI is a copy in `~/.local/bin` that must be refreshed
-///            explicitly after the AppImage is replaced on disk.
+/// - macOS: The CLI is a symlink into the `.app` bundle, so it is
+///   automatically correct after the bundle is replaced in-place.
+///   No action needed.
+/// - Linux: The CLI is a copy in `~/.local/bin` that must be refreshed
+///   explicitly after the AppImage is replaced on disk.
 /// - Windows: The Inno Setup installer already replaces the binary.
-///            No action needed.
+///   No action needed.
 pub fn update_cli_if_installed(cx: &mut App) {
     cx.spawn(
         async move |_cx: &mut gpui::AsyncApp| match do_update_if_installed().await {

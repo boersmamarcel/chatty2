@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui"]
+members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui", "crates/chatty-browser"]
 resolver = "2"
 
 [workspace.package]
@@ -30,9 +30,13 @@ anyhow = "1.0"
 regex = "1.10"
 base64 = "0.22"
 async-stream = "0.3"
-reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "query"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "query", "cookies", "form"] }
 glob = "0.3"
 similar = "2.2"
+
+# Encryption
+aes-gcm = "0.10"
+rand = "0.8"
 
 # Auto-updater
 semver = "1.0"
@@ -88,6 +92,16 @@ tiktoken-rs = "0.9"
 
 # Agent memory
 memvid-core = { version = "2.0", default-features = false, features = ["lex", "vec", "temporal_track"] }
+
+# URL parsing
+url = "2.5"
+
+# Browser backend (WebView)
+wry = "0.54"
+tao = "0.34"
+
+# Open URLs in system browser
+open = "5.3"
 
 # GPUI (UI only)
 gpui = "0.2.2"

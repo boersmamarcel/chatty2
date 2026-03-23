@@ -62,10 +62,11 @@ pub fn load_files_for_dir(dir: &std::path::Path) -> Vec<String> {
 /// when there is whitespace after the `@`.
 pub fn at_query_from(input_text: &str) -> Option<String> {
     // Work on the trailing portion of the text (handle multiline gracefully).
+    // `.lines()` already strips line endings, so no extra trim is needed —
+    // trailing spaces are significant (they close the menu).
     let last_line = input_text.lines().next_back().unwrap_or(input_text);
-    let trimmed = last_line.trim_end();
-    let at_pos = trimmed.rfind('@')?;
-    let after_at = &trimmed[at_pos + 1..];
+    let at_pos = last_line.rfind('@')?;
+    let after_at = &last_line[at_pos + 1..];
     // Close the menu as soon as the user types a space.
     if after_at.chars().any(char::is_whitespace) {
         return None;
@@ -246,7 +247,9 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
 /// Use [`slash_menu_items_with_skills`] to also include filesystem skills.
 #[cfg(test)]
 pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
-    let trimmed = input_text.trim();
+    // Only trim leading whitespace — trailing spaces are significant
+    // (they signal the user has finished typing the command).
+    let trimmed = input_text.trim_start();
     if !trimmed.starts_with('/') {
         return Vec::new();
     }
@@ -271,7 +274,7 @@ pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
 /// Returns combined slash-menu items: built-in commands first, then filesystem
 /// skills — both filtered to match the current query in `input_text`.
 pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> Vec<SlashMenuItem> {
-    let trimmed = input_text.trim();
+    let trimmed = input_text.trim_start();
     if !trimmed.starts_with('/') {
         return Vec::new();
     }
@@ -290,7 +293,7 @@ pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> 
                     .to_ascii_lowercase()
                     .starts_with(&query)
         })
-        .map(|cmd| SlashMenuItem::Command(cmd))
+        .map(SlashMenuItem::Command)
         .collect();
 
     let skill_items = skills
@@ -1286,24 +1289,22 @@ impl RenderOnce for ChatInput {
 
                                                                     if let Ok(Some(paths)) =
                                                                         receiver.await.ok()?
-                                                                    {
-                                                                        if let Some(path) =
+                                                                        && let Some(path) =
                                                                             paths.into_iter().next()
-                                                                        {
-                                                                            state
-                                                                                .update(
-                                                                                    cx,
-                                                                                    |state, cx| {
-                                                                                        state.set_working_dir(
-                                                                                            Some(
-                                                                                                path,
-                                                                                            ),
-                                                                                            cx,
-                                                                                        );
-                                                                                    },
-                                                                                )
-                                                                                .ok()?;
-                                                                        }
+                                                                    {
+                                                                        state
+                                                                            .update(
+                                                                                cx,
+                                                                                |state, cx| {
+                                                                                    state.set_working_dir(
+                                                                                        Some(
+                                                                                            path,
+                                                                                        ),
+                                                                                        cx,
+                                                                                    );
+                                                                                },
+                                                                            )
+                                                                            .ok()?;
                                                                     }
                                                                     Some(())
                                                                 })

@@ -25,8 +25,18 @@ use crate::tools::{
     SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
+use chatty_browser::tools::{
+    BrowseTool, BrowserActionTool, BrowserAuthTool, BrowserExtractTool, BrowserTabsTool,
+};
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
+
+type CachedBrowserComponents = (
+    std::sync::Arc<chatty_browser::session::BrowserSession>,
+    std::sync::Arc<tokio::sync::RwLock<Option<chatty_browser::backend::TabId>>>,
+);
+
+static BROWSER_COMPONENTS: OnceLock<CachedBrowserComponents> = OnceLock::new();
 
 /// Filesystem read tool set
 type FsReadTools = (
@@ -72,6 +82,15 @@ type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 type DataQueryTools = (QueryDataTool, DescribeDataTool);
+
+/// Browser tools (gated on browser_settings.enabled)
+type BrowserTools = (
+    BrowseTool,
+    BrowserActionTool,
+    BrowserExtractTool,
+    BrowserAuthTool,
+    BrowserTabsTool,
+);
 
 /// All four MCP management tools bundled together.
 ///
@@ -427,6 +446,7 @@ fn collect_tools(
     read_skill_tool: ReadSkillTool,
     search_web_tool: Option<SearchWebTool>,
     sub_agent_tool: Option<SubAgentTool>,
+    browser_tools: Option<BrowserTools>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -526,6 +546,13 @@ fn collect_tools(
     if let Some(t) = sub_agent_tool {
         tools.push(Box::new(t));
     }
+    if let Some((browse, action, extract, auth, tabs)) = browser_tools {
+        tools.push(Box::new(browse));
+        tools.push(Box::new(action));
+        tools.push(Box::new(extract));
+        tools.push(Box::new(auth));
+        tools.push(Box::new(tabs));
+    }
     tools
 }
 
@@ -557,6 +584,7 @@ impl AgentClient {
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
+        browser_settings: Option<chatty_browser::settings::BrowserSettingsModel>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -914,6 +942,92 @@ impl AgentClient {
             }))
         } else {
             tracing::info!("Search web tool disabled (internet access is off)");
+            None
+        };
+
+        // ── Browser tools ────────────────────────────────────────────────
+        let browser_tools: Option<BrowserTools> = if browser_settings
+            .as_ref()
+            .is_some_and(|s| s.enabled)
+        {
+            tracing::info!("Browser tools enabled");
+
+            // Reuse cached WryBackend/BrowserEngine across agent rebuilds
+            let browser_components = if let Some(cached) = BROWSER_COMPONENTS.get() {
+                Some(cached.clone())
+            } else {
+                match chatty_browser::backend::wry_backend::WryBackend::new().await {
+                    Ok(wry_backend) => {
+                        let backend = std::sync::Arc::new(wry_backend);
+                        let engine = chatty_browser::BrowserEngine::new(backend);
+                        let session = engine.session().clone();
+                        let active_tab = engine.active_tab().clone();
+                        let components = (session, active_tab);
+                        let _ = BROWSER_COMPONENTS.set(components.clone());
+                        Some(components)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "WryBackend failed to start (no display server?). \
+                             Browser tools will use HTTP fallback."
+                        );
+                        None
+                    }
+                }
+            };
+
+            if let Some((session, active_tab)) = browser_components {
+                // Single LoginProfileRepository for both browse and auth tools
+                let profiles_repo = match chatty_browser::settings::LoginProfileRepository::new() {
+                    Ok(repo) => Some(std::sync::Arc::new(repo)),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "Failed to init login profile repo");
+                        None
+                    }
+                };
+
+                let login_profiles = if let Some(ref repo) = profiles_repo {
+                    repo.load_all().await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Credential vault for auth tool
+                let auth_components = chatty_browser::credential::vault::CredentialVault::new()
+                    .map(|vault| (std::sync::Arc::new(vault), profiles_repo))
+                    .ok();
+
+                match auth_components {
+                    Some((vault, Some(profiles_repo))) => Some((
+                        BrowseTool::new(
+                            session.clone(),
+                            active_tab.clone(),
+                            login_profiles.clone(),
+                        ),
+                        BrowserActionTool::new(session.clone(), active_tab.clone(), login_profiles),
+                        BrowserExtractTool::new(session.clone(), active_tab.clone()),
+                        BrowserAuthTool::new(
+                            session.clone(),
+                            active_tab.clone(),
+                            vault,
+                            profiles_repo,
+                        ),
+                        BrowserTabsTool::new(session, active_tab),
+                    )),
+                    _ => {
+                        tracing::error!(
+                            "Failed to initialize credential vault or profile repo — \
+                             check config directory permissions. Browser tools disabled."
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            tracing::info!("Browser tools disabled");
             None
         };
 
@@ -1306,6 +1420,32 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        if browser_tools.is_some() {
+            tool_sections.push(
+                "- **browse**: Navigate to a URL and get a structured page snapshot (title, \
+                 text, interactive elements with IDs like e1/e2, forms, links).\n\
+                 - **browser_action**: Interact with page elements — click, fill, select, \
+                 scroll, wait. Reference elements by their ID from the browse output. \
+                 After click/fill/select/scroll the updated page snapshot is returned \
+                 automatically.\n\
+                 - **browser_extract**: Extract structured data (text, links, tables, screenshot) \
+                 from the current page.\n\
+                 - **browser_auth**: Log in to a website using stored credentials.\n\
+                 - **browser_tabs**: Manage browser tabs (new, close, switch, list).\n\
+                 \n\
+                 **Browser workflow:**\n\
+                 1. Start with `browse` to load a page and get the snapshot with element IDs.\n\
+                 2. Use `browser_action` to interact (click links/buttons, fill forms). \
+                 The response includes the updated page state.\n\
+                 3. Use `browser_extract` when you need full text, all links, or tables.\n\
+                 4. If a login form is detected, use `browser_auth` with the suggested credential.\n\
+                 5. Element IDs (e1, e2, …) change when the page changes — always use IDs \
+                 from the most recent snapshot.\n\
+                 6. For forms: fill each field with browser_action fill, then click the submit button.\n\
+                 7. If an element is not visible, scroll first with browser_action scroll."
+                    .to_string(),
+            );
+        }
         // read_skill is always present — it's the on-demand companion to the slim
         // skill descriptions that appear in the automatic context block.
         tool_sections.push(
@@ -1458,6 +1598,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1534,6 +1675,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1577,6 +1719,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1623,6 +1766,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1668,6 +1812,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1851,6 +1996,7 @@ impl AgentClient {
                     read_skill_tool.clone(),
                     search_web_tool.clone(),
                     sub_agent_tool.clone(),
+                    browser_tools.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1979,7 +2125,7 @@ mod tests {
         // regardless of which optional tools are enabled.
         let names = active_native_tool_names(
             false, false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
         );
         assert!(
             names.contains("read_skill"),
@@ -1992,7 +2138,7 @@ mod tests {
     fn active_native_tool_names_includes_search_tools() {
         let names = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
         );
 
         assert!(names.contains("list_tools"));
@@ -2005,7 +2151,7 @@ mod tests {
     fn filter_mcp_tool_info_skips_native_and_mcp_duplicates() {
         let reserved = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
         );
 
         let filtered = filter_mcp_tool_info(

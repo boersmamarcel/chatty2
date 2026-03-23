@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use memvid_core::{Memvid, PutOptions, SearchRequest};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -9,6 +11,12 @@ const DEFAULT_TOP_K: usize = 5;
 
 /// Snippet length for search results
 const SNIPPET_CHARS: usize = 500;
+
+/// Maximum retries for transient Tantivy lock errors during commit.
+const COMMIT_MAX_RETRIES: u32 = 5;
+
+/// Base backoff between commit retries (doubles each attempt).
+const COMMIT_RETRY_BASE_MS: u64 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,10 +94,13 @@ enum MemoryCommand {
 /// runtime.
 ///
 /// The thread exits when all `MemoryService` clones are dropped (channel closes).
+/// Call [`shutdown()`](Self::shutdown) for deterministic cleanup that waits for
+/// the thread to fully terminate (important when reopening the same file).
 #[derive(Clone)]
 pub struct MemoryService {
     cmd_tx: mpsc::Sender<MemoryCommand>,
     path: PathBuf,
+    thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl MemoryService {
@@ -112,7 +123,7 @@ impl MemoryService {
 
         let thread_path = path.clone();
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("memory-service".into())
             .spawn(move || {
                 run_memory_thread(thread_path, cmd_rx, init_tx);
@@ -125,7 +136,11 @@ impl MemoryService {
             .context("Memory thread panicked during init")?
             .context("Memory initialization failed")?;
 
-        Ok(Self { cmd_tx, path })
+        Ok(Self {
+            cmd_tx,
+            path,
+            thread_handle: Arc::new(Mutex::new(Some(handle))),
+        })
     }
 
     /// Store a memory entry with an optional title and key-value tags.
@@ -291,6 +306,61 @@ impl MemoryService {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Shut down the memory service and wait for the background thread to exit.
+    ///
+    /// Closes the command channel (causing the thread to exit its loop) and
+    /// then joins the thread, ensuring all resources — including Tantivy index
+    /// locks — are fully released before this method returns.
+    ///
+    /// This is important when the same memory file will be reopened immediately
+    /// (e.g., in tests simulating app restart).
+    pub async fn shutdown(self) {
+        // Drop the sender to signal the thread to exit.
+        drop(self.cmd_tx);
+
+        // Join the thread on a blocking task so we don't block the async executor.
+        let handle_arc = self.thread_handle;
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(handle) = handle_arc.lock().ok().and_then(|mut h| h.take()) {
+                let _ = handle.join();
+            }
+        })
+        .await;
+    }
+}
+
+/// Commit with retry for transient Tantivy lock errors.
+///
+/// Tantivy's internal commit cycle (take writer → commit → wait_merging_threads
+/// → create_writer) uses a non-blocking `try_lock_exclusive`. Under heavy system
+/// load the lock release from the old writer and the acquisition by the new writer
+/// can race, producing a transient `LockBusy` error. A brief backoff resolves it.
+fn commit_with_retry(memvid: &mut Memvid) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 0..=COMMIT_MAX_RETRIES {
+        match memvid.commit() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if attempt < COMMIT_MAX_RETRIES && msg.contains("LockBusy") {
+                    let backoff =
+                        std::time::Duration::from_millis(COMMIT_RETRY_BASE_MS * (1 << attempt));
+                    warn!(
+                        attempt = attempt + 1,
+                        max = COMMIT_MAX_RETRIES,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "Tantivy lock busy, retrying commit"
+                    );
+                    std::thread::sleep(backoff);
+                    last_err = Some(e);
+                } else {
+                    return Err(e).context("Failed to commit memory");
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap()).context("Failed to commit memory after retries")
 }
 
 /// Runs on the dedicated memory thread. All Memvid operations happen here,
@@ -495,7 +565,7 @@ fn handle_remember(
     memvid
         .put_bytes_with_options(content.as_bytes(), opts)
         .context("Failed to store memory")?;
-    memvid.commit().context("Failed to commit memory")?;
+    commit_with_retry(memvid)?;
 
     info!(
         title = title.unwrap_or("<untitled>"),
@@ -525,7 +595,7 @@ fn handle_remember_with_embedding(
     memvid
         .put_with_embedding_and_options(content.as_bytes(), embedding, opts)
         .context("Failed to store memory with embedding")?;
-    memvid.commit().context("Failed to commit memory")?;
+    commit_with_retry(memvid)?;
 
     info!(
         title = title.unwrap_or("<untitled>"),
@@ -698,8 +768,10 @@ mod tests {
             )
             .await
             .unwrap();
+            // Explicitly shut down so the background thread fully releases
+            // the Tantivy index lock before we reopen the same file.
+            svc.shutdown().await;
         }
-        // MemoryService is dropped here, simulating app shutdown
 
         // Verify the .mv2 file exists on disk
         let mv2_path = dir.path().join("memory.mv2");

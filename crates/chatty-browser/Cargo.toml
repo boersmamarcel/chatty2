@@ -1,0 +1,50 @@
+[package]
+name = "chatty-browser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Core workspace deps
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+dirs.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+# Agent tools
+rig-core.workspace = true
+
+# Encryption
+aes-gcm.workspace = true
+rand.workspace = true
+base64.workspace = true
+
+# URL parsing
+url = "2.5"
+
+# HTTP fallback when browser backend is unavailable
+reqwest.workspace = true
+
+# Browser backend (WebView)
+wry.workspace = true
+tao.workspace = true
+
+# Optional: GPUI integration
+gpui = { workspace = true, optional = true }
+
+# macOS: raw window handle for creating hidden NSWindow for wry
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+block2 = "0.6"
+objc2 = "0.6"
+
+[features]
+default = []
+# Enable this feature to get `impl gpui::Global` on browser types.
+gpui-globals = ["dep:gpui"]
+
+[dev-dependencies]
+tempfile.workspace = true

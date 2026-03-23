@@ -431,12 +431,10 @@ impl<'a> MathParser<'a> {
                             // A single newline before/after `$$` is NOT enough:
                             // LLMs often put `$$` on its own line inside a list
                             // item, and the user expects inline rendering there.
-                            let has_para_break = self.has_blank_line_before(i)
-                                || self.has_blank_line_after(j + 2);
+                            let has_para_break =
+                                self.has_blank_line_before(i) || self.has_blank_line_after(j + 2);
 
-                            if has_newlines
-                                || (is_block_start && is_block_end && has_para_break)
-                            {
+                            if has_newlines || (is_block_start && is_block_end && has_para_break) {
                                 segments
                                     .push(MathSegment::BlockMath(math_content.trim().to_string()));
                             } else {

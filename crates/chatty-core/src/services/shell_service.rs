@@ -8,6 +8,33 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+/// Time to wait after spawning a sandboxed process before checking if it
+/// died immediately (e.g. due to namespace creation failure).
+const SANDBOX_STARTUP_CHECK_DELAY_MS: u64 = 50;
+
+/// Base bubblewrap arguments shared between the sandbox capability test
+/// (`can_sandbox`) and the actual sandbox spawn (`spawn_sandboxed_linux`).
+#[cfg(target_os = "linux")]
+const BWRAP_BASE_ARGS: &[&str] = &[
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/sbin",
+    "/sbin",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--unshare-all",
+];
+
 /// Output from a shell command execution
 #[derive(Debug, Serialize)]
 pub struct ShellOutput {
@@ -88,17 +115,29 @@ impl ShellSession {
         &self.secret_key_names
     }
 
-    /// Check if sandboxing is available on this platform
+    /// Check if sandboxing is available on this platform.
+    ///
+    /// On Linux, this verifies not only that bubblewrap is installed but also
+    /// that it can actually create a sandbox (user namespaces must be enabled).
     pub fn can_sandbox() -> bool {
         #[cfg(target_os = "linux")]
         {
-            std::process::Command::new("bwrap")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            use std::sync::OnceLock;
+            static CAN_SANDBOX: OnceLock<bool> = OnceLock::new();
+            *CAN_SANDBOX.get_or_init(|| {
+                // Run a real sandboxed command to verify user namespace support.
+                // `bwrap --version` only checks if the binary exists; the actual
+                // `--unshare-all` flag can fail when unprivileged user namespaces
+                // are restricted (e.g. on GitHub Actions runners).
+                std::process::Command::new("bwrap")
+                    .args(BWRAP_BASE_ARGS)
+                    .args(["--", "/bin/true"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            })
         }
 
         #[cfg(target_os = "macos")]
@@ -163,9 +202,24 @@ impl ShellSession {
         // Try sandboxed spawn first, fall back to unsandboxed
         let (mut child, is_sandboxed) = if Self::can_sandbox() {
             match Self::spawn_sandboxed(workspace_dir, network_isolation) {
-                Ok(child) => {
-                    info!("Shell session spawned inside sandbox");
-                    (child, true)
+                Ok(mut child) => {
+                    // Give the process a moment to fail if the sandbox setup
+                    // is going to die immediately (e.g. namespace errors).
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        SANDBOX_STARTUP_CHECK_DELAY_MS,
+                    ))
+                    .await;
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            warn!(exit_status = ?status, "Sandboxed shell died immediately, falling back to unsandboxed");
+                            let child = Self::spawn_unsandboxed(workspace_dir)?;
+                            (child, false)
+                        }
+                        _ => {
+                            info!("Shell session spawned inside sandbox");
+                            (child, true)
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
@@ -270,30 +324,8 @@ impl ShellSession {
         let mut cmd = tokio::process::Command::new("bwrap");
 
         // Bind essential system directories as read-only
-        cmd.args([
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind",
-            "/bin",
-            "/bin",
-            "--ro-bind",
-            "/sbin",
-            "/sbin",
-            "--tmpfs",
-            "/tmp",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            // --unshare-all includes --unshare-net; we re-enable network
-            // below with --share-net when network_isolation is false.
-            "--unshare-all",
-            "--die-with-parent",
-        ]);
+        cmd.args(BWRAP_BASE_ARGS);
+        cmd.args(["--tmpfs", "/tmp", "--die-with-parent"]);
 
         // Re-enable network access when isolation is not requested
         if !network_isolation {
