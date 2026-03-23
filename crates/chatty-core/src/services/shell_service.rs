@@ -8,6 +8,33 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+/// Time to wait after spawning a sandboxed process before checking if it
+/// died immediately (e.g. due to namespace creation failure).
+const SANDBOX_STARTUP_CHECK_DELAY_MS: u64 = 50;
+
+/// Base bubblewrap arguments shared between the sandbox capability test
+/// (`can_sandbox`) and the actual sandbox spawn (`spawn_sandboxed_linux`).
+#[cfg(target_os = "linux")]
+const BWRAP_BASE_ARGS: &[&str] = &[
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/sbin",
+    "/sbin",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--unshare-all",
+];
+
 /// Output from a shell command execution
 #[derive(Debug, Serialize)]
 pub struct ShellOutput {
@@ -103,27 +130,8 @@ impl ShellSession {
                 // `--unshare-all` flag can fail when unprivileged user namespaces
                 // are restricted (e.g. on GitHub Actions runners).
                 std::process::Command::new("bwrap")
-                    .args([
-                        "--ro-bind",
-                        "/usr",
-                        "/usr",
-                        "--ro-bind",
-                        "/lib",
-                        "/lib",
-                        "--ro-bind",
-                        "/bin",
-                        "/bin",
-                        "--ro-bind",
-                        "/sbin",
-                        "/sbin",
-                        "--proc",
-                        "/proc",
-                        "--dev",
-                        "/dev",
-                        "--unshare-all",
-                        "--",
-                        "/bin/true",
-                    ])
+                    .args(BWRAP_BASE_ARGS)
+                    .args(["--", "/bin/true"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()
@@ -197,7 +205,10 @@ impl ShellSession {
                 Ok(mut child) => {
                     // Give the process a moment to fail if the sandbox setup
                     // is going to die immediately (e.g. namespace errors).
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        SANDBOX_STARTUP_CHECK_DELAY_MS,
+                    ))
+                    .await;
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             warn!(exit_status = ?status, "Sandboxed shell died immediately, falling back to unsandboxed");
@@ -313,30 +324,8 @@ impl ShellSession {
         let mut cmd = tokio::process::Command::new("bwrap");
 
         // Bind essential system directories as read-only
-        cmd.args([
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind",
-            "/bin",
-            "/bin",
-            "--ro-bind",
-            "/sbin",
-            "/sbin",
-            "--tmpfs",
-            "/tmp",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            // --unshare-all includes --unshare-net; we re-enable network
-            // below with --share-net when network_isolation is false.
-            "--unshare-all",
-            "--die-with-parent",
-        ]);
+        cmd.args(BWRAP_BASE_ARGS);
+        cmd.args(["--tmpfs", "/tmp", "--die-with-parent"]);
 
         // Re-enable network access when isolation is not requested
         if !network_isolation {
