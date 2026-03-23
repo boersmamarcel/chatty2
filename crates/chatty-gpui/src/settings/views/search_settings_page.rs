@@ -9,12 +9,12 @@ use gpui_component::{
 };
 
 pub fn search_settings_page() -> SettingPage {
-    SettingPage::new("Search")
-        .description("Configure web search for the AI assistant")
+    SettingPage::new("External Services")
+        .description("Configure web search and external service integrations for the AI assistant")
         .resettable(false)
         .groups(vec![
             SettingGroup::new()
-                .title("General")
+                .title("Web Search")
                 .description(
                     "Enable web search so the AI can look up current information. \
                      Requires an API key for the selected search provider.",
@@ -101,7 +101,7 @@ pub fn search_settings_page() -> SettingPage {
                     .description("Maximum number of search results to return per query (1-20)."),
                 ]),
             SettingGroup::new()
-                .title("API Keys")
+                .title("Search API Keys")
                 .description(
                     "Enter your API keys for each search provider. \
                      You only need a key for the provider you want to use.",
@@ -139,6 +139,48 @@ pub fn search_settings_page() -> SettingPage {
                         ),
                     )
                     .description("Get your API key from brave.com/search/api"),
+                ]),
+            SettingGroup::new()
+                .title("Browser Use")
+                .description(
+                    "browser-use is a cloud service that lets the AI control a real web browser \
+                     to complete tasks described in natural language. \
+                     Get your API key from browser-use.com.",
+                )
+                .items(vec![
+                    SettingItem::new(
+                        "Enable Browser Use",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<SearchSettingsModel>().browser_use_enabled,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_browser_use(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "When enabled and an API key is set, the AI can use browser-use to \
+                         automate browser tasks (e.g., 'find the contact email on example.com').",
+                    ),
+                    SettingItem::new(
+                        "Browser Use API Key",
+                        masked_api_key_field(
+                            |cx: &App| {
+                                cx.global::<SearchSettingsModel>()
+                                    .browser_use_api_key
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into()
+                            },
+                            |val: SharedString, cx: &mut App| {
+                                search_settings_controller::set_browser_use_api_key(
+                                    val.to_string(),
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
+                    .description("Get your API key from browser-use.com/cloud"),
                 ]),
         ])
 }

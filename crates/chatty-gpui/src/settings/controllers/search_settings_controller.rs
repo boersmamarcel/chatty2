@@ -84,3 +84,24 @@ pub fn set_max_results(count: usize, cx: &mut App) {
     cx.refresh_windows();
     save_async(cx);
 }
+
+/// Toggle browser-use enabled/disabled and persist to disk
+pub fn toggle_browser_use(cx: &mut App) {
+    let new_enabled = !cx.global::<SearchSettingsModel>().browser_use_enabled;
+    info!(new = new_enabled, "Toggling browser-use");
+    cx.global_mut::<SearchSettingsModel>().browser_use_enabled = new_enabled;
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}
+
+/// Set the browser-use API key and persist to disk
+pub fn set_browser_use_api_key(key: String, cx: &mut App) {
+    let api_key = if key.is_empty() { None } else { Some(key) };
+    cx.global_mut::<SearchSettingsModel>().browser_use_api_key = api_key;
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}

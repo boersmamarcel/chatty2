@@ -17,7 +17,7 @@ impl std::fmt::Display for SearchProvider {
     }
 }
 
-/// Settings for the web search tool
+/// Settings for the web search tool and other external services
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SearchSettingsModel {
     /// Master toggle for web search
@@ -35,6 +35,12 @@ pub struct SearchSettingsModel {
     /// Maximum number of search results to return
     #[serde(default = "default_max_results")]
     pub max_results: usize,
+    /// Whether browser-use cloud automation is enabled
+    #[serde(default)]
+    pub browser_use_enabled: bool,
+    /// API key for browser-use cloud service (https://browser-use.com)
+    #[serde(default)]
+    pub browser_use_api_key: Option<String>,
 }
 
 fn default_max_results() -> usize {
@@ -49,6 +55,8 @@ impl Default for SearchSettingsModel {
             tavily_api_key: None,
             brave_api_key: None,
             max_results: default_max_results(),
+            browser_use_enabled: false,
+            browser_use_api_key: None,
         }
     }
 }
