@@ -3,7 +3,11 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
+use gpui_component::{
+    ActiveTheme, Icon, Sizable,
+    button::{Button, ButtonVariants},
+    text::TextView,
+};
 use std::time::Duration;
 
 use super::diff_view_component::DiffViewComponent;
@@ -450,6 +454,21 @@ impl SystemTraceView {
             );
         }
 
+        // Website preview card for browse tool
+        if is_browse_tool(&tool_call.tool_name) {
+            if let Some(preview) = extract_browse_preview(tool_call) {
+                let link_url = preview.url.clone();
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .child(render_website_preview_card(index, &preview, link_url, cx)),
+                );
+            }
+        }
+
         // Error section (if error state)
         if let ToolCallState::Error(error) = &tool_call.state {
             let error_color = cx.theme().ring;
@@ -872,6 +891,22 @@ where
         }
     }
 
+    // Website preview card for browse tool (inline rendering)
+    if is_browse_tool(&tool_call.tool_name) {
+        if let Some(preview) = extract_browse_preview(tool_call) {
+            let link_url = preview.url.clone();
+            content_children.push(
+                render_website_preview_card(
+                    message_index * 1000 + tool_index,
+                    &preview,
+                    link_url,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+    }
+
     // Add error section if error state
     if let ToolCallState::Error(error) = &tool_call.state {
         let error_color = cx.theme().ring;
@@ -912,7 +947,7 @@ where
     }
 
     // Return header + conditionally visible content
-    div()
+    let mut result = div()
         .flex()
         .flex_col()
         .gap_1()
@@ -922,17 +957,61 @@ where
         .border_color(cx.theme().border)
         .rounded_md()
         .bg(panel_bg.opacity(0.3))
-        .child(header)
-        .when(!collapsed && !content_children.is_empty(), |this| {
-            this.child(
+        .child(header);
+
+    // Always-visible compact URL row for browse tools
+    if is_browse_tool(&tool_call.tool_name) {
+        if let Some(url) = extract_browse_url(tool_call) {
+            let link_url = url.clone();
+            let domain = extract_domain(&url);
+            result = result.child(
                 div()
+                    .id(ElementId::Name(
+                        format!("open-browse-inline-{}-{}", message_index, tool_index).into(),
+                    ))
+                    .pl_6()
+                    .pt(px(2.0))
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .pl_4() // Indent content slightly
-                    .children(content_children),
-            )
-        })
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
+                        let url = if link_url.starts_with("http://")
+                            || link_url.starts_with("https://")
+                        {
+                            link_url.clone()
+                        } else {
+                            format!("https://{}", link_url)
+                        };
+                        if let Err(e) = open::that_detached(&url) {
+                            tracing::warn!(url = %url, error = %e, "Failed to open URL in browser");
+                        }
+                    })
+                    .child(
+                        Icon::new(CustomIcon::Earth)
+                            .size(px(12.0))
+                            .text_color(muted_text),
+                    )
+                    .child(div().text_xs().text_color(muted_text).child(domain))
+                    .child(
+                        Icon::new(CustomIcon::ExternalLink)
+                            .size(px(10.0))
+                            .text_color(muted_text),
+                    ),
+            );
+        }
+    }
+
+    result.when(!collapsed && !content_children.is_empty(), |this| {
+        this.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .pl_4() // Indent content slightly
+                .children(content_children),
+        )
+    })
 }
 
 /// Try to build a diff view from apply_diff tool input JSON.
@@ -1057,6 +1136,13 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             }
         }
 
+        // For browse: extract the URL
+        if tool_call.tool_name == "browse" {
+            if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
+                return url.to_string();
+            }
+        }
+
         // For fetch: extract the URL
         if tool_call.tool_name == "fetch" {
             if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
@@ -1091,6 +1177,42 @@ fn format_tool_output(output: &str) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
         // If it's an object with common result fields, extract them
         if let Some(obj) = json.as_object() {
+            // browse output: show a compact text summary instead of full JSON
+            if let Some(snapshot) = obj.get("snapshot").and_then(|v| v.as_object()) {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(title) = snapshot.get("title").and_then(|v| v.as_str()) {
+                    if !title.is_empty() {
+                        parts.push(format!("Title: {}", title));
+                    }
+                }
+                if let Some(text) = snapshot.get("text_content").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        let truncated: String = text.chars().take(300).collect();
+                        let suffix = if text.len() > 300 { "…" } else { "" };
+                        parts.push(format!("{}{}", truncated, suffix));
+                    }
+                }
+                let element_count = snapshot
+                    .get("elements")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len());
+                let link_count = snapshot
+                    .get("links")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len());
+                if element_count > 0 || link_count > 0 {
+                    parts.push(format!(
+                        "[{} interactive elements, {} links]",
+                        element_count, link_count
+                    ));
+                }
+                return if parts.is_empty() {
+                    "(empty page)".to_string()
+                } else {
+                    parts.join("\n")
+                };
+            }
+
             // execute_code output: show stdout + stderr + exit_code + port_mappings
             if obj.contains_key("exit_code") && obj.contains_key("timed_out") {
                 let mut parts: Vec<String> = Vec::new();
@@ -1218,4 +1340,262 @@ fn escape_markdown(s: &str) -> SharedString {
         }
     }
     SharedString::from(out)
+}
+
+// ── Browse tool website preview ─────────────────────────────────────────────
+
+/// Data extracted from a browse tool output for the preview card.
+struct BrowsePreview {
+    url: String,
+    title: String,
+    description: Option<String>,
+    screenshot_path: Option<String>,
+}
+
+/// Extract the domain name from a URL (e.g. "https://nos.nl/path" → "nos.nl").
+fn extract_domain(url: &str) -> String {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
+/// Check whether a tool name is a browser navigation tool.
+fn is_browse_tool(tool_name: &str) -> bool {
+    tool_name == "browse"
+}
+
+/// Extract the URL from a browse tool's input JSON.
+fn extract_browse_url(tool_call: &ToolCallBlock) -> Option<String> {
+    if let Some(output) = tool_call.output.as_ref() {
+        // Try JSON first (serialized BrowseOutput)
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+            let snapshot = json.get("snapshot").unwrap_or(&json);
+            if let Some(url) = snapshot.get("url").and_then(|v| v.as_str()) {
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+        // Try Display-formatted text: "URL: https://..."
+        for line in output.lines() {
+            if let Some(url) = line.strip_prefix("URL: ") {
+                let url = url.trim();
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    // Fall back to the input URL
+    let json: serde_json::Value = serde_json::from_str(&tool_call.input).ok()?;
+    json.get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Extract preview data from a browse tool's output (JSON or Display text).
+fn extract_browse_preview(tool_call: &ToolCallBlock) -> Option<BrowsePreview> {
+    let output = tool_call.output.as_ref()?;
+
+    // Try JSON first (serialized BrowseOutput)
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        let snapshot = json.get("snapshot").unwrap_or(&json);
+
+        if let Some(url) = snapshot.get("url").and_then(|v| v.as_str()) {
+            if !url.is_empty() {
+                let title = snapshot
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = snapshot
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let screenshot_path = snapshot
+                    .get("screenshot_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                return Some(BrowsePreview {
+                    url: url.to_string(),
+                    title,
+                    description,
+                    screenshot_path,
+                });
+            }
+        }
+    }
+
+    // Fall back to Display-formatted text parsing:
+    // # Page Title
+    // URL: https://...
+    let mut title = String::new();
+    let mut url = String::new();
+    for line in output.lines() {
+        if let Some(t) = line.strip_prefix("# ") {
+            title = t.trim().to_string();
+        } else if let Some(u) = line.strip_prefix("URL: ") {
+            url = u.trim().to_string();
+        }
+    }
+    if url.is_empty() {
+        return None;
+    }
+    Some(BrowsePreview {
+        url,
+        title,
+        description: None,
+        screenshot_path: None,
+    })
+}
+
+/// Render a website preview card styled like a link unfurl (Slack/Discord style).
+///
+/// Shows a left accent bar, domain, title, description, and "Open in Browser" action.
+fn render_website_preview_card(
+    index: usize,
+    preview: &BrowsePreview,
+    link_url: String,
+    cx: &App,
+) -> impl IntoElement {
+    let text_color = cx.theme().foreground;
+    let muted_text = cx.theme().muted_foreground;
+    let panel_bg = cx.theme().muted;
+    let accent = cx.theme().accent;
+
+    let domain = extract_domain(&preview.url);
+    let link_url_for_click = link_url.clone();
+
+    div()
+        .id(ElementId::Name(
+            format!("browse-preview-{}", index).into(),
+        ))
+        .mt_1()
+        .flex()
+        .flex_row()
+        // Left accent bar (link unfurl style)
+        .child(
+            div()
+                .w(px(3.0))
+                .flex_shrink_0()
+                .bg(accent)
+                .rounded_l_sm(),
+        )
+        // Content area
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .px_3()
+                .py_2()
+                .bg(panel_bg)
+                .rounded_r_md()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                // Domain row with Earth icon
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(CustomIcon::Earth)
+                                .size(px(12.0))
+                                .text_color(muted_text),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_text)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(domain),
+                        ),
+                )
+                // Title
+                .when(!preview.title.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text_color)
+                            .overflow_hidden()
+                            .child(preview.title.clone()),
+                    )
+                })
+                // Description (if available)
+                .when_some(preview.description.clone(), |this, desc| {
+                    if desc.is_empty() {
+                        this
+                    } else {
+                        let truncated = if desc.chars().count() > 200 {
+                            let t: String = desc.chars().take(199).collect();
+                            format!("{}…", t)
+                        } else {
+                            desc
+                        };
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_text)
+                                .line_height(rems(1.4))
+                                .child(truncated),
+                        )
+                    }
+                })
+                // Screenshot thumbnail (if available)
+                .when_some(preview.screenshot_path.clone(), |this, path| {
+                    let screenshot_file = std::path::PathBuf::from(&path);
+                    if screenshot_file.exists() {
+                        this.child(
+                            div()
+                                .mt(px(2.0))
+                                .w_full()
+                                .rounded_sm()
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .child(
+                                    img(screenshot_file)
+                                        .w_full()
+                                        .max_h(px(280.0))
+                                        .object_fit(gpui::ObjectFit::Contain),
+                                ),
+                        )
+                    } else {
+                        this
+                    }
+                })
+                // "Open in Browser" action row
+                .child(
+                    div().mt(px(2.0)).child(
+                        Button::new(ElementId::Name(
+                            format!("open-browse-{}", index).into(),
+                        ))
+                        .label("Open in Browser")
+                        .icon(Icon::new(CustomIcon::ExternalLink))
+                        .xsmall()
+                        .ghost()
+                        .on_click(move |_, _, _cx| {
+                            let url = if link_url_for_click.starts_with("http://")
+                                || link_url_for_click.starts_with("https://")
+                            {
+                                link_url_for_click.clone()
+                            } else {
+                                format!("https://{}", link_url_for_click)
+                            };
+                            if let Err(e) = open::that_detached(&url) {
+                                tracing::warn!(url = %url, error = %e, "Failed to open URL in browser");
+                            }
+                        }),
+                    ),
+                ),
+        )
 }

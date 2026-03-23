@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 chatty-core = { path = "../chatty-core" }
+chatty-browser = { path = "../chatty-browser" }
 
 # LLM framework (needed for rig types used in chatty-core's API)
 rig-core.workspace = true

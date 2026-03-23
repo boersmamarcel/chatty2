@@ -435,6 +435,12 @@ fn main() {
         // Initialize search settings with default - will be populated async
         cx.set_global(settings::models::SearchSettingsModel::default());
 
+        // Initialize browser settings with default - will be populated async
+        cx.set_global(chatty_browser::settings::BrowserSettingsModel::default());
+
+        // Initialize browser credentials with empty state - will be populated async
+        cx.set_global(chatty_browser::settings::BrowserCredentialsModel::default());
+
         // Initialize training settings with default - will be populated async
         cx.set_global(settings::models::TrainingSettingsModel::default());
 
@@ -750,11 +756,12 @@ fn main() {
         // Using tokio::join! makes the dependency graph explicit and eliminates AtomicBool polling.
         cx.spawn(async move |cx: &mut AsyncApp| {
             // Run all three I/O operations in parallel before touching global state
-            let (providers_result, models_result, exec_settings_result, search_settings_result) = tokio::join!(
+            let (providers_result, models_result, exec_settings_result, search_settings_result, browser_settings_result) = tokio::join!(
                 chatty_core::provider_repository().load_all(),
                 chatty_core::models_repository().load_all(),
                 chatty_core::execution_settings_repository().load(),
                 chatty_core::search_settings_repository().load(),
+                chatty_core::browser_settings_repository().load(),
             );
 
             // Apply providers result
@@ -930,6 +937,25 @@ fn main() {
                 }
             }
 
+            // Apply browser settings result
+            match browser_settings_result {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        info!(
+                            enabled = settings.enabled,
+                            headless = settings.headless,
+                            "Browser settings loaded from disk"
+                        );
+                        cx.set_global(settings);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global browser settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load browser settings, using defaults");
+                }
+            }
+
             // All tier-1 loads complete; trigger conversation loading
             info!("Models, providers, and execution settings loaded, triggering conversation load");
             cx.update(|cx| {
@@ -1018,6 +1044,49 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load user secrets, using defaults");
+                }
+            }
+        })
+        .detach();
+
+        // Load browser login profiles asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            match chatty_browser::settings::LoginProfileRepository::new() {
+                Ok(repo) => match repo.load_all().await {
+                    Ok(profiles) => {
+                        let count = profiles.len();
+
+                        // Also check which profiles have stored secrets
+                        let names_with_secrets =
+                            match chatty_browser::credential::vault::CredentialVault::new() {
+                                Ok(vault) => vault.names_with_secrets().await,
+                                Err(e) => {
+                                    warn!(error = ?e, "Failed to create CredentialVault for status check");
+                                    std::collections::HashSet::new()
+                                }
+                            };
+
+                        cx.update(|cx| {
+                            info!(
+                                count,
+                                secrets = names_with_secrets.len(),
+                                "Browser login profiles loaded from disk"
+                            );
+                            let model = cx.global_mut::<chatty_browser::settings::BrowserCredentialsModel>();
+                            model.replace_all(profiles);
+                            model.names_with_secrets = names_with_secrets;
+                        })
+                        .map_err(|e| {
+                            warn!(error = ?e, "Failed to update global browser credentials")
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to load browser login profiles");
+                    }
+                },
+                Err(e) => {
+                    warn!(error = ?e, "Failed to create LoginProfileRepository");
                 }
             }
         })
