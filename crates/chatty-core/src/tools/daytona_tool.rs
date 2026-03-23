@@ -205,9 +205,11 @@ impl DaytonaTool {
     }
 
     /// Run code in an existing Daytona sandbox via the toolbox proxy URL.
+    /// The full path is `{toolbox_proxy_url}/{sandbox_id}/process/code-run`.
     async fn run_code(
         &self,
         toolbox_proxy_url: &str,
+        sandbox_id: &str,
         code: &str,
     ) -> Result<CodeRunResponse, DaytonaToolError> {
         let request = CodeRunRequest {
@@ -216,7 +218,10 @@ impl DaytonaTool {
 
         let response = self
             .client
-            .post(format!("{}/process/code-run", toolbox_proxy_url))
+            .post(format!(
+                "{}/{}/process/code-run",
+                toolbox_proxy_url, sandbox_id
+            ))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -333,7 +338,7 @@ impl Tool for DaytonaTool {
         }
 
         info!(sandbox_id = %sandbox_id, language = %lang, "Daytona sandbox started, running code");
-        let run_result = self.run_code(&toolbox_proxy_url, &code).await;
+        let run_result = self.run_code(&toolbox_proxy_url, &sandbox_id, &code).await;
 
         // Always attempt cleanup regardless of execution result
         let cleaned_up = self.delete_sandbox(&sandbox_id).await;

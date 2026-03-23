@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Base URL for the browser-use cloud API (v2)
-const BROWSER_USE_API_BASE: &str = "https://cloud.browser-use.com/api/v2";
+const BROWSER_USE_API_BASE: &str = "https://api.browser-use.com/api/v2";
 
 /// Default polling interval in milliseconds
 const POLL_INTERVAL_MS: u64 = 2000;
@@ -89,7 +89,7 @@ impl BrowserUseTool {
         let response = self
             .client
             .post(format!("{}/tasks", BROWSER_USE_API_BASE))
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("X-Browser-Use-API-Key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -121,7 +121,7 @@ impl BrowserUseTool {
             let response = self
                 .client
                 .get(format!("{}/tasks/{}", BROWSER_USE_API_BASE, task_id))
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("X-Browser-Use-API-Key", &self.api_key)
                 .send()
                 .await
                 .map_err(|e| {
@@ -152,8 +152,8 @@ impl BrowserUseTool {
             );
 
             match status_response.status.as_str() {
-                // "completed" is the v2 API status; keep "finished" for v1 compatibility
-                "completed" | "finished" | "failed" | "stopped" => {
+                // Terminal states per browser-use v2 API: finished (success) and stopped (cancelled)
+                "finished" | "stopped" => {
                     return Ok(status_response);
                 }
                 _ => {
@@ -215,17 +215,17 @@ impl Tool for BrowserUseTool {
         let status_response = self.poll_task(&task_id).await?;
 
         let output = status_response.output.unwrap_or_else(|| {
-            if status_response.status == "failed" {
-                "Task failed without output.".to_string()
+            if status_response.status == "stopped" {
+                "Task was stopped before completion.".to_string()
             } else {
                 "Task completed without output.".to_string()
             }
         });
 
-        if status_response.status == "failed" {
-            warn!(task_id = %task_id, "browser-use task failed");
+        if status_response.status == "stopped" {
+            warn!(task_id = %task_id, "browser-use task was stopped");
         } else {
-            info!(task_id = %task_id, "browser-use task completed successfully");
+            info!(task_id = %task_id, "browser-use task finished");
         }
 
         Ok(BrowserUseToolOutput {
