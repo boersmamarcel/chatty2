@@ -289,6 +289,8 @@ pub fn friendly_tool_name(name: &str) -> String {
         "remember" => "Remembering".to_string(),
         "search_web" => "Searching online".to_string(),
         "fetch" => "Fetching".to_string(),
+        "daytona_run" => "Running in sandbox".to_string(),
+        "browser_use" => "Browsing web".to_string(),
         other => other.to_string(),
     }
 }
