@@ -501,23 +501,25 @@ impl DaytonaTool {
             let imports = extract_python_imports(code);
             if !imports.is_empty() {
                 let packages: Vec<&str> = imports.iter().map(|i| pip_package_name(i)).collect();
-                let pip_cmd = format!("pip install --quiet {}", packages.join(" "));
+                let pkg_list = packages.join(" ");
+                // Try uv first (much faster), fall back to pip
+                let uv_cmd = format!("uv pip install --quiet --system {}", pkg_list);
+                let pip_cmd = format!("pip install --quiet {}", pkg_list);
                 info!(sandbox_id, packages = ?packages, "Auto-installing Python dependencies");
-                match self.execute_command(sandbox_id, &pip_cmd).await {
-                    Ok(resp) if resp.exit_code != 0 => {
-                        warn!(
-                            sandbox_id,
-                            exit_code = resp.exit_code,
-                            result = %resp.result,
-                            "pip install had non-zero exit (continuing anyway)"
-                        );
+
+                let install_result = match self.execute_command(sandbox_id, &uv_cmd).await {
+                    Ok(resp) if resp.exit_code == 0 => {
+                        info!(sandbox_id, "Python dependencies installed via uv");
+                        Ok(())
                     }
-                    Err(e) => {
-                        warn!(sandbox_id, error = %e, "pip install failed (continuing anyway)");
+                    _ => {
+                        debug!(sandbox_id, "uv not available, falling back to pip");
+                        self.execute_command(sandbox_id, &pip_cmd).await.map(|_| ())
                     }
-                    Ok(_) => {
-                        info!(sandbox_id, "Python dependencies installed");
-                    }
+                };
+
+                if let Err(e) = install_result {
+                    warn!(sandbox_id, error = %e, "Dependency install failed (continuing anyway)");
                 }
             }
         }
