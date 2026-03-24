@@ -11,7 +11,7 @@ const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
 const DAYTONA_TIMEOUT_SECS: u64 = 30;
 
 /// Longer timeout for code execution which may run for extended periods (seconds)
-const DAYTONA_EXEC_TIMEOUT_SECS: u64 = 120;
+const DAYTONA_EXEC_TIMEOUT_SECS: u64 = 300;
 
 /// Maximum polling attempts when waiting for sandbox to reach "started" state (~120s)
 const DAYTONA_SANDBOX_POLL_ATTEMPTS: u64 = 60;
@@ -128,6 +128,78 @@ fn has_downloadable_extension(name: &str) -> bool {
     DOWNLOADABLE_EXTENSIONS
         .iter()
         .any(|ext| lower.ends_with(&format!(".{}", ext)))
+}
+
+/// Common Python standard library modules that should NOT be pip-installed.
+const PYTHON_STDLIB: &[&str] = &[
+    "abc", "argparse", "ast", "asyncio", "base64", "bisect", "calendar",
+    "cmath", "collections", "colorsys", "concurrent", "configparser",
+    "contextlib", "copy", "csv", "ctypes", "dataclasses", "datetime",
+    "decimal", "difflib", "email", "enum", "errno", "fcntl", "fileinput",
+    "fnmatch", "fractions", "ftplib", "functools", "gc", "getpass", "glob",
+    "gzip", "hashlib", "heapq", "hmac", "html", "http", "imaplib", "importlib",
+    "inspect", "io", "ipaddress", "itertools", "json", "keyword", "linecache",
+    "locale", "logging", "lzma", "math", "mimetypes", "multiprocessing",
+    "numbers", "operator", "os", "pathlib", "pickle", "platform", "plistlib",
+    "pprint", "pdb", "queue", "random", "re", "readline", "reprlib",
+    "secrets", "select", "shelve", "shlex", "shutil", "signal", "site",
+    "smtplib", "socket", "sqlite3", "ssl", "stat", "statistics", "string",
+    "struct", "subprocess", "sys", "syslog", "tempfile", "textwrap",
+    "threading", "time", "timeit", "tkinter", "token", "tokenize", "tomllib",
+    "traceback", "tty", "turtle", "types", "typing", "unicodedata", "unittest",
+    "urllib", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser",
+    "xml", "xmlrpc", "zipfile", "zipimport", "zlib",
+    // Also exclude _ prefixed and __future__
+    "__future__", "_thread",
+];
+
+/// Map import names to pip package names for common mismatches.
+fn pip_package_name(import_name: &str) -> &str {
+    match import_name {
+        "cv2" => "opencv-python",
+        "PIL" => "Pillow",
+        "sklearn" => "scikit-learn",
+        "bs4" => "beautifulsoup4",
+        "yaml" => "pyyaml",
+        "attr" => "attrs",
+        "dateutil" => "python-dateutil",
+        "dotenv" => "python-dotenv",
+        "gi" => "PyGObject",
+        "lxml" => "lxml",
+        "wx" => "wxPython",
+        _ => import_name,
+    }
+}
+
+/// Extract top-level Python import names from source code.
+fn extract_python_imports(code: &str) -> Vec<String> {
+    let mut imports = std::collections::HashSet::new();
+    for line in code.lines() {
+        let trimmed = line.trim();
+        // `import foo`, `import foo.bar`, `import foo as f`
+        if let Some(rest) = trimmed.strip_prefix("import ") {
+            for part in rest.split(',') {
+                let module = part.split_whitespace().next().unwrap_or("");
+                let top = module.split('.').next().unwrap_or("");
+                if !top.is_empty() {
+                    imports.insert(top.to_string());
+                }
+            }
+        }
+        // `from foo import bar`, `from foo.bar import baz`
+        if let Some(rest) = trimmed.strip_prefix("from ") {
+            let module = rest.split_whitespace().next().unwrap_or("");
+            let top = module.split('.').next().unwrap_or("");
+            if !top.is_empty() {
+                imports.insert(top.to_string());
+            }
+        }
+    }
+
+    imports
+        .into_iter()
+        .filter(|name| !PYTHON_STDLIB.contains(&name.as_str()))
+        .collect()
 }
 
 // ── Tool implementation ──────────────────────────────────────────────────────
@@ -406,10 +478,8 @@ impl DaytonaTool {
 
     /// Execute code in the sandbox by uploading it as a file and running it.
     ///
-    /// This is the preferred approach (used by the daytona-client crate):
-    /// 1. Upload code as a temporary file
-    /// 2. Execute the file via a simple shell command
-    /// 3. Return the stdout/stderr as the result
+    /// For Python code, automatically detects imports and installs missing
+    /// packages via pip before execution.
     async fn execute_code(
         &self,
         sandbox_id: &str,
@@ -426,14 +496,40 @@ impl DaytonaTool {
             _ => ("py", "python3"), // Default to Python
         };
 
+        // Step 1: Auto-install Python dependencies if needed
+        if ext == "py" {
+            let imports = extract_python_imports(code);
+            if !imports.is_empty() {
+                let packages: Vec<&str> = imports.iter().map(|i| pip_package_name(i)).collect();
+                let pip_cmd = format!("pip install --quiet {}", packages.join(" "));
+                info!(sandbox_id, packages = ?packages, "Auto-installing Python dependencies");
+                match self.execute_command(sandbox_id, &pip_cmd).await {
+                    Ok(resp) if resp.exit_code != 0 => {
+                        warn!(
+                            sandbox_id,
+                            exit_code = resp.exit_code,
+                            result = %resp.result,
+                            "pip install had non-zero exit (continuing anyway)"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(sandbox_id, error = %e, "pip install failed (continuing anyway)");
+                    }
+                    Ok(_) => {
+                        info!(sandbox_id, "Python dependencies installed");
+                    }
+                }
+            }
+        }
+
         let remote_path = format!("/tmp/chatty_code_{}.{}", file_id, ext);
         let command = format!("{} {}", interpreter, remote_path);
 
-        // Step 1: Upload the code file
+        // Step 2: Upload the code file
         self.upload_code_file(sandbox_id, &remote_path, code)
             .await?;
 
-        // Step 2: Execute the file
+        // Step 3: Execute the file
         self.execute_command(sandbox_id, &command).await
     }
 
@@ -869,5 +965,38 @@ mod tests {
         assert!(!entries[0].is_dir);
         assert_eq!(entries[0].size, 12345);
         assert!(entries[1].is_dir);
+    }
+
+    #[test]
+    fn test_extract_python_imports() {
+        let code = r#"
+import matplotlib.pyplot as plt
+import plotly.express as px
+from numpy import array
+import os
+import json
+import pandas as pd
+from PIL import Image
+"#;
+        let imports = extract_python_imports(code);
+        assert!(imports.contains(&"matplotlib".to_string()));
+        assert!(imports.contains(&"plotly".to_string()));
+        assert!(imports.contains(&"numpy".to_string()));
+        assert!(imports.contains(&"pandas".to_string()));
+        assert!(imports.contains(&"PIL".to_string()));
+        // stdlib should be excluded
+        assert!(!imports.contains(&"os".to_string()));
+        assert!(!imports.contains(&"json".to_string()));
+    }
+
+    #[test]
+    fn test_pip_package_name_mapping() {
+        assert_eq!(pip_package_name("PIL"), "Pillow");
+        assert_eq!(pip_package_name("sklearn"), "scikit-learn");
+        assert_eq!(pip_package_name("cv2"), "opencv-python");
+        assert_eq!(pip_package_name("yaml"), "pyyaml");
+        // Unmapped names pass through
+        assert_eq!(pip_package_name("plotly"), "plotly");
+        assert_eq!(pip_package_name("pandas"), "pandas");
     }
 }
