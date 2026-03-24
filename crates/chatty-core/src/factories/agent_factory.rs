@@ -977,7 +977,10 @@ impl AgentClient {
                         .filter(|k| !k.is_empty())
                         .map(|key| {
                             tracing::info!("Daytona sandbox tool enabled");
-                            DaytonaTool::new(key)
+                            let workspace = exec_settings
+                                .as_ref()
+                                .and_then(|s| s.workspace_dir.clone());
+                            DaytonaTool::new(key, workspace)
                         })
                 } else {
                     tracing::info!("Daytona tool disabled (toggle is off)");
@@ -2084,7 +2087,7 @@ mod tests {
         // regardless of which optional tools are enabled.
         let names = active_native_tool_names(
             false, false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false, false,
         );
         assert!(
             names.contains("read_skill"),
@@ -2097,7 +2100,7 @@ mod tests {
     fn active_native_tool_names_includes_search_tools() {
         let names = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false, false,
         );
 
         assert!(names.contains("list_tools"));
@@ -2110,7 +2113,7 @@ mod tests {
     fn filter_mcp_tool_info_skips_native_and_mcp_duplicates() {
         let reserved = active_native_tool_names(
             false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false, false,
         );
 
         let filtered = filter_mcp_tool_info(

@@ -1089,6 +1089,23 @@ fn extract_pdf_image_paths(
     Some(paths).filter(|v| !v.is_empty())
 }
 
+/// Extract downloaded file paths from a `daytona_run` tool call output JSON.
+/// The output has the shape `{"downloaded_files": ["/local/path/chart.png", ...], ...}`.
+fn extract_daytona_downloaded_files(
+    tool_call: &super::message_types::ToolCallBlock,
+) -> Option<Vec<PathBuf>> {
+    let output = tool_call.output.as_ref()?;
+    let json: serde_json::Value = serde_json::from_str(output).ok()?;
+    let files = json.get("downloaded_files")?.as_array()?;
+    let paths: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    Some(paths).filter(|v| !v.is_empty())
+}
+
 /// Extract chart specification from a `create_chart` tool call output JSON.
 fn extract_chart_spec(tool_call: &super::message_types::ToolCallBlock) -> Option<ChartSpec> {
     let output = tool_call.output.as_ref()?;
@@ -1782,6 +1799,22 @@ where
                 && let Some(chart_spec) = extract_chart_spec(tool_call)
             {
                 container = container.child(render_chart(chart_spec, index, tool_idx, cx));
+            }
+
+            // If this is a successful daytona_run call with downloaded files, render them inline
+            if tool_call.tool_name == "daytona_run"
+                && matches!(
+                    tool_call.state,
+                    super::message_types::ToolCallState::Success
+                )
+                && let Some(paths) = extract_daytona_downloaded_files(tool_call)
+                && !paths.is_empty()
+            {
+                container = container.child(render_attachments(
+                    &paths,
+                    &format!("msg-{index}-tool-{tool_idx}"),
+                    cx,
+                ));
             }
         }
     }

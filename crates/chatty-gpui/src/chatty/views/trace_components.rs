@@ -993,7 +993,8 @@ fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 
     match tool_call.tool_name.as_str() {
-        "remember" | "search_memory" | "search_web" | "fetch" | "sub_agent" => {
+        "remember" | "search_memory" | "search_web" | "fetch" | "sub_agent"
+        | "daytona_run" | "browser_use" => {
             // Use the friendly display_name as prefix with the detail
             format!("{}: {}", tool_call.display_name, detail)
         }
@@ -1022,11 +1023,18 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             }
         }
 
-        // For execute_code: show language prefix + full code
-        if tool_call.tool_name == "execute_code" {
-            let language = json.get("language").and_then(|v| v.as_str()).unwrap_or("?");
+        // For execute_code / daytona_run: show language prefix + full code
+        if tool_call.tool_name == "execute_code" || tool_call.tool_name == "daytona_run" {
+            let language = json.get("language").and_then(|v| v.as_str()).unwrap_or("python");
             let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
             return format!("[{}] {}", language, code);
+        }
+
+        // For browser_use: show the task description
+        if tool_call.tool_name == "browser_use" {
+            if let Some(task) = json.get("task").and_then(|v| v.as_str()) {
+                return task.to_string();
+            }
         }
 
         // For remember tool: prefer title, fall back to truncated content
@@ -1120,6 +1128,38 @@ fn format_tool_output(output: &str) -> String {
                             .filter_map(|(k, v)| v.as_u64().map(|hp| format!("{}→{}", k, hp)))
                             .collect();
                         parts.push(format!("[ports: {}]", mappings.join(", ")));
+                    }
+                }
+
+                return if parts.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    parts.join("\n")
+                };
+            }
+
+            // daytona_run output: show result + exit_code + downloaded files
+            if obj.contains_key("exit_code") && obj.contains_key("sandbox_cleaned_up") {
+                let mut parts: Vec<String> = Vec::new();
+
+                if let Some(result) = obj.get("result").and_then(|v| v.as_str()) {
+                    if !result.is_empty() {
+                        parts.push(result.to_string());
+                    }
+                }
+                if let Some(code) = obj.get("exit_code").and_then(|v| v.as_i64()) {
+                    if code != 0 {
+                        parts.push(format!("[exit code: {}]", code));
+                    }
+                }
+                if let Some(files) = obj.get("downloaded_files").and_then(|v| v.as_array()) {
+                    if !files.is_empty() {
+                        let names: Vec<&str> = files
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .filter_map(|p| p.rsplit('/').next())
+                            .collect();
+                        parts.push(format!("[files: {}]", names.join(", ")));
                     }
                 }
 
