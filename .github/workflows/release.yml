@@ -133,21 +133,26 @@ jobs:
             echo "::error::AppImage not found — packaging step may have failed"
             exit 1
           fi
-          chmod +x "$APPIMAGE"
-          # --appimage-extract is handled by the AppImage ELF runtime before AppRun runs;
-          # it extracts squashfs contents without needing a FUSE kernel module.
-          # Try selective extraction first (faster); fall back to full extraction.
-          if ! "$APPIMAGE" --appimage-extract usr/lib/libpdfium.so > /dev/null 2>&1; then
-            "$APPIMAGE" --appimage-extract > /dev/null 2>&1 || true
+          # Use squashfs-tools to inspect the AppImage's embedded squashfs directly,
+          # without executing the AppImage (which may fail in CI due to FUSE restrictions).
+          sudo apt-get install -y squashfs-tools > /dev/null 2>&1
+          # An AppImage is an ELF runtime prepended to a squashfs; find the squashfs offset.
+          OFFSET=$(python3 -c "
+data = open('$APPIMAGE', 'rb').read()
+idx = data.find(b'sqsh')
+if idx < 0:
+    idx = data.find(b'hsqs')
+print(idx)")
+          if [ "$OFFSET" -lt 0 ]; then
+            echo "::error::Could not locate squashfs section inside AppImage — the file may be corrupted or not a valid AppImage"
+            exit 1
           fi
-          if [ -f squashfs-root/usr/lib/libpdfium.so ]; then
+          if unsquashfs -l -o "$OFFSET" "$APPIMAGE" 2>/dev/null | grep -q 'usr/lib/libpdfium\.so'; then
             echo "✅ libpdfium.so confirmed inside AppImage"
           else
             echo "::error::libpdfium.so not found in AppImage — PDF tools (pdf_to_image, pdf_extract_text, pdf_info) will not work for users"
-            rm -rf squashfs-root
             exit 1
           fi
-          rm -rf squashfs-root
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
