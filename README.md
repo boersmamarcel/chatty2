@@ -232,6 +232,10 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 |:-----|:----------------------|:--------:|
 | `search_web` | Search the web — configure Tavily or Brave in Settings > Search for best results; falls back to DuckDuckGo lite automatically when no API key is set | — |
 | `fetch` | Fetch any URL and return its readable text content | — |
+| `browser_use` | Automate real browser tasks using the [browser-use](https://browser-use.com) cloud service — describe what you want in natural language and a cloud browser agent executes it | — |
+| `daytona_run` | Execute code in an isolated [Daytona](https://app.daytona.io) cloud sandbox — creates a secure ephemeral environment, runs the code, returns output, and cleans up automatically | ✓ |
+
+> **browser_use** and **daytona_run** require API keys configured in **Settings > Search** (External Services section). Internet Access must also be enabled. Set the API key to activate the tool; use the toggle to disable it without removing the key.
 
 #### Memory & Skills
 
