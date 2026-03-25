@@ -137,7 +137,7 @@ jobs:
           # without executing the AppImage (which may fail in CI due to FUSE restrictions).
           sudo apt-get install -y squashfs-tools > /dev/null 2>&1
           # An AppImage is an ELF runtime prepended to a squashfs; find the squashfs offset.
-          OFFSET=$(python3 -c "data=open('$APPIMAGE','rb').read(); idx=data.find(b'sqsh'); idx=data.find(b'hsqs') if idx<0 else idx; print(idx)")
+          OFFSET=$(python3 -c "data=open('$APPIMAGE','rb').read();sqsh=data.find(b'sqsh');hsqs=data.find(b'hsqs');print(sqsh if sqsh>=0 else hsqs)")
           if [ "$OFFSET" -lt 0 ]; then
             echo "::error::Could not locate squashfs section inside AppImage — the file may be corrupted or not a valid AppImage"
             exit 1
