@@ -279,7 +279,7 @@ jobs:
   # Called directly via workflow_call — no event-based handoff needed.
   build-and-upload:
     needs: prepare
-    if: needs.prepare.outputs.dry_run != 'true'
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.dry_run != 'true'
     uses: ./.github/workflows/release.yml
     with:
       tag_name: ${{ needs.prepare.outputs.tag }}
