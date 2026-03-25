@@ -10,7 +10,8 @@ pub fn mcp_tools_page() -> SettingPage {
     SettingPage::new("Tools")
         .description(
             "MCP servers extend the AI with external tools like file access, \
-             web search, databases, and more",
+             web search, databases, and more. Start the server yourself, then add \
+             its URL here.",
         )
         .resettable(false)
         .groups(vec![mcp_servers_list_group()])
@@ -19,7 +20,10 @@ pub fn mcp_tools_page() -> SettingPage {
 fn mcp_servers_list_group() -> SettingGroup {
     SettingGroup::new()
         .title("Configured Servers")
-        .description("MCP servers provide tools that the AI can use during conversations")
+        .description(
+            "Connect to already-running MCP servers by URL. The server must be \
+             running before you enable it here.",
+        )
         .items(vec![SettingItem::render(|_options, _window, cx| {
             let servers = cx.global::<McpServersModel>().servers().to_vec();
 
@@ -60,8 +64,8 @@ fn mcp_servers_list_group() -> SettingGroup {
                         render_server_row(
                             ix,
                             server.name.clone(),
-                            server.command.clone(),
-                            server.args.clone(),
+                            server.url.clone(),
+                            server.has_api_key(),
                             server.enabled,
                             cx,
                         )
@@ -97,7 +101,7 @@ fn render_header(cx: &App) -> impl IntoElement {
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
-                .child("Command"),
+                .child("URL"),
         )
         .child(
             div()
@@ -115,8 +119,8 @@ fn render_header(cx: &App) -> impl IntoElement {
 fn render_server_row(
     ix: usize,
     name: String,
-    command: String,
-    args: Vec<String>,
+    url: String,
+    has_api_key: bool,
     enabled: bool,
     cx: &App,
 ) -> impl IntoElement {
@@ -124,12 +128,6 @@ fn render_server_row(
     let name_for_delete = name.clone();
     let toggle_id = SharedString::from(format!("mcp-toggle-{}", ix));
     let delete_id = SharedString::from(format!("mcp-delete-{}", ix));
-
-    let command_display = if args.is_empty() {
-        command
-    } else {
-        format!("{} {}", command, args.join(" "))
-    };
 
     h_flex()
         .w_full()
@@ -150,16 +148,35 @@ fn render_server_row(
                 .whitespace_nowrap()
                 .child(name),
         )
-        // Command column — flexible, truncates on overflow
+        // URL column — flexible, truncates on overflow; shows key badge if authenticated
         .child(
-            div()
+            h_flex()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(command_display),
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(url),
+                )
+                .when(has_api_key, |this| {
+                    this.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("🔑"),
+                    )
+                }),
         )
         // Actions column — fixed width, no shrink
         .child(

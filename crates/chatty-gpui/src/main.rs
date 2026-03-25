@@ -226,15 +226,11 @@ fn register_actions(cx: &mut App) {
             });
         }
 
-        // Shutdown all MCP servers.
-        // kill_all_sync() sends SIGTERM synchronously to all child processes before
-        // the process exits, preventing orphaned MCP server processes. The async
-        // stop_all() provides a best-effort graceful shutdown attempt.
+        // Disconnect from all MCP servers on quit.
         let mcp_service = cx.global::<chatty::services::McpService>().clone();
-        mcp_service.kill_all_sync();
         cx.spawn(|_cx: &mut AsyncApp| async move {
-            if let Err(e) = mcp_service.stop_all().await {
-                error!(error = ?e, "Failed to stop MCP servers during shutdown");
+            if let Err(e) = mcp_service.disconnect_all().await {
+                error!(error = ?e, "Failed to disconnect MCP servers during shutdown");
             }
         })
         .detach();
@@ -960,11 +956,11 @@ fn main() {
                         });
                         info!("MCP server configurations loaded");
 
-                        // Start all enabled MCP servers
+                        // Connect to all enabled MCP servers
                         let mcp_service = cx.global::<chatty::services::McpService>().clone();
                         cx.spawn(|_cx: &mut AsyncApp| async move {
-                            if let Err(e) = mcp_service.start_all(servers_clone).await {
-                                error!(error = ?e, "Failed to start MCP servers");
+                            if let Err(e) = mcp_service.connect_all(servers_clone).await {
+                                error!(error = ?e, "Failed to connect to MCP servers");
                             }
                         })
                         .detach();

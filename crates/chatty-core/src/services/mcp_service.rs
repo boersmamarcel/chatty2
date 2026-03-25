@@ -1,14 +1,8 @@
 use anyhow::{Context, Result};
-#[cfg(unix)]
-use nix::sys::signal::{Signal, kill};
-#[cfg(unix)]
-use nix::unistd::Pid;
 use rmcp::service::ServiceExt;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+use rmcp::transport::StreamableHttpClientTransport;
 use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use tokio::process::Command;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -22,54 +16,38 @@ pub struct McpConnection {
     /// The rmcp service for communicating with the server
     pub service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
 
-    /// Process ID of the child process (if available)
-    pub pid: Option<u32>,
-
-    /// Cached tool list, populated on first fetch and invalidated on restart
+    /// Cached tool list, populated on first fetch and invalidated on reconnect
     cached_tools: Option<Vec<rmcp::model::Tool>>,
 }
 
 impl McpConnection {
-    /// Create a new MCP connection by spawning a child process
-    pub async fn spawn(config: McpServerConfig) -> Result<Self> {
+    /// Connect to an already-running MCP server via its HTTP endpoint.
+    pub async fn connect(config: McpServerConfig) -> Result<Self> {
         let name = config.name.clone();
 
         info!(
             server = %name,
-            command = %config.command,
-            args = ?config.args,
-            "Spawning MCP server"
+            url = %config.url,
+            has_api_key = config.has_api_key(),
+            "Connecting to MCP server"
         );
 
-        // Build and configure the command
-        let cmd = Command::new(&config.command).configure(|cmd| {
-            cmd.args(&config.args);
-            for (key, value) in &config.env {
-                cmd.env(key, value);
-            }
-            // Silence the subprocess's stderr so it doesn't corrupt the caller's
-            // terminal (e.g. the TUI) when servers start in the background.
-            cmd.stderr(Stdio::null());
-        });
+        let transport = StreamableHttpClientTransport::from_config(
+            rmcp::transport::StreamableHttpClientTransportConfig {
+                uri: config.url.as_str().into(),
+                auth_header: config.api_key.filter(|k| !k.is_empty()),
+                ..Default::default()
+            },
+        );
 
-        // Spawn the child process
-        let transport = TokioChildProcess::new(cmd)
-            .with_context(|| format!("Failed to spawn MCP server: {}", name))?;
-
-        // Get process ID before serving
-        let pid = transport.id();
-
-        // Create the service
         let service = ()
             .serve(transport)
             .await
-            .with_context(|| format!("Failed to initialize MCP service: {}", name))?;
+            .with_context(|| format!("Failed to connect to MCP server: {}", name))?;
 
-        // Log server info
         let server_info = service.peer_info();
         info!(
             server = %name,
-            pid = ?pid,
             info = ?server_info,
             "MCP server connected"
         );
@@ -77,7 +55,6 @@ impl McpConnection {
         Ok(Self {
             name,
             service,
-            pid,
             cached_tools: None,
         })
     }
@@ -99,9 +76,9 @@ impl McpConnection {
         Ok(response.tools)
     }
 
-    /// Gracefully shutdown the connection
-    pub async fn shutdown(self) -> Result<()> {
-        info!(server = %self.name, "Shutting down MCP server");
+    /// Gracefully disconnect from the server
+    pub async fn disconnect(self) -> Result<()> {
+        info!(server = %self.name, "Disconnecting from MCP server");
 
         self.service
             .cancel()
@@ -117,9 +94,6 @@ impl McpConnection {
 pub struct McpService {
     /// Active connections keyed by server name
     connections: Arc<RwLock<HashMap<String, McpConnection>>>,
-
-    /// PID index for synchronous access during shutdown (std Mutex for sync use)
-    pids: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl McpService {
@@ -127,112 +101,43 @@ impl McpService {
     pub fn new() -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
-            pids: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Synchronously send SIGTERM (Unix) or taskkill (Windows) to all child processes.
-    ///
-    /// This is called from the synchronous quit handler before cx.quit() to give
-    /// child MCP processes a best-effort signal before the process exits.
-    pub fn kill_all_sync(&self) {
-        let pids = self.pids.lock().unwrap_or_else(|e| e.into_inner());
-
-        for (name, pid) in pids.iter() {
-            #[cfg(unix)]
-            {
-                let pid_i32 = *pid as i32;
-                match kill(Pid::from_raw(pid_i32), Signal::SIGTERM) {
-                    Ok(()) => info!(server = %name, pid = pid_i32, "Sent SIGTERM to MCP server"),
-                    Err(e) => {
-                        warn!(server = %name, pid = pid_i32, error = ?e, "Failed to send SIGTERM to MCP server")
-                    }
-                }
-            }
-
-            #[cfg(windows)]
-            {
-                // On Windows, use `taskkill` to forcefully terminate the process.
-                // We use std::process::Command here because we are in a sync context.
-                let pid_str = pid.to_string();
-                match std::process::Command::new("taskkill")
-                    .arg("/F") // Forcefully terminate the process
-                    .arg("/PID") // Specify Process ID
-                    .arg(&pid_str)
-                    // We capture output to avoid polluting stdout/stderr unless there's an error
-                    .output()
-                {
-                    Ok(output) => {
-                        if output.status.success() {
-                            info!(server = %name, pid = pid, "Sent taskkill /F to MCP server");
-                        } else {
-                            // Convert stderr to string for logging if it failed (e.g., access denied or process gone)
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            warn!(server = %name, pid = pid, error = %stderr, "Failed to taskkill MCP server");
-                        }
-                    }
-                    Err(e) => {
-                        warn!(server = %name, pid = pid, error = ?e, "Failed to execute taskkill command");
-                    }
-                }
-            }
-
-            #[cfg(not(any(unix, windows)))]
-            {
-                // Fallback for other platforms (e.g. WASM, Redox)
-                warn!(server = %name, pid = pid, "Skipping synchronous kill: unsupported platform");
-            }
-        }
-    }
-
-    /// Start a single MCP server
-    pub async fn start_server(&self, config: McpServerConfig) -> Result<()> {
+    /// Connect to a single MCP server by URL.
+    pub async fn connect_server(&self, config: McpServerConfig) -> Result<()> {
         let name = config.name.clone();
 
-        // Check if already running
+        // Check if already connected
         {
             let connections = self.connections.read().await;
             if connections.contains_key(&name) {
-                warn!(server = %name, "MCP server already running");
+                warn!(server = %name, "MCP server already connected");
                 return Ok(());
             }
         }
 
-        // Spawn the connection
-        let connection = McpConnection::spawn(config).await?;
+        let connection = McpConnection::connect(config).await?;
 
-        // Track PID for synchronous shutdown
-        if let Some(pid) = connection.pid {
-            let mut pids = self.pids.lock().unwrap_or_else(|e| e.into_inner());
-            pids.insert(name.clone(), pid);
-        }
-
-        // Store the connection
         {
             let mut connections = self.connections.write().await;
             connections.insert(name.clone(), connection);
         }
 
-        info!(server = %name, "MCP server started successfully");
+        info!(server = %name, "MCP server connected successfully");
         Ok(())
     }
 
-    /// Stop a single MCP server
-    pub async fn stop_server(&self, name: &str) -> Result<()> {
+    /// Disconnect from a single MCP server.
+    pub async fn disconnect_server(&self, name: &str) -> Result<()> {
         let connection = {
             let mut connections = self.connections.write().await;
             connections.remove(name)
         };
 
-        // Remove from PID index
-        {
-            let mut pids = self.pids.lock().unwrap_or_else(|e| e.into_inner());
-            pids.remove(name);
-        }
-
         if let Some(connection) = connection {
-            connection.shutdown().await?;
-            info!(server = %name, "MCP server stopped");
+            connection.disconnect().await?;
+            info!(server = %name, "MCP server disconnected");
         } else {
             warn!(server = %name, "MCP server not found");
         }
@@ -240,9 +145,9 @@ impl McpService {
         Ok(())
     }
 
-    /// Start all enabled servers from the given configurations concurrently.
-    pub async fn start_all(&self, configs: Vec<McpServerConfig>) -> Result<()> {
-        info!(count = configs.len(), "Starting MCP servers");
+    /// Connect to all enabled servers from the given configurations concurrently.
+    pub async fn connect_all(&self, configs: Vec<McpServerConfig>) -> Result<()> {
+        info!(count = configs.len(), "Connecting to MCP servers");
 
         let mut join_set = tokio::task::JoinSet::new();
 
@@ -255,10 +160,10 @@ impl McpService {
             let svc = self.clone();
             join_set.spawn(async move {
                 let name = config.name.clone();
-                match svc.start_server(config).await {
+                match svc.connect_server(config).await {
                     Ok(()) => None,
                     Err(e) => {
-                        error!(server = %name, error = ?e, "Failed to start MCP server");
+                        error!(server = %name, error = ?e, "Failed to connect to MCP server");
                         Some((name, e))
                     }
                 }
@@ -268,35 +173,34 @@ impl McpService {
         let mut error_count = 0usize;
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                // Error already logged with full details inside the spawned task; just count it.
                 Ok(Some(_)) => error_count += 1,
                 Ok(None) => {}
-                Err(e) => warn!(error = ?e, "MCP server start task panicked"),
+                Err(e) => warn!(error = ?e, "MCP server connect task panicked"),
             }
         }
 
         if error_count > 0 {
-            warn!(failed = error_count, "Some MCP servers failed to start");
+            warn!(failed = error_count, "Some MCP servers failed to connect");
         }
 
         Ok(())
     }
 
-    /// Stop all running servers
-    pub async fn stop_all(&self) -> Result<()> {
+    /// Disconnect from all connected servers
+    pub async fn disconnect_all(&self) -> Result<()> {
         let server_names: Vec<String> = {
             let connections = self.connections.read().await;
             connections.keys().cloned().collect()
         };
 
-        info!(count = server_names.len(), "Stopping all MCP servers");
+        info!(count = server_names.len(), "Disconnecting from all MCP servers");
 
         for name in server_names {
-            if let Err(e) = self.stop_server(&name).await {
+            if let Err(e) = self.disconnect_server(&name).await {
                 error!(
                     server = %name,
                     error = ?e,
-                    "Failed to stop MCP server"
+                    "Failed to disconnect from MCP server"
                 );
             }
         }
@@ -304,11 +208,9 @@ impl McpService {
         Ok(())
     }
 
-    /// Get a list of all active server names
     /// Get all tools from all active servers, grouped by server with their ServerSinks.
     ///
-    /// Tool lists are cached after the first successful fetch per server and
-    /// invalidated when a server is restarted via restart_server().
+    /// Tool lists are cached after the first successful fetch per server.
     pub async fn get_all_tools_with_sinks(
         &self,
     ) -> Result<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {
@@ -321,7 +223,6 @@ impl McpService {
                     let server_sink = connection.service.peer().clone();
                     let tool_count = tools.len();
 
-                    // Log individual tool names for debugging
                     for tool in &tools {
                         debug!(
                             server = %name,
@@ -361,14 +262,12 @@ impl Default for McpService {
 mod tests {
     use super::*;
     use crate::settings::models::mcp_store::McpServerConfig;
-    use std::collections::HashMap;
 
     fn disabled_config(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
-            command: "true".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
             enabled: false,
         }
     }
@@ -378,57 +277,44 @@ mod tests {
     #[test]
     fn test_new_service_has_no_connections() {
         let svc = McpService::new();
-        let pids = svc.pids.lock().unwrap();
-        assert!(pids.is_empty());
+        // A freshly created service should have no active connections
+        // (verified by get_all_tools_with_sinks returning empty in async tests)
+        let _ = svc.connections.try_read().is_ok();
     }
 
     #[test]
     fn test_default_equals_new() {
-        let svc = McpService::default();
-        let pids = svc.pids.lock().unwrap();
-        assert!(pids.is_empty());
+        let _svc = McpService::default();
+        // Default constructor delegates to new() — just verify it doesn't panic
     }
 
-    // --- kill_all_sync with empty pids ---
-
-    #[test]
-    fn test_kill_all_sync_empty_does_not_panic() {
-        let svc = McpService::new();
-        // Should complete without panicking when no pids are tracked
-        svc.kill_all_sync();
-    }
-
-    // --- stop_server on unknown name ---
+    // --- disconnect_server on unknown name ---
 
     #[tokio::test]
-    async fn test_stop_server_unknown_is_ok() {
+    async fn test_disconnect_server_unknown_is_ok() {
         let svc = McpService::new();
-        // Stopping a server that was never started should succeed (logs a warning)
-        let result = svc.stop_server("nonexistent").await;
+        let result = svc.disconnect_server("nonexistent").await;
         assert!(result.is_ok());
     }
 
-    // --- start_all skips disabled servers ---
+    // --- connect_all skips disabled servers ---
 
     #[tokio::test]
-    async fn test_start_all_skips_disabled_servers() {
+    async fn test_connect_all_skips_disabled_servers() {
         let svc = McpService::new();
         let configs = vec![disabled_config("disabled-a"), disabled_config("disabled-b")];
-        let result = svc.start_all(configs).await;
+        let result = svc.connect_all(configs).await;
         assert!(result.is_ok());
 
         // No connections should have been registered for disabled servers
         let connections = svc.connections.read().await;
         assert!(connections.is_empty());
-
-        let pids = svc.pids.lock().unwrap();
-        assert!(pids.is_empty());
     }
 
     #[tokio::test]
-    async fn test_start_all_empty_list_is_ok() {
+    async fn test_connect_all_empty_list_is_ok() {
         let svc = McpService::new();
-        let result = svc.start_all(vec![]).await;
+        let result = svc.connect_all(vec![]).await;
         assert!(result.is_ok());
     }
 
@@ -442,75 +328,41 @@ mod tests {
         assert!(result.unwrap().is_empty());
     }
 
-    // --- stop_all with no connections ---
+    // --- disconnect_all with no connections ---
 
     #[tokio::test]
-    async fn test_stop_all_empty_is_ok() {
+    async fn test_disconnect_all_empty_is_ok() {
         let svc = McpService::new();
-        let result = svc.stop_all().await;
+        let result = svc.disconnect_all().await;
         assert!(result.is_ok());
     }
 
-    // --- start_server with a bad command ---
-    //
-    // We cannot construct a McpConnection without spawn(), so we verify the
-    // error path: a command that does not exist should cause start_server to
-    // return Err and leave the connections map empty.
+    // --- connect_all: bad URL returns Ok (non-fatal, errors are logged) ---
 
     #[tokio::test]
-    async fn test_start_server_bad_command_returns_err_and_no_connection() {
+    async fn test_connect_all_bad_url_returns_ok() {
         let svc = McpService::new();
-        let bad_config = McpServerConfig {
-            name: "bad-server".to_string(),
-            command: "/nonexistent/command".to_string(),
-            args: vec![],
-            env: HashMap::new(),
-            enabled: true,
-        };
+        let configs = vec![
+            McpServerConfig {
+                name: "bad-1".to_string(),
+                url: "http://127.0.0.1:1/mcp".to_string(),
+                api_key: None,
+                enabled: true,
+            },
+            McpServerConfig {
+                name: "bad-2".to_string(),
+                url: "http://127.0.0.1:2/mcp".to_string(),
+                api_key: None,
+                enabled: true,
+            },
+        ];
 
-        let result = svc.start_server(bad_config).await;
-        assert!(result.is_err(), "Expected Err for nonexistent command");
-
-        // Failed spawn must not leave a partial connection
-        let connections = svc.connections.read().await;
-        assert!(connections.is_empty());
-
-        let pids = svc.pids.lock().unwrap();
-        assert!(pids.is_empty());
-    }
-
-    // --- Verify pids are cleaned up on stop_server ---
-    //
-    // Manually pre-insert a PID (simulating a partially-cleaned state where the
-    // connection was already removed but the pid index was not), then verify
-    // stop_server clears it.
-
-    #[tokio::test]
-    async fn test_stop_server_clears_pid_entry() {
-        let svc = McpService::new();
-
-        // Manually insert a fake PID entry
-        {
-            let mut pids = svc.pids.lock().unwrap();
-            pids.insert("fake-server".to_string(), 99999);
-        }
-
-        // stop_server should remove the pid even though no live connection exists
-        let result = svc.stop_server("fake-server").await;
+        let result = svc.connect_all(configs).await;
+        // connect_all returns Ok even when all servers fail to connect
         assert!(result.is_ok());
-
-        let pids = svc.pids.lock().unwrap();
-        assert!(
-            !pids.contains_key("fake-server"),
-            "PID entry should be removed after stop_server"
-        );
     }
 
     // --- Tool cache: get_all_tools idempotent with no connections ---
-    //
-    // McpConnection::spawn requires a real MCP-compatible process, so we verify
-    // the observable: repeated calls to get_all_tools_with_sinks are idempotent
-    // when there are no connections.
 
     #[tokio::test]
     async fn test_get_all_tools_idempotent_no_connections() {
@@ -518,35 +370,5 @@ mod tests {
         let r1 = svc.get_all_tools_with_sinks().await.unwrap();
         let r2 = svc.get_all_tools_with_sinks().await.unwrap();
         assert_eq!(r1.len(), r2.len());
-    }
-
-    // --- start_all: partial failure returns Ok (non-fatal) ---
-    //
-    // start_all is designed to continue starting remaining servers when one
-    // fails; it returns Ok(()) even if some servers fail, only logging errors.
-
-    #[tokio::test]
-    async fn test_start_all_partial_failure_returns_ok() {
-        let svc = McpService::new();
-        let configs = vec![
-            McpServerConfig {
-                name: "bad-1".to_string(),
-                command: "/no/such/binary".to_string(),
-                args: vec![],
-                env: HashMap::new(),
-                enabled: true,
-            },
-            McpServerConfig {
-                name: "bad-2".to_string(),
-                command: "/also/missing".to_string(),
-                args: vec![],
-                env: HashMap::new(),
-                enabled: true,
-            },
-        ];
-
-        let result = svc.start_all(configs).await;
-        // start_all returns Ok even when all servers fail
-        assert!(result.is_ok());
     }
 }

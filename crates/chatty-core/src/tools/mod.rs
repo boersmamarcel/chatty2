@@ -6,7 +6,6 @@ pub mod data_query_tool;
 pub mod daytona_tool;
 pub mod delete_mcp_tool;
 pub mod edit_mcp_tool;
-mod env_serde;
 pub mod excel_tool;
 pub mod execute_code_tool;
 pub mod fetch_tool;
