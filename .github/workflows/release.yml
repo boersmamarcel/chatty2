@@ -126,6 +126,29 @@ jobs:
       - name: Package Linux AppImage
         run: ./scripts/package-linux-appimage.sh
 
+      - name: Verify pdfium is bundled in AppImage
+        run: |
+          APPIMAGE=$(ls chatty-linux-*.AppImage 2>/dev/null | head -1)
+          if [ -z "$APPIMAGE" ]; then
+            echo "::error::AppImage not found — packaging step may have failed"
+            exit 1
+          fi
+          chmod +x "$APPIMAGE"
+          # --appimage-extract is handled by the AppImage ELF runtime before AppRun runs;
+          # it extracts squashfs contents without needing a FUSE kernel module.
+          # Try selective extraction first (faster); fall back to full extraction.
+          if ! "$APPIMAGE" --appimage-extract usr/lib/libpdfium.so > /dev/null 2>&1; then
+            "$APPIMAGE" --appimage-extract > /dev/null 2>&1 || true
+          fi
+          if [ -f squashfs-root/usr/lib/libpdfium.so ]; then
+            echo "✅ libpdfium.so confirmed inside AppImage"
+          else
+            echo "::error::libpdfium.so not found in AppImage — PDF tools (pdf_to_image, pdf_extract_text, pdf_info) will not work for users"
+            rm -rf squashfs-root
+            exit 1
+          fi
+          rm -rf squashfs-root
+
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
@@ -195,6 +218,24 @@ jobs:
           NOTARIZE_TEAM_ID: ${{ secrets.NOTARIZE_TEAM_ID }}
           NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
         run: ./scripts/package-macos.sh
+
+      - name: Verify pdfium is bundled in DMG
+        run: |
+          DMG=$(ls chatty-macos-*.dmg 2>/dev/null | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::DMG not found — packaging step may have failed"
+            exit 1
+          fi
+          hdiutil attach -readonly -nobrowse -mountpoint /tmp/verify_pdfium "$DMG"
+          PDFIUM=$(find /tmp/verify_pdfium -name "libpdfium.dylib" 2>/dev/null | head -1)
+          # Always detach before potentially exiting so the volume is never left mounted
+          hdiutil detach /tmp/verify_pdfium || true
+          if [ -n "$PDFIUM" ]; then
+            echo "✅ libpdfium.dylib confirmed inside DMG at: $PDFIUM"
+          else
+            echo "::error::libpdfium.dylib not found in DMG — PDF tools (pdf_to_image, pdf_extract_text, pdf_info) will not work for users"
+            exit 1
+          fi
 
       - name: Clean up keychain
         if: always()
