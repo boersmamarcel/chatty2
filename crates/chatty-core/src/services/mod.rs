@@ -7,6 +7,7 @@ pub mod git_service;
 pub mod llm_service;
 pub mod math_renderer_service;
 pub mod mcp_service;
+pub mod mcp_token_store;
 pub mod memory_query;
 pub mod memory_service;
 pub mod mermaid_renderer_service;

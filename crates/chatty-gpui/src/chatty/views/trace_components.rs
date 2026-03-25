@@ -993,8 +993,8 @@ fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 
     match tool_call.tool_name.as_str() {
-        "remember" | "search_memory" | "search_web" | "fetch" | "sub_agent"
-        | "daytona_run" | "browser_use" => {
+        "remember" | "search_memory" | "search_web" | "fetch" | "sub_agent" | "daytona_run"
+        | "browser_use" => {
             // Use the friendly display_name as prefix with the detail
             format!("{}: {}", tool_call.display_name, detail)
         }
@@ -1025,7 +1025,10 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
 
         // For execute_code / daytona_run: show language prefix + full code
         if tool_call.tool_name == "execute_code" || tool_call.tool_name == "daytona_run" {
-            let language = json.get("language").and_then(|v| v.as_str()).unwrap_or("python");
+            let language = json
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("python");
             let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
             return format!("[{}] {}", language, code);
         }

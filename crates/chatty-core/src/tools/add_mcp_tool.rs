@@ -3,7 +3,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::{MASKED_API_KEY_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
+use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
 
 /// Error type for add_mcp tool
@@ -356,11 +356,7 @@ mod tests {
             api_key: None,
         };
         assert!(validate_config(&args).is_err());
-        assert!(
-            validate_config(&args)
-                .unwrap_err()
-                .contains("http://")
-        );
+        assert!(validate_config(&args).unwrap_err().contains("http://"));
     }
 
     #[test]
@@ -586,7 +582,8 @@ mod tests {
 
     #[test]
     fn test_args_deserialize_with_api_key() {
-        let json = r#"{"name": "test", "url": "https://example.com/mcp", "api_key": "bearer-token-123"}"#;
+        let json =
+            r#"{"name": "test", "url": "https://example.com/mcp", "api_key": "bearer-token-123"}"#;
         let args: AddMcpToolArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.api_key.unwrap(), "bearer-token-123");
     }
@@ -638,4 +635,3 @@ mod tests {
         assert_eq!(AddMcpTool::NAME, "add_mcp_service");
     }
 }
-

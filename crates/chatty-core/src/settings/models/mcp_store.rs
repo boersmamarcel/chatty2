@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 lazy_static::lazy_static! {
     /// Shared write lock for all MCP tool operations (add, delete, edit).
@@ -13,6 +14,22 @@ lazy_static::lazy_static! {
 /// When the LLM sends this value back in `edit_mcp_service`, the original
 /// stored value is preserved rather than overwriting with the literal string.
 pub const MASKED_API_KEY_SENTINEL: &str = "****";
+
+/// Runtime authentication status for an MCP server.
+/// Not persisted — derived from connection state and cached credentials.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpAuthStatus {
+    /// No special auth needed, or using static API key
+    NotRequired,
+    /// OAuth tokens are cached and server is connected
+    Authenticated,
+    /// Server requires OAuth but no cached tokens exist
+    NeedsAuth,
+    /// OAuth flow or connection in progress
+    Connecting,
+    /// Auth or connection failed
+    Failed(String),
+}
 
 /// Configuration for a single MCP server.
 ///
@@ -54,12 +71,15 @@ impl McpServerConfig {
 #[derive(Clone)]
 pub struct McpServersModel {
     servers: Vec<McpServerConfig>,
+    /// Runtime auth status per server (not persisted)
+    auth_statuses: HashMap<String, McpAuthStatus>,
 }
 
 impl McpServersModel {
     pub fn new() -> Self {
         Self {
             servers: Vec::new(),
+            auth_statuses: HashMap::new(),
         }
     }
 
@@ -80,6 +100,23 @@ impl McpServersModel {
     /// Replace all servers (used when loading from disk)
     pub fn replace_all(&mut self, servers: Vec<McpServerConfig>) {
         self.servers = servers;
+    }
+
+    /// Get auth status for a server
+    pub fn auth_status(&self, server_name: &str) -> &McpAuthStatus {
+        self.auth_statuses
+            .get(server_name)
+            .unwrap_or(&McpAuthStatus::NotRequired)
+    }
+
+    /// Set auth status for a server
+    pub fn set_auth_status(&mut self, server_name: String, status: McpAuthStatus) {
+        self.auth_statuses.insert(server_name, status);
+    }
+
+    /// Remove auth status for a server (e.g. on delete)
+    pub fn remove_auth_status(&mut self, server_name: &str) {
+        self.auth_statuses.remove(server_name);
     }
 }
 

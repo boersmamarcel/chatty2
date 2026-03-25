@@ -22,7 +22,7 @@ const DAYTONA_SANDBOX_POLL_INTERVAL_MS: u64 = 2000;
 /// File extensions to auto-discover and download from sandbox
 const DOWNLOADABLE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", // images
-    "pdf", "csv", "html",                               // documents
+    "pdf", "csv", "html", // documents
 ];
 
 /// Maximum number of files to download from a single sandbox run
@@ -132,25 +132,122 @@ fn has_downloadable_extension(name: &str) -> bool {
 
 /// Common Python standard library modules that should NOT be pip-installed.
 const PYTHON_STDLIB: &[&str] = &[
-    "abc", "argparse", "ast", "asyncio", "base64", "bisect", "calendar",
-    "cmath", "collections", "colorsys", "concurrent", "configparser",
-    "contextlib", "copy", "csv", "ctypes", "dataclasses", "datetime",
-    "decimal", "difflib", "email", "enum", "errno", "fcntl", "fileinput",
-    "fnmatch", "fractions", "ftplib", "functools", "gc", "getpass", "glob",
-    "gzip", "hashlib", "heapq", "hmac", "html", "http", "imaplib", "importlib",
-    "inspect", "io", "ipaddress", "itertools", "json", "keyword", "linecache",
-    "locale", "logging", "lzma", "math", "mimetypes", "multiprocessing",
-    "numbers", "operator", "os", "pathlib", "pickle", "platform", "plistlib",
-    "pprint", "pdb", "queue", "random", "re", "readline", "reprlib",
-    "secrets", "select", "shelve", "shlex", "shutil", "signal", "site",
-    "smtplib", "socket", "sqlite3", "ssl", "stat", "statistics", "string",
-    "struct", "subprocess", "sys", "syslog", "tempfile", "textwrap",
-    "threading", "time", "timeit", "tkinter", "token", "tokenize", "tomllib",
-    "traceback", "tty", "turtle", "types", "typing", "unicodedata", "unittest",
-    "urllib", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser",
-    "xml", "xmlrpc", "zipfile", "zipimport", "zlib",
+    "abc",
+    "argparse",
+    "ast",
+    "asyncio",
+    "base64",
+    "bisect",
+    "calendar",
+    "cmath",
+    "collections",
+    "colorsys",
+    "concurrent",
+    "configparser",
+    "contextlib",
+    "copy",
+    "csv",
+    "ctypes",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "difflib",
+    "email",
+    "enum",
+    "errno",
+    "fcntl",
+    "fileinput",
+    "fnmatch",
+    "fractions",
+    "ftplib",
+    "functools",
+    "gc",
+    "getpass",
+    "glob",
+    "gzip",
+    "hashlib",
+    "heapq",
+    "hmac",
+    "html",
+    "http",
+    "imaplib",
+    "importlib",
+    "inspect",
+    "io",
+    "ipaddress",
+    "itertools",
+    "json",
+    "keyword",
+    "linecache",
+    "locale",
+    "logging",
+    "lzma",
+    "math",
+    "mimetypes",
+    "multiprocessing",
+    "numbers",
+    "operator",
+    "os",
+    "pathlib",
+    "pickle",
+    "platform",
+    "plistlib",
+    "pprint",
+    "pdb",
+    "queue",
+    "random",
+    "re",
+    "readline",
+    "reprlib",
+    "secrets",
+    "select",
+    "shelve",
+    "shlex",
+    "shutil",
+    "signal",
+    "site",
+    "smtplib",
+    "socket",
+    "sqlite3",
+    "ssl",
+    "stat",
+    "statistics",
+    "string",
+    "struct",
+    "subprocess",
+    "sys",
+    "syslog",
+    "tempfile",
+    "textwrap",
+    "threading",
+    "time",
+    "timeit",
+    "tkinter",
+    "token",
+    "tokenize",
+    "tomllib",
+    "traceback",
+    "tty",
+    "turtle",
+    "types",
+    "typing",
+    "unicodedata",
+    "unittest",
+    "urllib",
+    "uuid",
+    "venv",
+    "warnings",
+    "wave",
+    "weakref",
+    "webbrowser",
+    "xml",
+    "xmlrpc",
+    "zipfile",
+    "zipimport",
+    "zlib",
     // Also exclude _ prefixed and __future__
-    "__future__", "_thread",
+    "__future__",
+    "_thread",
 ];
 
 /// Map import names to pip package names for common mismatches.
@@ -217,9 +314,7 @@ fn extract_output_paths(code: &str) -> Vec<String> {
         }
     }
     // Also match: open('file', 'w') / open("file", "w")
-    let open_re = regex::Regex::new(
-        r#"open\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]"#
-    ).unwrap();
+    let open_re = regex::Regex::new(r#"open\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]"#).unwrap();
     for cap in open_re.captures_iter(code) {
         if let Some(m) = cap.get(1) {
             let path = m.as_str();
@@ -293,9 +388,7 @@ impl DaytonaTool {
             }
             return DaytonaToolError::ApiError(format!(
                 "Daytona API {} ({}): {}",
-                status,
-                api_err.status_code,
-                api_err.message
+                status, api_err.status_code, api_err.message
             ));
         }
 
@@ -472,10 +565,7 @@ impl DaytonaTool {
             .send()
             .await
             .map_err(|e| {
-                DaytonaToolError::ApiError(format!(
-                    "Failed to execute command in sandbox: {}",
-                    e
-                ))
+                DaytonaToolError::ApiError(format!("Failed to execute command in sandbox: {}", e))
             })?;
 
         if !response.status().is_success() {
@@ -494,13 +584,12 @@ impl DaytonaTool {
 
         debug!(raw_response = %raw_text, "Daytona execute raw response");
 
-        let exec_response: ExecuteResponse =
-            serde_json::from_str(&raw_text).map_err(|e| {
-                DaytonaToolError::ApiError(format!(
-                    "Failed to parse execute response: {} — raw: {}",
-                    e, raw_text
-                ))
-            })?;
+        let exec_response: ExecuteResponse = serde_json::from_str(&raw_text).map_err(|e| {
+            DaytonaToolError::ApiError(format!(
+                "Failed to parse execute response: {} — raw: {}",
+                e, raw_text
+            ))
+        })?;
 
         Ok(exec_response)
     }
@@ -671,7 +760,8 @@ impl DaytonaTool {
         let project_dir_str;
         if let Some(ref pdir) = project_dir {
             project_dir_str = pdir.clone();
-            if project_dir_str != "/tmp" && project_dir_str != "/root" && project_dir_str != "/home" {
+            if project_dir_str != "/tmp" && project_dir_str != "/root" && project_dir_str != "/home"
+            {
                 scan_dirs.insert(0, &project_dir_str);
             }
         }
@@ -702,10 +792,7 @@ impl DaytonaTool {
             return;
         }
 
-        let url = format!(
-            "{}/toolbox/{}/toolbox/files",
-            self.api_base, sandbox_id
-        );
+        let url = format!("{}/toolbox/{}/toolbox/files", self.api_base, sandbox_id);
 
         let response = match self
             .client
@@ -747,7 +834,12 @@ impl DaytonaTool {
             }
         };
 
-        info!(sandbox_id, dir, count = entries.len(), "Listed files in sandbox directory");
+        info!(
+            sandbox_id,
+            dir,
+            count = entries.len(),
+            "Listed files in sandbox directory"
+        );
 
         for entry in entries {
             if out.len() >= MAX_DOWNLOAD_FILES {
@@ -782,11 +874,7 @@ impl DaytonaTool {
     /// Download a single file from the sandbox via the toolbox files API.
     ///
     /// Returns the raw file bytes, or `None` on failure.
-    async fn download_file_bytes(
-        &self,
-        sandbox_id: &str,
-        remote_path: &str,
-    ) -> Option<Vec<u8>> {
+    async fn download_file_bytes(&self, sandbox_id: &str, remote_path: &str) -> Option<Vec<u8>> {
         let url = format!(
             "{}/toolbox/{}/toolbox/files/download",
             self.api_base, sandbox_id
@@ -813,7 +901,12 @@ impl DaytonaTool {
 
         match response.bytes().await {
             Ok(bytes) => {
-                info!(sandbox_id, path = remote_path, size = bytes.len(), "Downloaded file from sandbox");
+                info!(
+                    sandbox_id,
+                    path = remote_path,
+                    size = bytes.len(),
+                    "Downloaded file from sandbox"
+                );
                 Some(bytes.to_vec())
             }
             Err(e) => {
@@ -925,11 +1018,7 @@ impl Tool for DaytonaTool {
             ));
         }
 
-        let lang = args
-            .language
-            .as_deref()
-            .unwrap_or("unknown")
-            .to_string();
+        let lang = args.language.as_deref().unwrap_or("unknown").to_string();
 
         info!(language = %lang, "Creating Daytona sandbox");
         let sandbox_id = self.create_sandbox().await?;

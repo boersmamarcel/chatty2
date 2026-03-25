@@ -849,7 +849,7 @@ dependencies = [
  "async-trait",
  "azure_core",
  "futures",
- "oauth2",
+ "oauth2 4.4.2",
  "pin-project",
  "serde",
  "time",
@@ -6593,6 +6593,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "oauth2"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "getrandom 0.2.17",
+ "http 1.4.0",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "objc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8238,6 +8257,7 @@ dependencies = [
  "chrono",
  "futures",
  "http 1.4.0",
+ "oauth2 5.0.0",
  "pastey 0.2.1",
  "pin-project-lite",
  "reqwest 0.13.2",
@@ -8251,6 +8271,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -10264,6 +10285,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

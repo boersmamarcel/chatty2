@@ -3,7 +3,9 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::settings::models::mcp_store::{MASKED_API_KEY_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
+use crate::settings::models::mcp_store::{
+    MASKED_API_KEY_SENTINEL, MCP_WRITE_LOCK, McpServerConfig,
+};
 use crate::settings::repositories::McpRepository;
 
 /// Error type for edit_mcp tool
@@ -246,6 +248,7 @@ mod tests {
         McpServerConfig {
             name: name.to_string(),
             url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
             enabled: true,
         }
     }
@@ -257,6 +260,7 @@ mod tests {
         let args = EditMcpToolArgs {
             name: "".to_string(),
             url: Some("http://localhost:3000/mcp".to_string()),
+            api_key: None,
         };
         assert!(validate_edit_args(&args).is_err());
         assert!(validate_edit_args(&args).unwrap_err().contains("name"));
@@ -267,6 +271,7 @@ mod tests {
         let args = EditMcpToolArgs {
             name: "server".to_string(),
             url: None,
+            api_key: None,
         };
         assert!(validate_edit_args(&args).is_err());
         assert!(
@@ -281,6 +286,7 @@ mod tests {
         let args = EditMcpToolArgs {
             name: "server".to_string(),
             url: Some("".to_string()),
+            api_key: None,
         };
         assert!(validate_edit_args(&args).is_err());
         assert!(
@@ -295,13 +301,10 @@ mod tests {
         let args = EditMcpToolArgs {
             name: "server".to_string(),
             url: Some("localhost:3000/mcp".to_string()),
+            api_key: None,
         };
         assert!(validate_edit_args(&args).is_err());
-        assert!(
-            validate_edit_args(&args)
-                .unwrap_err()
-                .contains("http://")
-        );
+        assert!(validate_edit_args(&args).unwrap_err().contains("http://"));
     }
 
     #[test]
@@ -309,6 +312,7 @@ mod tests {
         let args = EditMcpToolArgs {
             name: "server".to_string(),
             url: Some("http://localhost:9000/mcp".to_string()),
+            api_key: None,
         };
         assert!(validate_edit_args(&args).is_ok());
     }
@@ -325,6 +329,7 @@ mod tests {
             .call(EditMcpToolArgs {
                 name: "my-server".to_string(),
                 url: Some("http://localhost:9000/mcp".to_string()),
+                api_key: None,
             })
             .await;
         assert!(result.is_ok());
@@ -348,6 +353,7 @@ mod tests {
             .call(EditMcpToolArgs {
                 name: "nonexistent".to_string(),
                 url: Some("http://localhost:9000/mcp".to_string()),
+                api_key: None,
             })
             .await;
         assert!(result.is_ok());
@@ -373,6 +379,7 @@ mod tests {
             .call(EditMcpToolArgs {
                 name: "server-b".to_string(),
                 url: Some("http://localhost:9000/mcp".to_string()),
+                api_key: None,
             })
             .await;
         assert!(result.is_ok());
@@ -394,6 +401,7 @@ mod tests {
             .call(EditMcpToolArgs {
                 name: "any".to_string(),
                 url: Some("http://localhost:9000/mcp".to_string()),
+                api_key: None,
             })
             .await;
         assert!(result.is_err());
@@ -416,6 +424,7 @@ mod tests {
             .call(EditMcpToolArgs {
                 name: "target".to_string(),
                 url: Some("http://localhost:9000/mcp".to_string()),
+                api_key: None,
             })
             .await;
         assert!(result.is_err());
@@ -508,4 +517,3 @@ mod tests {
         assert_eq!(EditMcpTool::NAME, "edit_mcp_service");
     }
 }
-
