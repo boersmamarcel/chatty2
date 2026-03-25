@@ -56,6 +56,8 @@ Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignorevers
 Source: "..\target\release\chatty-tui.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; DuckDB runtime DLL (required by chatty-tui)
 Source: "..\target\release\duckdb.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Pdfium DLL (required for PDF support — pdf_to_image, pdf_extract_text, pdf_info tools)
+Source: "..\target\release\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; Themes
 Source: "..\themes\*.json"; DestDir: "{app}\themes"; Flags: ignoreversion
 

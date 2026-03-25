@@ -72,7 +72,7 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
     if let Some(exe_dir) = exe_for_linux.parent() {
         let lib_dir = exe_dir.join("../lib");
         debug!(path = %lib_dir.display(), "pdfium: trying exe-relative lib path");
-        if lib_dir.is_dir() {
+        if lib_dir.is_dir() && lib_dir.join(&lib_name).exists() {
             return Some(lib_dir);
         }
     }
