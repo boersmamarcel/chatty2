@@ -231,8 +231,25 @@ jobs:
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
+      - name: Cache pdfium library
+        uses: actions/cache@v4
+        with:
+          path: |
+            crates/chatty-core/libs
+          key: pdfium-windows-${{ hashFiles('crates/chatty-core/build.rs') }}
+
       - name: Build release binary (TUI only — gpui does not support Windows)
         run: cargo build --release -p chatty-tui
+
+      - name: Copy pdfium.dll to release directory for installer
+        run: |
+          if (Test-Path "crates\chatty-core\libs\lib\pdfium.dll") {
+            Copy-Item "crates\chatty-core\libs\lib\pdfium.dll" "target\release\pdfium.dll"
+            Write-Host "Copied pdfium.dll to target\release\"
+          } else {
+            Write-Warning "pdfium.dll not found at crates\chatty-core\libs\lib\pdfium.dll — PDF tools will not work on Windows"
+          }
+        shell: pwsh
 
 
       - name: Copy chatty-tui.exe as chatty.exe for installer
