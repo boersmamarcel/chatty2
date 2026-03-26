@@ -136,18 +136,23 @@ jobs:
           # Use squashfs-tools to inspect the AppImage's embedded squashfs directly,
           # without executing the AppImage (which may fail in CI due to FUSE restrictions).
           sudo apt-get install -y squashfs-tools > /dev/null 2>&1
-          # An AppImage is an ELF runtime prepended to a squashfs; find the squashfs offset.
-          OFFSET=$(python3 -c "data=open('$APPIMAGE','rb').read();sqsh=data.find(b'sqsh');hsqs=data.find(b'hsqs');print(sqsh if sqsh>=0 else hsqs)")
+          # AppImage Type 2: squashfs is page-aligned (4096 bytes) after the ELF runtime.
+          # Search only at page-aligned offsets to avoid false matches inside the ELF binary.
+          OFFSET=$(python3 -c "data=open('$APPIMAGE','rb').read();print(next((off for off in range(0,len(data)-4,4096) if data[off:off+4] in (b'hsqs',b'sqsh')),-1))")
           if [ "$OFFSET" -lt 0 ]; then
             echo "::error::Could not locate squashfs section inside AppImage — the file may be corrupted or not a valid AppImage"
             exit 1
           fi
-          if unsquashfs -l -o "$OFFSET" "$APPIMAGE" 2>/dev/null | grep -q 'usr/lib/libpdfium\.so'; then
+          echo "Found squashfs at offset $OFFSET"
+          TMPDIR=$(mktemp -d)
+          unsquashfs -d "$TMPDIR" -o "$OFFSET" "$APPIMAGE" usr/lib/libpdfium.so 2>&1
+          if [ -f "$TMPDIR/usr/lib/libpdfium.so" ]; then
             echo "✅ libpdfium.so confirmed inside AppImage"
           else
             echo "::error::libpdfium.so not found in AppImage — PDF tools (pdf_to_image, pdf_extract_text, pdf_info) will not work for users"
             exit 1
           fi
+          rm -rf "$TMPDIR"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
