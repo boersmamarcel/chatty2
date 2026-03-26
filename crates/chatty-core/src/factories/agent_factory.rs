@@ -15,14 +15,14 @@ use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 use crate::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BrowserUseTool, CompileTypstTool, CreateChartTool,
-    CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool, DescribeDataTool, EditExcelTool,
-    EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool,
-    GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
-    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BrowserUseTool, CompileTypstTool,
+    CreateChartTool, CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool,
+    DescribeDataTool, EditExcelTool, EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool,
+    FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
+    ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
+    QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool,
+    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
 
@@ -977,9 +977,8 @@ impl AgentClient {
                         .filter(|k| !k.is_empty())
                         .map(|key| {
                             tracing::info!("Daytona sandbox tool enabled");
-                            let workspace = exec_settings
-                                .as_ref()
-                                .and_then(|s| s.workspace_dir.clone());
+                            let workspace =
+                                exec_settings.as_ref().and_then(|s| s.workspace_dir.clone());
                             DaytonaTool::new(key, workspace)
                         })
                 } else {

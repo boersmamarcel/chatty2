@@ -477,8 +477,8 @@ async fn start_mcp_servers() -> Option<McpService> {
     // will have their tools available; the rest become available after /clear.
     let svc = service.clone();
     tokio::spawn(async move {
-        if let Err(e) = svc.start_all(servers).await {
-            tracing::error!(error = ?e, "Failed to start MCP servers");
+        if let Err(e) = svc.connect_all(servers).await {
+            tracing::error!(error = ?e, "Failed to connect to MCP servers");
         }
     });
 

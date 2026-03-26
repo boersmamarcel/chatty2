@@ -9,12 +9,12 @@ edition = "2024"
 [workspace.dependencies]
 # Core agent dependencies
 rig-core = "0.32.0"
-rmcp = { version = "0.16", features = ["client", "macros", "transport-child-process"] }
+rmcp = { version = "0.16", features = ["client", "macros", "transport-streamable-http-client-reqwest", "auth"] }
 
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "fs", "macros"] }
+tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 dirs = "5.0"
 lazy_static = "1.4"

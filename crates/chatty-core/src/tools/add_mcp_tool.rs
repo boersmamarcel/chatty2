@@ -1,11 +1,9 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::env_serde::deserialize_env_vars;
-use crate::settings::models::mcp_store::{MASKED_VALUE_SENTINEL, MCP_WRITE_LOCK, McpServerConfig};
+use crate::settings::models::mcp_store::{MCP_WRITE_LOCK, McpServerConfig};
 use crate::settings::repositories::McpRepository;
 
 /// Error type for add_mcp tool
@@ -20,17 +18,15 @@ pub enum AddMcpToolError {
 /// Arguments for adding an MCP server
 #[derive(Deserialize, Serialize, Default)]
 pub struct AddMcpToolArgs {
-    /// Unique name for the MCP server (e.g., "tavily-search", "github")
+    /// Unique name for the MCP server (e.g., "my-tools", "github")
     pub name: String,
-    /// Command to execute (e.g., "npx", "uvx", "docker")
-    pub command: String,
-    /// Command-line arguments
+    /// HTTP URL of the already-running MCP server endpoint
+    /// (e.g., "http://localhost:3000/mcp")
+    pub url: String,
+    /// Optional Bearer token for authentication (`Authorization: Bearer <api_key>`).
+    /// Required for remote servers that enforce access control.
     #[serde(default)]
-    pub args: Vec<String>,
-    /// Environment variables for the server process.
-    /// Accepts either a JSON object or a JSON-encoded string (for OpenAI compatibility).
-    #[serde(default, deserialize_with = "deserialize_env_vars")]
-    pub env: HashMap<String, String>,
+    pub api_key: Option<String>,
 }
 
 /// Output from the add_mcp tool
@@ -59,8 +55,6 @@ impl AddMcpTool {
     }
 
     /// Production constructor: inject real sender.
-    /// Note: mcp_service is intentionally not stored — new servers are always saved as disabled
-    /// so there is nothing to start.
     pub fn new_with_services(
         repository: Arc<dyn McpRepository>,
         update_sender: tokio::sync::mpsc::Sender<Vec<McpServerConfig>>,
@@ -75,8 +69,6 @@ impl AddMcpTool {
 
 /// Validate an MCP server configuration, returning an error message if invalid.
 fn validate_config(args: &AddMcpToolArgs) -> Result<(), String> {
-    // Trim once and use for all name checks to avoid confusing errors
-    // (e.g. a name with only leading/trailing spaces must fail empty, not char validation)
     let name = args.name.trim();
 
     // Name must not be empty
@@ -95,16 +87,18 @@ fn validate_config(args: &AddMcpToolArgs) -> Result<(), String> {
         );
     }
 
-    // Command must not be empty
-    if args.command.trim().is_empty() {
-        return Err("Command cannot be empty".to_string());
+    // URL must not be empty
+    if args.url.trim().is_empty() {
+        return Err("URL cannot be empty".to_string());
     }
 
-    // Env var keys must not be empty
-    for key in args.env.keys() {
-        if key.trim().is_empty() {
-            return Err("Environment variable keys cannot be empty".to_string());
-        }
+    // URL must start with http:// or https://
+    let url = args.url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(
+            "URL must start with http:// or https:// (e.g. \"http://localhost:3000/mcp\")"
+                .to_string(),
+        );
     }
 
     Ok(())
@@ -120,41 +114,32 @@ impl Tool for AddMcpTool {
         ToolDefinition {
             name: "add_mcp_service".to_string(),
             description: "Add a new MCP (Model Context Protocol) server configuration. \
+                         The server must already be running — the app connects to it via HTTP. \
                          The server is ALWAYS saved as disabled — only the user can enable it \
-                         via Settings → Execution → MCP Servers. There is no way to create a \
-                         server in the enabled state. This keeps the user in full control of \
-                         what runs on their machine. \
+                         via Settings → Execution → MCP Servers. \
                          \n\n\
-                         Use this when the user wants to connect to a new MCP service. \
-                         Common examples include:\n\
-                         - npx-based servers: command=\"npx\", args=[\"-y\", \"@package/name\"]\n\
-                         - uvx-based servers: command=\"uvx\", args=[\"package-name\"]\n\
-                         - Docker-based servers: command=\"docker\", args=[\"run\", ...]\n\
-                         \n\
-                         Environment variables can be used for API keys and configuration."
+                         Use this when the user wants to connect to an existing MCP service. \
+                         The user is responsible for starting the server before adding it here. \
+                         Remote servers typically require an API key sent as a Bearer token. \
+                         Local servers usually do not require authentication."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Unique name identifier for the MCP server (e.g., 'tavily-search', 'github', 'filesystem'). Must contain only alphanumeric characters, hyphens, or underscores."
+                        "description": "Unique name identifier for the MCP server (e.g., 'my-tools', 'github', 'filesystem'). Must contain only alphanumeric characters, hyphens, or underscores."
                     },
-                    "command": {
+                    "url": {
                         "type": "string",
-                        "description": "The command to execute to start the MCP server (e.g., 'npx', 'uvx', 'docker', '/usr/local/bin/mcp-server')"
+                        "description": "HTTP URL of the already-running MCP server endpoint (e.g., 'http://localhost:3000/mcp'). The server must be running before enabling this entry."
                     },
-                    "args": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Command-line arguments for the server command (e.g., ['-y', '@anthropic/mcp-server-fetch'])"
-                    },
-                    "env": {
+                    "api_key": {
                         "type": "string",
-                        "description": "Environment variables as a JSON-encoded string (e.g., '{\"TAVILY_API_KEY\": \"tvly-xxxxx\"}'). Pass '{}' for no env vars."
+                        "description": "Optional Bearer token for authentication (sent as 'Authorization: Bearer <api_key>'). Required for remote servers that enforce access control. Omit or pass null for unauthenticated local servers."
                     }
                 },
-                "required": ["name", "command", "args", "env"]
+                "required": ["name", "url"]
             }),
         }
     }
@@ -165,8 +150,7 @@ impl Tool for AddMcpTool {
 
         let server_name = args.name.clone();
 
-        // Acquire write lock: makes load → check → append → save atomic,
-        // preventing TOCTOU races when two concurrent calls share the same name.
+        // Acquire write lock: makes load → check → append → save atomic.
         let _guard = MCP_WRITE_LOCK.lock().await;
 
         // Load existing servers
@@ -186,30 +170,19 @@ impl Tool for AddMcpTool {
             });
         }
 
-        // Reject sentinel values — there is no existing server to preserve values from.
-        if args.env.values().any(|v| v == MASKED_VALUE_SENTINEL) {
-            return Err(AddMcpToolError::ValidationError(
-                "Cannot use '****' as an env var value when adding a new server. \
-                 Provide the actual value."
-                    .to_string(),
-            ));
-        }
-
         // Create the new server config. Always disabled — only the user can enable
         // it via Settings after reviewing the configuration.
         let new_server = McpServerConfig {
             name: args.name,
-            command: args.command,
-            args: args.args,
-            env: args.env,
+            url: args.url,
+            api_key: args.api_key.filter(|k| !k.is_empty()),
             enabled: false,
         };
 
         tracing::info!(
             server_name = %new_server.name,
-            command = %new_server.command,
-            args = ?new_server.args,
-            env_keys = ?new_server.env.keys().collect::<Vec<_>>(),
+            url = %new_server.url,
+            has_api_key = new_server.has_api_key(),
             enabled = %new_server.enabled,
             "Adding new MCP server configuration"
         );
@@ -224,7 +197,7 @@ impl Tool for AddMcpTool {
                 AddMcpToolError::RepositoryError(format!("Failed to save servers: {}", e))
             })?;
 
-        // Release lock before best-effort notification and server start.
+        // Release lock before best-effort notification.
         drop(_guard);
 
         // Notify the UI to refresh via injected sender (None in tests → skipped).
@@ -234,10 +207,9 @@ impl Tool for AddMcpTool {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // New servers are always saved as disabled — the user enables them via Settings.
         let message = format!(
             "MCP server '{}' has been saved as disabled. \
-             Enable it in Settings → Execution → MCP Servers to start using it.",
+             Enable it in Settings → Execution → MCP Servers once the server is running.",
             server_name
         );
 
@@ -258,9 +230,8 @@ mod tests {
     fn test_server(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
-            command: "echo".to_string(),
-            args: vec!["test".to_string()],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
             enabled: true,
         }
     }
@@ -269,9 +240,8 @@ mod tests {
     fn valid_args(name: &str) -> AddMcpToolArgs {
         AddMcpToolArgs {
             name: name.to_string(),
-            command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@test/mcp-server".to_string()],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         }
     }
 
@@ -281,9 +251,8 @@ mod tests {
     fn test_validate_empty_name() {
         let args = AddMcpToolArgs {
             name: "".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
         assert!(
@@ -297,9 +266,8 @@ mod tests {
     fn test_validate_whitespace_name() {
         let args = AddMcpToolArgs {
             name: "   ".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -308,9 +276,8 @@ mod tests {
     fn test_validate_invalid_name_characters() {
         let args = AddMcpToolArgs {
             name: "my server!".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
         assert!(validate_config(&args).unwrap_err().contains("alphanumeric"));
@@ -320,9 +287,8 @@ mod tests {
     fn test_validate_name_with_dots() {
         let args = AddMcpToolArgs {
             name: "my.server".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -331,9 +297,8 @@ mod tests {
     fn test_validate_name_with_slashes() {
         let args = AddMcpToolArgs {
             name: "my/server".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
     }
@@ -342,9 +307,8 @@ mod tests {
     fn test_validate_valid_name_with_hyphens_and_underscores() {
         let args = AddMcpToolArgs {
             name: "my-server_v2".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -353,106 +317,64 @@ mod tests {
     fn test_validate_valid_name_alphanumeric_only() {
         let args = AddMcpToolArgs {
             name: "myserver123".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_ok());
     }
 
     #[test]
-    fn test_validate_empty_command() {
+    fn test_validate_empty_url() {
         let args = AddMcpToolArgs {
             name: "test-server".to_string(),
-            command: "".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
         assert!(
             validate_config(&args)
                 .unwrap_err()
-                .contains("Command cannot be empty")
+                .contains("URL cannot be empty")
         );
     }
 
     #[test]
-    fn test_validate_whitespace_command() {
+    fn test_validate_whitespace_url() {
         let args = AddMcpToolArgs {
             name: "test-server".to_string(),
-            command: "   ".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "   ".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
     }
 
     #[test]
-    fn test_validate_empty_env_key() {
-        let mut env = HashMap::new();
-        env.insert("".to_string(), "value".to_string());
+    fn test_validate_url_without_scheme() {
         let args = AddMcpToolArgs {
             name: "test-server".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env,
+            url: "localhost:3000/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_err());
-        assert!(
-            validate_config(&args)
-                .unwrap_err()
-                .contains("Environment variable keys")
-        );
+        assert!(validate_config(&args).unwrap_err().contains("http://"));
     }
 
     #[test]
-    fn test_validate_whitespace_env_key() {
-        let mut env = HashMap::new();
-        env.insert("  ".to_string(), "value".to_string());
+    fn test_validate_https_url_is_valid() {
         let args = AddMcpToolArgs {
-            name: "test-server".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env,
-        };
-        assert!(validate_config(&args).is_err());
-    }
-
-    #[test]
-    fn test_validate_valid_full_config() {
-        let mut env = HashMap::new();
-        env.insert("API_KEY".to_string(), "test-key".to_string());
-        let args = AddMcpToolArgs {
-            name: "tavily-search".to_string(),
-            command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@tavily/mcp-server".to_string()],
-            env,
+            name: "remote-server".to_string(),
+            url: "https://mcp.example.com/tools".to_string(),
+            api_key: Some("bearer-token".to_string()),
         };
         assert!(validate_config(&args).is_ok());
     }
 
     #[test]
-    fn test_validate_empty_args_and_env_is_valid() {
+    fn test_validate_http_url_is_valid() {
         let args = AddMcpToolArgs {
-            name: "simple".to_string(),
-            command: "my-server".to_string(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        assert!(validate_config(&args).is_ok());
-    }
-
-    #[test]
-    fn test_validate_multiple_env_vars() {
-        let mut env = HashMap::new();
-        env.insert("KEY1".to_string(), "val1".to_string());
-        env.insert("KEY2".to_string(), "val2".to_string());
-        env.insert("KEY3".to_string(), "val3".to_string());
-        let args = AddMcpToolArgs {
-            name: "multi-env".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env,
+            name: "local-server".to_string(),
+            url: "http://localhost:8080/mcp".to_string(),
+            api_key: None,
         };
         assert!(validate_config(&args).is_ok());
     }
@@ -476,9 +398,46 @@ mod tests {
         let saved = repo.get_last_saved().unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, "new-server");
-        assert_eq!(saved[0].command, "npx");
-        assert_eq!(saved[0].args, vec!["-y", "@test/mcp-server"]);
+        assert_eq!(saved[0].url, "http://localhost:3000/mcp");
+        assert!(saved[0].api_key.is_none());
         assert!(!saved[0].enabled); // disabled by default — user enables via Settings
+    }
+
+    #[tokio::test]
+    async fn test_call_add_with_api_key() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo.clone());
+
+        let args = AddMcpToolArgs {
+            name: "remote-server".to_string(),
+            url: "https://mcp.example.com/tools".to_string(),
+            api_key: Some("sk-secret-bearer-token".to_string()),
+        };
+
+        let result = tool.call(args).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let saved = repo.get_last_saved().unwrap();
+        assert_eq!(saved[0].api_key.as_deref(), Some("sk-secret-bearer-token"));
+    }
+
+    #[tokio::test]
+    async fn test_call_empty_api_key_stored_as_none() {
+        let repo = Arc::new(MockMcpRepository::new());
+        let tool = AddMcpTool::new(repo.clone());
+
+        let args = AddMcpToolArgs {
+            name: "local-server".to_string(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: Some("".to_string()), // empty → stored as None
+        };
+
+        let result = tool.call(args).await;
+        assert!(result.is_ok());
+
+        let saved = repo.get_last_saved().unwrap();
+        assert!(saved[0].api_key.is_none());
     }
 
     #[tokio::test]
@@ -526,9 +485,8 @@ mod tests {
 
         let args = AddMcpToolArgs {
             name: "".to_string(),
-            command: "npx".to_string(),
-            args: vec![],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
         };
 
         let result = tool.call(args).await;
@@ -566,33 +524,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_call_preserves_env_vars() {
-        let repo = Arc::new(MockMcpRepository::new());
-        let tool = AddMcpTool::new(repo.clone());
-
-        let mut env = HashMap::new();
-        env.insert("API_KEY".to_string(), "secret-123".to_string());
-        env.insert("REGION".to_string(), "us-east-1".to_string());
-
-        let args = AddMcpToolArgs {
-            name: "env-server".to_string(),
-            command: "uvx".to_string(),
-            args: vec!["my-package".to_string()],
-            env,
-        };
-
-        let result = tool.call(args).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().success);
-
-        let saved = repo.get_last_saved().unwrap();
-        assert_eq!(saved[0].env.get("API_KEY").unwrap(), "secret-123");
-        assert_eq!(saved[0].env.get("REGION").unwrap(), "us-east-1");
-        assert_eq!(saved[0].command, "uvx");
-        assert_eq!(saved[0].args, vec!["my-package"]);
-    }
-
-    #[tokio::test]
     async fn test_call_new_server_is_disabled_by_default() {
         let repo = Arc::new(MockMcpRepository::new());
         let tool = AddMcpTool::new(repo.clone());
@@ -624,10 +555,7 @@ mod tests {
         let required = def.parameters["required"].as_array().unwrap();
         let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_names.contains(&"name"));
-        assert!(required_names.contains(&"command"));
-        // OpenAI requires all properties to be in the required array
-        assert!(required_names.contains(&"args"));
-        assert!(required_names.contains(&"env"));
+        assert!(required_names.contains(&"url"));
     }
 
     #[tokio::test]
@@ -638,47 +566,37 @@ mod tests {
         let def = tool.definition("test".to_string()).await;
         let props = def.parameters["properties"].as_object().unwrap();
         assert!(props.contains_key("name"));
-        assert!(props.contains_key("command"));
-        assert!(props.contains_key("args"));
-        assert!(props.contains_key("env"));
+        assert!(props.contains_key("url"));
     }
 
     // --- Serde deserialization tests ---
 
     #[test]
     fn test_args_deserialize_minimal() {
-        let json = r#"{"name": "test", "command": "npx"}"#;
+        let json = r#"{"name": "test", "url": "http://localhost:3000/mcp"}"#;
         let args: AddMcpToolArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.name, "test");
-        assert_eq!(args.command, "npx");
-        assert!(args.args.is_empty());
-        assert!(args.env.is_empty());
+        assert_eq!(args.url, "http://localhost:3000/mcp");
+        assert!(args.api_key.is_none());
     }
 
     #[test]
-    fn test_args_deserialize_full() {
-        let json = r#"{
-            "name": "tavily",
-            "command": "npx",
-            "args": ["-y", "@tavily/mcp-server"],
-            "env": {"TAVILY_API_KEY": "tvly-xxx"}
-        }"#;
+    fn test_args_deserialize_with_api_key() {
+        let json =
+            r#"{"name": "test", "url": "https://example.com/mcp", "api_key": "bearer-token-123"}"#;
         let args: AddMcpToolArgs = serde_json::from_str(json).unwrap();
-        assert_eq!(args.name, "tavily");
-        assert_eq!(args.command, "npx");
-        assert_eq!(args.args, vec!["-y", "@tavily/mcp-server"]);
-        assert_eq!(args.env.get("TAVILY_API_KEY").unwrap(), "tvly-xxx");
+        assert_eq!(args.api_key.unwrap(), "bearer-token-123");
     }
 
     #[test]
     fn test_args_deserialize_missing_name_fails() {
-        let json = r#"{"command": "npx"}"#;
+        let json = r#"{"url": "http://localhost:3000/mcp"}"#;
         let result: Result<AddMcpToolArgs, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_args_deserialize_missing_command_fails() {
+    fn test_args_deserialize_missing_url_fails() {
         let json = r#"{"name": "test"}"#;
         let result: Result<AddMcpToolArgs, _> = serde_json::from_str(json);
         assert!(result.is_err());

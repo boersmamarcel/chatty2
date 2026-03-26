@@ -226,15 +226,11 @@ fn register_actions(cx: &mut App) {
             });
         }
 
-        // Shutdown all MCP servers.
-        // kill_all_sync() sends SIGTERM synchronously to all child processes before
-        // the process exits, preventing orphaned MCP server processes. The async
-        // stop_all() provides a best-effort graceful shutdown attempt.
+        // Disconnect from all MCP servers on quit.
         let mcp_service = cx.global::<chatty::services::McpService>().clone();
-        mcp_service.kill_all_sync();
         cx.spawn(|_cx: &mut AsyncApp| async move {
-            if let Err(e) = mcp_service.stop_all().await {
-                error!(error = ?e, "Failed to stop MCP servers during shutdown");
+            if let Err(e) = mcp_service.disconnect_all().await {
+                error!(error = ?e, "Failed to disconnect MCP servers during shutdown");
             }
         })
         .detach();
@@ -960,12 +956,34 @@ fn main() {
                         });
                         info!("MCP server configurations loaded");
 
-                        // Start all enabled MCP servers
+                        // Connect to all enabled MCP servers and track auth status
                         let mcp_service = cx.global::<chatty::services::McpService>().clone();
-                        cx.spawn(|_cx: &mut AsyncApp| async move {
-                            if let Err(e) = mcp_service.start_all(servers_clone).await {
-                                error!(error = ?e, "Failed to start MCP servers");
-                            }
+                        cx.spawn(async move |cx: &mut AsyncApp| {
+                            let results =
+                                mcp_service.connect_all_with_status(servers_clone).await;
+
+                            cx.update(|cx| {
+                                use settings::models::mcp_store::McpAuthStatus;
+                                let model = cx.global_mut::<settings::models::McpServersModel>();
+                                for (name, ok, err_msg) in results {
+                                    let status = if ok {
+                                        McpAuthStatus::Authenticated
+                                    } else if let Some(ref msg) = err_msg {
+                                        if msg.contains("Auth required")
+                                            || msg.contains("AuthRequired")
+                                        {
+                                            McpAuthStatus::NeedsAuth
+                                        } else {
+                                            McpAuthStatus::Failed(msg.clone())
+                                        }
+                                    } else {
+                                        McpAuthStatus::Failed("Unknown error".to_string())
+                                    };
+                                    model.set_auth_status(name, status);
+                                }
+                                cx.refresh_windows();
+                            })
+                            .ok();
                         })
                         .detach();
                     })

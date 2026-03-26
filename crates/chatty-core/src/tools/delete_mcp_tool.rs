@@ -36,8 +36,6 @@ pub struct DeleteMcpTool {
     repository: Arc<dyn McpRepository>,
     /// Notifies the UI after a successful save. None in tests.
     update_sender: Option<tokio::sync::mpsc::Sender<Vec<McpServerConfig>>>,
-    /// Stops the server immediately after removing. None in tests.
-    mcp_service: Option<crate::services::McpService>,
 }
 
 impl DeleteMcpTool {
@@ -46,20 +44,18 @@ impl DeleteMcpTool {
         Self {
             repository,
             update_sender: None,
-            mcp_service: None,
         }
     }
 
-    /// Production constructor: inject real sender and service.
+    /// Production constructor: inject real sender.
     pub fn new_with_services(
         repository: Arc<dyn McpRepository>,
         update_sender: tokio::sync::mpsc::Sender<Vec<McpServerConfig>>,
-        mcp_service: crate::services::McpService,
+        _mcp_service: crate::services::McpService,
     ) -> Self {
         Self {
             repository,
             update_sender: Some(update_sender),
-            mcp_service: Some(mcp_service),
         }
     }
 }
@@ -74,17 +70,18 @@ impl Tool for DeleteMcpTool {
         ToolDefinition {
             name: "delete_mcp_service".to_string(),
             description: "Delete an existing MCP (Model Context Protocol) server configuration. \
-                         This removes the server and stops it if currently running. \
+                         This removes the server from the list and disconnects it if currently \
+                         connected. The external server process itself is not affected — it is \
+                         the user's responsibility to manage the server process. \
                          \n\n\
-                         Use this when the user wants to remove an MCP service they no longer need. \
-                         The server will be stopped immediately if it is running."
+                         Use this when the user wants to remove an MCP service they no longer need."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The name of the MCP server to delete (e.g., 'tavily-search', 'github')"
+                        "description": "The name of the MCP server to delete (e.g., 'my-tools', 'github')"
                     }
                 },
                 "required": ["name"]
@@ -113,8 +110,6 @@ impl Tool for DeleteMcpTool {
             DeleteMcpToolError::RepositoryError(format!("Failed to load servers: {}", e))
         })?;
 
-        // Find the server to delete and capture whether it was enabled (i.e. running).
-        let was_enabled = servers.iter().find(|s| s.name == name).map(|s| s.enabled);
         let original_len = servers.len();
         servers.retain(|s| s.name != name);
 
@@ -132,7 +127,6 @@ impl Tool for DeleteMcpTool {
 
         tracing::info!(
             server_name = %name,
-            was_enabled = ?was_enabled,
             "Deleting MCP server configuration"
         );
 
@@ -144,7 +138,7 @@ impl Tool for DeleteMcpTool {
                 DeleteMcpToolError::RepositoryError(format!("Failed to save servers: {}", e))
             })?;
 
-        // Release lock before best-effort notification and server stop.
+        // Release lock before best-effort notification.
         drop(_guard);
 
         // Notify the UI to refresh
@@ -154,23 +148,9 @@ impl Tool for DeleteMcpTool {
             tracing::warn!(error = ?e, "Failed to send MCP update notification");
         }
 
-        // Only stop the server process if it was enabled (i.e. actually running).
-        if was_enabled == Some(true)
-            && let Some(ref svc) = self.mcp_service
-            && let Err(e) = svc.stop_server(&name).await
-        {
-            tracing::warn!(server = %name, error = ?e, "Failed to stop MCP server during deletion");
-        }
-
-        let message = if was_enabled == Some(true) {
-            format!("MCP server '{}' has been deleted and stopped.", server_name)
-        } else {
-            format!("MCP server '{}' has been deleted.", server_name)
-        };
-
         Ok(DeleteMcpToolOutput {
             success: true,
-            message,
+            message: format!("MCP server '{}' has been deleted.", server_name),
             server_name,
         })
     }
@@ -180,14 +160,12 @@ impl Tool for DeleteMcpTool {
 mod tests {
     use super::*;
     use crate::tools::test_helpers::MockMcpRepository;
-    use std::collections::HashMap;
 
     fn test_server(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
-            command: "echo".to_string(),
-            args: vec!["test".to_string()],
-            env: HashMap::new(),
+            url: "http://localhost:3000/mcp".to_string(),
+            api_key: None,
             enabled: true,
         }
     }
