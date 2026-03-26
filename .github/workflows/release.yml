@@ -136,9 +136,34 @@ jobs:
           # Use squashfs-tools to inspect the AppImage's embedded squashfs directly,
           # without executing the AppImage (which may fail in CI due to FUSE restrictions).
           sudo apt-get install -y squashfs-tools > /dev/null 2>&1
-          # AppImage Type 2: squashfs is page-aligned (4096 bytes) after the ELF runtime.
-          # Search only at page-aligned offsets to avoid false matches inside the ELF binary.
-          OFFSET=$(python3 -c "data=open('$APPIMAGE','rb').read();print(next((off for off in range(0,len(data)-4,4096) if data[off:off+4] in (b'hsqs',b'sqsh')),-1))")
+          # Search all squashfs magic candidates and validate each offset by
+          # probing with unsquashfs. This avoids false positives from bytes in
+          # the ELF runtime while still supporting AppImages that are not
+          # strictly page-aligned.
+          OFFSETS=$(python3 - "$APPIMAGE" <<'PY'
+          import pathlib
+          import sys
+          
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          candidates = set()
+          for magic in (b"hsqs", b"sqsh"):
+              start = 0
+              while True:
+                  idx = data.find(magic, start)
+                  if idx < 0:
+                      break
+                  candidates.add(idx)
+                  start = idx + 1
+          print("\n".join(str(offset) for offset in sorted(candidates)))
+          PY
+          )
+          OFFSET=-1
+          for candidate in $OFFSETS; do
+            if unsquashfs -ll -o "$candidate" "$APPIMAGE" >/dev/null 2>&1; then
+              OFFSET="$candidate"
+              break
+            fi
+          done
           if [ "$OFFSET" -lt 0 ]; then
             echo "::error::Could not locate squashfs section inside AppImage — the file may be corrupted or not a valid AppImage"
             exit 1
