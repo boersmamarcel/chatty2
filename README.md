@@ -259,77 +259,46 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 
 **To add an MCP server:**
 
-1. Go to **Settings > MCP Servers**
-2. Click **Add Server**
-3. Enter the server command, args, and any environment variables
-4. Enable the server when you're ready to use it
+1. Start your MCP server process separately (Chatty connects to it; it does not launch it)
+2. Go to **Settings > MCP Servers**
+3. Click **Add Server**
+4. Enter the server **URL** and an optional **API key** (sent as `Authorization: Bearer <key>`)
+5. Enable the server when you're ready to use it
 
-The agent can also manage its own MCP servers at runtime — add, edit, list, and delete servers via tool calls — with env var masking so your API keys are never exposed.
+The agent can also manage its own MCP servers at runtime — add, edit, list, and delete servers via tool calls — with API key masking so your secrets are never exposed to the agent.
 
 <details>
 <summary><strong>Recommended MCP Servers</strong></summary>
 
-Here are MCP servers that pair well with Chatty agents:
+Here are MCP servers that pair well with Chatty agents. Since Chatty connects to already-running servers, start each server first and then add its URL in Settings > MCP Servers.
 
 #### GitHub (`@modelcontextprotocol/server-github`)
 Search code, browse issues and PRs, read file contents from repos.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "ghp_..." } }
-```
+Start: `npx -y @modelcontextprotocol/server-github` (set `GITHUB_TOKEN` in your environment), then add its URL and your token as the API key.
 
 #### Filesystem (`@modelcontextprotocol/server-filesystem`)
 Advanced filesystem operations beyond Chatty's built-in tools.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"] }
-```
+Start: `npx -y @modelcontextprotocol/server-filesystem /path/to/dir`, then add its URL.
 
 #### PostgreSQL (`@modelcontextprotocol/server-postgres`)
 Run read-only SQL queries against your PostgreSQL databases.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres"], "env": { "POSTGRES_CONNECTION_STRING": "postgresql://user:pass@localhost/db" } }
-```
+Start: `npx -y @modelcontextprotocol/server-postgres` (set `POSTGRES_CONNECTION_STRING` in your environment), then add its URL.
 
 #### Brave Search (`@modelcontextprotocol/server-brave-search`)
 Give your agent access to web search for current events and documentation.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "..." } }
-```
+Start: `npx -y @modelcontextprotocol/server-brave-search` (set `BRAVE_API_KEY`), then add its URL and your Brave API key.
 
 #### Memory (`@modelcontextprotocol/server-memory`)
 Persistent key-value memory across conversations.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"] }
-```
+Start: `npx -y @modelcontextprotocol/server-memory`, then add its URL.
 
 #### Puppeteer (`@modelcontextprotocol/server-puppeteer`)
 Browser automation — navigate pages, take screenshots, extract content.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-puppeteer"] }
-```
-
-#### Slack (`@modelcontextprotocol/server-slack`)
-Read and search Slack messages, channels, and threads.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-slack"], "env": { "SLACK_BOT_TOKEN": "xoxb-..." } }
-```
-
-#### Google Maps (`@modelcontextprotocol/server-google-maps`)
-Geocoding, directions, place search, and distance calculations.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-google-maps"], "env": { "GOOGLE_MAPS_API_KEY": "..." } }
-```
-
-#### SQLite (`@modelcontextprotocol/server-sqlite`)
-Query and explore SQLite databases.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-sqlite"], "env": { "SQLITE_DB_PATH": "/path/to/database.db" } }
-```
+Start: `npx -y @modelcontextprotocol/server-puppeteer`, then add its URL.
 
 #### Fetch (`@modelcontextprotocol/server-fetch`)
 Fetch and convert web pages to markdown for the agent to read.
-```json
-{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"] }
-```
+Start: `npx -y @modelcontextprotocol/server-fetch`, then add its URL.
 
 > **Tip:** You can write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
 
@@ -452,7 +421,7 @@ Every tool that has a side effect (file writes, shell commands, sub-agents) supp
 
 ### Secrets & Key Masking
 
-- **API key masking** — MCP env vars containing keys, tokens, or secrets are shown to the agent as `****` — the agent knows the variable name but never sees the value
+- **API key masking** — MCP server API keys are never exposed to the agent; the agent can see whether a key is set (`has_api_key: true`) but never the value itself
 - **User secrets** — environment variables added in Settings > Secrets are injected into shell sessions but their values are never revealed to the agent or logged in tool output
 - **No telemetry** — nothing is sent anywhere except directly to your configured LLM provider
 
