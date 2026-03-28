@@ -93,6 +93,7 @@ impl Conversation {
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
+        allow_sub_agent: bool,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -129,6 +130,7 @@ impl Conversation {
             memory_service,
             search_settings,
             embedding_service,
+            allow_sub_agent,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -173,6 +175,7 @@ impl Conversation {
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
+        allow_sub_agent: bool,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -207,6 +210,7 @@ impl Conversation {
             memory_service,
             search_settings,
             embedding_service,
+            allow_sub_agent,
         )
         .await
         .context("Failed to create agent from config")?;

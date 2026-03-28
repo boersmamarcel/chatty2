@@ -266,6 +266,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         memory_service,
         search_settings,
         embedding_service,
+        true, // interactive agent: sub-agent tool is allowed
     )
     .await?;
 
@@ -760,6 +761,7 @@ impl ChattyApp {
             memory_service,
             search_settings,
             embedding_service,
+            true, // interactive agent: sub-agent tool is allowed
         )
         .await
     }
@@ -1045,6 +1047,7 @@ impl ChattyApp {
                         memory_service,
                         search_settings,
                         embedding_service,
+                        true, // interactive agent: sub-agent tool is allowed
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1540,6 +1543,7 @@ impl ChattyApp {
                                 memory_service,
                                 search_settings,
                                 embedding_service,
+                                true, // interactive agent: sub-agent tool is allowed
                             )
                             .await?;
 
