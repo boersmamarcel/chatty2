@@ -932,6 +932,10 @@ impl ChatEngine {
     /// Launch a sub-agent by invoking chatty-tui in headless mode.
     /// This is intentionally non-blocking: completion is delivered via `AppEvent::SubAgentFinished`.
     pub fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
+        if self.is_sub_agent {
+            bail!("Sub-agents cannot spawn further sub-agents");
+        }
+
         let prompt = prompt.trim();
         if prompt.is_empty() {
             bail!("Usage: /agent <prompt>");
