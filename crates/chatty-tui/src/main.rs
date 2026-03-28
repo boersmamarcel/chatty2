@@ -347,6 +347,7 @@ async fn main() -> Result<()> {
         embedding_service,
         user_secrets,
         event_tx,
+        cli.headless, // headless mode means we are running as a sub-agent
     );
 
     // Route based on mode

@@ -178,6 +178,9 @@ pub struct ChatEngine {
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
+    /// When `true`, this engine is running as a sub-agent and must not expose
+    /// the sub_agent tool (preventing recursive sub-agent spawning).
+    pub is_sub_agent: bool,
 
     // Display state
     pub messages: Vec<DisplayMessage>,
@@ -216,6 +219,7 @@ impl ChatEngine {
         embedding_service: Option<chatty_core::services::EmbeddingService>,
         user_secrets: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
+        is_sub_agent: bool,
     ) -> Self {
         let skill_service = chatty_core::services::SkillService::new(embedding_service.clone());
         Self {
@@ -233,6 +237,7 @@ impl ChatEngine {
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
+            is_sub_agent,
             messages: Vec::new(),
             is_streaming: false,
             cancel_flag: None,
@@ -305,6 +310,7 @@ impl ChatEngine {
             self.memory_service.clone(),
             self.search_settings.clone(),
             self.embedding_service.clone(),
+            !self.is_sub_agent,
         )
         .await
         .context("Failed to create conversation")?;
@@ -337,6 +343,7 @@ impl ChatEngine {
         let search_settings = self.search_settings.clone();
         let embedding_service = self.embedding_service.clone();
         let event_tx = self.event_tx.clone();
+        let is_sub_agent = self.is_sub_agent;
 
         tokio::spawn(async move {
             // Gather MCP tools
@@ -384,6 +391,7 @@ impl ChatEngine {
                 memory_service,
                 search_settings,
                 embedding_service,
+                !is_sub_agent,
             )
             .await;
 

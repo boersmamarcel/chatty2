@@ -573,6 +573,7 @@ impl AgentClient {
         memory_service: Option<MemoryService>,
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
+        allow_sub_agent: bool,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -1145,10 +1146,10 @@ impl AgentClient {
             None
         };
 
-        // Sub-agent tool — gated on execution being enabled (the sub-agent needs
-        // to be able to run tools). Uses the same model as the parent conversation.
+        // Sub-agent tool — gated on execution being enabled and on the caller not
+        // being a sub-agent itself (sub-agents must not spawn further sub-agents).
         let sub_agent_tool: Option<SubAgentTool> =
-            if exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false) {
+            if allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false) {
                 let sub_model_id = model_config.id.clone();
                 let sub_auto_approve = exec_settings
                     .as_ref()
@@ -1162,7 +1163,11 @@ impl AgentClient {
                 tracing::debug!("Sub-agent tool enabled");
                 Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
             } else {
-                tracing::debug!("Sub-agent tool disabled: execution not enabled");
+                if !allow_sub_agent {
+                    tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
+                } else {
+                    tracing::debug!("Sub-agent tool disabled: execution not enabled");
+                }
                 None
             };
 
