@@ -35,6 +35,9 @@ impl WasmModule {
     /// Build a Wasmtime [`Engine`] pre-configured for the component model
     /// and fuel metering.
     ///
+    /// Memory limits are enforced at runtime via [`StoreLimitsBuilder`] in
+    /// `from_component`; only fuel and component model are set on the engine.
+    ///
     /// Callers may share one engine across multiple modules.
     pub fn build_engine(_limits: &ResourceLimits) -> Result<Engine> {
         let mut config = Config::new();

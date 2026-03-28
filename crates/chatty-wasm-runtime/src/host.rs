@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn module_state_initialises() {
+    fn module_state_initializes() {
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider {
             response: String::new(),
         });
