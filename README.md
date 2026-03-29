@@ -641,6 +641,7 @@ crates/
 ├── chatty-tui/               # Terminal frontend (Ratatui) + headless/pipe agent modes
 ├── chatty-wasm-runtime/      # Wasmtime-based runtime for executing WASM agent modules
 ├── chatty-module-registry/   # Module discovery, loading, and lifecycle (hot-reload)
+├── chatty-protocol-gateway/  # HTTP gateway exposing WASM modules via OpenAI, MCP, and A2A protocols
 └── chatty-module-sdk/        # SDK for building WASM agent modules (standalone, not in workspace)
 ```
 
