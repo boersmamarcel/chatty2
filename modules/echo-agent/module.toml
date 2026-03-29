@@ -1,0 +1,19 @@
+[module]
+name = "echo-agent"
+version = "0.1.0"
+description = "Reference echo agent demonstrating all chatty SDK features"
+wasm = "echo_agent.wasm"
+
+[capabilities]
+tools = ["echo", "reverse", "count_words"]
+chat = true
+agent = true
+
+[protocols]
+openai_compat = true
+mcp = true
+a2a = true
+
+[resources]
+max_memory_mb = 32
+max_execution_ms = 5000

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tracing::{debug, error, info, trace, warn};
+use wasmtime_wasi::{IoView, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::bindings::chatty::module::types::{CompletionResponse, Message};
 use crate::limits::ResourceLimits;
@@ -82,6 +83,11 @@ pub(crate) struct ModuleState {
     pub(crate) manifest: ModuleManifest,
     /// Callback for LLM completions.
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
+    /// WASI Preview 2 context — provides the WASI host implementations
+    /// required by modules compiled for `wasm32-wasip2`.
+    pub(crate) wasi_ctx: WasiCtx,
+    /// WASI resource table for tracking guest resources.
+    pub(crate) table: ResourceTable,
 }
 
 impl ModuleState {
@@ -94,13 +100,45 @@ impl ModuleState {
             .memory_size(resource_limits.max_memory_bytes as usize)
             .build();
 
+        // Minimal WASI context — no filesystem, no network, no env vars.
+        // Modules compiled for wasm32-wasip2 import these interfaces from
+        // the host; we satisfy them with a sandboxed no-op implementation.
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let table = ResourceTable::new();
+
         Self {
             limits,
             manifest,
             llm_provider,
+            wasi_ctx,
+            table,
         }
     }
 }
+
+// Implement IoView (required by WasiView) so WASI can access the resource table.
+impl IoView for ModuleState {
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
+}
+
+// Implement WasiView so the WASI linker can access the context and table.
+impl WasiView for ModuleState {
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi_ctx
+    }
+}
+
+// `WasiCtx` is `!Sync` due to internal `UnsafeCell` usage, but `ModuleState`
+// is ONLY ever accessed through `&mut Store<ModuleState>` (exclusive access)
+// inside a `WasmModule` that is guarded by the `RwLock<ModuleRegistry>` write
+// lock.  No shared `&ModuleState` reference can reach another thread; the
+// `Sync` bound is required purely so `Arc<RwLock<ModuleRegistry>>` satisfies
+// axum's `Send + Sync` state constraint.
+//
+// Safety: see above — no concurrent shared-reference access ever occurs.
+unsafe impl Sync for ModuleState {}
 
 // ---------------------------------------------------------------------------
 // Host import implementations

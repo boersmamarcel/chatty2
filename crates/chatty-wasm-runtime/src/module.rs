@@ -94,6 +94,12 @@ impl WasmModule {
         limits: ResourceLimits,
     ) -> Result<Self> {
         let mut linker: Linker<ModuleState> = Linker::new(engine);
+
+        // Add WASI Preview 2 host implementations first — modules compiled
+        // for wasm32-wasip2 import WASI interfaces (e.g. wasi:io/poll) from
+        // the host even when they don't actively use them.
+        wasmtime_wasi::add_to_linker_sync(&mut linker).context("failed to add WASI to linker")?;
+
         Module::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 

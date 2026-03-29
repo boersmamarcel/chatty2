@@ -6,6 +6,7 @@ description = "Wasmtime embedding and host-side WIT interface for chatty WASM mo
 
 [dependencies]
 wasmtime = { version = "30", features = ["component-model"] }
+wasmtime-wasi = "30"
 anyhow.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
