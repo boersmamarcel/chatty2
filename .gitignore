@@ -6,6 +6,9 @@ crates/chatty-module-sdk/Cargo.lock
 *.db
 **/libs/
 
+# WASM module build outputs (built by CI)
+modules/**/*.wasm
+
 # AppImage build artifacts
 /squashfs-root
 appimagetool-*.AppImage

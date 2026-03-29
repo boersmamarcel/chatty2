@@ -1,0 +1,15 @@
+[package]
+name = "echo-agent"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chatty-module-sdk = { path = "../../crates/chatty-module-sdk" }
+serde_json = "1"
+
+# Standalone crate — intentionally NOT part of the main chatty workspace.
+# Compiles to wasm32-wasip2; see .cargo/config.toml for the default target.
+[workspace]

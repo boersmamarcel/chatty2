@@ -1,0 +1,19 @@
+[module]
+name = "{{project-name}}"
+version = "0.1.0"
+description = "{{description}}"
+wasm = "{{project-name | snake_case}}.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true
+
+[protocols]
+openai_compat = true
+mcp = true
+a2a = true
+
+[resources]
+max_memory_mb = 32
+max_execution_ms = 5000
