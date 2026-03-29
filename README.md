@@ -647,6 +647,17 @@ crates/
 
 ### Building WASM Modules
 
+The repository includes a reference implementation at [`modules/echo-agent/`](modules/echo-agent/) — a minimal module covering every SDK feature in ~130 lines. Use it as a starting point or study it alongside the instructions below.
+
+To scaffold a new module from the included template:
+
+```sh
+cargo generate --path templates/module --name my-agent
+cd my-agent
+cargo build --target wasm32-wasip2 --release
+cp target/wasm32-wasip2/release/my_agent.wasm .
+```
+
 Once built, place your module in the `.chatty/modules/` directory so Chatty can discover and load it:
 
 ```
