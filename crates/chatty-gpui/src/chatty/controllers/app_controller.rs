@@ -2695,18 +2695,38 @@ impl ChattyApp {
     /// Returns `true` when the message was handled as an arg-based slash command
     /// (so the caller should NOT forward it to the LLM).
     fn try_handle_arg_slash_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-        if let Some(prompt) = text.strip_prefix("/agent ") {
-            let prompt = prompt.trim().to_string();
-            if prompt.is_empty() {
+        if let Some(rest) = text.strip_prefix("/agent ") {
+            let rest = rest.trim().to_string();
+            if rest.is_empty() {
                 self.chat_view.update(cx, |view, cx| {
                     view.add_info_message(
-                        "Usage: `/agent <prompt>` — provide a prompt for the sub-agent."
+                        "Usage: `/agent <prompt>` or `/agent <name> <prompt>` — \
+                         dispatch to a local sub-agent or a registered A2A agent."
                             .to_string(),
                         cx,
                     );
                 });
             } else {
-                self.launch_agent(prompt, cx);
+                // Check if the first word matches a registered A2A agent name.
+                let (agent_name, prompt_for_agent) = {
+                    let mut words = rest.splitn(2, char::is_whitespace);
+                    let first = words.next().unwrap_or("").to_string();
+                    let tail = words.next().unwrap_or("").trim().to_string();
+                    (first, tail)
+                };
+
+                let is_a2a_agent = !prompt_for_agent.is_empty()
+                    && cx
+                        .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                        .and_then(|m| m.find_enabled(&agent_name).map(|_| true))
+                        .unwrap_or(false);
+
+                if is_a2a_agent {
+                    self.launch_a2a_agent(agent_name, prompt_for_agent, cx);
+                } else {
+                    // Fall back to local sub-agent with the entire rest as the prompt.
+                    self.launch_agent(rest, cx);
+                }
             }
             return true;
         }
@@ -2727,6 +2747,97 @@ impl ChattyApp {
             return true;
         }
         false
+    }
+
+    /// Dispatch a task to a remote A2A agent and display the result.
+    fn launch_a2a_agent(
+        &mut self,
+        agent_name: String,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        info!(agent = %agent_name, prompt = %prompt, "Dispatching task to remote A2A agent");
+
+        // Capture the config snapshot now (before the async spawn).
+        let config = cx
+            .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+            .and_then(|m| m.find_enabled(&agent_name).cloned());
+
+        let Some(config) = config else {
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(
+                    format!("A2A agent \u{2018}{agent_name}\u{2019} not found or not enabled."),
+                    cx,
+                );
+            });
+            return;
+        };
+
+        // Capture conversation ID so we can inject the result even if the user
+        // navigates away while the remote call is in flight.
+        let launch_conv_id = cx
+            .try_global::<ConversationsStore>()
+            .and_then(|store| store.active_id().cloned());
+
+        // Show immediate progress feedback.
+        let prompt_for_display = prompt.clone();
+        self.chat_view.update(cx, |view, cx| {
+            view.start_sub_agent_progress(
+                &format!("[A2A: {agent_name}] {prompt_for_display}"),
+                cx,
+            );
+        });
+
+        let chat_view = self.chat_view.clone();
+        let prompt_label = prompt.clone();
+
+        cx.spawn(async move |weak, cx| {
+            let client = chatty_core::services::A2aClient::new();
+            let result = client.send_message(&config, &prompt).await;
+
+            let success = result.is_ok();
+            let result_text = match result {
+                Ok(text) if text.is_empty() => None,
+                Ok(text) => Some(text),
+                Err(e) => Some(format!("\u{26a0}\u{fe0f} A2A error: {e:#}")),
+            };
+
+            // Inject into conversation history.
+            if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
+                let user_entry = rig::completion::Message::User {
+                    content: rig::OneOrMany::one(rig::message::UserContent::text(format!(
+                        "[A2A task \u{2192} {agent_name}: {prompt_label}]"
+                    ))),
+                };
+                let result_entry = format!("[A2A result from {agent_name}]\n\n{txt}");
+                cx.update(|cx| {
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(conv_id) {
+                            conv.add_user_message_with_attachments(user_entry, vec![]);
+                            conv.finalize_response(result_entry, vec![], None);
+                        }
+                    });
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to inject A2A result into conversation"))
+                .ok();
+
+                if let Some(app) = weak.upgrade() {
+                    let conv_id_for_persist = conv_id.clone();
+                    app.update(cx, |app, cx| {
+                        app.persist_conversation(&conv_id_for_persist, cx);
+                    })
+                    .ok();
+                }
+            }
+
+            // Finalize the progress trace.
+            chat_view
+                .update(cx, |view, cx| {
+                    view.finalize_sub_agent_progress(success, result_text, cx)
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// `/agent <prompt>` — launch chatty-tui in headless mode with the given prompt.

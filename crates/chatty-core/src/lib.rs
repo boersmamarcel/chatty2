@@ -43,6 +43,7 @@ static GENERAL_SETTINGS_REPOSITORY: OnceLock<
 static MODELS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ModelsRepository>> =
     OnceLock::new();
 static MCP_REPOSITORY: OnceLock<Arc<dyn settings::repositories::McpRepository>> = OnceLock::new();
+static A2A_REPOSITORY: OnceLock<Arc<dyn settings::repositories::A2aRepository>> = OnceLock::new();
 static EXECUTION_SETTINGS_REPOSITORY: OnceLock<
     Arc<dyn settings::repositories::ExecutionSettingsRepository>,
 > = OnceLock::new();
@@ -75,6 +76,9 @@ pub fn init_repositories() -> anyhow::Result<()> {
         .set(Arc::new(JsonModelsRepository::new()?))
         .ok();
     MCP_REPOSITORY.set(Arc::new(JsonMcpRepository::new()?)).ok();
+    A2A_REPOSITORY
+        .set(Arc::new(A2aJsonRepository::new()?))
+        .ok();
     EXECUTION_SETTINGS_REPOSITORY
         .set(Arc::new(ExecutionSettingsJsonRepository::new()?))
         .ok();
@@ -122,6 +126,14 @@ pub fn models_repository() -> Arc<dyn settings::repositories::ModelsRepository> 
 /// Returns a cloned Arc to the MCP repository.
 pub fn mcp_repository() -> Arc<dyn settings::repositories::McpRepository> {
     MCP_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the A2A agents repository.
+pub fn a2a_repository() -> Arc<dyn settings::repositories::A2aRepository> {
+    A2A_REPOSITORY
         .get()
         .expect("init_repositories() not called")
         .clone()
