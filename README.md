@@ -632,17 +632,28 @@ Built with:
 
 ### Workspace Structure
 
-Chatty is organized as a Cargo workspace with three crates:
+Chatty is organized as a Cargo workspace:
 
 ```
 crates/
-├── chatty-core/       # UI-agnostic: models, services, tools, settings, persistence
-├── chatty-gpui/       # GPUI desktop frontend
-├── chatty-tui/        # Terminal frontend (Ratatui) + headless/pipe agent modes
-└── chatty-module-sdk/ # SDK for building WASM agent modules (standalone, not in workspace)
+├── chatty-core/              # UI-agnostic: models, services, tools, settings, persistence
+├── chatty-gpui/              # GPUI desktop frontend
+├── chatty-tui/               # Terminal frontend (Ratatui) + headless/pipe agent modes
+├── chatty-wasm-runtime/      # Wasmtime-based runtime for executing WASM agent modules
+├── chatty-module-registry/   # Module discovery, loading, and lifecycle (hot-reload)
+└── chatty-module-sdk/        # SDK for building WASM agent modules (standalone, not in workspace)
 ```
 
 ### Building WASM Modules
+
+Once built, place your module in the `.chatty/modules/` directory so Chatty can discover and load it:
+
+```
+.chatty/modules/
+└── my-agent/
+    ├── module.toml   # manifest (name, version, capabilities)
+    └── my_agent.wasm
+```
 
 `chatty-module-sdk` is a standalone crate (not part of the main workspace) that lets you build custom agent modules compiled to `wasm32-wasip2`. It provides the `ModuleExports` trait, `export_module!` macro, and typed host import wrappers for LLM completion, config lookup, and structured logging.
 
