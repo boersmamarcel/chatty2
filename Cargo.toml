@@ -5,6 +5,7 @@ members = [
     "crates/chatty-tui",
     "crates/chatty-wasm-runtime",
     "crates/chatty-module-registry",
+    "crates/chatty-protocol-gateway",
 ]
 resolver = "2"
 
