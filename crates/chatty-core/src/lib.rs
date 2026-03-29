@@ -54,6 +54,9 @@ static TRAINING_SETTINGS_REPOSITORY: OnceLock<
 > = OnceLock::new();
 static USER_SECRETS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::UserSecretsRepository>> =
     OnceLock::new();
+static MODULE_SETTINGS_REPOSITORY: OnceLock<
+    Arc<dyn settings::repositories::ModuleSettingsRepository>,
+> = OnceLock::new();
 
 /// Initialize all repository singletons. Must be called once at startup before
 /// any repository is accessed. Returns an error if the config directory cannot
@@ -83,6 +86,9 @@ pub fn init_repositories() -> anyhow::Result<()> {
         .ok();
     USER_SECRETS_REPOSITORY
         .set(Arc::new(UserSecretsJsonRepository::new()?))
+        .ok();
+    MODULE_SETTINGS_REPOSITORY
+        .set(Arc::new(ModuleSettingsJsonRepository::new()?))
         .ok();
 
     Ok(())
@@ -150,6 +156,14 @@ pub fn training_settings_repository() -> Arc<dyn settings::repositories::Trainin
 /// Returns a cloned Arc to the user secrets repository.
 pub fn user_secrets_repository() -> Arc<dyn settings::repositories::UserSecretsRepository> {
     USER_SECRETS_REPOSITORY
+        .get()
+        .expect("init_repositories() not called")
+        .clone()
+}
+
+/// Returns a cloned Arc to the module settings repository.
+pub fn module_settings_repository() -> Arc<dyn settings::repositories::ModuleSettingsRepository> {
+    MODULE_SETTINGS_REPOSITORY
         .get()
         .expect("init_repositories() not called")
         .clone()

@@ -3,8 +3,8 @@ pub use chatty_core::settings::models::*;
 
 // Re-export submodules for path-based access
 pub use chatty_core::settings::models::{
-    execution_settings, general_model, mcp_store, models_store, providers_store, search_settings,
-    token_tracking_settings, training_settings, user_secrets_store,
+    execution_settings, general_model, mcp_store, models_store, module_settings, providers_store,
+    search_settings, token_tracking_settings, training_settings, user_secrets_store,
 };
 
 // Local gpui-specific modules
