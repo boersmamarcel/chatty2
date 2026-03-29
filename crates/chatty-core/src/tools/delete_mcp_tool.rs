@@ -167,6 +167,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: true,
+            is_module: false,
         }
     }
 

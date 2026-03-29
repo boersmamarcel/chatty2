@@ -866,6 +866,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: false,
+            is_module: false,
         }
     }
 
@@ -945,12 +946,14 @@ mod tests {
                 url: "http://127.0.0.1:1/mcp".to_string(),
                 api_key: None,
                 enabled: true,
+                is_module: false,
             },
             McpServerConfig {
                 name: "bad-2".to_string(),
                 url: "http://127.0.0.1:2/mcp".to_string(),
                 api_key: None,
                 enabled: true,
+                is_module: false,
             },
         ];
 

@@ -177,6 +177,7 @@ impl Tool for AddMcpTool {
             url: args.url,
             api_key: args.api_key.filter(|k| !k.is_empty()),
             enabled: false,
+            is_module: false,
         };
 
         tracing::info!(
@@ -233,6 +234,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: true,
+            is_module: false,
         }
     }
 

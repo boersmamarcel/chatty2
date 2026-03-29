@@ -1,6 +1,7 @@
 use crate::settings::models::module_settings::{
     ModuleSettingsModel, default_module_dir, normalize_module_dir,
 };
+use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 use anyhow::{Context, Result};
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
@@ -189,6 +190,7 @@ fn apply_gateway_result(
     result: Result<ProtocolGateway>,
     cx: &mut App,
 ) {
+    let gateway_ok;
     {
         let state = cx.global_mut::<DiscoveredModulesModel>();
         if state.refresh_generation != generation {
@@ -202,14 +204,112 @@ fn apply_gateway_result(
                     settings.gateway_port
                 );
                 state.gateway = Some(gateway);
+                gateway_ok = true;
             }
             Err(err) => {
                 state.gateway_status = format!("Gateway failed to start: {err}");
                 state.gateway = None;
+                gateway_ok = false;
             }
         }
     }
+
+    if gateway_ok {
+        sync_module_mcp_servers(settings.gateway_port, cx);
+    } else {
+        remove_module_mcp_servers(cx);
+    }
+
     cx.refresh_windows();
+}
+
+/// Add/update MCP server entries for discovered modules that declare `mcp = true`.
+/// Entries are created disabled so the user must manually enable them.
+fn sync_module_mcp_servers(gateway_port: u16, cx: &mut App) {
+    let mcp_modules: Vec<String> = {
+        let discovered = cx.global::<DiscoveredModulesModel>();
+        discovered
+            .modules
+            .iter()
+            .filter(|m| m.mcp && matches!(m.status, ModuleLoadStatus::Loaded))
+            .map(|m| m.name.clone())
+            .collect()
+    };
+
+    if mcp_modules.is_empty() {
+        return;
+    }
+
+    let mut changed = false;
+    {
+        let model = cx.global_mut::<McpServersModel>();
+        for module_name in &mcp_modules {
+            let url = format!("http://127.0.0.1:{}/mcp/{}", gateway_port, module_name);
+
+            if let Some(existing) = model
+                .servers_mut()
+                .iter_mut()
+                .find(|s| s.name == *module_name && s.is_module)
+            {
+                // Update URL if gateway port changed
+                if existing.url != url {
+                    info!(module = %module_name, url = %url, "Updated module MCP server URL");
+                    existing.url = url;
+                    changed = true;
+                }
+            } else if !model.servers().iter().any(|s| s.name == *module_name) {
+                // Only create if no server (manual or module) already has this name
+                info!(module = %module_name, "Auto-registered module as MCP server (disabled)");
+                model.servers_mut().push(McpServerConfig {
+                    name: module_name.clone(),
+                    url,
+                    api_key: None,
+                    enabled: false,
+                    is_module: true,
+                });
+                changed = true;
+            }
+        }
+
+        // Remove module entries for modules that are no longer discovered
+        let before = model.servers().len();
+        model
+            .servers_mut()
+            .retain(|s| !s.is_module || mcp_modules.contains(&s.name));
+        if model.servers().len() != before {
+            changed = true;
+        }
+    }
+
+    if changed {
+        let servers = cx.global::<McpServersModel>().servers().to_vec();
+        save_mcp_servers_async(servers, cx);
+    }
+}
+
+/// Remove all module-sourced MCP server entries (e.g. when gateway stops).
+fn remove_module_mcp_servers(cx: &mut App) {
+    let changed = {
+        let model = cx.global_mut::<McpServersModel>();
+        let before = model.servers().len();
+        model.servers_mut().retain(|s| !s.is_module);
+        model.servers().len() != before
+    };
+
+    if changed {
+        let servers = cx.global::<McpServersModel>().servers().to_vec();
+        save_mcp_servers_async(servers, cx);
+    }
+}
+
+fn save_mcp_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::mcp_repository();
+        if let Err(e) = repo.save_all(servers).await {
+            error!(error = ?e, "Failed to save MCP servers after module sync");
+        }
+    })
+    .detach();
 }
 
 pub fn refresh_runtime(cx: &mut App) {
