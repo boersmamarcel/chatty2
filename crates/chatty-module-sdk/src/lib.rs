@@ -195,38 +195,36 @@ macro_rules! export_module {
         // Private wrapper that implements the generated Guest trait.
         struct __ChattyGuest;
 
+        // Single shared instance of the user's module — lazily initialised
+        // via Default::default() on the first guest export call.
+        static __CHATTY_MODULE_INSTANCE: ::std::sync::OnceLock<$t> =
+            ::std::sync::OnceLock::new();
+
+        fn __chatty_get_instance() -> &'static $t {
+            __CHATTY_MODULE_INSTANCE
+                .get_or_init(|| <$t as ::core::default::Default>::default())
+        }
+
         impl $crate::exports::chatty::module::agent::Guest for __ChattyGuest {
             fn chat(
                 req: $crate::ChatRequest,
             ) -> ::core::result::Result<$crate::ChatResponse, ::std::string::String> {
-                static INSTANCE: ::std::sync::OnceLock<$t> = ::std::sync::OnceLock::new();
-                let inst =
-                    INSTANCE.get_or_init(|| <$t as ::core::default::Default>::default());
-                <$t as $crate::ModuleExports>::chat(inst, req)
+                <$t as $crate::ModuleExports>::chat(__chatty_get_instance(), req)
             }
 
             fn invoke_tool(
                 name: ::std::string::String,
                 args: ::std::string::String,
             ) -> ::core::result::Result<::std::string::String, ::std::string::String> {
-                static INSTANCE: ::std::sync::OnceLock<$t> = ::std::sync::OnceLock::new();
-                let inst =
-                    INSTANCE.get_or_init(|| <$t as ::core::default::Default>::default());
-                <$t as $crate::ModuleExports>::invoke_tool(inst, name, args)
+                <$t as $crate::ModuleExports>::invoke_tool(__chatty_get_instance(), name, args)
             }
 
             fn list_tools() -> ::std::vec::Vec<$crate::ToolDefinition> {
-                static INSTANCE: ::std::sync::OnceLock<$t> = ::std::sync::OnceLock::new();
-                let inst =
-                    INSTANCE.get_or_init(|| <$t as ::core::default::Default>::default());
-                <$t as $crate::ModuleExports>::list_tools(inst)
+                <$t as $crate::ModuleExports>::list_tools(__chatty_get_instance())
             }
 
             fn get_agent_card() -> $crate::AgentCard {
-                static INSTANCE: ::std::sync::OnceLock<$t> = ::std::sync::OnceLock::new();
-                let inst =
-                    INSTANCE.get_or_init(|| <$t as ::core::default::Default>::default());
-                <$t as $crate::ModuleExports>::get_agent_card(inst)
+                <$t as $crate::ModuleExports>::get_agent_card(__chatty_get_instance())
             }
         }
 
