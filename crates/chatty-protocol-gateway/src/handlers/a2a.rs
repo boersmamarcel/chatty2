@@ -1,0 +1,277 @@
+//! A2A (Agent-to-Agent) protocol handlers.
+//!
+//! Routes:
+//! - `GET  /a2a/{module}/.well-known/agent.json` — per-module agent card
+//! - `POST /a2a/{module}` — A2A JSON-RPC (`message/send`, `tasks/get`)
+//! - `GET  /.well-known/agent.json` — aggregated gateway agent card
+
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use chatty_wasm_runtime::AgentCard;
+use serde_json::{Value, json};
+use tokio::sync::RwLock;
+
+use chatty_module_registry::ModuleRegistry;
+
+use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+
+// ---------------------------------------------------------------------------
+// Handler: GET /a2a/{module}/.well-known/agent.json
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn module_agent_card(
+    Path(module_name): Path<String>,
+    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+) -> impl IntoResponse {
+    let mut reg = registry.write().await;
+    let module = match reg.get_mut(&module_name) {
+        Some(m) => m,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("module '{}' not found", module_name) })),
+            )
+                .into_response();
+        }
+    };
+
+    match module.agent_card() {
+        Ok(card) => (StatusCode::OK, Json(agent_card_to_json(&card))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler: GET /.well-known/agent.json  (aggregated)
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn aggregated_agent_card(
+    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+) -> impl IntoResponse {
+    let names: Vec<String> = {
+        let reg = registry.read().await;
+        reg.module_names().map(str::to_string).collect()
+    };
+
+    let mut agents: Vec<Value> = Vec::new();
+
+    for name in &names {
+        let mut reg = registry.write().await;
+        if let Some(module) = reg.get_mut(name)
+            && let Ok(card) = module.agent_card()
+        {
+            agents.push(agent_card_to_json(&card));
+        }
+    }
+
+    Json(json!({
+        "schema_version": "0.1",
+        "gateway": true,
+        "agents": agents,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Handler: POST /a2a/{module}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn a2a_jsonrpc(
+    Path(module_name): Path<String>,
+    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    Json(body): Json<JsonRpcRequest>,
+) -> impl IntoResponse {
+    if body.jsonrpc != "2.0" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::to_value(JsonRpcResponse::err(
+                    body.id,
+                    -32600,
+                    "Invalid Request: jsonrpc must be \"2.0\"",
+                ))
+                .unwrap_or_default(),
+            ),
+        )
+            .into_response();
+    }
+
+    match body.method.as_str() {
+        "message/send" => handle_message_send(&module_name, body.id, body.params, registry).await,
+        "tasks/get" => handle_tasks_get(&module_name, body.id, body.params).await,
+        method => (
+            StatusCode::OK,
+            Json(
+                serde_json::to_value(JsonRpcResponse::err(
+                    body.id,
+                    -32601,
+                    format!("Method not found: {}", method),
+                ))
+                .unwrap_or_default(),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// message/send: forward to module's chat export
+// ---------------------------------------------------------------------------
+
+async fn handle_message_send(
+    module_name: &str,
+    id: Option<Value>,
+    params: Option<Value>,
+    registry: Arc<RwLock<ModuleRegistry>>,
+) -> axum::response::Response {
+    use chatty_wasm_runtime::{ChatRequest, Message, Role};
+
+    let params = match params {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(JsonRpcResponse::err(
+                        id,
+                        -32602,
+                        "params are required for message/send",
+                    ))
+                    .unwrap_or_default(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    // Extract text from params: support both `message.parts[0].text` and plain `message.text`
+    let content = params
+        .pointer("/message/parts/0/text")
+        .or_else(|| params.pointer("/message/text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let req = ChatRequest {
+        messages: vec![Message {
+            role: Role::User,
+            content,
+        }],
+        conversation_id: String::new(),
+    };
+
+    let mut reg = registry.write().await;
+    let module = match reg.get_mut(module_name) {
+        Some(m) => m,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(JsonRpcResponse::err(
+                        id,
+                        -32602,
+                        format!("module '{}' not found", module_name),
+                    ))
+                    .unwrap_or_default(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    match module.chat(req).await {
+        Ok(resp) => {
+            let task_id = format!("task-{}", crate::gateway::new_id());
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(JsonRpcResponse::ok(
+                        id,
+                        json!({
+                            "id": task_id,
+                            "status": { "state": "completed" },
+                            "artifacts": [{
+                                "parts": [{ "type": "text", "text": resp.content }]
+                            }]
+                        }),
+                    ))
+                    .unwrap_or_default(),
+                ),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(JsonRpcResponse::err(id, -32603, e.to_string()))
+                    .unwrap_or_default(),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tasks/get: return a simple "not found" since we are stateless
+// ---------------------------------------------------------------------------
+
+async fn handle_tasks_get(
+    _module_name: &str,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> axum::response::Response {
+    let task_id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Stateless gateway — we don't persist tasks across requests.
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(JsonRpcResponse::err(
+                id,
+                -32602,
+                format!("task '{}' not found (stateless gateway)", task_id),
+            ))
+            .unwrap_or_default(),
+        ),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Helper: serialize an AgentCard to JSON
+// ---------------------------------------------------------------------------
+
+pub(crate) fn agent_card_to_json(card: &AgentCard) -> Value {
+    let skills: Vec<Value> = card
+        .skills
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "description": s.description,
+                "examples": s.examples,
+            })
+        })
+        .collect();
+
+    json!({
+        "name": card.name,
+        "displayName": card.display_name,
+        "description": card.description,
+        "version": card.version,
+        "skills": skills,
+    })
+}

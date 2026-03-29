@@ -1,0 +1,23 @@
+[package]
+name = "chatty-protocol-gateway"
+version.workspace = true
+edition.workspace = true
+description = "HTTP protocol gateway exposing WASM modules via OpenAI, MCP, and A2A protocols"
+
+[dependencies]
+chatty-module-registry = { path = "../chatty-module-registry" }
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
+
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio = { workspace = true, features = ["sync", "net"] }
+tokio-stream = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tower = "0.5"
+axum = { version = "0.8", features = ["macros"] }
