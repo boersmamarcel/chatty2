@@ -1,0 +1,17 @@
+[package]
+name = "chatty-wasm-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Wasmtime embedding and host-side WIT interface for chatty WASM modules"
+
+[dependencies]
+wasmtime = { version = "30", features = ["component-model"] }
+anyhow.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

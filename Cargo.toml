@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/chatty-core", "crates/chatty-gpui", "crates/chatty-tui"]
+members = [
+    "crates/chatty-core",
+    "crates/chatty-gpui",
+    "crates/chatty-tui",
+    "crates/chatty-wasm-runtime",
+]
 resolver = "2"
 
 [workspace.package]

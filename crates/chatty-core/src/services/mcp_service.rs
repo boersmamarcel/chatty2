@@ -305,10 +305,7 @@ impl McpConnection {
         let scopes = auth_manager.select_scopes(None, &[]);
         let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
 
-        let oauth_config = match auth_manager
-            .register_client("Chatty", &redirect_uri)
-            .await
-        {
+        let oauth_config = match auth_manager.register_client("Chatty", &redirect_uri).await {
             Ok(config) => config,
             Err(e) => {
                 let err_str = format!("{e:?}");
@@ -496,10 +493,7 @@ impl McpConnection {
         // Extract code and state from either GET query params or POST form body
         let params: HashMap<String, String> = if method.eq_ignore_ascii_case("POST") {
             // POST form_post: params are in the URL-encoded body after \r\n\r\n
-            let body = request
-                .split("\r\n\r\n")
-                .nth(1)
-                .unwrap_or("");
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
             Self::parse_query_string(body)
         } else {
             // GET: params are in the query string
