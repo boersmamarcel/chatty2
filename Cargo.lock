@@ -1628,6 +1628,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatty-module-registry"
+version = "0.1.128"
+dependencies = [
+ "anyhow",
+ "chatty-wasm-runtime",
+ "notify",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "chatty-tui"
 version = "0.1.128"
 dependencies = [
