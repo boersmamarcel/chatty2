@@ -110,6 +110,247 @@ main chatty agent automatically.
 
 ---
 
+## Protocol comparison
+
+The benford-agent exposes the **same underlying logic** through three different
+protocol surfaces. Each surface is optimised for a different caller. Use this
+section as a concrete test to see all three in action.
+
+> **Test dataset** — all three examples use the same 9 invoice amounts:
+> `1234 4521 891 2340 567 8901 234 456 789`
+
+---
+
+### 1 · Completion API (`/v1/{module}/chat/completions`)
+
+**What it does**: Triggers the full agentic loop (LLM → tools → LLM → report)
+and wraps the final audit report in an OpenAI-compatible response. Best for
+any client that already speaks the OpenAI API.
+
+```sh
+curl -X POST http://localhost:8420/v1/benford-agent/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "benford-agent",
+    "messages": [{
+      "role": "user",
+      "content": "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
+    }]
+  }'
+```
+
+**Expected response shape**:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "benford-agent",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "## Benford's Law Audit Report\n\n**Risk level: LOW** (χ² = 4.21, df = 8, p ≥ 0.05)\n\nThe distribution of leading digits across the 9 invoice amounts conforms to Benford's Law. No statistically significant anomaly was detected. ..."
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": { "prompt_tokens": 412, "completion_tokens": 198, "total_tokens": 610 }
+}
+```
+
+The `content` field is the LLM-synthesised narrative report. The intermediate
+tool calls (`compute_benford_distribution`, `chi_square_test`) are invisible to
+the caller — they happen inside the WASM agentic loop.
+
+---
+
+### 2 · MCP (`/mcp/{module}`)
+
+**What it does**: Exposes the two tools as individual callable functions via
+JSON-RPC 2.0. There is **no** agentic loop — the MCP client (typically another
+LLM or orchestrator) decides when and how to call each tool. Best for
+integrating the Benford analysis primitives into a larger MCP toolchain.
+
+#### Step A — discover available tools
+
+```sh
+curl -X POST http://localhost:8420/mcp/benford-agent \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+**Expected response**:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "name": "compute_benford_distribution",
+        "description": "Compute the first-digit frequency distribution ...",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "numbers": { "type": "array", "items": { "type": "number" } }
+          },
+          "required": ["numbers"]
+        }
+      },
+      {
+        "name": "chi_square_test",
+        "description": "Run a chi-square goodness-of-fit test ...",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "observed_counts": { "type": "array", "items": { "type": "integer" } },
+            "total": { "type": "integer" }
+          },
+          "required": ["observed_counts", "total"]
+        }
+      }
+    ]
+  }
+}
+```
+
+#### Step B — call `compute_benford_distribution` directly
+
+```sh
+curl -X POST http://localhost:8420/mcp/benford-agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "compute_benford_distribution",
+      "arguments": {
+        "numbers": [1234, 4521, 891, 2340, 567, 8901, 234, 456, 789]
+      }
+    }
+  }'
+```
+
+**Expected response** (raw JSON from the WASM tool — no LLM involved):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"total_analyzed\":9,\"observed_counts\":[2,2,0,2,1,0,0,1,1],\"distribution\":[{\"digit\":1,\"observed_count\":2,\"observed_pct\":22.22,\"expected_pct\":30.10,\"deviation\":-7.88},{\"digit\":2,\"observed_count\":2,\"observed_pct\":22.22,\"expected_pct\":17.61,\"deviation\":4.61},...],}"
+    }]
+  }
+}
+```
+
+#### Step C — call `chi_square_test` with the counts from step B
+
+```sh
+curl -X POST http://localhost:8420/mcp/benford-agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "chi_square_test",
+      "arguments": {
+        "observed_counts": [2, 2, 0, 2, 1, 0, 0, 1, 1],
+        "total": 9
+      }
+    }
+  }'
+```
+
+**Expected response**:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"chi_square\":4.210,\"degrees_of_freedom\":8,\"risk_level\":\"LOW\",\"most_deviant_digit\":1,\"interpretation\":\"Distribution conforms to Benford's Law. No statistically significant anomaly detected.\"}"
+    }]
+  }
+}
+```
+
+With MCP you get the raw statistical output — no synthesised narrative. Your
+orchestrator or the host LLM writes the interpretation.
+
+---
+
+### 3 · A2A (`/a2a/{module}`)
+
+**What it does**: Triggers the full agentic loop (identical to the Completion
+API path) but speaks the Agent-to-Agent JSON-RPC 2.0 protocol. The response
+wraps the audit report in an A2A `message` with typed `parts`. Best for
+agent-to-agent communication where both sides understand A2A (LangGraph,
+CrewAI, ADK, other chatty instances).
+
+```sh
+curl -X POST http://localhost:8420/a2a/benford-agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "parts": [{
+          "type": "text",
+          "text": "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
+        }]
+      }
+    }
+  }'
+```
+
+**Expected response shape**:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "message": {
+      "role": "agent",
+      "parts": [{
+        "type": "text",
+        "text": "## Benford's Law Audit Report\n\n**Risk level: LOW** (χ² = 4.21, df = 8, p ≥ 0.05)\n\nThe distribution of leading digits across the 9 invoice amounts conforms to Benford's Law. ..."
+      }]
+    }
+  }
+}
+```
+
+The narrative content is the same as the Completion API response — only the
+envelope differs (`choices[0].message.content` vs `result.message.parts[0].text`).
+
+---
+
+### Side-by-side summary
+
+| | **Completion API** | **MCP** | **A2A** |
+|---|---|---|---|
+| **Endpoint** | `POST /v1/benford-agent/chat/completions` | `POST /mcp/benford-agent` | `POST /a2a/benford-agent` |
+| **Protocol** | OpenAI chat completions | JSON-RPC 2.0 `tools/list`, `tools/call` | JSON-RPC 2.0 `message/send` |
+| **Agentic loop** | ✅ Full (LLM → tools → LLM) | ❌ No — raw tool calls only | ✅ Full (LLM → tools → LLM) |
+| **Response envelope** | `choices[0].message.content` | `result.content[0].text` (raw JSON) | `result.message.parts[0].text` |
+| **Response content** | Narrative audit report | Raw statistical output | Narrative audit report |
+| **Caller controls LLM?** | No — WASM drives it | Yes — caller orchestrates | No — WASM drives it |
+| **Ideal for** | OpenAI-compatible clients, chatty UI | MCP orchestrators, tool-using agents | A2A ecosystem (LangGraph, CrewAI, ADK, other chatty) |
+| **Discover agent?** | `GET /.well-known/agent.json` | `tools/list` | `GET /.well-known/agent.json` |
+
+---
+
 ## Build
 
 ### Prerequisites
