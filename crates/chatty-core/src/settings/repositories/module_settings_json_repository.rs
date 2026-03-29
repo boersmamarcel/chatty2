@@ -29,7 +29,7 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
 
         Box::pin(async move {
             let exists = tokio::fs::try_exists(&path).await.unwrap_or_else(|e| {
-                warn!(error = ?e, path = %path.display(), "Failed to check module settings file existence");
+                warn!(error = ?e, path = %path.display(), "Failed to check if module settings file exists at {}", path.display());
                 false
             });
 

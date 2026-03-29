@@ -1,5 +1,5 @@
 use crate::settings::controllers::module_settings_controller;
-use crate::settings::models::module_settings::ModuleSettingsModel;
+use crate::settings::models::module_settings::{ModuleSettingsModel, default_module_dir};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::{Input, InputState};
@@ -60,22 +60,27 @@ fn runtime_group() -> SettingGroup {
 }
 
 fn directory_group() -> SettingGroup {
+    let platform_default = default_module_dir();
+    let help_text: SharedString = format!("Platform default: {}", platform_default).into();
+
     SettingGroup::new()
         .title("Module Directory")
         .description(
             "The directory Chatty scans for WASM modules on startup. \
              Each sub-directory containing a `module.toml` is loaded as a module.",
         )
-        .items(vec![SettingItem::render(|_options, window, cx| {
+        .items(vec![SettingItem::render(move |_options, window, cx| {
             let current_dir = cx.global::<ModuleSettingsModel>().module_dir.clone();
+            let placeholder: SharedString = default_module_dir().into();
 
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder(".chatty/modules")
+                    .placeholder(placeholder)
                     .default_value(current_dir)
             });
 
             let input_clone = input.clone();
+            let help = help_text.clone();
 
             v_flex()
                 .w_full()
@@ -100,10 +105,7 @@ fn directory_group() -> SettingGroup {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(
-                            "Relative paths are resolved from the working directory. \
-                             Example: .chatty/modules",
-                        ),
+                        .child(help),
                 )
                 .into_any_element()
         })])
