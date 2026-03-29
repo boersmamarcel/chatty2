@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::module_settings_repository::{BoxFuture, ModuleSettingsRepository};
 use super::provider_repository::{RepositoryError, RepositoryResult};
-use crate::settings::models::module_settings::ModuleSettingsModel;
+use crate::settings::models::module_settings::{ModuleSettingsModel, normalize_module_dir};
 use tracing::warn;
 
 pub struct ModuleSettingsJsonRepository {
@@ -41,8 +41,13 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
                 .await
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-            let settings: ModuleSettingsModel = serde_json::from_str(&contents)
+            let mut settings: ModuleSettingsModel = serde_json::from_str(&contents)
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
+
+            let normalized_dir = normalize_module_dir(settings.module_dir.clone());
+            if normalized_dir != settings.module_dir {
+                settings.module_dir = normalized_dir;
+            }
 
             Ok(settings)
         })

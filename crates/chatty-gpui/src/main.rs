@@ -439,6 +439,9 @@ fn main() {
 
         // Initialize module settings with default - will be populated async
         cx.set_global(settings::models::ModuleSettingsModel::default());
+        cx.set_global(settings::models::DiscoveredModulesModel::default());
+
+        settings::controllers::module_settings_controller::refresh_runtime(cx);
 
         // Initialize agent memory service asynchronously.
         // A watch channel is stored as a global so that conversation creation can await
@@ -1057,6 +1060,7 @@ fn main() {
                             "Module settings loaded from disk"
                         );
                         cx.set_global(settings);
+                        settings::controllers::module_settings_controller::refresh_runtime(cx);
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to update global module settings"))
                     .ok();

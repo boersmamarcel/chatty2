@@ -9,7 +9,9 @@ pub use chatty_core::settings::models::{
 
 // Local gpui-specific modules
 pub mod agent_config_notifier;
+pub mod discovered_modules;
 pub mod models_notifier;
 
 pub use agent_config_notifier::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
+pub use discovered_modules::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 pub use models_notifier::{GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent};

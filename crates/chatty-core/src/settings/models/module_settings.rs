@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const LEGACY_FALLBACK_MODULE_DIR: &str = ".chatty/modules";
+
 /// Settings for the WASM module runtime and protocol gateway.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ModuleSettingsModel {
@@ -36,7 +38,21 @@ pub fn default_module_dir() -> String {
                 .to_string_lossy()
                 .into_owned()
         })
-        .unwrap_or_else(|| ".chatty/modules".to_string())
+        .unwrap_or_else(|| LEGACY_FALLBACK_MODULE_DIR.to_string())
+}
+
+pub fn normalize_module_dir(module_dir: String) -> String {
+    let trimmed = module_dir.trim();
+    if trimmed.is_empty() {
+        return default_module_dir();
+    }
+
+    let platform_default = default_module_dir();
+    if trimmed == LEGACY_FALLBACK_MODULE_DIR && platform_default != LEGACY_FALLBACK_MODULE_DIR {
+        platform_default
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -99,5 +115,25 @@ mod tests {
         assert_eq!(restored.gateway_port, 8420);
         // module_dir should use the platform default
         assert_eq!(restored.module_dir, default_module_dir());
+    }
+
+    #[test]
+    fn normalize_module_dir_migrates_legacy_fallback_when_platform_default_exists() {
+        let normalized = normalize_module_dir(LEGACY_FALLBACK_MODULE_DIR.to_string());
+        let platform_default = default_module_dir();
+
+        if platform_default == LEGACY_FALLBACK_MODULE_DIR {
+            assert_eq!(normalized, LEGACY_FALLBACK_MODULE_DIR);
+        } else {
+            assert_eq!(normalized, platform_default);
+        }
+    }
+
+    #[test]
+    fn normalize_module_dir_replaces_empty_values() {
+        assert_eq!(
+            normalize_module_dir("   ".to_string()),
+            default_module_dir()
+        );
     }
 }

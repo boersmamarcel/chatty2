@@ -45,6 +45,23 @@ pub(crate) async fn mcp_jsonrpc(
     }
 
     match body.method.as_str() {
+        // MCP lifecycle
+        "initialize" => handle_initialize(&module_name, body.id, registry).await,
+        "notifications/initialized" | "initialized" => {
+            // Notification — no JSON-RPC response needed. Return 202 Accepted
+            // per the MCP Streamable HTTP spec (rmcp expects 202/204 for notifications).
+            (StatusCode::ACCEPTED, "").into_response()
+        }
+        method if method.starts_with("notifications/") => {
+            // Handle any other MCP notifications (cancelled, progress, etc.)
+            (StatusCode::ACCEPTED, "").into_response()
+        }
+        "ping" => (
+            StatusCode::OK,
+            Json(serde_json::to_value(JsonRpcResponse::ok(body.id, json!({}))).unwrap_or_default()),
+        )
+            .into_response(),
+        // MCP tool methods
         "tools/list" => handle_tools_list(&module_name, body.id, registry).await,
         "tools/call" => handle_tools_call(&module_name, body.id, body.params, registry).await,
         method => (
@@ -60,6 +77,51 @@ pub(crate) async fn mcp_jsonrpc(
         )
             .into_response(),
     }
+}
+
+async fn handle_initialize(
+    module_name: &str,
+    id: Option<Value>,
+    registry: Arc<RwLock<ModuleRegistry>>,
+) -> axum::response::Response {
+    // Verify the module exists
+    let reg = registry.read().await;
+    if reg.get(module_name).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(
+                serde_json::to_value(JsonRpcResponse::err(
+                    id,
+                    -32602,
+                    format!("module '{}' not found", module_name),
+                ))
+                .unwrap_or_default(),
+            ),
+        )
+            .into_response();
+    }
+    drop(reg);
+
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(JsonRpcResponse::ok(
+                id,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": module_name,
+                        "version": "0.1.0"
+                    },
+                    "capabilities": {
+                        "tools": { "listChanged": false }
+                    }
+                }),
+            ))
+            .unwrap_or_default(),
+        ),
+    )
+        .into_response()
 }
 
 async fn handle_tools_list(
@@ -177,14 +239,14 @@ async fn handle_tools_call(
 
     match module.invoke_tool(&tool_name, &args).await {
         Ok(result) => {
-            let result_value: Value =
-                serde_json::from_str(&result).unwrap_or(Value::String(result));
+            // MCP TextContent requires `text` to be a string.
+            // The tool result is already a string (possibly JSON-encoded).
             (
                 StatusCode::OK,
                 Json(
                     serde_json::to_value(JsonRpcResponse::ok(
                         id,
-                        json!({ "content": [{ "type": "text", "text": result_value }] }),
+                        json!({ "content": [{ "type": "text", "text": result }] }),
                     ))
                     .unwrap_or_default(),
                 ),
@@ -238,16 +300,14 @@ pub(crate) async fn mcp_sse(
 // ---------------------------------------------------------------------------
 
 fn tool_to_json(tool: &ToolDefinition) -> Value {
+    // parameters_schema is already a complete JSON Schema object
+    // (e.g. {"type":"object","properties":{...},"required":[...]})
+    let input_schema = serde_json::from_str::<Value>(&tool.parameters_schema)
+        .unwrap_or(json!({"type": "object", "properties": {}}));
+
     json!({
         "name": tool.name,
         "description": tool.description,
-        "inputSchema": {
-            "type": "object",
-            "properties": parse_params(&tool.parameters_schema),
-        }
+        "inputSchema": input_schema
     })
-}
-
-fn parse_params(schema: &str) -> Value {
-    serde_json::from_str(schema).unwrap_or(json!({}))
 }
