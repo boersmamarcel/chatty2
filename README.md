@@ -636,9 +636,45 @@ Chatty is organized as a Cargo workspace with three crates:
 
 ```
 crates/
-├── chatty-core/   # UI-agnostic: models, services, tools, settings, persistence
-├── chatty-gpui/   # GPUI desktop frontend
-└── chatty-tui/    # Terminal frontend (Ratatui) + headless/pipe agent modes
+├── chatty-core/       # UI-agnostic: models, services, tools, settings, persistence
+├── chatty-gpui/       # GPUI desktop frontend
+├── chatty-tui/        # Terminal frontend (Ratatui) + headless/pipe agent modes
+└── chatty-module-sdk/ # SDK for building WASM agent modules (standalone, not in workspace)
+```
+
+### Building WASM Modules
+
+`chatty-module-sdk` is a standalone crate (not part of the main workspace) that lets you build custom agent modules compiled to `wasm32-wasip2`. It provides the `ModuleExports` trait, `export_module!` macro, and typed host import wrappers for LLM completion, config lookup, and structured logging.
+
+```toml
+# In your module's Cargo.toml — point to the SDK crate
+[dependencies]
+chatty-module-sdk = { path = "/path/to/chatty/crates/chatty-module-sdk" }
+```
+
+```rust
+use chatty_module_sdk::*;
+
+#[derive(Default)]
+struct MyAgent;
+
+impl ModuleExports for MyAgent {
+    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
+        let resp = llm::complete("claude-sonnet-4-20250514", &req.messages, None)?;
+        Ok(ChatResponse { content: resp.content, tool_calls: vec![], usage: resp.usage })
+    }
+    fn invoke_tool(&self, _name: String, _args: String) -> Result<String, String> {
+        Err("no tools".into())
+    }
+    fn list_tools(&self) -> Vec<ToolDefinition> { vec![] }
+    fn get_agent_card(&self) -> AgentCard {
+        AgentCard { name: "my-agent".into(), display_name: "My Agent".into(),
+                    description: "Demo".into(), version: "0.1.0".into(),
+                    skills: vec![], tools: vec![] }
+    }
+}
+
+export_module!(MyAgent);
 ```
 
 See [docs/architecture-overview.md](docs/architecture-overview.md) for the full module breakdown and data flow.
