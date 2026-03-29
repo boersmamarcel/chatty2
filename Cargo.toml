@@ -4,6 +4,7 @@ members = [
     "crates/chatty-gpui",
     "crates/chatty-tui",
     "crates/chatty-wasm-runtime",
+    "crates/chatty-module-registry",
 ]
 resolver = "2"
 

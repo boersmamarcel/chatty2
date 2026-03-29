@@ -1,0 +1,18 @@
+[package]
+name = "chatty-module-registry"
+version.workspace = true
+edition.workspace = true
+description = "Module discovery, loading, and lifecycle management for chatty WASM modules"
+
+[dependencies]
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
+notify = "7.0"
+toml = "0.8"
+serde = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
