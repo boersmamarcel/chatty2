@@ -1,0 +1,13 @@
+[package]
+name = "chatty-module-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "SDK for building chatty WASM agent modules — compile to wasm32-wasip2"
+
+[dependencies]
+wit-bindgen = "0.51.0"
+
+# This crate is intentionally NOT part of the chatty workspace.
+# It targets wasm32-wasip2 (see .cargo/config.toml) and is compiled
+# independently by module authors.
+[workspace]

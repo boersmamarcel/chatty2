@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target
 **/target/
+crates/chatty-module-sdk/Cargo.lock
 **.DS_Store
 *.db
 **/libs/
