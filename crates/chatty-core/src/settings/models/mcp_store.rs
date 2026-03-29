@@ -54,6 +54,17 @@ pub struct McpServerConfig {
     /// Whether this server is enabled/active
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+
+    /// Whether this entry was auto-registered from a WASM module.
+    /// Module entries are managed by the module runtime — their URL is
+    /// updated when the gateway port changes and they are removed when
+    /// the corresponding module disappears.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_module: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 fn default_enabled() -> bool {
@@ -137,6 +148,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: true,
+            is_module: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"name\":\"test-server\""));
@@ -153,6 +165,7 @@ mod tests {
             url: "https://mcp.example.com/tools".to_string(),
             api_key: Some("sk-secret-token".to_string()),
             enabled: true,
+            is_module: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"api_key\":\"sk-secret-token\""));
@@ -189,6 +202,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: Some("token".to_string()),
             enabled: true,
+            is_module: false,
         };
         assert!(with_key.has_api_key());
 
@@ -197,6 +211,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: true,
+            is_module: false,
         };
         assert!(!without_key.has_api_key());
 
@@ -205,6 +220,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: Some("".to_string()),
             enabled: true,
+            is_module: false,
         };
         assert!(!empty_key.has_api_key());
     }
@@ -218,18 +234,21 @@ mod tests {
                 url: "http://localhost:3001/mcp".to_string(),
                 api_key: None,
                 enabled: true,
+                is_module: false,
             },
             McpServerConfig {
                 name: "b".to_string(),
                 url: "http://localhost:3002/mcp".to_string(),
                 api_key: None,
                 enabled: false,
+                is_module: false,
             },
             McpServerConfig {
                 name: "c".to_string(),
                 url: "http://localhost:3003/mcp".to_string(),
                 api_key: Some("token".to_string()),
                 enabled: true,
+                is_module: false,
             },
         ]);
         assert_eq!(model.enabled_count(), 2);

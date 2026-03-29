@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "echo-agent"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "chatty-module-sdk",
  "serde_json",

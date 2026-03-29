@@ -118,6 +118,7 @@ mod tests {
             url: url.to_string(),
             api_key: None,
             enabled: true,
+            is_module: false,
         }
     }
 
@@ -160,6 +161,7 @@ mod tests {
             url: "https://mcp.example.com/tools".to_string(),
             api_key: Some("sk-super-secret".to_string()),
             enabled: true,
+            is_module: false,
         };
         let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
@@ -210,6 +212,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: false,
+            is_module: false,
         };
         let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);

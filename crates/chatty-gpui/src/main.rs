@@ -437,6 +437,12 @@ fn main() {
         // Initialize user secrets with empty state - will be populated async
         cx.set_global(settings::models::UserSecretsModel::default());
 
+        // Initialize module settings with default - will be populated async
+        cx.set_global(settings::models::ModuleSettingsModel::default());
+        cx.set_global(settings::models::DiscoveredModulesModel::default());
+
+        settings::controllers::module_settings_controller::refresh_runtime(cx);
+
         // Initialize agent memory service asynchronously.
         // A watch channel is stored as a global so that conversation creation can await
         // completion, preventing a race where the agent would be built without memory tools.
@@ -1036,6 +1042,31 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load user secrets, using defaults");
+                }
+            }
+        })
+        .detach();
+
+        // Load module settings asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = chatty_core::module_settings_repository();
+            match repo.load().await {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        info!(
+                            enabled = settings.enabled,
+                            port = settings.gateway_port,
+                            dir = %settings.module_dir,
+                            "Module settings loaded from disk"
+                        );
+                        cx.set_global(settings);
+                        settings::controllers::module_settings_controller::refresh_runtime(cx);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global module settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load module settings, using defaults");
                 }
             }
         })

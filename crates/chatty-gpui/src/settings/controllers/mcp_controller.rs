@@ -18,6 +18,7 @@ pub fn create_server(name: String, url: String, api_key: Option<String>, cx: &mu
             url: url.clone(),
             api_key,
             enabled: false,
+            is_module: false,
         });
         model.servers().to_vec()
     };
@@ -286,6 +287,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled,
+            is_module: false,
         }
     }
 
@@ -376,6 +378,7 @@ mod tests {
             url: "http://localhost:9000/mcp".to_string(),
             api_key: Some("bearer-token".to_string()),
             enabled: false,
+            is_module: false,
         }];
 
         if let Some(server) = servers.iter_mut().find(|s| s.name == "test") {

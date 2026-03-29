@@ -53,44 +53,82 @@ impl McpConnection {
             }
         }
 
-        // First attempt: use static API key (Bearer token) if provided
+        // Try connecting with retries for transient transport errors (e.g.
+        // local gateway not yet listening at startup).
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
         let transport_config = StreamableHttpClientTransportConfig {
             uri: url.as_str().into(),
             auth_header: config.api_key.filter(|k| !k.is_empty()),
             ..Default::default()
         };
 
-        let transport = StreamableHttpClientTransport::from_config(transport_config.clone());
-
-        match ().serve(transport).await {
-            Ok(service) => {
-                let server_info = service.peer_info();
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
                 info!(
                     server = %name,
-                    info = ?server_info,
-                    "MCP server connected"
+                    attempt,
+                    "Retrying MCP connection after transport error"
                 );
-                return Ok(Self {
-                    name,
-                    service,
-                    cached_tools: None,
-                });
+                tokio::time::sleep(RETRY_DELAY).await;
             }
-            Err(e) => {
-                let err_str = format!("{e:?}");
-                if err_str.contains("Auth required")
-                    || err_str.contains("AuthRequired")
-                    || err_str.contains("error decoding response body")
-                {
+
+            let transport = StreamableHttpClientTransport::from_config(transport_config.clone());
+
+            match ().serve(transport).await {
+                Ok(service) => {
+                    let server_info = service.peer_info();
                     info!(
                         server = %name,
-                        "Server requires OAuth, starting browser authorization flow"
+                        info = ?server_info,
+                        "MCP server connected"
                     );
-                } else {
+                    return Ok(Self {
+                        name,
+                        service,
+                        cached_tools: None,
+                    });
+                }
+                Err(e) => {
+                    let err_str = format!("{e:?}");
+                    if err_str.contains("Auth required")
+                        || err_str.contains("AuthRequired")
+                        || err_str.contains("error decoding response body")
+                    {
+                        info!(
+                            server = %name,
+                            "Server requires OAuth, starting browser authorization flow"
+                        );
+                        last_err = None;
+                        break;
+                    }
+
+                    // Retry on transport/connection errors
+                    let is_transport_error = err_str.contains("error sending request")
+                        || err_str.contains("connection refused")
+                        || err_str.contains("Connection refused")
+                        || err_str.contains("Client error");
+
+                    if is_transport_error && attempt < MAX_RETRIES {
+                        warn!(
+                            server = %name,
+                            attempt,
+                            "Transport error, will retry: {e}"
+                        );
+                        last_err = Some(e.into());
+                        continue;
+                    }
+
                     return Err(e)
                         .with_context(|| format!("Failed to connect to MCP server: {}", name));
                 }
             }
+        }
+
+        if let Some(e) = last_err {
+            return Err(e).with_context(|| format!("Failed to connect to MCP server: {}", name));
         }
 
         // Second attempt: OAuth 2.0 browser-based authorization
@@ -828,6 +866,7 @@ mod tests {
             url: "http://localhost:3000/mcp".to_string(),
             api_key: None,
             enabled: false,
+            is_module: false,
         }
     }
 
@@ -907,12 +946,14 @@ mod tests {
                 url: "http://127.0.0.1:1/mcp".to_string(),
                 api_key: None,
                 enabled: true,
+                is_module: false,
             },
             McpServerConfig {
                 name: "bad-2".to_string(),
                 url: "http://127.0.0.1:2/mcp".to_string(),
                 api_key: None,
                 enabled: true,
+                is_module: false,
             },
         ];
 

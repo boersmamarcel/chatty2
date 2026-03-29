@@ -15,6 +15,7 @@ impl Global for crate::settings::models::TrainingSettingsModel {}
 impl Global for crate::settings::models::SearchSettingsModel {}
 impl Global for crate::settings::models::TokenTrackingSettings {}
 impl Global for crate::settings::models::UserSecretsModel {}
+impl Global for crate::settings::models::ModuleSettingsModel {}
 
 // ── Chatty models ────────────────────────────────────────────────────────────
 impl Global for crate::models::ConversationsStore {}
