@@ -20,11 +20,11 @@ use crate::tools::{
     DescribeDataTool, EditExcelTool, EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool,
     FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
     GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListAgentsTool, ListDirectoryTool,
-    ListMcpTool, ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool,
-    PendingArtifacts, QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool,
-    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool,
-    WriteFileTool,
+    ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool, PdfExtractTextTool,
+    PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool, ReadBinaryTool, ReadExcelTool,
+    ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool,
+    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool,
+    WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -581,6 +581,7 @@ impl AgentClient {
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
+        module_agents: Vec<LocalModuleAgentSummary>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -1155,46 +1156,45 @@ impl AgentClient {
 
         // Sub-agent tool — gated on execution being enabled and on the caller not
         // being a sub-agent itself (sub-agents must not spawn further sub-agents).
-        let sub_agent_tool: Option<SubAgentTool> = if allow_sub_agent
-            && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false)
-        {
-            let sub_model_id = model_config.id.clone();
-            let sub_auto_approve = exec_settings
-                .as_ref()
-                .map(|s| {
-                    matches!(
+        let sub_agent_tool: Option<SubAgentTool> =
+            if allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false) {
+                let sub_model_id = model_config.id.clone();
+                let sub_auto_approve = exec_settings
+                    .as_ref()
+                    .map(|s| {
+                        matches!(
                         s.approval_mode,
                         crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
                     )
-                })
-                .unwrap_or(false);
-            // Load available model IDs so the sub-agent tool can validate
-            // a caller-provided model before spawning the subprocess.
-            let available_model_ids = match crate::models_repository().load_all().await {
-                Ok(models) => models.iter().map(|m| m.id.clone()).collect(),
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "Failed to load models for sub-agent validation; \
-                         model parameter validation will be skipped"
-                    );
-                    Vec::new()
-                }
-            };
-            tracing::debug!("Sub-agent tool enabled");
-            Some(SubAgentTool::new(
-                sub_model_id,
-                sub_auto_approve,
-                available_model_ids,
-            ))
-        } else {
-            if !allow_sub_agent {
-                tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
+                    })
+                    .unwrap_or(false);
+                // Load available model IDs so the sub-agent tool can validate
+                // a caller-provided model before spawning the subprocess.
+                let available_model_ids = match crate::models_repository().load_all().await {
+                    Ok(models) => models.iter().map(|m| m.id.clone()).collect(),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "Failed to load models for sub-agent validation; \
+                             model parameter validation will be skipped"
+                        );
+                        Vec::new()
+                    }
+                };
+                tracing::debug!("Sub-agent tool enabled");
+                Some(SubAgentTool::new(
+                    sub_model_id,
+                    sub_auto_approve,
+                    available_model_ids,
+                ))
             } else {
-                tracing::debug!("Sub-agent tool disabled: execution not enabled");
-            }
-            None
-        };
+                if !allow_sub_agent {
+                    tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
+                } else {
+                    tracing::debug!("Sub-agent tool disabled: execution not enabled");
+                }
+                None
+            };
 
         let native_tool_names = active_native_tool_names(
             fs_read_tools.is_some(),
@@ -1247,8 +1247,9 @@ impl AgentClient {
             mcp_tool_info,
         );
 
-        // Create list_agents tool (always available, shows configured A2A agents)
-        let list_agents_tool = ListAgentsTool::new(crate::a2a_repository());
+        // Create list_agents tool (always available, shows A2A agents + local module agents)
+        let list_agents_tool =
+            ListAgentsTool::new_with_modules(crate::a2a_repository(), module_agents);
 
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model

@@ -16,7 +16,7 @@ use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
-use crate::tools::PendingArtifacts;
+use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
 
 /// User feedback signal for an individual assistant message
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -94,6 +94,7 @@ impl Conversation {
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
+        module_agents: Vec<LocalModuleAgentSummary>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -131,6 +132,7 @@ impl Conversation {
             search_settings,
             embedding_service,
             allow_sub_agent,
+            module_agents,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -176,6 +178,7 @@ impl Conversation {
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
+        module_agents: Vec<LocalModuleAgentSummary>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -211,6 +214,7 @@ impl Conversation {
             search_settings,
             embedding_service,
             allow_sub_agent,
+            module_agents,
         )
         .await
         .context("Failed to create agent from config")?;

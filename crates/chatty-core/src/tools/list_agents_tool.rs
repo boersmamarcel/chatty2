@@ -9,8 +9,8 @@ use crate::settings::repositories::A2aRepository;
 #[derive(Deserialize, Serialize)]
 pub struct ListAgentsToolArgs {}
 
-/// Summary of a single configured A2A agent, safe for display to the LLM.
-#[derive(Debug, Serialize)]
+/// Summary of a single configured remote A2A agent, safe for display to the LLM.
+#[derive(Debug, Serialize, Clone)]
 pub struct A2aAgentSummary {
     pub name: String,
     pub url: String,
@@ -21,10 +21,25 @@ pub struct A2aAgentSummary {
     pub skills: Vec<String>,
 }
 
+/// Summary of a locally installed WASM module agent, safe for display to the LLM.
+#[derive(Debug, Serialize, Clone)]
+pub struct LocalModuleAgentSummary {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// Tools exposed by the module.
+    pub tools: Vec<String>,
+    /// Whether the module supports the A2A protocol (accessible via the protocol gateway).
+    pub supports_a2a: bool,
+}
+
 /// Output from the list_agents tool
 #[derive(Debug, Serialize)]
 pub struct ListAgentsToolOutput {
-    pub agents: Vec<A2aAgentSummary>,
+    /// Remote A2A agents configured via Settings → A2A Agents.
+    pub remote_agents: Vec<A2aAgentSummary>,
+    /// Locally installed WASM module agents discoverable via the modules directory.
+    pub local_agents: Vec<LocalModuleAgentSummary>,
     pub total: usize,
     pub note: String,
 }
@@ -36,19 +51,36 @@ pub enum ListAgentsToolError {
     RepositoryError(String),
 }
 
-/// Tool that lists all configured remote A2A agents.
+/// Tool that lists all available agents: both remotely configured A2A agents and
+/// locally installed WASM module agents.
 ///
-/// This gives the LLM visibility into what A2A agents are already configured,
-/// including their names, URLs, and skills. Each agent is invokable via the
+/// This gives the LLM visibility into what agents are available, including their
+/// names, URLs/types, and skills/tools. Each agent is invokable via the
 /// `/agent <name> <prompt>` command.
 #[derive(Clone)]
 pub struct ListAgentsTool {
     repository: Arc<dyn A2aRepository>,
+    /// Locally installed WASM module agents with `agent = true`.
+    module_agents: Vec<LocalModuleAgentSummary>,
 }
 
 impl ListAgentsTool {
     pub fn new(repository: Arc<dyn A2aRepository>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            module_agents: Vec::new(),
+        }
+    }
+
+    /// Create a new `ListAgentsTool` that also reports local WASM module agents.
+    pub fn new_with_modules(
+        repository: Arc<dyn A2aRepository>,
+        module_agents: Vec<LocalModuleAgentSummary>,
+    ) -> Self {
+        Self {
+            repository,
+            module_agents,
+        }
     }
 }
 
@@ -61,12 +93,13 @@ impl Tool for ListAgentsTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "list_agents".to_string(),
-            description: "List all configured remote A2A (Agent-to-Agent) agents. \
-                         Returns each agent's name, URL, enabled state, and the skills \
-                         it advertises. \
+            description: "List all available agents: remote A2A agents configured via \
+                         Settings → A2A Agents, and locally installed WASM module agents. \
+                         Returns each agent's name, type, enabled state, and the skills/tools \
+                         it provides. \
                          \n\n\
-                         Use this to discover what remote agents are available before \
-                         deciding whether to delegate a task. Agents can be invoked with \
+                         Use this to discover what agents are available before deciding whether \
+                         to delegate a task. Agents can be invoked with \
                          `/agent <name> <prompt>` — each agent runs its own full agentic \
                          loop and returns a result."
                 .to_string(),
@@ -83,9 +116,13 @@ impl Tool for ListAgentsTool {
             ListAgentsToolError::RepositoryError(format!("Failed to load agents: {}", e))
         })?;
 
-        tracing::info!(agent_count = agents.len(), "list_agents called");
+        tracing::info!(
+            remote_agent_count = agents.len(),
+            local_agent_count = self.module_agents.len(),
+            "list_agents called"
+        );
 
-        let summaries: Vec<A2aAgentSummary> = agents
+        let remote_summaries: Vec<A2aAgentSummary> = agents
             .iter()
             .map(|a| A2aAgentSummary {
                 name: a.name.clone(),
@@ -96,17 +133,20 @@ impl Tool for ListAgentsTool {
             })
             .collect();
 
-        let total = summaries.len();
+        let total = remote_summaries.len() + self.module_agents.len();
         let note = if total == 0 {
-            "No A2A agents are configured. Add one via Settings → A2A Agents.".to_string()
+            "No agents are available. Remote agents can be added via Settings → A2A Agents. \
+             Local WASM module agents are installed in the modules directory."
+                .to_string()
         } else {
             "Invoke an agent with `/agent <name> <prompt>`. \
-             Only enabled agents can be called."
+             Only enabled remote agents can be called; local module agents are always available."
                 .to_string()
         };
 
         Ok(ListAgentsToolOutput {
-            agents: summaries,
+            remote_agents: remote_summaries,
+            local_agents: self.module_agents.clone(),
             total,
             note,
         })
@@ -129,6 +169,16 @@ mod tests {
         }
     }
 
+    fn make_module_agent(name: &str) -> LocalModuleAgentSummary {
+        LocalModuleAgentSummary {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            description: format!("{} module agent", name),
+            tools: vec!["tool_a".to_string()],
+            supports_a2a: true,
+        }
+    }
+
     #[tokio::test]
     async fn test_list_empty_repo() {
         let repo = Arc::new(MockA2aRepository::new());
@@ -139,8 +189,9 @@ mod tests {
 
         let output = result.unwrap();
         assert_eq!(output.total, 0);
-        assert!(output.agents.is_empty());
-        assert!(output.note.contains("No A2A agents"));
+        assert!(output.remote_agents.is_empty());
+        assert!(output.local_agents.is_empty());
+        assert!(output.note.contains("No agents are available"));
     }
 
     #[tokio::test]
@@ -151,7 +202,7 @@ mod tests {
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert_eq!(output.total, 1);
-        let a = &output.agents[0];
+        let a = &output.remote_agents[0];
         assert_eq!(a.name, "voucher-agent");
         assert_eq!(a.url, "https://hive.dev/a2a/voucher");
         assert!(!a.has_api_key);
@@ -171,7 +222,7 @@ mod tests {
         let tool = ListAgentsTool::new(repo);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
-        let a = &output.agents[0];
+        let a = &output.remote_agents[0];
         // API key value is never exposed — only whether one is configured
         assert!(a.has_api_key);
     }
@@ -183,7 +234,7 @@ mod tests {
         let tool = ListAgentsTool::new(repo);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
-        assert!(!output.agents[0].enabled);
+        assert!(!output.remote_agents[0].enabled);
     }
 
     #[tokio::test]
@@ -199,7 +250,7 @@ mod tests {
         let tool = ListAgentsTool::new(repo);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
-        let a = &output.agents[0];
+        let a = &output.remote_agents[0];
         assert_eq!(a.skills.len(), 2);
         assert_eq!(a.skills[0], "data-analysis");
     }
@@ -215,8 +266,35 @@ mod tests {
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert_eq!(output.total, 2);
-        assert_eq!(output.agents[0].name, "agent-a");
-        assert_eq!(output.agents[1].name, "agent-b");
+        assert_eq!(output.remote_agents[0].name, "agent-a");
+        assert_eq!(output.remote_agents[1].name, "agent-b");
+    }
+
+    #[tokio::test]
+    async fn test_list_includes_local_module_agents() {
+        let repo = Arc::new(MockA2aRepository::new());
+        let module = make_module_agent("benford-agent");
+        let tool = ListAgentsTool::new_with_modules(repo, vec![module]);
+
+        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        assert_eq!(output.total, 1);
+        assert!(output.remote_agents.is_empty());
+        assert_eq!(output.local_agents.len(), 1);
+        assert_eq!(output.local_agents[0].name, "benford-agent");
+        assert!(output.local_agents[0].supports_a2a);
+    }
+
+    #[tokio::test]
+    async fn test_list_combines_remote_and_local() {
+        let remote = make_agent("remote-agent", "https://example.com/a2a", true);
+        let repo = Arc::new(MockA2aRepository::with_agents(vec![remote]));
+        let module = make_module_agent("local-agent");
+        let tool = ListAgentsTool::new_with_modules(repo, vec![module]);
+
+        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        assert_eq!(output.total, 2);
+        assert_eq!(output.remote_agents.len(), 1);
+        assert_eq!(output.local_agents.len(), 1);
     }
 
     #[tokio::test]

@@ -24,6 +24,7 @@ use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
+use crate::chatty::tools::LocalModuleAgentSummary;
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
@@ -38,6 +39,30 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
+use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+
+/// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
+/// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
+///
+/// Only modules with `agent = true` and a `Loaded` status are included.
+fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
+    cx.try_global::<DiscoveredModulesModel>()
+        .map(|model| {
+            model
+                .modules
+                .iter()
+                .filter(|m| m.agent && matches!(m.status, ModuleLoadStatus::Loaded))
+                .map(|m| LocalModuleAgentSummary {
+                    name: m.name.clone(),
+                    version: m.version.clone(),
+                    description: m.description.clone(),
+                    tools: m.tools.clone(),
+                    supports_a2a: m.a2a,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
 ///
@@ -251,6 +276,9 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
 
     let memory_service = await_memory_service(cx).await;
     let embedding_service = get_embedding_service(cx);
+    let module_agents = cx
+        .update(|cx| collect_module_agents(cx))
+        .unwrap_or_default();
 
     let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
         &model_config,
@@ -267,6 +295,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         search_settings,
         embedding_service,
         true, // interactive agent: sub-agent tool is allowed
+        module_agents,
     )
     .await?;
 
@@ -710,6 +739,7 @@ impl ChattyApp {
         memory_service: Option<crate::chatty::services::MemoryService>,
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
+        module_agents: Vec<LocalModuleAgentSummary>,
     ) -> anyhow::Result<Conversation> {
         let mut effective_exec_settings = exec_settings.clone();
         if let Some(working_dir) = data.working_dir.as_ref() {
@@ -762,6 +792,7 @@ impl ChattyApp {
             search_settings,
             embedding_service,
             true, // interactive agent: sub-agent tool is allowed
+            module_agents,
         )
         .await
     }
@@ -1032,6 +1063,9 @@ impl ChattyApp {
                     // Wait for memory service init to complete before building the agent
                     let memory_service = await_memory_service(cx).await;
                     let embedding_service = get_embedding_service(cx);
+                    let module_agents = cx
+                        .update(|cx| collect_module_agents(cx))
+                        .unwrap_or_default();
 
                     let mut conversation = Conversation::new(
                         conv_id.clone(),
@@ -1048,6 +1082,7 @@ impl ChattyApp {
                         search_settings,
                         embedding_service,
                         true, // interactive agent: sub-agent tool is allowed
+                        module_agents,
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1145,6 +1180,7 @@ impl ChattyApp {
         } else {
             // Slow path: fetch from SQLite, restore, then display
             let repo = self.conversation_repo.clone();
+            let module_agents = collect_module_agents(cx);
             cx.spawn(async move |weak, cx| {
                 let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
@@ -1167,6 +1203,7 @@ impl ChattyApp {
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
                             theme_colors, memory_service, search_settings, embedding_service,
+                            module_agents,
                         )
                         .await
                         {
@@ -1526,6 +1563,9 @@ impl ChattyApp {
                         // Wait for memory service init to complete before building the agent
                         let memory_service = await_memory_service(cx).await;
                         let embedding_service = get_embedding_service(cx);
+                        let module_agents = cx
+                            .update(|cx| collect_module_agents(cx))
+                            .unwrap_or_default();
 
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session) =
@@ -1544,6 +1584,7 @@ impl ChattyApp {
                                 search_settings,
                                 embedding_service,
                                 true, // interactive agent: sub-agent tool is allowed
+                                module_agents,
                             )
                             .await?;
 

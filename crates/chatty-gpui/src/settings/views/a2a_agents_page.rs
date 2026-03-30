@@ -1,4 +1,5 @@
 use crate::settings::controllers::a2a_controller;
+use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 use chatty_core::settings::models::a2a_store::{A2aAgentStatus, A2aAgentsModel};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -12,10 +13,11 @@ pub fn a2a_agents_page() -> SettingPage {
         .description(
             "A2A (Agent-to-Agent) lets chatty dispatch tasks to remote agents over HTTP. \
              Add an agent URL below; chatty will discover its capabilities automatically. \
-             Use `/agent <name> <prompt>` to call a remote agent.",
+             Use `/agent <name> <prompt>` to call a remote agent. \
+             Local WASM modules with agent capability are listed below for reference.",
         )
         .resettable(false)
-        .groups(vec![a2a_agents_list_group()])
+        .groups(vec![a2a_agents_list_group(), local_module_agents_group()])
 }
 
 fn a2a_agents_list_group() -> SettingGroup {
@@ -495,4 +497,125 @@ fn show_edit_key_dialog(
                 ),
             )
     });
+}
+
+fn local_module_agents_group() -> SettingGroup {
+    SettingGroup::new()
+        .title("Local Module Agents")
+        .description(
+            "WASM modules installed in the modules directory that expose agent capabilities. \
+             These can be invoked with `/agent <name> <prompt>`. \
+             Manage modules in the Modules settings page.",
+        )
+        .items(vec![SettingItem::render(|_options, _window, cx| {
+            let module_agents: Vec<DiscoveredModuleEntry> = cx
+                .try_global::<DiscoveredModulesModel>()
+                .map(|model| {
+                    model
+                        .modules
+                        .iter()
+                        .filter(|m| m.agent && matches!(m.status, ModuleLoadStatus::Loaded))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if module_agents.is_empty() {
+                v_flex()
+                    .w_full()
+                    .py_6()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No local module agents found."),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .mt_1()
+                            .child(
+                                "Install a WASM module with agent capability in the modules \
+                                 directory to see it here.",
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .children(module_agents.iter().map(|module| {
+                        let tools_summary = if module.tools.is_empty() {
+                            "no tools".to_string()
+                        } else {
+                            module.tools.join(", ")
+                        };
+                        let a2a_badge = module.a2a.then(|| {
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .text_xs()
+                                .bg(cx.theme().accent)
+                                .text_color(cx.theme().accent_foreground)
+                                .child("A2A")
+                        });
+
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().card)
+                            .gap_3()
+                            .child(
+                                Icon::new(IconName::Bot)
+                                    .size(px(18.))
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_semibold()
+                                                    .child(module.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!("v{}", module.version)),
+                                            )
+                                            .when_some(a2a_badge, |this, badge| this.child(badge)),
+                                    )
+                                    .when(!module.description.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(module.description.clone()),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("Tools: {}", tools_summary)),
+                                    ),
+                            )
+                    }))
+                    .into_any_element()
+            }
+        })])
 }
