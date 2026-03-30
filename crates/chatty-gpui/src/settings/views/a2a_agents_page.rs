@@ -1,5 +1,6 @@
 use crate::settings::controllers::a2a_controller;
 use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
+use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::a2a_store::{A2aAgentStatus, A2aAgentsModel};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -510,6 +511,11 @@ fn local_module_agents_group() -> SettingGroup {
              Manage modules in the Modules settings page.",
         )
         .items(vec![SettingItem::render(|_options, _window, cx| {
+            let runtime_enabled = cx
+                .try_global::<ModuleSettingsModel>()
+                .map(|s| s.enabled)
+                .unwrap_or(false);
+
             let module_agents: Vec<DiscoveredModuleEntry> = cx
                 .try_global::<DiscoveredModulesModel>()
                 .map(|model| {
@@ -523,6 +529,20 @@ fn local_module_agents_group() -> SettingGroup {
                 .unwrap_or_default();
 
             if module_agents.is_empty() {
+                let (primary_msg, hint_msg) = if !runtime_enabled {
+                    (
+                        "Module runtime is disabled.",
+                        "Enable the module runtime in Settings → Modules to discover local \
+                         WASM module agents.",
+                    )
+                } else {
+                    (
+                        "No local module agents found.",
+                        "Install a WASM module with agent capability in the modules \
+                         directory to see it here.",
+                    )
+                };
+
                 v_flex()
                     .w_full()
                     .py_6()
@@ -531,17 +551,14 @@ fn local_module_agents_group() -> SettingGroup {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("No local module agents found."),
+                            .child(primary_msg),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .mt_1()
-                            .child(
-                                "Install a WASM module with agent capability in the modules \
-                                 directory to see it here.",
-                            ),
+                            .child(hint_msg),
                     )
                     .into_any_element()
             } else {
