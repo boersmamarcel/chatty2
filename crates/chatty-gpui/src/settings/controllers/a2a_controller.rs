@@ -1,5 +1,5 @@
-use chatty_core::settings::models::a2a_store::{A2aAgentConfig, A2aAgentStatus, A2aAgentsModel};
 use chatty_core::services::A2aClient;
+use chatty_core::settings::models::a2a_store::{A2aAgentConfig, A2aAgentStatus, A2aAgentsModel};
 use gpui::{App, AsyncApp};
 use tracing::{error, info};
 
@@ -40,11 +40,7 @@ pub fn update_agent_api_key(agent_name: String, api_key: Option<String>, cx: &mu
 
     let updated = {
         let model = cx.global_mut::<A2aAgentsModel>();
-        if let Some(agent) = model
-            .agents_mut()
-            .iter_mut()
-            .find(|a| a.name == agent_name)
-        {
+        if let Some(agent) = model.agents_mut().iter_mut().find(|a| a.name == agent_name) {
             agent.api_key = api_key;
         } else {
             error!(agent = %agent_name, "Agent not found for API key update");
@@ -66,11 +62,7 @@ pub fn update_agent_api_key(agent_name: String, api_key: Option<String>, cx: &mu
 pub fn toggle_agent(agent_name: String, cx: &mut App) {
     let updated = {
         let model = cx.global_mut::<A2aAgentsModel>();
-        if let Some(agent) = model
-            .agents_mut()
-            .iter_mut()
-            .find(|a| a.name == agent_name)
-        {
+        if let Some(agent) = model.agents_mut().iter_mut().find(|a| a.name == agent_name) {
             agent.enabled = !agent.enabled;
             info!(
                 agent = %agent_name,
@@ -143,10 +135,8 @@ pub fn probe_agent_card(agent_name: String, cx: &mut App) {
                     let model = cx.global_mut::<A2aAgentsModel>();
                     model.set_status(agent_name.clone(), A2aAgentStatus::Connected);
                     // Update cached skills
-                    if let Some(agent) = model
-                        .agents_mut()
-                        .iter_mut()
-                        .find(|a| a.name == agent_name)
+                    if let Some(agent) =
+                        model.agents_mut().iter_mut().find(|a| a.name == agent_name)
                     {
                         agent.skills = skills;
                     }

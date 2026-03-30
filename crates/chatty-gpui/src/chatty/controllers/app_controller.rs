@@ -2750,12 +2750,7 @@ impl ChattyApp {
     }
 
     /// Dispatch a task to a remote A2A agent and display the result.
-    fn launch_a2a_agent(
-        &mut self,
-        agent_name: String,
-        prompt: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn launch_a2a_agent(&mut self, agent_name: String, prompt: String, cx: &mut Context<Self>) {
         info!(agent = %agent_name, prompt = %prompt, "Dispatching task to remote A2A agent");
 
         // Capture the config snapshot now (before the async spawn).
@@ -2782,10 +2777,7 @@ impl ChattyApp {
         // Show immediate progress feedback.
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
-            view.start_sub_agent_progress(
-                &format!("[A2A: {agent_name}] {prompt_for_display}"),
-                cx,
-            );
+            view.start_sub_agent_progress(&format!("[A2A: {agent_name}] {prompt_for_display}"), cx);
         });
 
         let chat_view = self.chat_view.clone();

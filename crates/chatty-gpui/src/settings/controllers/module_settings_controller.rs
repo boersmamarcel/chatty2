@@ -1,7 +1,7 @@
+use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::{
     ModuleSettingsModel, default_module_dir, normalize_module_dir,
 };
-use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 use anyhow::{Context, Result};
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};

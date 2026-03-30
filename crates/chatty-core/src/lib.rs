@@ -76,9 +76,7 @@ pub fn init_repositories() -> anyhow::Result<()> {
         .set(Arc::new(JsonModelsRepository::new()?))
         .ok();
     MCP_REPOSITORY.set(Arc::new(JsonMcpRepository::new()?)).ok();
-    A2A_REPOSITORY
-        .set(Arc::new(A2aJsonRepository::new()?))
-        .ok();
+    A2A_REPOSITORY.set(Arc::new(A2aJsonRepository::new()?)).ok();
     EXECUTION_SETTINGS_REPOSITORY
         .set(Arc::new(ExecutionSettingsJsonRepository::new()?))
         .ok();

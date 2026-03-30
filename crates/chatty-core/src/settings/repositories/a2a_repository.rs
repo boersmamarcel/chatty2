@@ -11,8 +11,5 @@ pub trait A2aRepository: Send + Sync + 'static {
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<A2aAgentConfig>>>;
 
     /// Save all A2A agent configurations to storage.
-    fn save_all(
-        &self,
-        agents: Vec<A2aAgentConfig>,
-    ) -> BoxFuture<'static, RepositoryResult<()>>;
+    fn save_all(&self, agents: Vec<A2aAgentConfig>) -> BoxFuture<'static, RepositoryResult<()>>;
 }

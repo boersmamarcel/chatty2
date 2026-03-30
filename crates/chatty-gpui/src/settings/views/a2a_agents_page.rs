@@ -53,9 +53,7 @@ fn a2a_agents_list_group() -> SettingGroup {
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .pt_1()
-                                    .child(
-                                        "Click \u{201c}Add Agent\u{201d} below to get started.",
-                                    ),
+                                    .child("Click \u{201c}Add Agent\u{201d} below to get started."),
                             ),
                     )
                 })
@@ -274,11 +272,9 @@ fn render_agent_row(
 
 /// Open dialog to add a new A2A agent.
 fn show_add_agent_dialog(window: &mut Window, cx: &mut App) {
-    let name_input =
-        cx.new(|cx| InputState::new(window, cx).placeholder("e.g. voucher-agent"));
-    let url_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("https://hive.dev/a2a/voucher-agent")
-    });
+    let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. voucher-agent"));
+    let url_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder("https://hive.dev/a2a/voucher-agent"));
     let api_key_input = cx.new(|cx| {
         InputState::new(window, cx)
             .masked(true)
@@ -318,15 +314,10 @@ fn show_add_agent_dialog(window: &mut Window, cx: &mut App) {
                                 .child(div().text_sm().child("API Key (optional)"))
                                 .child(Input::new(&api_key_input).mask_toggle()),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_fg)
-                                .child(
-                                    "Chatty will fetch the agent card automatically. \
+                        .child(div().text_xs().text_color(muted_fg).child(
+                            "Chatty will fetch the agent card automatically. \
                                      Call this agent with `/agent <name> <prompt>`.",
-                                ),
-                        )
+                        ))
                         .child(
                             h_flex()
                                 .gap_2()

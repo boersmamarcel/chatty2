@@ -295,14 +295,15 @@ async fn handle_message_stream(
 
     // Build an SSE stream that:
     //   1. Emits a TaskStatusUpdateEvent with state "working"
-    //   2. Calls module.chat() (blocking from the stream's perspective)
+    //   2. Awaits module.chat() (request/response, not streaming)
     //   3. Emits a TaskArtifactUpdateEvent with the full response
     //   4. Emits a final TaskStatusUpdateEvent with state "completed"
     //
     // Note: The underlying WASM `chat` export is request/response, so we
-    // cannot emit token-level chunks today.  When the WIT interface gains a
-    // streaming chat export, this handler can emit finer-grained artifact
-    // events without changing the SSE wire format.
+    // emit the full response as a single artifact chunk after chat completes.
+    // When the WIT interface gains a streaming chat export, this handler can
+    // emit finer-grained token-level events without changing the SSE wire
+    // format.
     let stream = async_stream::stream! {
         // 1. "working" status
         let working = json!({

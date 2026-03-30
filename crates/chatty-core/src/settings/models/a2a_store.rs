@@ -88,9 +88,7 @@ impl A2aAgentsModel {
 
     /// Look up an enabled agent by name.
     pub fn find_enabled(&self, name: &str) -> Option<&A2aAgentConfig> {
-        self.agents
-            .iter()
-            .find(|a| a.enabled && a.name == name)
+        self.agents.iter().find(|a| a.enabled && a.name == name)
     }
 
     /// Get the connection status for a given agent.

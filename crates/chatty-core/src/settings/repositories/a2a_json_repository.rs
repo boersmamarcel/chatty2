@@ -40,10 +40,7 @@ impl A2aRepository for A2aJsonRepository {
         })
     }
 
-    fn save_all(
-        &self,
-        agents: Vec<A2aAgentConfig>,
-    ) -> BoxFuture<'static, RepositoryResult<()>> {
+    fn save_all(&self, agents: Vec<A2aAgentConfig>) -> BoxFuture<'static, RepositoryResult<()>> {
         let path = self.file_path.clone();
 
         Box::pin(async move {

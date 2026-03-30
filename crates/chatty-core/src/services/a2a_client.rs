@@ -299,28 +299,20 @@ impl A2aClient {
             let mut buffer = String::new();
             let mut byte_stream = byte_stream;
 
-            while let Some(chunk_result) = byte_stream.try_next().await.transpose() {
-                match chunk_result {
-                    Ok(bytes) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Ok(Some(bytes)) = byte_stream.try_next().await {
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-                        // SSE events are separated by double newlines.
-                        while let Some(pos) = buffer.find("\n\n") {
-                            let event_block = buffer[..pos].to_string();
-                            buffer = buffer[pos + 2..].to_string();
+                // SSE events are separated by double newlines.
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event_block = buffer[..pos].to_string();
+                    buffer = buffer[pos + 2..].to_string();
 
-                            if let Some(evt) = parse_sse_event(&event_block) {
-                                let is_final = matches!(&evt, A2aStreamEvent::StatusUpdate { is_final: true, .. });
-                                yield Ok(evt);
-                                if is_final {
-                                    return;
-                                }
-                            }
+                    if let Some(evt) = parse_sse_event(&event_block) {
+                        let is_final = matches!(&evt, A2aStreamEvent::StatusUpdate { is_final: true, .. });
+                        yield Ok(evt);
+                        if is_final {
+                            return;
                         }
-                    }
-                    Err(e) => {
-                        yield Err(anyhow::anyhow!("SSE stream error: {}", e));
-                        return;
                     }
                 }
             }
@@ -362,7 +354,7 @@ fn parse_sse_event(block: &str) -> Option<A2aStreamEvent> {
                 .or_else(|| line.strip_prefix("data: "))
         })
         .collect::<Vec<_>>()
-        .join("");
+        .join("\n");
 
     if data.is_empty() {
         return None;
