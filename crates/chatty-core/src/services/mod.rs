@@ -21,7 +21,7 @@ pub mod skill_service;
 pub mod title_generator;
 pub mod typst_compiler_service;
 
-pub use a2a_client::A2aClient;
+pub use a2a_client::{A2aClient, A2aStreamEvent};
 pub use auto_context::{AutoContextRequest, load_auto_context_block};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;

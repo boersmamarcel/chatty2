@@ -14,6 +14,7 @@ gRPC, no WebSocket (except MCP SSE), and no binary framing.
 | MCP JSON-RPC | `POST /mcp/{module}` | `application/json` |
 | MCP SSE stream | `GET /mcp/{module}/sse` | `text/event-stream` |
 | A2A JSON-RPC | `POST /a2a/{module}` | `application/json` |
+| A2A streaming | `POST /a2a/{module}` (method: `message/stream`) | `text/event-stream` |
 | Agent card (per module) | `GET /a2a/{module}/.well-known/agent.json` | `application/json` |
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
 
@@ -35,16 +36,34 @@ output.
 
 ### 3 · A2A (Agent-to-Agent)
 
-Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `tasks/get`). Like the
-Completion API, the full agentic loop runs inside the WASM module. The
-response is wrapped in an A2A `message` envelope with typed `parts`:
+Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `message/stream`,
+`tasks/get`). Like the Completion API, the full agentic loop runs inside the
+WASM module.
+
+**`message/send`** returns a complete JSON-RPC response:
 
 ```json
-{ "result": { "message": { "role": "agent", "parts": [{ "type": "text", "text": "…" }] } } }
+{ "result": { "id": "task-…", "status": { "state": "completed" }, "artifacts": [{ "parts": [{ "type": "text", "text": "…" }] }] } }
 ```
 
-A2A differs from the Completion API only in the JSON envelope — the
-underlying computation is identical.
+**`message/stream`** returns an SSE stream (`text/event-stream`) with
+incremental updates per the [A2A streaming spec](https://a2a-protocol.org/latest/topics/streaming-and-async/):
+
+```
+data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","status":{"state":"working"},"final":false}}
+
+data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","artifact":{"parts":[{"type":"text","text":"…"}],"index":0,"lastChunk":true}}}
+
+data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","status":{"state":"completed"},"final":true}}
+```
+
+The agent card advertises `"capabilities": { "streaming": true }` so clients
+can discover streaming support.
+
+> **Note:** The underlying WASM `chat` export is currently request/response,
+> so the gateway emits the full response as a single artifact chunk. When the
+> WIT interface gains a streaming chat export, this handler will emit
+> finer-grained token-level events without changing the SSE wire format.
 
 ## Architecture
 
@@ -67,7 +86,8 @@ All three handlers call the same underlying WIT exports:
 |---------|-------------------|
 | OpenAI  | `agent::chat`     |
 | MCP     | `agent::list-tools`, `agent::invoke-tool` |
-| A2A     | `agent::chat`     |
+| A2A `message/send` | `agent::chat` |
+| A2A `message/stream` | `agent::chat` (SSE wrapper) |
 
 ## Running
 
