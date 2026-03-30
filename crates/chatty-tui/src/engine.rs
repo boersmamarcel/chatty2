@@ -312,6 +312,7 @@ impl ChatEngine {
             self.embedding_service.clone(),
             !self.is_sub_agent,
             Vec::new(), // no WASM module discovery in TUI/headless mode
+            None,       // no gateway port in TUI
         )
         .await
         .context("Failed to create conversation")?;
@@ -394,6 +395,7 @@ impl ChatEngine {
                 embedding_service,
                 !is_sub_agent,
                 Vec::new(), // no WASM module discovery in TUI/headless mode
+                None,       // no gateway port in TUI
             )
             .await;
 

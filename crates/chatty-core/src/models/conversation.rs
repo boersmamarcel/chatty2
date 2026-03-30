@@ -95,6 +95,7 @@ impl Conversation {
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -133,6 +134,7 @@ impl Conversation {
             embedding_service,
             allow_sub_agent,
             module_agents,
+            gateway_port,
         )
         .await
         .context("Failed to create agent from config")?;
@@ -179,6 +181,7 @@ impl Conversation {
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -215,6 +218,7 @@ impl Conversation {
             embedding_service,
             allow_sub_agent,
             module_agents,
+            gateway_port,
         )
         .await
         .context("Failed to create agent from config")?;

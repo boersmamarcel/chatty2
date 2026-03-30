@@ -139,8 +139,7 @@ impl Tool for ListAgentsTool {
              Local WASM module agents are installed in the modules directory."
                 .to_string()
         } else {
-            "To invoke an agent, use the `sub_agent` tool with the agent's name included in \
-             the task description (e.g. task: \"Use benford-agent to analyze …\"). \
+            "To invoke an agent, use the `invoke_agent` tool with the agent's name and a prompt. \
              Only enabled remote agents can be called; local module agents are always available. \
              If a remote agent and a local module share the same name, the remote agent takes \
              precedence."

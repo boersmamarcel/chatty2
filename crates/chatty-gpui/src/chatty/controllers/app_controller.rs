@@ -279,6 +279,13 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let module_agents = cx
         .update(|cx| collect_module_agents(cx))
         .unwrap_or_default();
+    let gateway_port = cx
+        .update(|cx| {
+            cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+                .map(|m| m.gateway_port)
+        })
+        .ok()
+        .flatten();
 
     let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
         &model_config,
@@ -296,6 +303,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         embedding_service,
         true, // interactive agent: sub-agent tool is allowed
         module_agents,
+        gateway_port,
     )
     .await?;
 
@@ -740,6 +748,7 @@ impl ChattyApp {
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
         module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
     ) -> anyhow::Result<Conversation> {
         let mut effective_exec_settings = exec_settings.clone();
         if let Some(working_dir) = data.working_dir.as_ref() {
@@ -793,6 +802,7 @@ impl ChattyApp {
             embedding_service,
             true, // interactive agent: sub-agent tool is allowed
             module_agents,
+            gateway_port,
         )
         .await
     }
@@ -1066,6 +1076,13 @@ impl ChattyApp {
                     let module_agents = cx
                         .update(|cx| collect_module_agents(cx))
                         .unwrap_or_default();
+                    let gateway_port = cx
+                        .update(|cx| {
+                            cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+                                .map(|m| m.gateway_port)
+                        })
+                        .ok()
+                        .flatten();
 
                     let mut conversation = Conversation::new(
                         conv_id.clone(),
@@ -1083,6 +1100,7 @@ impl ChattyApp {
                         embedding_service,
                         true, // interactive agent: sub-agent tool is allowed
                         module_agents,
+                        gateway_port,
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1181,6 +1199,9 @@ impl ChattyApp {
             // Slow path: fetch from SQLite, restore, then display
             let repo = self.conversation_repo.clone();
             let module_agents = collect_module_agents(cx);
+            let gateway_port = cx
+                .try_global::<crate::settings::models::ModuleSettingsModel>()
+                .map(|m| m.gateway_port);
             cx.spawn(async move |weak, cx| {
                 let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
@@ -1203,7 +1224,7 @@ impl ChattyApp {
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
                             theme_colors, memory_service, search_settings, embedding_service,
-                            module_agents,
+                            module_agents, gateway_port,
                         )
                         .await
                         {
@@ -1566,6 +1587,13 @@ impl ChattyApp {
                         let module_agents = cx
                             .update(|cx| collect_module_agents(cx))
                             .unwrap_or_default();
+                        let gateway_port = cx
+                            .update(|cx| {
+                                cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+                                    .map(|m| m.gateway_port)
+                            })
+                            .ok()
+                            .flatten();
 
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session) =
@@ -1585,6 +1613,7 @@ impl ChattyApp {
                                 embedding_service,
                                 true, // interactive agent: sub-agent tool is allowed
                                 module_agents,
+                                gateway_port,
                             )
                             .await?;
 

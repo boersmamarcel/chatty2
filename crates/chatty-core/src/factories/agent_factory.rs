@@ -19,12 +19,12 @@ use crate::tools::{
     CreateChartTool, CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool,
     DescribeDataTool, EditExcelTool, EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool,
     FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
-    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListAgentsTool, ListDirectoryTool,
-    ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool, PdfExtractTextTool,
-    PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool, ReadBinaryTool, ReadExcelTool,
-    ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool,
-    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool,
-    WriteExcelTool, WriteFileTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool,
+    ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool,
+    PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
+    ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
+    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -178,6 +178,7 @@ fn active_native_tool_names(
         String::from("list_tools"),
         String::from("read_skill"),
         String::from("list_agents"),
+        String::from("invoke_agent"),
     ]);
 
     if has_add_mcp {
@@ -443,10 +444,12 @@ fn collect_tools(
     browser_use_tool: Option<BrowserUseTool>,
     daytona_tool: Option<DaytonaTool>,
     list_agents_tool: ListAgentsTool,
+    invoke_agent_tool: InvokeAgentTool,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
     tools.push(Box::new(list_agents_tool)); // always present
+    tools.push(Box::new(invoke_agent_tool)); // always present
     if let Some(t) = mcp_mgmt.list {
         tools.push(Box::new(t));
     }
@@ -582,6 +585,7 @@ impl AgentClient {
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
     ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
@@ -1249,7 +1253,11 @@ impl AgentClient {
 
         // Create list_agents tool (always available, shows A2A agents + local module agents)
         let list_agents_tool =
-            ListAgentsTool::new_with_modules(crate::a2a_repository(), module_agents);
+            ListAgentsTool::new_with_modules(crate::a2a_repository(), module_agents.clone());
+
+        // Create invoke_agent tool (always available, calls agents by name)
+        let invoke_agent_tool =
+            InvokeAgentTool::new(crate::a2a_repository(), module_agents, gateway_port);
 
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
@@ -1390,11 +1398,16 @@ impl AgentClient {
                     .to_string(),
             );
         }
-        // list_agents is always present
+        // list_agents + invoke_agent are always present
         tool_sections.push(
-            "- **list_agents**: List all configured remote A2A agents with their names, URLs, \
-             and skills. Call this to discover what agents are available before delegating \
-             a task with `/agent <name> <prompt>`."
+            "- **list_agents**: List all available agents (remote A2A and local WASM modules). \
+             Call this to discover agents before invoking them."
+                .to_string(),
+        );
+        tool_sections.push(
+            "- **invoke_agent**: Invoke a named agent with a prompt. Use `list_agents` first to \
+             discover available agents, then call `invoke_agent` with the agent's name and your \
+             prompt. The agent runs autonomously and returns its response."
                 .to_string(),
         );
         if execute_code_tool.is_some() {
@@ -1599,6 +1612,7 @@ impl AgentClient {
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1678,6 +1692,7 @@ impl AgentClient {
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1724,6 +1739,7 @@ impl AgentClient {
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1773,6 +1789,7 @@ impl AgentClient {
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1821,6 +1838,7 @@ impl AgentClient {
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -2007,6 +2025,7 @@ impl AgentClient {
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
