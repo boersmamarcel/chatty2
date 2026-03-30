@@ -1173,8 +1173,11 @@ impl AgentClient {
             let available_model_ids = match crate::models_repository().load_all().await {
                 Ok(models) => models.iter().map(|m| m.id.clone()).collect(),
                 Err(e) => {
-                    tracing::warn!(error = ?e, "Failed to load models for sub-agent validation; \
-                            model parameter validation will be skipped");
+                    tracing::warn!(
+                        error = ?e,
+                        "Failed to load models for sub-agent validation; \
+                         model parameter validation will be skipped"
+                    );
                     Vec::new()
                 }
             };
