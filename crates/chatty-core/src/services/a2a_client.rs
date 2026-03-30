@@ -297,9 +297,9 @@ impl A2aClient {
             use futures::TryStreamExt;
 
             let mut buffer = String::new();
-            let mut byte_stream = byte_stream;
+            let mut stream = byte_stream;
 
-            while let Ok(Some(bytes)) = byte_stream.try_next().await {
+            while let Ok(Some(bytes)) = stream.try_next().await {
                 buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                 // SSE events are separated by double newlines.
