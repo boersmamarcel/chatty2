@@ -140,7 +140,9 @@ impl Tool for ListAgentsTool {
                 .to_string()
         } else {
             "Invoke an agent with `/agent <name> <prompt>`. \
-             Only enabled remote agents can be called; local module agents are always available."
+             Only enabled remote agents can be called; local module agents are always available. \
+             If a remote agent and a local module share the same name, the remote agent takes \
+             precedence."
                 .to_string()
         };
 
