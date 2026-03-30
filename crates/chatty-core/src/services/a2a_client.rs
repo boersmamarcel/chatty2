@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde_json::{Value, json};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::settings::models::a2a_store::A2aAgentConfig;
 
@@ -213,7 +213,6 @@ impl A2aClient {
         config: &A2aAgentConfig,
         prompt: &str,
     ) -> Result<BoxStream<'static, Result<A2aStreamEvent>>> {
-        use futures::StreamExt;
         use reqwest::header;
 
         let url = config.url.trim_end_matches('/').to_string();

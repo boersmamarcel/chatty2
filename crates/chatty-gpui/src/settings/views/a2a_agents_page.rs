@@ -6,7 +6,9 @@ use gpui::*;
 use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme, Icon, IconName, Sizable, StyledExt as _, WindowExt as _, h_flex, v_flex,
+};
 
 pub fn a2a_agents_page() -> SettingPage {
     SettingPage::new("A2A Agents")
@@ -570,7 +572,7 @@ fn local_module_agents_group() -> SettingGroup {
                             .rounded_lg()
                             .border_1()
                             .border_color(cx.theme().border)
-                            .bg(cx.theme().card)
+                            .bg(cx.theme().muted)
                             .gap_3()
                             .child(
                                 Icon::new(IconName::Bot)
