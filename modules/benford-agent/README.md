@@ -338,10 +338,16 @@ envelope differs (`choices[0].message.content` vs `result.message.parts[0].text`
 
 ### Side-by-side summary
 
+> **Transport**: All three protocols use plain **HTTP + JSON over TCP**. There is
+> **no gRPC** anywhere in the chatty protocol gateway. The word "protocol" in
+> each name refers to the JSON message schema, not the network transport.
+
 | | **Completion API** | **MCP** | **A2A** |
 |---|---|---|---|
 | **Endpoint** | `POST /v1/benford-agent/chat/completions` | `POST /mcp/benford-agent` | `POST /a2a/benford-agent` |
-| **Protocol** | OpenAI chat completions | JSON-RPC 2.0 `tools/list`, `tools/call` | JSON-RPC 2.0 `message/send` |
+| **Transport** | HTTP + JSON | HTTP + JSON | HTTP + JSON |
+| **Message schema** | OpenAI chat completions | JSON-RPC 2.0 `tools/list`, `tools/call` | JSON-RPC 2.0 `message/send` |
+| **Uses gRPC?** | ❌ No | ❌ No | ❌ No |
 | **Agentic loop** | ✅ Full (LLM → tools → LLM) | ❌ No — raw tool calls only | ✅ Full (LLM → tools → LLM) |
 | **Response envelope** | `choices[0].message.content` | `result.content[0].text` (raw JSON) | `result.message.parts[0].text` |
 | **Response content** | Narrative audit report | Raw statistical output | Narrative audit report |
