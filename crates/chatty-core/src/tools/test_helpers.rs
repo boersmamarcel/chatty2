@@ -1,12 +1,14 @@
-/// Shared test helpers for MCP tool unit tests.
+/// Shared test helpers for MCP and A2A tool unit tests.
 ///
-/// Provides `MockMcpRepository` — a fully in-memory implementation of
-/// [`McpRepository`] used by `add_mcp_tool`, `delete_mcp_tool`, and
-/// `edit_mcp_tool` test suites.
+/// Provides:
+/// - `MockMcpRepository` — in-memory [`McpRepository`] for MCP tool tests.
+/// - `MockA2aRepository` — in-memory [`A2aRepository`] for A2A tool tests.
+use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::mcp_store::McpServerConfig;
-use crate::settings::repositories::McpRepository;
+use crate::settings::repositories::a2a_repository::BoxFuture as A2aBoxFuture;
 use crate::settings::repositories::mcp_repository::BoxFuture;
 use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
+use crate::settings::repositories::{A2aRepository, McpRepository};
 use std::sync::Mutex;
 
 /// In-memory mock of [`McpRepository`] for unit tests.
@@ -85,5 +87,56 @@ impl McpRepository for MockMcpRepository {
                 Ok(())
             }
         })
+    }
+}
+
+/// In-memory mock of [`A2aRepository`] for unit tests.
+pub struct MockA2aRepository {
+    pub agents: Mutex<Vec<A2aAgentConfig>>,
+    /// If set, `load_all` returns this error.
+    pub load_error: Mutex<Option<String>>,
+}
+
+impl MockA2aRepository {
+    pub fn new() -> Self {
+        Self {
+            agents: Mutex::new(Vec::new()),
+            load_error: Mutex::new(None),
+        }
+    }
+
+    pub fn with_agents(agents: Vec<A2aAgentConfig>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+            load_error: Mutex::new(None),
+        }
+    }
+
+    pub fn with_load_error(error: &str) -> Self {
+        Self {
+            agents: Mutex::new(Vec::new()),
+            load_error: Mutex::new(Some(error.to_string())),
+        }
+    }
+}
+
+impl A2aRepository for MockA2aRepository {
+    fn load_all(&self) -> A2aBoxFuture<'static, RepositoryResult<Vec<A2aAgentConfig>>> {
+        let agents = self.agents.lock().unwrap().clone();
+        let error = self.load_error.lock().unwrap().clone();
+        Box::pin(async move {
+            if let Some(err) = error {
+                Err(RepositoryError::IoError(err))
+            } else {
+                Ok(agents)
+            }
+        })
+    }
+
+    fn save_all(
+        &self,
+        _agents: Vec<A2aAgentConfig>,
+    ) -> A2aBoxFuture<'static, RepositoryResult<()>> {
+        Box::pin(async move { Ok(()) })
     }
 }

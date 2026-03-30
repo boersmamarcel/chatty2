@@ -19,11 +19,12 @@ use crate::tools::{
     CreateChartTool, CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool,
     DescribeDataTool, EditExcelTool, EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool,
     FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
-    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
-    ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
-    QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool,
-    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListAgentsTool, ListDirectoryTool,
+    ListMcpTool, ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool,
+    PendingArtifacts, QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool,
+    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool,
+    WriteFileTool,
 };
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -173,7 +174,11 @@ fn active_native_tool_names(
     has_browser_use: bool,
     has_daytona: bool,
 ) -> HashSet<String> {
-    let mut names = HashSet::from([String::from("list_tools"), String::from("read_skill")]);
+    let mut names = HashSet::from([
+        String::from("list_tools"),
+        String::from("read_skill"),
+        String::from("list_agents"),
+    ]);
 
     if has_add_mcp {
         names.extend(
@@ -437,9 +442,11 @@ fn collect_tools(
     sub_agent_tool: Option<SubAgentTool>,
     browser_use_tool: Option<BrowserUseTool>,
     daytona_tool: Option<DaytonaTool>,
+    list_agents_tool: ListAgentsTool,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
+    tools.push(Box::new(list_agents_tool)); // always present
     if let Some(t) = mcp_mgmt.list {
         tools.push(Box::new(t));
     }
@@ -1222,6 +1229,9 @@ impl AgentClient {
             mcp_tool_info,
         );
 
+        // Create list_agents tool (always available, shows configured A2A agents)
+        let list_agents_tool = ListAgentsTool::new(crate::a2a_repository());
+
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
         // to call list_tools first.
@@ -1361,6 +1371,13 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        // list_agents is always present
+        tool_sections.push(
+            "- **list_agents**: List all configured remote A2A agents with their names, URLs, \
+             and skills. Call this to discover what agents are available before delegating \
+             a task with `/agent <name> <prompt>`."
+                .to_string(),
+        );
         if execute_code_tool.is_some() {
             tool_sections.push(
                 "- **execute_code**: Execute code in an isolated Docker sandbox. \
@@ -1560,6 +1577,7 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1638,6 +1656,7 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1683,6 +1702,7 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1731,6 +1751,7 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1778,6 +1799,7 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1963,6 +1985,7 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -2098,6 +2121,7 @@ mod tests {
             "read_skill must always be reserved to prevent MCP conflicts"
         );
         assert!(names.contains("list_tools"));
+        assert!(names.contains("list_agents"));
     }
 
     #[test]

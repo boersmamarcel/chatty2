@@ -12,6 +12,7 @@ pub mod fetch_tool;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod git_tool;
+pub mod list_agents_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
 mod path_utils;
@@ -49,6 +50,7 @@ pub use git_tool::{
     GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool,
 };
+pub use list_agents_tool::ListAgentsTool;
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
 pub use pdf_extract_text_tool::PdfExtractTextTool;
