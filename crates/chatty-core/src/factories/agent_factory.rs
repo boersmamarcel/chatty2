@@ -1155,28 +1155,43 @@ impl AgentClient {
 
         // Sub-agent tool — gated on execution being enabled and on the caller not
         // being a sub-agent itself (sub-agents must not spawn further sub-agents).
-        let sub_agent_tool: Option<SubAgentTool> =
-            if allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false) {
-                let sub_model_id = model_config.id.clone();
-                let sub_auto_approve = exec_settings
-                    .as_ref()
-                    .map(|s| {
-                        matches!(
+        let sub_agent_tool: Option<SubAgentTool> = if allow_sub_agent
+            && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false)
+        {
+            let sub_model_id = model_config.id.clone();
+            let sub_auto_approve = exec_settings
+                .as_ref()
+                .map(|s| {
+                    matches!(
                         s.approval_mode,
                         crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
                     )
-                    })
-                    .unwrap_or(false);
-                tracing::debug!("Sub-agent tool enabled");
-                Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
-            } else {
-                if !allow_sub_agent {
-                    tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
-                } else {
-                    tracing::debug!("Sub-agent tool disabled: execution not enabled");
+                })
+                .unwrap_or(false);
+            // Load available model IDs so the sub-agent tool can validate
+            // a caller-provided model before spawning the subprocess.
+            let available_model_ids = match crate::models_repository().load_all().await {
+                Ok(models) => models.iter().map(|m| m.id.clone()).collect(),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to load models for sub-agent validation; \
+                            model parameter validation will be skipped");
+                    Vec::new()
                 }
-                None
             };
+            tracing::debug!("Sub-agent tool enabled");
+            Some(SubAgentTool::new(
+                sub_model_id,
+                sub_auto_approve,
+                available_model_ids,
+            ))
+        } else {
+            if !allow_sub_agent {
+                tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
+            } else {
+                tracing::debug!("Sub-agent tool disabled: execution not enabled");
+            }
+            None
+        };
 
         let native_tool_names = active_native_tool_names(
             fs_read_tools.is_some(),
@@ -1402,7 +1417,9 @@ impl AgentClient {
                 "- **sub_agent**: Delegate a task to an independent sub-agent that has access to \
                  the same tools. The sub-agent runs autonomously and returns the result. \
                  Use this to parallelize work or isolate complex sub-tasks. Each sub-agent \
-                 starts fresh — include all necessary context in the task description."
+                 starts fresh — include all necessary context in the task description. \
+                 You can optionally pass a `model` parameter to run the sub-agent with a \
+                 different model (e.g., a faster model for simple tasks)."
                     .to_string(),
             );
         }
