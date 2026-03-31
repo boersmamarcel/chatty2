@@ -658,14 +658,22 @@ cargo build --target wasm32-wasip2 --release
 cp target/wasm32-wasip2/release/my_agent.wasm .
 ```
 
-Once built, place your module in the `.chatty/modules/` directory so Chatty can discover and load it:
+Once built, place your module in the platform-native modules directory so Chatty can discover and load it:
+
+| Platform | Default modules directory |
+|:---------|:--------------------------|
+| macOS | `~/Library/Application Support/chatty/modules/` |
+| Linux | `~/.local/share/chatty/modules/` |
+| Windows | `%APPDATA%\chatty\modules\` |
 
 ```
-.chatty/modules/
+<modules-dir>/
 └── my-agent/
     ├── module.toml   # manifest (name, version, capabilities)
     └── my_agent.wasm
 ```
+
+You can view or change the modules directory and other runtime settings in **Settings > Modules**. The panel also lets you enable/disable the module runtime and configure the gateway port (default 3000).
 
 `chatty-module-sdk` is a standalone crate (not part of the main workspace) that lets you build custom agent modules compiled to `wasm32-wasip2`. It provides the `ModuleExports` trait, `export_module!` macro, and typed host import wrappers for LLM completion, config lookup, and structured logging.
 
