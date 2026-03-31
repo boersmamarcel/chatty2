@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, trace, warn};
 use wasmtime_wasi::{IoView, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
@@ -88,6 +89,8 @@ pub(crate) struct ModuleState {
     pub(crate) wasi_ctx: WasiCtx,
     /// WASI resource table for tracking guest resources.
     pub(crate) table: ResourceTable,
+    /// Optional channel for streaming progress events to the gateway.
+    pub(crate) progress_tx: Option<UnboundedSender<String>>,
 }
 
 impl ModuleState {
@@ -112,6 +115,7 @@ impl ModuleState {
             llm_provider,
             wasi_ctx,
             table,
+            progress_tx: None,
         }
     }
 }
@@ -193,6 +197,10 @@ impl crate::bindings::chatty::module::logging::Host for ModuleState {
             "warn" => warn!(module = %module, "{}", message),
             "error" => error!(module = %module, "{}", message),
             other => info!(module = %module, level = %other, "{}", message),
+        }
+        // Forward to progress channel for real-time streaming
+        if let Some(ref tx) = self.progress_tx {
+            let _ = tx.send(message);
         }
     }
 }

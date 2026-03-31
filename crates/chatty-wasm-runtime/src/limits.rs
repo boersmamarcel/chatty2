@@ -28,9 +28,9 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_fuel: 1_000_000,
+            max_fuel: 100_000_000,
             max_memory_bytes: 64 * 1024 * 1024, // 64 MiB
-            max_execution_ms: 30_000,
+            max_execution_ms: 300_000,
         }
     }
 }
@@ -42,9 +42,9 @@ mod tests {
     #[test]
     fn default_limits_are_sane() {
         let limits = ResourceLimits::default();
-        assert_eq!(limits.max_fuel, 1_000_000);
+        assert_eq!(limits.max_fuel, 100_000_000);
         assert_eq!(limits.max_memory_bytes, 64 * 1024 * 1024);
-        assert_eq!(limits.max_execution_ms, 30_000);
+        assert_eq!(limits.max_execution_ms, 300_000);
     }
 
     #[test]

@@ -586,7 +586,11 @@ impl AgentClient {
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
         gateway_port: Option<u16>,
-    ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
+    ) -> Result<(
+        Self,
+        Option<std::sync::Arc<ShellSession>>,
+        crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
+    )> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
 
@@ -1258,6 +1262,7 @@ impl AgentClient {
         // Create invoke_agent tool (always available, calls agents by name)
         let invoke_agent_tool =
             InvokeAgentTool::new(crate::a2a_repository(), module_agents, gateway_port);
+        let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
@@ -1617,7 +1622,11 @@ impl AgentClient {
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Anthropic(agent), shell_session_out))
+                Ok((
+                    AgentClient::Anthropic(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::OpenAI => {
                 let key =
@@ -1698,7 +1707,11 @@ impl AgentClient {
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::OpenAI(agent), shell_session_out))
+                Ok((
+                    AgentClient::OpenAI(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::Gemini => {
                 let key =
@@ -1744,7 +1757,11 @@ impl AgentClient {
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Gemini(agent), shell_session_out))
+                Ok((
+                    AgentClient::Gemini(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::Mistral => {
                 let key = api_key
@@ -1794,7 +1811,11 @@ impl AgentClient {
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Mistral(agent), shell_session_out))
+                Ok((
+                    AgentClient::Mistral(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -1843,7 +1864,11 @@ impl AgentClient {
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Ollama(agent), shell_session_out))
+                Ok((
+                    AgentClient::Ollama(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::AzureOpenAI => {
                 let raw_endpoint = base_url.ok_or_else(|| {
@@ -2031,7 +2056,11 @@ impl AgentClient {
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::AzureOpenAI(agent), shell_session_out))
+                Ok((
+                    AgentClient::AzureOpenAI(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
         }
     }

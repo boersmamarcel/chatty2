@@ -31,6 +31,8 @@ pub enum A2aStreamEvent {
         task_id: String,
         state: String,
         is_final: bool,
+        /// Optional status message (e.g. progress text or error details).
+        message: Option<String>,
     },
     /// An artifact chunk (text content from the agent).
     ArtifactUpdate {
@@ -51,6 +53,16 @@ impl A2aClient {
         Self {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to build A2A HTTP client"),
+        }
+    }
+
+    /// Create a client with a custom timeout (useful for long-running agent calls).
+    pub fn with_timeout(timeout: std::time::Duration) -> Self {
+        Self {
+            http: Client::builder()
+                .timeout(timeout)
                 .build()
                 .expect("Failed to build A2A HTTP client"),
         }
@@ -279,6 +291,7 @@ impl A2aClient {
                     task_id: tid.clone(),
                     state: "completed".to_string(),
                     is_final: true,
+                    message: None,
                 }),
                 Ok(A2aStreamEvent::ArtifactUpdate {
                     task_id: tid,
@@ -397,10 +410,15 @@ fn parse_sse_event(block: &str) -> Option<A2aStreamEvent> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
+        let message = status
+            .pointer("/message/parts/0/text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         return Some(A2aStreamEvent::StatusUpdate {
             task_id,
             state,
             is_final,
+            message,
         });
     }
 
@@ -420,6 +438,7 @@ mod tests {
                 task_id,
                 state,
                 is_final,
+                ..
             } => {
                 assert_eq!(task_id, "task-abc");
                 assert_eq!(state, "working");

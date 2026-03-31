@@ -1,13 +1,31 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::services::a2a_client::A2aClient;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::repositories::A2aRepository;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
+
+/// Progress events emitted by the invoke_agent tool during streaming execution.
+#[derive(Debug, Clone)]
+pub enum InvokeAgentProgress {
+    /// Agent invocation started.
+    Started { agent_name: String, prompt: String },
+    /// A text chunk from the agent's response.
+    Text(String),
+    /// Agent invocation finished.
+    Finished { success: bool },
+}
+
+/// Shared slot for sending progress events from the tool to the stream loop.
+///
+/// The stream loop installs a fresh sender before each LLM stream. The tool
+/// holds a reference to the slot and sends progress events through it.
+pub type InvokeAgentProgressSlot = Arc<Mutex<Option<UnboundedSender<InvokeAgentProgress>>>>;
 
 /// Arguments for the invoke_agent tool
 #[derive(Deserialize, Serialize)]
@@ -44,7 +62,7 @@ pub enum InvokeAgentError {
 
 /// Tool that invokes a named agent (remote A2A or local WASM module) with a prompt.
 ///
-/// Remote agents are called via `A2aClient::send_message()`.
+/// Remote agents are called via `A2aClient::send_message_stream()` for real-time progress.
 /// Local WASM module agents are called via the protocol gateway's A2A endpoint.
 #[derive(Clone)]
 pub struct InvokeAgentTool {
@@ -54,6 +72,8 @@ pub struct InvokeAgentTool {
     /// used to call local WASM module agents via their A2A endpoint.
     gateway_base_url: Option<String>,
     client: A2aClient,
+    /// Shared slot for sending progress events to the UI stream loop.
+    progress_slot: InvokeAgentProgressSlot,
 }
 
 impl InvokeAgentTool {
@@ -67,7 +87,22 @@ impl InvokeAgentTool {
             repository,
             module_agents,
             gateway_base_url,
-            client: A2aClient::new(),
+            client: A2aClient::with_timeout(std::time::Duration::from_secs(300)),
+            progress_slot: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Returns a clone of the progress slot for the stream loop to install a sender.
+    pub fn progress_slot(&self) -> InvokeAgentProgressSlot {
+        self.progress_slot.clone()
+    }
+
+    /// Send a progress event through the slot (if a sender is installed).
+    fn send_progress(&self, event: InvokeAgentProgress) {
+        if let Ok(guard) = self.progress_slot.lock()
+            && let Some(tx) = guard.as_ref()
+        {
+            let _ = tx.send(event);
         }
     }
 }
@@ -136,7 +171,11 @@ impl Tool for InvokeAgentTool {
             }
 
             info!(agent = %agent_name, url = %config.url, "Invoking remote A2A agent");
-            return self.call_remote(config, &prompt).await;
+            self.send_progress(InvokeAgentProgress::Started {
+                agent_name: agent_name.clone(),
+                prompt: prompt.clone(),
+            });
+            return self.call_streaming(config, &prompt).await;
         }
 
         // 2. Check local WASM module agents
@@ -164,7 +203,11 @@ impl Tool for InvokeAgentTool {
                 enabled: true,
                 skills: module.tools.clone(),
             };
-            return self.call_remote(&config, &prompt).await;
+            self.send_progress(InvokeAgentProgress::Started {
+                agent_name: agent_name.clone(),
+                prompt: prompt.clone(),
+            });
+            return self.call_streaming(&config, &prompt).await;
         }
 
         // 3. Not found
@@ -187,33 +230,86 @@ impl Tool for InvokeAgentTool {
 }
 
 impl InvokeAgentTool {
-    async fn call_remote(
+    /// Call an agent via streaming A2A protocol, forwarding progress events.
+    async fn call_streaming(
         &self,
         config: &A2aAgentConfig,
         prompt: &str,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
-        match self.client.send_message(config, prompt).await {
-            Ok(response) => {
-                let response = response.trim().to_string();
-                debug!(agent = %config.name, response_len = response.len(), "Agent responded");
-                Ok(InvokeAgentOutput {
-                    agent: config.name.clone(),
-                    response: if response.is_empty() {
-                        "Agent completed with no output.".to_string()
-                    } else {
-                        response
-                    },
-                    success: true,
-                })
-            }
-            Err(e) => {
-                warn!(agent = %config.name, error = %e, "Agent invocation failed");
-                Err(InvokeAgentError::InvocationFailed(format!(
+        use futures::StreamExt;
+
+        let mut stream = self
+            .client
+            .send_message_stream(config, prompt)
+            .await
+            .map_err(|e| {
+                self.send_progress(InvokeAgentProgress::Finished { success: false });
+                InvokeAgentError::InvocationFailed(format!(
                     "Failed to invoke agent '{}': {}",
                     config.name, e
-                )))
+                ))
+            })?;
+
+        let mut response = String::new();
+        let mut success = true;
+        let mut error_msg = None;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(crate::services::a2a_client::A2aStreamEvent::StatusUpdate {
+                    state,
+                    message,
+                    ..
+                }) => {
+                    if state == "failed" {
+                        success = false;
+                        error_msg = message.clone();
+                        self.send_progress(InvokeAgentProgress::Finished { success: false });
+                    } else if state == "working" {
+                        if let Some(ref msg) = message {
+                            self.send_progress(InvokeAgentProgress::Text(msg.clone()));
+                        }
+                    } else if state == "completed" {
+                        self.send_progress(InvokeAgentProgress::Finished { success: true });
+                    }
+                }
+                Ok(crate::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
+                    text, ..
+                }) => {
+                    if !text.is_empty() {
+                        self.send_progress(InvokeAgentProgress::Text(text.clone()));
+                        response.push_str(&text);
+                    }
+                }
+                Err(e) => {
+                    warn!(agent = %config.name, error = %e, "Stream error");
+                    success = false;
+                    error_msg = Some(e.to_string());
+                    self.send_progress(InvokeAgentProgress::Finished { success: false });
+                    break;
+                }
             }
         }
+
+        if !success {
+            return Err(InvokeAgentError::InvocationFailed(format!(
+                "Agent '{}' reported failure{}",
+                config.name,
+                error_msg.map(|m| format!(": {}", m)).unwrap_or_default()
+            )));
+        }
+
+        let response = response.trim().to_string();
+        debug!(agent = %config.name, response_len = response.len(), "Agent responded");
+        Ok(InvokeAgentOutput {
+            agent: config.name.clone(),
+            response: if response.is_empty() {
+                "Agent completed with no output.".to_string()
+            } else {
+                response
+            },
+            success: true,
+        })
     }
 }
 

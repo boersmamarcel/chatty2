@@ -293,17 +293,10 @@ async fn handle_message_stream(
         conversation_id: String::new(),
     };
 
-    // Build an SSE stream that:
-    //   1. Emits a TaskStatusUpdateEvent with state "working"
-    //   2. Awaits module.chat() (request/response, not streaming)
-    //   3. Emits a TaskArtifactUpdateEvent with the full response
-    //   4. Emits a final TaskStatusUpdateEvent with state "completed"
-    //
-    // Note: The underlying WASM `chat` export is request/response, so we
-    // emit the full response as a single artifact chunk after chat completes.
-    // When the WIT interface gains a streaming chat export, this handler can
-    // emit finer-grained token-level events without changing the SSE wire
-    // format.
+    // Create a progress channel for real-time streaming of module log messages.
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Build an SSE stream that interleaves progress events with the chat result.
     let stream = async_stream::stream! {
         // 1. "working" status
         let working = json!({
@@ -317,17 +310,81 @@ async fn handle_message_stream(
         });
         yield Ok::<_, std::convert::Infallible>(Event::default().data(working.to_string()));
 
-        // 2. Execute the chat
-        let mut reg = registry.write().await;
-        let chat_result = match reg.get_mut(&module_name) {
-            Some(m) => m.chat(req).await,
-            None => Err(anyhow::anyhow!("module '{}' not found", module_name)),
-        };
-        drop(reg);
+        // 2. Spawn chat in a separate task, install progress sender
+        let mut chat_handle = tokio::task::spawn_blocking({
+            let registry = registry.clone();
+            let module_name = module_name.clone();
+            let req = req;
+            let progress_tx = progress_tx;
+            move || {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    let mut reg = registry.write().await;
+                    if let Some(m) = reg.get_mut(&module_name) {
+                        m.set_progress_sender(progress_tx);
+                        m.chat(req).await
+                    } else {
+                        Err(anyhow::anyhow!("module '{}' not found", module_name))
+                    }
+                })
+            }
+        });
 
+        // 3. Interleave progress events with chat completion
+        let mut chat_done = false;
+        let mut chat_result = None;
+
+        loop {
+            if chat_done {
+                break;
+            }
+
+            tokio::select! {
+                biased;
+                // Check for progress messages first
+                Some(msg) = progress_rx.recv() => {
+                    let progress = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "id": task_id,
+                            "status": {
+                                "state": "working",
+                                "message": { "parts": [{ "type": "text", "text": msg }] }
+                            },
+                            "final": false
+                        }
+                    });
+                    yield Ok(Event::default().data(progress.to_string()));
+                }
+                // Chat task completed
+                result = &mut chat_handle => {
+                    chat_done = true;
+                    chat_result = Some(result);
+                }
+            }
+        }
+
+        // Drain any remaining progress
+        while let Ok(msg) = progress_rx.try_recv() {
+            let progress = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "id": task_id,
+                    "status": {
+                        "state": "working",
+                        "message": { "parts": [{ "type": "text", "text": msg }] }
+                    },
+                    "final": false
+                }
+            });
+            yield Ok(Event::default().data(progress.to_string()));
+        }
+
+        // 4. Emit final result
         match chat_result {
-            Ok(resp) => {
-                // 3. Artifact with the response text
+            Some(Ok(Ok(resp))) => {
                 let artifact = json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -342,7 +399,6 @@ async fn handle_message_stream(
                 });
                 yield Ok(Event::default().data(artifact.to_string()));
 
-                // 4. "completed" status (final)
                 let completed = json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -354,7 +410,7 @@ async fn handle_message_stream(
                 });
                 yield Ok(Event::default().data(completed.to_string()));
             }
-            Err(e) => {
+            Some(Ok(Err(e))) => {
                 let failed = json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -363,6 +419,36 @@ async fn handle_message_stream(
                         "status": {
                             "state": "failed",
                             "message": { "parts": [{ "type": "text", "text": e.to_string() }] }
+                        },
+                        "final": true
+                    }
+                });
+                yield Ok(Event::default().data(failed.to_string()));
+            }
+            Some(Err(e)) => {
+                let failed = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "status": {
+                            "state": "failed",
+                            "message": { "parts": [{ "type": "text", "text": format!("Task panicked: {e}") }] }
+                        },
+                        "final": true
+                    }
+                });
+                yield Ok(Event::default().data(failed.to_string()));
+            }
+            None => {
+                let failed = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "status": {
+                            "state": "failed",
+                            "message": { "parts": [{ "type": "text", "text": "No result received" }] }
                         },
                         "final": true
                     }
