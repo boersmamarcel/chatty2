@@ -4364,10 +4364,10 @@ async fn run_llm_stream(
                             })
                             .ok();
                     }
-                    InvokeAgentProgress::Finished { success } => {
+                    InvokeAgentProgress::Finished { success, result } => {
                         chat_view
                             .update(cx, |view, cx| {
-                                view.finalize_sub_agent_progress(success, None, cx);
+                                view.finalize_sub_agent_progress(success, result, cx);
                             })
                             .ok();
                     }
@@ -4477,10 +4477,10 @@ async fn run_llm_stream(
                     })
                     .ok();
             }
-            InvokeAgentProgress::Finished { success } => {
+            InvokeAgentProgress::Finished { success, result } => {
                 chat_view
                     .update(cx, |view, cx| {
-                        view.finalize_sub_agent_progress(success, None, cx);
+                        view.finalize_sub_agent_progress(success, result, cx);
                     })
                     .ok();
             }

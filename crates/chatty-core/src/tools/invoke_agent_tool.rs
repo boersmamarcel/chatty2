@@ -18,7 +18,10 @@ pub enum InvokeAgentProgress {
     /// A text chunk from the agent's response.
     Text(String),
     /// Agent invocation finished.
-    Finished { success: bool },
+    Finished {
+        success: bool,
+        result: Option<String>,
+    },
 }
 
 /// Shared slot for sending progress events from the tool to the stream loop.
@@ -243,7 +246,10 @@ impl InvokeAgentTool {
             .send_message_stream(config, prompt)
             .await
             .map_err(|e| {
-                self.send_progress(InvokeAgentProgress::Finished { success: false });
+                self.send_progress(InvokeAgentProgress::Finished {
+                    success: false,
+                    result: None,
+                });
                 InvokeAgentError::InvocationFailed(format!(
                     "Failed to invoke agent '{}': {}",
                     config.name, e
@@ -264,20 +270,17 @@ impl InvokeAgentTool {
                     if state == "failed" {
                         success = false;
                         error_msg = message.clone();
-                        self.send_progress(InvokeAgentProgress::Finished { success: false });
                     } else if state == "working" {
                         if let Some(ref msg) = message {
                             self.send_progress(InvokeAgentProgress::Text(msg.clone()));
                         }
-                    } else if state == "completed" {
-                        self.send_progress(InvokeAgentProgress::Finished { success: true });
                     }
+                    // "completed" — just let the stream end naturally
                 }
                 Ok(crate::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
                     text, ..
                 }) => {
                     if !text.is_empty() {
-                        self.send_progress(InvokeAgentProgress::Text(text.clone()));
                         response.push_str(&text);
                     }
                 }
@@ -285,13 +288,22 @@ impl InvokeAgentTool {
                     warn!(agent = %config.name, error = %e, "Stream error");
                     success = false;
                     error_msg = Some(e.to_string());
-                    self.send_progress(InvokeAgentProgress::Finished { success: false });
                     break;
                 }
             }
         }
 
+        let response = response.trim().to_string();
+
         if !success {
+            let err_text = error_msg
+                .as_ref()
+                .map(|m| format!("⚠️ {m}"))
+                .unwrap_or_else(|| "⚠️ Agent failed".to_string());
+            self.send_progress(InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(err_text),
+            });
             return Err(InvokeAgentError::InvocationFailed(format!(
                 "Agent '{}' reported failure{}",
                 config.name,
@@ -299,15 +311,30 @@ impl InvokeAgentTool {
             )));
         }
 
-        let response = response.trim().to_string();
+        // Emit Finished with the full result so the sub-agent trace block
+        // shows the response (identical to /agent visualisation).
+        self.send_progress(InvokeAgentProgress::Finished {
+            success: true,
+            result: if response.is_empty() {
+                None
+            } else {
+                Some(response.clone())
+            },
+        });
+
         debug!(agent = %config.name, response_len = response.len(), "Agent responded");
+
+        // Return a brief summary to rig-core so the LLM knows the agent
+        // finished without echoing the full response (it's already shown
+        // in the sub-agent trace block visible to the user).
         Ok(InvokeAgentOutput {
             agent: config.name.clone(),
-            response: if response.is_empty() {
-                "Agent completed with no output.".to_string()
-            } else {
-                response
-            },
+            response: format!(
+                "Agent '{}' completed successfully. The full response ({} chars) \
+                 has been displayed to the user in the sub-agent trace.",
+                config.name,
+                response.len()
+            ),
             success: true,
         })
     }
