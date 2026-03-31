@@ -270,10 +270,10 @@ impl InvokeAgentTool {
                     if state == "failed" {
                         success = false;
                         error_msg = message.clone();
-                    } else if state == "working" {
-                        if let Some(ref msg) = message {
-                            self.send_progress(InvokeAgentProgress::Text(msg.clone()));
-                        }
+                    } else if state == "working"
+                        && let Some(ref msg) = message
+                    {
+                        self.send_progress(InvokeAgentProgress::Text(msg.clone()));
                     }
                     // "completed" — just let the stream end naturally
                 }
@@ -281,6 +281,7 @@ impl InvokeAgentTool {
                     text, ..
                 }) => {
                     if !text.is_empty() {
+                        self.send_progress(InvokeAgentProgress::Text(text.clone()));
                         response.push_str(&text);
                     }
                 }

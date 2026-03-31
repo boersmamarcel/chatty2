@@ -306,13 +306,20 @@ impl A2aClient {
         // Parse the SSE byte stream into A2aStreamEvent items.
         let byte_stream = resp.bytes_stream();
         let event_stream = async_stream::stream! {
-            use futures::TryStreamExt;
+            use futures::StreamExt;
 
             let mut buffer = String::new();
             let mut stream = byte_stream;
 
-            while let Ok(Some(bytes)) = stream.try_next().await {
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(result) = stream.next().await {
+                let bytes = match result {
+                    Ok(b) => b,
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("SSE stream error: {}", e));
+                        return;
+                    }
+                };
+                buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
 
                 // SSE events are separated by double newlines.
                 while let Some(pos) = buffer.find("\n\n") {
@@ -330,10 +337,8 @@ impl A2aClient {
             }
 
             // Process any remaining data in the buffer.
-            if !buffer.trim().is_empty() {
-                if let Some(evt) = parse_sse_event(&buffer) {
-                    yield Ok(evt);
-                }
+            if !buffer.trim().is_empty() && let Some(evt) = parse_sse_event(&buffer) {
+                yield Ok(evt);
             }
         };
 

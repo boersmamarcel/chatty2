@@ -1276,6 +1276,10 @@ impl ChattyApp {
 
     /// Display a conversation that is already loaded in the ConversationsStore.
     fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Clear stale invoke_agent IDs from the previous conversation to
+        // prevent suppressing ToolCallBlocks that happen to share an ID.
+        self.active_invoke_agent_ids.clear();
+
         let conv_id = id.to_string();
         let chat_view = self.chat_view.clone();
 
