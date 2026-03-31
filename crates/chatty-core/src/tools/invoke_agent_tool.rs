@@ -7,7 +7,6 @@ use tracing::{debug, info, warn};
 
 use crate::services::a2a_client::A2aClient;
 use crate::settings::models::a2a_store::A2aAgentConfig;
-use crate::settings::repositories::A2aRepository;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
 
 /// Progress events emitted by the invoke_agent tool during streaming execution.
@@ -59,8 +58,6 @@ pub enum InvokeAgentError {
     Disabled(String),
     #[error("Invocation failed: {0}")]
     InvocationFailed(String),
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
 }
 
 /// Tool that invokes a named agent (remote A2A or local WASM module) with a prompt.
@@ -69,7 +66,8 @@ pub enum InvokeAgentError {
 /// Local WASM module agents are called via the protocol gateway's A2A endpoint.
 #[derive(Clone)]
 pub struct InvokeAgentTool {
-    repository: Arc<dyn A2aRepository>,
+    /// Snapshot of configured remote A2A agents taken at construction time.
+    remote_agents: Vec<A2aAgentConfig>,
     module_agents: Vec<LocalModuleAgentSummary>,
     /// Base URL for the protocol gateway (e.g. `http://localhost:8420`),
     /// used to call local WASM module agents via their A2A endpoint.
@@ -81,13 +79,13 @@ pub struct InvokeAgentTool {
 
 impl InvokeAgentTool {
     pub fn new(
-        repository: Arc<dyn A2aRepository>,
+        remote_agents: Vec<A2aAgentConfig>,
         module_agents: Vec<LocalModuleAgentSummary>,
         gateway_port: Option<u16>,
     ) -> Self {
         let gateway_base_url = gateway_port.map(|port| format!("http://localhost:{}", port));
         Self {
-            repository,
+            remote_agents,
             module_agents,
             gateway_base_url,
             client: A2aClient::with_timeout(std::time::Duration::from_secs(300)),
@@ -159,13 +157,7 @@ impl Tool for InvokeAgentTool {
         }
 
         // 1. Check remote A2A agents first (they take precedence)
-        let remote_agents = self
-            .repository
-            .load_all()
-            .await
-            .map_err(|e| InvokeAgentError::RepositoryError(e.to_string()))?;
-
-        if let Some(config) = remote_agents.iter().find(|a| a.name == agent_name) {
+        if let Some(config) = self.remote_agents.iter().find(|a| a.name == agent_name) {
             if !config.enabled {
                 return Err(InvokeAgentError::Disabled(format!(
                     "Remote agent '{}' is disabled. Enable it in Settings → A2A Agents.",
@@ -214,7 +206,8 @@ impl Tool for InvokeAgentTool {
         }
 
         // 3. Not found
-        let available: Vec<String> = remote_agents
+        let available: Vec<String> = self
+            .remote_agents
             .iter()
             .map(|a| a.name.clone())
             .chain(self.module_agents.iter().map(|m| m.name.clone()))
@@ -345,7 +338,6 @@ impl InvokeAgentTool {
 mod tests {
     use super::*;
     use crate::settings::models::a2a_store::A2aAgentConfig;
-    use crate::tools::test_helpers::MockA2aRepository;
 
     fn make_agent(name: &str, url: &str, enabled: bool) -> A2aAgentConfig {
         A2aAgentConfig {
@@ -369,8 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_not_found() {
-        let repo = Arc::new(MockA2aRepository::new());
-        let tool = InvokeAgentTool::new(repo, vec![], None);
+        let tool = InvokeAgentTool::new(vec![], vec![], None);
 
         let result = tool
             .call(InvokeAgentArgs {
@@ -388,8 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_invoke_disabled_remote_agent() {
         let agent = make_agent("my-agent", "https://example.com/a2a", false);
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![agent]));
-        let tool = InvokeAgentTool::new(repo, vec![], None);
+        let tool = InvokeAgentTool::new(vec![agent], vec![], None);
 
         let result = tool
             .call(InvokeAgentArgs {
@@ -404,9 +394,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_local_module_no_gateway() {
-        let repo = Arc::new(MockA2aRepository::new());
         let module = make_module("benford-agent", true);
-        let tool = InvokeAgentTool::new(repo, vec![module], None);
+        let tool = InvokeAgentTool::new(vec![], vec![module], None);
 
         let result = tool
             .call(InvokeAgentArgs {
@@ -423,9 +412,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_local_module_no_a2a_support() {
-        let repo = Arc::new(MockA2aRepository::new());
         let module = make_module("basic-module", false);
-        let tool = InvokeAgentTool::new(repo, vec![module], Some(8420));
+        let tool = InvokeAgentTool::new(vec![], vec![module], Some(8420));
 
         let result = tool
             .call(InvokeAgentArgs {
@@ -445,8 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_empty_agent_name() {
-        let repo = Arc::new(MockA2aRepository::new());
-        let tool = InvokeAgentTool::new(repo, vec![], None);
+        let tool = InvokeAgentTool::new(vec![], vec![], None);
 
         let result = tool
             .call(InvokeAgentArgs {
@@ -461,8 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_empty_prompt() {
-        let repo = Arc::new(MockA2aRepository::new());
-        let tool = InvokeAgentTool::new(repo, vec![], None);
+        let tool = InvokeAgentTool::new(vec![], vec![], None);
 
         let result = tool
             .call(InvokeAgentArgs {
@@ -479,31 +465,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invoke_repo_error() {
-        let repo = Arc::new(MockA2aRepository::with_load_error("disk failure"));
-        let tool = InvokeAgentTool::new(repo, vec![], None);
-
-        let result = tool
-            .call(InvokeAgentArgs {
-                agent: "any-agent".to_string(),
-                prompt: "hello".to_string(),
-            })
-            .await;
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InvokeAgentError::RepositoryError(_)
-        ));
-    }
-
-    #[tokio::test]
     async fn test_remote_agent_takes_precedence() {
         // When both remote and local share a name, remote should win
         let remote = make_agent("shared-name", "https://example.com/a2a", false);
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![remote]));
         let module = make_module("shared-name", true);
-        let tool = InvokeAgentTool::new(repo, vec![module], Some(8420));
+        let tool = InvokeAgentTool::new(vec![remote], vec![module], Some(8420));
 
         let result = tool
             .call(InvokeAgentArgs {

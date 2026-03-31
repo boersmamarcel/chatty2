@@ -1,9 +1,8 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-use crate::settings::repositories::A2aRepository;
+use crate::settings::models::a2a_store::A2aAgentConfig;
 
 /// Arguments for listing A2A agents (no arguments needed)
 #[derive(Deserialize, Serialize)]
@@ -47,8 +46,8 @@ pub struct ListAgentsToolOutput {
 /// Error type for list_agents tool
 #[derive(Debug, thiserror::Error)]
 pub enum ListAgentsToolError {
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
+    #[error("Agent error: {0}")]
+    AgentError(String),
 }
 
 /// Tool that lists all available agents: both remotely configured A2A agents and
@@ -59,26 +58,27 @@ pub enum ListAgentsToolError {
 /// `/agent <name> <prompt>` command.
 #[derive(Clone)]
 pub struct ListAgentsTool {
-    repository: Arc<dyn A2aRepository>,
+    /// Snapshot of configured remote A2A agents taken at construction time.
+    remote_agents: Vec<A2aAgentConfig>,
     /// Locally installed WASM module agents with `agent = true`.
     module_agents: Vec<LocalModuleAgentSummary>,
 }
 
 impl ListAgentsTool {
-    pub fn new(repository: Arc<dyn A2aRepository>) -> Self {
+    pub fn new(remote_agents: Vec<A2aAgentConfig>) -> Self {
         Self {
-            repository,
+            remote_agents,
             module_agents: Vec::new(),
         }
     }
 
     /// Create a new `ListAgentsTool` that also reports local WASM module agents.
     pub fn new_with_modules(
-        repository: Arc<dyn A2aRepository>,
+        remote_agents: Vec<A2aAgentConfig>,
         module_agents: Vec<LocalModuleAgentSummary>,
     ) -> Self {
         Self {
-            repository,
+            remote_agents,
             module_agents,
         }
     }
@@ -112,17 +112,14 @@ impl Tool for ListAgentsTool {
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let agents = self.repository.load_all().await.map_err(|e| {
-            ListAgentsToolError::RepositoryError(format!("Failed to load agents: {}", e))
-        })?;
-
         tracing::info!(
-            remote_agent_count = agents.len(),
+            remote_agent_count = self.remote_agents.len(),
             local_agent_count = self.module_agents.len(),
             "list_agents called"
         );
 
-        let remote_summaries: Vec<A2aAgentSummary> = agents
+        let remote_summaries: Vec<A2aAgentSummary> = self
+            .remote_agents
             .iter()
             .map(|a| A2aAgentSummary {
                 name: a.name.clone(),
@@ -159,7 +156,6 @@ impl Tool for ListAgentsTool {
 mod tests {
     use super::*;
     use crate::settings::models::a2a_store::A2aAgentConfig;
-    use crate::tools::test_helpers::MockA2aRepository;
 
     fn make_agent(name: &str, url: &str, enabled: bool) -> A2aAgentConfig {
         A2aAgentConfig {
@@ -183,8 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_empty_repo() {
-        let repo = Arc::new(MockA2aRepository::new());
-        let tool = ListAgentsTool::new(repo);
+        let tool = ListAgentsTool::new(vec![]);
 
         let result = tool.call(ListAgentsToolArgs {}).await;
         assert!(result.is_ok());
@@ -199,8 +194,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_returns_agent_fields() {
         let agent = make_agent("voucher-agent", "https://hive.dev/a2a/voucher", true);
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![agent]));
-        let tool = ListAgentsTool::new(repo);
+        let tool = ListAgentsTool::new(vec![agent]);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert_eq!(output.total, 1);
@@ -220,8 +214,7 @@ mod tests {
             enabled: true,
             skills: vec![],
         };
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![agent]));
-        let tool = ListAgentsTool::new(repo);
+        let tool = ListAgentsTool::new(vec![agent]);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         let a = &output.remote_agents[0];
@@ -232,8 +225,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_disabled_agent() {
         let agent = make_agent("disabled-agent", "https://example.com/a2a", false);
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![agent]));
-        let tool = ListAgentsTool::new(repo);
+        let tool = ListAgentsTool::new(vec![agent]);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert!(!output.remote_agents[0].enabled);
@@ -248,8 +240,7 @@ mod tests {
             enabled: true,
             skills: vec!["data-analysis".to_string(), "report-writing".to_string()],
         };
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![agent]));
-        let tool = ListAgentsTool::new(repo);
+        let tool = ListAgentsTool::new(vec![agent]);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         let a = &output.remote_agents[0];
@@ -263,8 +254,7 @@ mod tests {
             make_agent("agent-a", "https://a.example.com/a2a", true),
             make_agent("agent-b", "https://b.example.com/a2a", false),
         ];
-        let repo = Arc::new(MockA2aRepository::with_agents(agents));
-        let tool = ListAgentsTool::new(repo);
+        let tool = ListAgentsTool::new(agents);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert_eq!(output.total, 2);
@@ -274,9 +264,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_includes_local_module_agents() {
-        let repo = Arc::new(MockA2aRepository::new());
         let module = make_module_agent("benford-agent");
-        let tool = ListAgentsTool::new_with_modules(repo, vec![module]);
+        let tool = ListAgentsTool::new_with_modules(vec![], vec![module]);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert_eq!(output.total, 1);
@@ -289,26 +278,12 @@ mod tests {
     #[tokio::test]
     async fn test_list_combines_remote_and_local() {
         let remote = make_agent("remote-agent", "https://example.com/a2a", true);
-        let repo = Arc::new(MockA2aRepository::with_agents(vec![remote]));
         let module = make_module_agent("local-agent");
-        let tool = ListAgentsTool::new_with_modules(repo, vec![module]);
+        let tool = ListAgentsTool::new_with_modules(vec![remote], vec![module]);
 
         let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
         assert_eq!(output.total, 2);
         assert_eq!(output.remote_agents.len(), 1);
         assert_eq!(output.local_agents.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_list_load_error() {
-        let repo = Arc::new(MockA2aRepository::with_load_error("disk read failure"));
-        let tool = ListAgentsTool::new(repo);
-
-        let result = tool.call(ListAgentsToolArgs {}).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ListAgentsToolError::RepositoryError(_)
-        ));
     }
 }

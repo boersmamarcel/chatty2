@@ -586,6 +586,8 @@ impl AgentClient {
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
         gateway_port: Option<u16>,
+        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> Result<(
         Self,
         Option<std::sync::Arc<ShellSession>>,
@@ -1176,19 +1178,6 @@ impl AgentClient {
                     )
                     })
                     .unwrap_or(false);
-                // Load available model IDs so the sub-agent tool can validate
-                // a caller-provided model before spawning the subprocess.
-                let available_model_ids = match crate::models_repository().load_all().await {
-                    Ok(models) => models.iter().map(|m| m.id.clone()).collect(),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = ?e,
-                            "Failed to load models for sub-agent validation; \
-                             model parameter validation will be skipped"
-                        );
-                        Vec::new()
-                    }
-                };
                 tracing::debug!("Sub-agent tool enabled");
                 Some(SubAgentTool::new(
                     sub_model_id,
@@ -1257,11 +1246,10 @@ impl AgentClient {
 
         // Create list_agents tool (always available, shows A2A agents + local module agents)
         let list_agents_tool =
-            ListAgentsTool::new_with_modules(crate::a2a_repository(), module_agents.clone());
+            ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
 
         // Create invoke_agent tool (always available, calls agents by name)
-        let invoke_agent_tool =
-            InvokeAgentTool::new(crate::a2a_repository(), module_agents, gateway_port);
+        let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
         // Build a compact tool capability summary so the LLM knows what it can do

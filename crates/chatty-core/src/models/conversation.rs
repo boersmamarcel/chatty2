@@ -98,6 +98,8 @@ impl Conversation {
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
         gateway_port: Option<u16>,
+        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -138,6 +140,8 @@ impl Conversation {
                 allow_sub_agent,
                 module_agents,
                 gateway_port,
+                remote_agents,
+                available_model_ids,
             )
             .await
             .context("Failed to create agent from config")?;
@@ -186,6 +190,8 @@ impl Conversation {
         allow_sub_agent: bool,
         module_agents: Vec<LocalModuleAgentSummary>,
         gateway_port: Option<u16>,
+        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -224,6 +230,8 @@ impl Conversation {
                 allow_sub_agent,
                 module_agents,
                 gateway_port,
+                remote_agents,
+                available_model_ids,
             )
             .await
             .context("Failed to create agent from config")?;

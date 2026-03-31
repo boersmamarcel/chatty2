@@ -286,6 +286,19 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         })
         .ok()
         .flatten();
+    let (remote_agents, available_model_ids) = cx
+        .update(|cx| {
+            let agents = cx
+                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                .map(|m| m.agents().to_vec())
+                .unwrap_or_default();
+            let model_ids = cx
+                .try_global::<crate::settings::models::ModelsModel>()
+                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            (agents, model_ids)
+        })
+        .unwrap_or_default();
 
     let (new_agent, new_shell_session, new_progress_slot) =
         AgentClient::from_model_config_with_tools(
@@ -305,6 +318,8 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             true, // interactive agent: sub-agent tool is allowed
             module_agents,
             gateway_port,
+            remote_agents,
+            available_model_ids,
         )
         .await?;
 
@@ -756,6 +771,8 @@ impl ChattyApp {
         embedding_service: Option<chatty_core::services::EmbeddingService>,
         module_agents: Vec<LocalModuleAgentSummary>,
         gateway_port: Option<u16>,
+        remote_agents: Vec<chatty_core::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> anyhow::Result<Conversation> {
         let mut effective_exec_settings = exec_settings.clone();
         if let Some(working_dir) = data.working_dir.as_ref() {
@@ -810,6 +827,8 @@ impl ChattyApp {
             true, // interactive agent: sub-agent tool is allowed
             module_agents,
             gateway_port,
+            remote_agents,
+            available_model_ids,
         )
         .await
     }
@@ -1090,6 +1109,21 @@ impl ChattyApp {
                         })
                         .ok()
                         .flatten();
+                    let (remote_agents, available_model_ids) = cx
+                        .update(|cx| {
+                            let agents = cx
+                                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                                .map(|m| m.agents().to_vec())
+                                .unwrap_or_default();
+                            let model_ids = cx
+                                .try_global::<crate::settings::models::ModelsModel>()
+                                .map(|m| {
+                                    m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            (agents, model_ids)
+                        })
+                        .unwrap_or_default();
 
                     let mut conversation = Conversation::new(
                         conv_id.clone(),
@@ -1108,6 +1142,8 @@ impl ChattyApp {
                         true, // interactive agent: sub-agent tool is allowed
                         module_agents,
                         gateway_port,
+                        remote_agents,
+                        available_model_ids,
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1209,6 +1245,14 @@ impl ChattyApp {
             let gateway_port = cx
                 .try_global::<crate::settings::models::ModuleSettingsModel>()
                 .map(|m| m.gateway_port);
+            let remote_agents = cx
+                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                .map(|m| m.agents().to_vec())
+                .unwrap_or_default();
+            let available_model_ids = cx
+                .try_global::<crate::settings::models::ModelsModel>()
+                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
             cx.spawn(async move |weak, cx| {
                 let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
@@ -1231,7 +1275,7 @@ impl ChattyApp {
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
                             theme_colors, memory_service, search_settings, embedding_service,
-                            module_agents, gateway_port,
+                            module_agents, gateway_port, remote_agents, available_model_ids,
                         )
                         .await
                         {
@@ -1605,6 +1649,21 @@ impl ChattyApp {
                             })
                             .ok()
                             .flatten();
+                        let (remote_agents, available_model_ids) = cx
+                            .update(|cx| {
+                                let agents = cx
+                                    .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                                    .map(|m| m.agents().to_vec())
+                                    .unwrap_or_default();
+                                let model_ids = cx
+                                    .try_global::<crate::settings::models::ModelsModel>()
+                                    .map(|m| {
+                                        m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                (agents, model_ids)
+                            })
+                            .unwrap_or_default();
 
                         // Factory creates shell session on-demand if not provided
                         let (new_agent, new_shell_session, new_progress_slot) =
@@ -1625,6 +1684,8 @@ impl ChattyApp {
                                 true, // interactive agent: sub-agent tool is allowed
                                 module_agents,
                                 gateway_port,
+                                remote_agents,
+                                available_model_ids,
                             )
                             .await?;
 

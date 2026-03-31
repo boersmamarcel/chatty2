@@ -313,6 +313,8 @@ impl ChatEngine {
             !self.is_sub_agent,
             Vec::new(), // no WASM module discovery in TUI/headless mode
             None,       // no gateway port in TUI
+            Vec::new(), // no remote A2A agents in TUI
+            Vec::new(), // no model ID validation in TUI
         )
         .await
         .context("Failed to create conversation")?;
@@ -396,6 +398,8 @@ impl ChatEngine {
                 !is_sub_agent,
                 Vec::new(), // no WASM module discovery in TUI/headless mode
                 None,       // no gateway port in TUI
+                Vec::new(), // no remote A2A agents in TUI
+                Vec::new(), // no model ID validation in TUI
             )
             .await;
 
