@@ -2875,22 +2875,74 @@ impl ChattyApp {
         // Show immediate progress feedback.
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
-            view.start_sub_agent_progress(&format!("[A2A: {agent_name}] {prompt_for_display}"), cx);
+            view.start_sub_agent_progress(
+                &format!("[Agent: {agent_name}] {prompt_for_display}"),
+                cx,
+            );
         });
 
         let chat_view = self.chat_view.clone();
         let prompt_label = prompt.clone();
 
         cx.spawn(async move |weak, cx| {
-            let client = chatty_core::services::A2aClient::new();
-            let result = client.send_message(&config, &prompt).await;
+            use futures::StreamExt;
 
-            let success = result.is_ok();
-            let result_text = match result {
-                Ok(text) if text.is_empty() => None,
-                Ok(text) => Some(text),
-                Err(e) => Some(format!("\u{26a0}\u{fe0f} A2A error: {e:#}")),
-            };
+            let client = chatty_core::services::A2aClient::new();
+
+            // Use streaming to match invoke_agent's visual behaviour.
+            let stream_result = client.send_message_stream(&config, &prompt).await;
+
+            let (success, result_text) =
+                match stream_result {
+                    Ok(mut stream) => {
+                        let mut response = String::new();
+                        let mut success = true;
+
+                        while let Some(event) = stream.next().await {
+                            match event {
+                            Ok(chatty_core::services::a2a_client::A2aStreamEvent::StatusUpdate {
+                                state,
+                                message,
+                                ..
+                            }) => {
+                                if state == "failed" {
+                                    success = false;
+                                    if let Some(msg) = message {
+                                        response = format!("\u{26a0}\u{fe0f} {msg}");
+                                    }
+                                } else if state == "working" {
+                                    if let Some(ref msg) = message {
+                                        chat_view
+                                            .update(cx, |view, cx| {
+                                                view.append_sub_agent_progress(msg, cx);
+                                            })
+                                            .ok();
+                                    }
+                                }
+                            }
+                            Ok(chatty_core::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
+                                text,
+                                ..
+                            }) => {
+                                response.push_str(&text);
+                            }
+                            Err(e) => {
+                                success = false;
+                                response = format!("\u{26a0}\u{fe0f} A2A error: {e:#}");
+                                break;
+                            }
+                        }
+                        }
+
+                        let result_text = if response.is_empty() {
+                            None
+                        } else {
+                            Some(response)
+                        };
+                        (success, result_text)
+                    }
+                    Err(e) => (false, Some(format!("\u{26a0}\u{fe0f} A2A error: {e:#}"))),
+                };
 
             // Inject into conversation history.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {

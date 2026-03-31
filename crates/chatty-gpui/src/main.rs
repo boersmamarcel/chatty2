@@ -858,6 +858,13 @@ fn main() {
                         }
                         info!("Models loaded");
 
+                        // Refresh the module runtime so the gateway gets a real
+                        // HostLlmProvider now that models/providers are available.
+                        // The initial refresh_runtime() call at startup runs before
+                        // providers finish loading asynchronously, which causes the
+                        // gateway to use the noop provider.
+                        settings::controllers::module_settings_controller::refresh_runtime(cx);
+
                         // Always attempt to auto-discover Ollama models on startup
                         debug!("Attempting Ollama model auto-discovery");
 
