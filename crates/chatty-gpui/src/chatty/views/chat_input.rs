@@ -63,10 +63,9 @@ pub fn load_files_for_dir(dir: &std::path::Path) -> Vec<String> {
 pub fn at_query_from(input_text: &str) -> Option<String> {
     // Work on the trailing portion of the text (handle multiline gracefully).
     let last_line = input_text.lines().next_back().unwrap_or(input_text);
-    let trimmed = last_line.trim_end();
-    let at_pos = trimmed.rfind('@')?;
-    let after_at = &trimmed[at_pos + 1..];
-    // Close the menu as soon as the user types a space.
+    let at_pos = last_line.rfind('@')?;
+    let after_at = &last_line[at_pos + 1..];
+    // Close the menu as soon as the user types a space (including trailing).
     if after_at.chars().any(char::is_whitespace) {
         return None;
     }
@@ -290,7 +289,7 @@ pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> 
                     .to_ascii_lowercase()
                     .starts_with(&query)
         })
-        .map(|cmd| SlashMenuItem::Command(cmd))
+        .map(SlashMenuItem::Command)
         .collect();
 
     let skill_items = skills
@@ -1286,8 +1285,7 @@ impl RenderOnce for ChatInput {
 
                                                                     if let Ok(Some(paths)) =
                                                                         receiver.await.ok()?
-                                                                    {
-                                                                        if let Some(path) =
+                                                                        && let Some(path) =
                                                                             paths.into_iter().next()
                                                                         {
                                                                             state
@@ -1304,7 +1302,6 @@ impl RenderOnce for ChatInput {
                                                                                 )
                                                                                 .ok()?;
                                                                         }
-                                                                    }
                                                                     Some(())
                                                                 })
                                                                 .detach();

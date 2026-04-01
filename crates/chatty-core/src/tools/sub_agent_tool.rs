@@ -12,6 +12,11 @@ const STDERR_PREVIEW_CHARS: usize = 500;
 pub struct SubAgentArgs {
     /// The task or prompt to delegate to the sub-agent.
     pub task: String,
+    /// Optional model ID to use for the sub-agent. If omitted, the parent's
+    /// model is used. Use `list_tools` to see the current model or check
+    /// the available model IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Output from the sub_agent tool
@@ -37,19 +42,24 @@ pub enum SubAgentError {
 /// have access to the same tool set. Each sub-agent runs in its own process,
 /// executes the task, and returns the result. This enables the master agent
 /// to parallelize work by launching multiple sub-agents for different tasks.
+///
+/// The sub-agent may optionally use a different model than its parent.
 #[derive(Clone)]
 pub struct SubAgentTool {
-    /// Model ID the sub-agent should use (inherits from the parent conversation).
+    /// Model ID the sub-agent uses by default (inherits from the parent conversation).
     model_id: String,
     /// Whether to auto-approve tool calls in the sub-agent.
     auto_approve: bool,
+    /// Available model IDs for validation (empty = skip validation).
+    available_model_ids: Vec<String>,
 }
 
 impl SubAgentTool {
-    pub fn new(model_id: String, auto_approve: bool) -> Self {
+    pub fn new(model_id: String, auto_approve: bool, available_model_ids: Vec<String>) -> Self {
         Self {
             model_id,
             auto_approve,
+            available_model_ids,
         }
     }
 }
@@ -68,7 +78,8 @@ impl Tool for SubAgentTool {
                          executes the task (including any tool calls it needs), and returns the \
                          result. Use this to parallelize work or to isolate complex sub-tasks. \
                          Each sub-agent starts with a fresh conversation context — provide all \
-                         necessary context in the task description."
+                         necessary context in the task description. \
+                         You can optionally specify a different model for the sub-agent."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -78,6 +89,13 @@ impl Tool for SubAgentTool {
                         "description": "A detailed description of the task for the sub-agent. \
                                        Include all context the sub-agent needs since it does not \
                                        share conversation history with the parent."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model ID to use for the sub-agent. If omitted, \
+                                       the sub-agent uses the same model as the parent. Use this \
+                                       to pick a faster/cheaper model for simple tasks or a more \
+                                       capable model for complex ones."
                     }
                 },
                 "required": ["task"]
@@ -93,8 +111,30 @@ impl Tool for SubAgentTool {
             ));
         }
 
+        // Resolve model: use the requested model if provided, else fall back
+        // to the parent's model.
+        let model_id = if let Some(requested) = &args.model {
+            let requested = requested.trim().to_string();
+            if requested.is_empty() {
+                self.model_id.clone()
+            } else if !self.available_model_ids.is_empty()
+                && !self.available_model_ids.contains(&requested)
+            {
+                return Err(SubAgentError::Error(format!(
+                    "Unknown model '{}'. Available models: {}",
+                    requested,
+                    self.available_model_ids.join(", ")
+                )));
+            } else {
+                requested
+            }
+        } else {
+            self.model_id.clone()
+        };
+
         info!(
             task_len = task.len(),
+            model = %model_id,
             "Launching sub-agent for delegated task"
         );
 
@@ -109,7 +149,6 @@ impl Tool for SubAgentTool {
                 PathBuf::from("chatty-tui")
             });
 
-        let model_id = self.model_id.clone();
         let auto_approve = self.auto_approve;
 
         // Run the subprocess in a blocking task to avoid blocking the async runtime.

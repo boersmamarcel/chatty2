@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
@@ -14,9 +15,11 @@ use chatty_core::models::execution_approval_store::{
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::{McpService, MemoryService, StreamChunk, stream_prompt};
+use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
+use chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot;
 
 use futures::StreamExt;
 use rig::message::UserContent;
@@ -178,6 +181,8 @@ pub struct ChatEngine {
     pub execution_approval_store: ExecutionApprovalStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
+    /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
+    pub remote_agents: Vec<A2aAgentConfig>,
     /// When `true`, this engine is running as a sub-agent and must not expose
     /// the sub_agent tool (preventing recursive sub-agent spawning).
     pub is_sub_agent: bool,
@@ -197,6 +202,8 @@ pub struct ChatEngine {
     /// Index into `messages` of the system message showing sub-agent progress.
     /// `None` when no sub-agent is running.
     pub sub_agent_msg_idx: Option<usize>,
+    /// Tracks `invoke_agent` tool call IDs to suppress their ToolCallBlock rendering.
+    active_invoke_agent_ids: HashSet<String>,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Monotonically increasing counter to discard stale background init results.
@@ -218,6 +225,7 @@ impl ChatEngine {
         >,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
         user_secrets: Vec<(String, String)>,
+        remote_agents: Vec<A2aAgentConfig>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
         is_sub_agent: bool,
     ) -> Self {
@@ -237,6 +245,7 @@ impl ChatEngine {
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
             user_secrets,
+            remote_agents,
             is_sub_agent,
             messages: Vec::new(),
             is_streaming: false,
@@ -250,9 +259,14 @@ impl ChatEngine {
             tool_picker: None,
             scroll_offset: 0,
             sub_agent_msg_idx: None,
+            active_invoke_agent_ids: HashSet::new(),
             event_tx,
             init_generation: 0,
         }
+    }
+
+    fn available_model_ids(&self) -> Vec<String> {
+        self.models.models().iter().map(|m| m.id.clone()).collect()
     }
 
     /// Initialize the conversation (async — creates agent with tools)
@@ -311,6 +325,10 @@ impl ChatEngine {
             self.search_settings.clone(),
             self.embedding_service.clone(),
             !self.is_sub_agent,
+            Vec::new(), // no WASM module discovery in TUI
+            None,       // no gateway port in TUI
+            self.remote_agents.clone(),
+            self.available_model_ids(),
         )
         .await
         .context("Failed to create conversation")?;
@@ -339,6 +357,8 @@ impl ChatEngine {
         let pending_approvals = self.execution_approval_store.get_pending_approvals();
         let pending_write_approvals = self.write_approval_store.get_pending_approvals();
         let user_secrets = self.user_secrets.clone();
+        let remote_agents = self.remote_agents.clone();
+        let available_model_ids = self.available_model_ids();
         let memory_service = self.memory_service.clone();
         let search_settings = self.search_settings.clone();
         let embedding_service = self.embedding_service.clone();
@@ -392,6 +412,10 @@ impl ChatEngine {
                 search_settings,
                 embedding_service,
                 !is_sub_agent,
+                Vec::new(), // no WASM module discovery in TUI
+                None,       // no gateway port in TUI
+                remote_agents,
+                available_model_ids,
             )
             .await;
 
@@ -478,6 +502,7 @@ impl ChatEngine {
 
         let agent = conversation.agent().clone();
         let history = conversation.history().to_vec();
+        let invoke_agent_progress_slot = conversation.invoke_agent_progress_slot();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
         let workspace_dir = self.execution_settings.workspace_dir.clone();
@@ -527,6 +552,7 @@ impl ChatEngine {
                 approval_rx,
                 resolution_rx,
                 max_agent_turns,
+                invoke_agent_progress_slot,
             })
             .await;
 
@@ -556,20 +582,25 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::ToolCallStarted { id, name } => {
-                let info = ToolCallInfo {
-                    id,
-                    name,
-                    input: String::new(),
-                    output: None,
-                    state: ToolCallState::Running,
-                };
-                if let Some(last) = self.messages.last_mut() {
-                    last.tool_calls.push(info);
+                if name == "invoke_agent" {
+                    self.active_invoke_agent_ids.insert(id);
+                } else {
+                    let info = ToolCallInfo {
+                        id,
+                        name,
+                        input: String::new(),
+                        output: None,
+                        state: ToolCallState::Running,
+                    };
+                    if let Some(last) = self.messages.last_mut() {
+                        last.tool_calls.push(info);
+                    }
                 }
                 EngineAction::Redraw
             }
             AppEvent::ToolCallInput { id, arguments } => {
-                if let Some(last) = self.messages.last_mut()
+                if !self.active_invoke_agent_ids.contains(&id)
+                    && let Some(last) = self.messages.last_mut()
                     && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
                 {
                     tc.input.push_str(&arguments);
@@ -577,7 +608,9 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::ToolCallResult { id, result } => {
-                if let Some(last) = self.messages.last_mut()
+                if self.active_invoke_agent_ids.remove(&id) {
+                    // invoke_agent result — sub-agent progress already handled
+                } else if let Some(last) = self.messages.last_mut()
                     && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
                 {
                     tc.output = Some(result);
@@ -586,7 +619,9 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::ToolCallError { id, error } => {
-                if let Some(last) = self.messages.last_mut()
+                if self.active_invoke_agent_ids.remove(&id) {
+                    // invoke_agent error — sub-agent progress already handled
+                } else if let Some(last) = self.messages.last_mut()
                     && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
                 {
                     tc.output = Some(error.clone());
@@ -685,7 +720,11 @@ impl ChatEngine {
                 if line.is_empty() {
                     return EngineAction::None;
                 }
-                if let Some(idx) = self.sub_agent_msg_idx
+                if self.sub_agent_msg_idx.is_none() {
+                    // Auto-create system message for invoke_agent progress
+                    self.add_system_message(line);
+                    self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+                } else if let Some(idx) = self.sub_agent_msg_idx
                     && let Some(msg) = self.messages.get_mut(idx)
                 {
                     msg.text.push('\n');
@@ -929,8 +968,9 @@ impl ChatEngine {
         Ok(())
     }
 
-    /// Launch a sub-agent by invoking chatty-tui in headless mode.
-    /// This is intentionally non-blocking: completion is delivered via `AppEvent::SubAgentFinished`.
+    /// Launch a sub-agent. If the first word matches a registered A2A agent,
+    /// dispatches via the A2A protocol with SSE streaming. Otherwise falls back
+    /// to invoking chatty-tui in headless mode.
     pub fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
         if self.is_sub_agent {
             bail!("Sub-agents cannot spawn further sub-agents");
@@ -941,6 +981,109 @@ impl ChatEngine {
             bail!("Usage: /agent <prompt>");
         }
 
+        // Check if first word is an A2A agent name
+        let (first_word, rest_of_prompt) = {
+            let mut words = prompt.splitn(2, char::is_whitespace);
+            let first = words.next().unwrap_or("").to_string();
+            let tail = words.next().unwrap_or("").trim().to_string();
+            (first, tail)
+        };
+
+        let a2a_match = if !rest_of_prompt.is_empty() {
+            self.remote_agents
+                .iter()
+                .find(|a| a.enabled && a.name == first_word)
+                .cloned()
+        } else {
+            None
+        };
+
+        if let Some(config) = a2a_match {
+            return self.launch_a2a_agent(config, rest_of_prompt);
+        }
+
+        // Fall back to headless subprocess
+        self.launch_subprocess_agent(prompt)
+    }
+
+    /// Dispatch a task to a remote A2A agent via SSE streaming.
+    fn launch_a2a_agent(&mut self, config: A2aAgentConfig, prompt: String) -> Result<()> {
+        info!(agent = %config.name, prompt = %prompt, "Dispatching task to remote A2A agent");
+
+        let label = format!("[Agent: {}] {}", config.name, prompt);
+        self.add_system_message(label);
+        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let client = chatty_core::services::A2aClient::new();
+            let stream_result = client.send_message_stream(&config, &prompt).await;
+
+            let message = match stream_result {
+                Ok(mut stream) => {
+                    let mut response = String::new();
+                    let mut success = true;
+
+                    while let Some(event) = stream.next().await {
+                        match event {
+                            Ok(
+                                chatty_core::services::a2a_client::A2aStreamEvent::StatusUpdate {
+                                    state,
+                                    message,
+                                    ..
+                                },
+                            ) => {
+                                if state == "failed" {
+                                    success = false;
+                                    if let Some(msg) = message {
+                                        response = format!("\u{26a0}\u{fe0f} {msg}");
+                                    }
+                                } else if state == "working"
+                                    && let Some(ref msg) = message
+                                {
+                                    let _ = event_tx.send(AppEvent::SubAgentProgress(msg.clone()));
+                                }
+                            }
+                            Ok(
+                                chatty_core::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
+                                    text,
+                                    ..
+                                },
+                            ) => {
+                                response.push_str(&text);
+                            }
+                            Err(e) => {
+                                success = false;
+                                response = format!("\u{26a0}\u{fe0f} A2A error: {e:#}");
+                                break;
+                            }
+                        }
+                    }
+
+                    if success {
+                        if response.is_empty() {
+                            "Agent completed with no output.".to_string()
+                        } else {
+                            format!("Agent response:\n{response}")
+                        }
+                    } else {
+                        response
+                    }
+                }
+                Err(e) => format!("\u{26a0}\u{fe0f} A2A error: {e:#}"),
+            };
+
+            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+                warn!(error = ?e, "Failed to deliver A2A agent completion event");
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Launch a sub-agent by invoking chatty-tui in headless mode (subprocess fallback).
+    fn launch_subprocess_agent(&mut self, prompt: &str) -> Result<()> {
         let executable = std::env::current_exe().context("Failed to resolve chatty-tui binary")?;
         let model_id = self.model_config.id.clone();
         let prompt_owned = prompt.to_string();
@@ -1277,6 +1420,7 @@ struct StreamParams {
     approval_rx: mpsc::UnboundedReceiver<ApprovalNotification>,
     resolution_rx: mpsc::UnboundedReceiver<ApprovalResolution>,
     max_agent_turns: usize,
+    invoke_agent_progress_slot: InvokeAgentProgressSlot,
 }
 
 /// Run the LLM stream in a background task, sending AppEvents for each chunk.
@@ -1290,6 +1434,7 @@ async fn run_stream(params: StreamParams) -> Result<()> {
         approval_rx,
         resolution_rx,
         max_agent_turns,
+        invoke_agent_progress_slot,
     } = params;
     let (mut stream, _user_message) = stream_prompt(
         &agent,
@@ -1302,57 +1447,97 @@ async fn run_stream(params: StreamParams) -> Result<()> {
     .await
     .context("Failed to start stream")?;
 
+    // Install invoke_agent progress channel
+    let (progress_tx, mut progress_rx) =
+        mpsc::unbounded_channel::<chatty_core::tools::invoke_agent_tool::InvokeAgentProgress>();
+    {
+        let mut slot = invoke_agent_progress_slot.lock().unwrap();
+        *slot = Some(progress_tx);
+    }
+
     let _ = event_tx.send(AppEvent::StreamStarted);
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
         if cancel_flag.load(Ordering::Relaxed) {
             let _ = event_tx.send(AppEvent::StreamCancelled);
             return Ok(());
         }
 
-        match chunk_result? {
-            StreamChunk::Text(text) => {
-                let _ = event_tx.send(AppEvent::TextChunk(text));
+        tokio::select! {
+            biased;
+            // Handle invoke_agent progress events (sub-agent visualisation)
+            Some(progress) = progress_rx.recv() => {
+                use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+                match progress {
+                    InvokeAgentProgress::Started { agent_name, prompt } => {
+                        let label = format!("[Agent: {agent_name}] {prompt}");
+                        let _ = event_tx.send(AppEvent::SubAgentProgress(label));
+                    }
+                    InvokeAgentProgress::Text(text) => {
+                        let _ = event_tx.send(AppEvent::SubAgentProgress(text));
+                    }
+                    InvokeAgentProgress::Finished { success, result } => {
+                        let message = if success {
+                            result.unwrap_or_else(|| "Agent completed.".to_string())
+                        } else {
+                            result.unwrap_or_else(|| "Agent failed.".to_string())
+                        };
+                        let _ = event_tx.send(AppEvent::SubAgentFinished(message));
+                    }
+                }
             }
-            StreamChunk::ToolCallStarted { id, name } => {
-                let _ = event_tx.send(AppEvent::ToolCallStarted { id, name });
-            }
-            StreamChunk::ToolCallInput { id, arguments } => {
-                let _ = event_tx.send(AppEvent::ToolCallInput { id, arguments });
-            }
-            StreamChunk::ToolCallResult { id, result } => {
-                let _ = event_tx.send(AppEvent::ToolCallResult { id, result });
-            }
-            StreamChunk::ToolCallError { id, error } => {
-                let _ = event_tx.send(AppEvent::ToolCallError { id, error });
-            }
-            StreamChunk::ApprovalRequested {
-                id,
-                command,
-                is_sandboxed,
-            } => {
-                let _ = event_tx.send(AppEvent::ApprovalRequested {
-                    id,
-                    command,
-                    is_sandboxed,
-                });
-            }
-            StreamChunk::ApprovalResolved { id, approved } => {
-                let _ = event_tx.send(AppEvent::ApprovalResolved { id, approved });
-            }
-            StreamChunk::TokenUsage {
-                input_tokens,
-                output_tokens,
-            } => {
-                let _ = event_tx.send(AppEvent::TokenUsage {
-                    input_tokens,
-                    output_tokens,
-                });
-            }
-            StreamChunk::Done => break,
-            StreamChunk::Error(e) => {
-                let _ = event_tx.send(AppEvent::StreamError(e));
-                return Ok(());
+            // Process LLM stream chunks
+            chunk_result = stream.next() => {
+                let chunk_result = match chunk_result {
+                    Some(r) => r,
+                    None => break,
+                };
+
+                match chunk_result? {
+                    StreamChunk::Text(text) => {
+                        let _ = event_tx.send(AppEvent::TextChunk(text));
+                    }
+                    StreamChunk::ToolCallStarted { id, name } => {
+                        let _ = event_tx.send(AppEvent::ToolCallStarted { id, name });
+                    }
+                    StreamChunk::ToolCallInput { id, arguments } => {
+                        let _ = event_tx.send(AppEvent::ToolCallInput { id, arguments });
+                    }
+                    StreamChunk::ToolCallResult { id, result } => {
+                        let _ = event_tx.send(AppEvent::ToolCallResult { id, result });
+                    }
+                    StreamChunk::ToolCallError { id, error } => {
+                        let _ = event_tx.send(AppEvent::ToolCallError { id, error });
+                    }
+                    StreamChunk::ApprovalRequested {
+                        id,
+                        command,
+                        is_sandboxed,
+                    } => {
+                        let _ = event_tx.send(AppEvent::ApprovalRequested {
+                            id,
+                            command,
+                            is_sandboxed,
+                        });
+                    }
+                    StreamChunk::ApprovalResolved { id, approved } => {
+                        let _ = event_tx.send(AppEvent::ApprovalResolved { id, approved });
+                    }
+                    StreamChunk::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        let _ = event_tx.send(AppEvent::TokenUsage {
+                            input_tokens,
+                            output_tokens,
+                        });
+                    }
+                    StreamChunk::Done => break,
+                    StreamChunk::Error(e) => {
+                        let _ = event_tx.send(AppEvent::StreamError(e));
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -1383,7 +1568,7 @@ fn common_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
 fn copy_text_to_clipboard(text: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return copy_via_command("pbcopy", &[], text);
+        copy_via_command("pbcopy", &[], text)
     }
     #[cfg(target_os = "windows")]
     {
@@ -1460,7 +1645,7 @@ fn run_sub_agent_process(
     let stderr_thread = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let _ = event_tx.send(AppEvent::SubAgentProgress(line));
             }
         }

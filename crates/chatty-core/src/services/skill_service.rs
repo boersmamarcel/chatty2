@@ -217,6 +217,15 @@ impl SkillService {
         }
     }
 
+    /// Create a `SkillService` with a custom global skills directory.
+    #[cfg(test)]
+    pub fn with_global_dir(global_skills_dir: PathBuf) -> Self {
+        Self {
+            global_skills_dir,
+            embedding_service: None,
+        }
+    }
+
     /// Return the path to the global skills directory.
     pub fn global_skills_dir(&self) -> &Path {
         &self.global_skills_dir
@@ -432,7 +441,9 @@ mod tests {
             .await
             .unwrap();
 
-        let service = SkillService::new(None);
+        // Use an empty global dir so only the workspace skill is found.
+        let empty_global = tempfile::tempdir().unwrap();
+        let service = SkillService::with_global_dir(empty_global.path().to_path_buf());
         let hits = service
             .load_hits("my skill query", None, Some(tmp.path()))
             .await;

@@ -24,6 +24,7 @@ use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
+use crate::chatty::tools::LocalModuleAgentSummary;
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
@@ -38,6 +39,30 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
+use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+
+/// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
+/// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
+///
+/// Only modules with `agent = true` and a `Loaded` status are included.
+fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
+    cx.try_global::<DiscoveredModulesModel>()
+        .map(|model| {
+            model
+                .modules
+                .iter()
+                .filter(|m| m.agent && matches!(m.status, ModuleLoadStatus::Loaded))
+                .map(|m| LocalModuleAgentSummary {
+                    name: m.name.clone(),
+                    version: m.version.clone(),
+                    description: m.description.clone(),
+                    tools: m.tools.clone(),
+                    supports_a2a: m.a2a,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
 ///
@@ -251,24 +276,52 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
 
     let memory_service = await_memory_service(cx).await;
     let embedding_service = get_embedding_service(cx);
+    let module_agents = cx
+        .update(|cx| collect_module_agents(cx))
+        .unwrap_or_default();
+    let gateway_port = cx
+        .update(|cx| {
+            cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+                .map(|m| m.gateway_port)
+        })
+        .ok()
+        .flatten();
+    let (remote_agents, available_model_ids) = cx
+        .update(|cx| {
+            let agents = cx
+                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                .map(|m| m.agents().to_vec())
+                .unwrap_or_default();
+            let model_ids = cx
+                .try_global::<crate::settings::models::ModelsModel>()
+                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            (agents, model_ids)
+        })
+        .unwrap_or_default();
 
-    let (new_agent, new_shell_session) = AgentClient::from_model_config_with_tools(
-        &model_config,
-        &provider_config,
-        mcp_tools,
-        exec_settings,
-        pending_approvals,
-        pending_write_approvals,
-        pending_artifacts,
-        shell_session,
-        user_secrets,
-        theme_colors,
-        memory_service,
-        search_settings,
-        embedding_service,
-        true, // interactive agent: sub-agent tool is allowed
-    )
-    .await?;
+    let (new_agent, new_shell_session, new_progress_slot) =
+        AgentClient::from_model_config_with_tools(
+            &model_config,
+            &provider_config,
+            mcp_tools,
+            exec_settings,
+            pending_approvals,
+            pending_write_approvals,
+            pending_artifacts,
+            shell_session,
+            user_secrets,
+            theme_colors,
+            memory_service,
+            search_settings,
+            embedding_service,
+            true, // interactive agent: sub-agent tool is allowed
+            module_agents,
+            gateway_port,
+            remote_agents,
+            available_model_ids,
+        )
+        .await?;
 
     cx.update_global::<ConversationsStore, _>(|store, _cx| {
         if let Some(conv) = store.get_conversation_mut(&conv_id) {
@@ -280,6 +333,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             if new_shell_session.is_some() {
                 conv.set_shell_session(new_shell_session);
             }
+            conv.set_invoke_agent_progress_slot(new_progress_slot);
             info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
         } else {
             warn!(
@@ -407,6 +461,10 @@ pub struct ChattyApp {
     /// Keeps the AgentConfigNotifier entity alive for the app's lifetime so that
     /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
     _mcp_notifier: Entity<AgentConfigNotifier>,
+    /// Tool-call IDs for active invoke_agent calls. These are suppressed from the
+    /// chat UI (no ToolCallBlock) and instead visualised via the sub-agent progress
+    /// system, identical to the `/agent` slash command.
+    active_invoke_agent_ids: std::collections::HashSet<String>,
 }
 
 impl ChattyApp {
@@ -438,6 +496,7 @@ impl ChattyApp {
             is_ready: false,
             active_create_task: None,
             _mcp_notifier: mcp_notifier,
+            active_invoke_agent_ids: std::collections::HashSet::new(),
         };
 
         // Store entity in global state for later access
@@ -710,6 +769,10 @@ impl ChattyApp {
         memory_service: Option<crate::chatty::services::MemoryService>,
         search_settings: Option<crate::settings::models::SearchSettingsModel>,
         embedding_service: Option<chatty_core::services::EmbeddingService>,
+        module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
+        remote_agents: Vec<chatty_core::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> anyhow::Result<Conversation> {
         let mut effective_exec_settings = exec_settings.clone();
         if let Some(working_dir) = data.working_dir.as_ref() {
@@ -762,6 +825,10 @@ impl ChattyApp {
             search_settings,
             embedding_service,
             true, // interactive agent: sub-agent tool is allowed
+            module_agents,
+            gateway_port,
+            remote_agents,
+            available_model_ids,
         )
         .await
     }
@@ -1032,6 +1099,31 @@ impl ChattyApp {
                     // Wait for memory service init to complete before building the agent
                     let memory_service = await_memory_service(cx).await;
                     let embedding_service = get_embedding_service(cx);
+                    let module_agents = cx
+                        .update(|cx| collect_module_agents(cx))
+                        .unwrap_or_default();
+                    let gateway_port = cx
+                        .update(|cx| {
+                            cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+                                .map(|m| m.gateway_port)
+                        })
+                        .ok()
+                        .flatten();
+                    let (remote_agents, available_model_ids) = cx
+                        .update(|cx| {
+                            let agents = cx
+                                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                                .map(|m| m.agents().to_vec())
+                                .unwrap_or_default();
+                            let model_ids = cx
+                                .try_global::<crate::settings::models::ModelsModel>()
+                                .map(|m| {
+                                    m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            (agents, model_ids)
+                        })
+                        .unwrap_or_default();
 
                     let mut conversation = Conversation::new(
                         conv_id.clone(),
@@ -1048,6 +1140,10 @@ impl ChattyApp {
                         search_settings,
                         embedding_service,
                         true, // interactive agent: sub-agent tool is allowed
+                        module_agents,
+                        gateway_port,
+                        remote_agents,
+                        available_model_ids,
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1145,6 +1241,18 @@ impl ChattyApp {
         } else {
             // Slow path: fetch from SQLite, restore, then display
             let repo = self.conversation_repo.clone();
+            let module_agents = collect_module_agents(cx);
+            let gateway_port = cx
+                .try_global::<crate::settings::models::ModuleSettingsModel>()
+                .map(|m| m.gateway_port);
+            let remote_agents = cx
+                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                .map(|m| m.agents().to_vec())
+                .unwrap_or_default();
+            let available_model_ids = cx
+                .try_global::<crate::settings::models::ModelsModel>()
+                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
             cx.spawn(async move |weak, cx| {
                 let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
@@ -1167,6 +1275,7 @@ impl ChattyApp {
                             data, &models, &providers, &mcp_service, &exec_settings,
                             pending_approvals, pending_write_approvals, user_secrets,
                             theme_colors, memory_service, search_settings, embedding_service,
+                            module_agents, gateway_port, remote_agents, available_model_ids,
                         )
                         .await
                         {
@@ -1211,6 +1320,10 @@ impl ChattyApp {
 
     /// Display a conversation that is already loaded in the ConversationsStore.
     fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Clear stale invoke_agent IDs from the previous conversation to
+        // prevent suppressing ToolCallBlocks that happen to share an ID.
+        self.active_invoke_agent_ids.clear();
+
         let conv_id = id.to_string();
         let chat_view = self.chat_view.clone();
 
@@ -1310,7 +1423,7 @@ impl ChattyApp {
             // Use the conversation-level override first, then fall back to the global setting.
             let skills_dir: Option<PathBuf> = conversation_working_dir.clone().or_else(|| {
                 cx.try_global::<ExecutionSettingsModel>()
-                    .and_then(|s| s.workspace_dir.as_ref().map(|p| PathBuf::from(p)))
+                    .and_then(|s| s.workspace_dir.as_ref().map(PathBuf::from))
             });
             self.refresh_chat_input_skills(skills_dir.as_deref(), cx);
         }
@@ -1526,9 +1639,34 @@ impl ChattyApp {
                         // Wait for memory service init to complete before building the agent
                         let memory_service = await_memory_service(cx).await;
                         let embedding_service = get_embedding_service(cx);
+                        let module_agents = cx
+                            .update(|cx| collect_module_agents(cx))
+                            .unwrap_or_default();
+                        let gateway_port = cx
+                            .update(|cx| {
+                                cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+                                    .map(|m| m.gateway_port)
+                            })
+                            .ok()
+                            .flatten();
+                        let (remote_agents, available_model_ids) = cx
+                            .update(|cx| {
+                                let agents = cx
+                                    .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                                    .map(|m| m.agents().to_vec())
+                                    .unwrap_or_default();
+                                let model_ids = cx
+                                    .try_global::<crate::settings::models::ModelsModel>()
+                                    .map(|m| {
+                                        m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                (agents, model_ids)
+                            })
+                            .unwrap_or_default();
 
                         // Factory creates shell session on-demand if not provided
-                        let (new_agent, new_shell_session) =
+                        let (new_agent, new_shell_session, new_progress_slot) =
                             AgentClient::from_model_config_with_tools(
                                 &model_config,
                                 &provider_config,
@@ -1544,6 +1682,10 @@ impl ChattyApp {
                                 search_settings,
                                 embedding_service,
                                 true, // interactive agent: sub-agent tool is allowed
+                                module_agents,
+                                gateway_port,
+                                remote_agents,
+                                available_model_ids,
                             )
                             .await?;
 
@@ -1561,6 +1703,7 @@ impl ChattyApp {
                                 if new_shell_session.is_some() {
                                     conv.set_shell_session(new_shell_session);
                                 }
+                                conv.set_invoke_agent_progress_slot(new_progress_slot);
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))
@@ -1980,7 +2123,7 @@ impl ChattyApp {
                 }
 
                 // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_attachment_paths) = cx
+                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_attachment_paths, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
@@ -2004,6 +2147,7 @@ impl ChattyApp {
                                 supports_pdf,
                                 supports_images,
                                 conv.attachment_paths().to_vec(),
+                                conv.invoke_agent_progress_slot(),
                             ))
                         } else {
                             Err(anyhow::anyhow!(
@@ -2068,6 +2212,7 @@ impl ChattyApp {
                     chat_view,
                     stream_manager,
                     cancel_flag_for_loop,
+                    invoke_agent_progress_slot,
                     cx,
                 )
                 .await
@@ -2173,11 +2318,17 @@ impl ChattyApp {
                     }
                 });
 
-                chat_view.update(cx, |view, cx| {
-                    if view.conversation_id() == Some(conversation_id) {
-                        view.handle_tool_call_started(id, name, cx);
-                    }
-                });
+                if name == "invoke_agent" {
+                    // Suppress ToolCallBlock in the UI — the sub-agent progress
+                    // system will handle visualisation via the progress channel.
+                    self.active_invoke_agent_ids.insert(id);
+                } else {
+                    chat_view.update(cx, |view, cx| {
+                        if view.conversation_id() == Some(conversation_id) {
+                            view.handle_tool_call_started(id, name, cx);
+                        }
+                    });
+                }
             }
             StreamManagerEvent::ToolCallInput {
                 conversation_id,
@@ -2201,11 +2352,13 @@ impl ChattyApp {
                     }
                 });
 
-                chat_view.update(cx, |view, cx| {
-                    if view.conversation_id() == Some(conversation_id) {
-                        view.handle_tool_call_input(id, arguments, cx);
-                    }
-                });
+                if !self.active_invoke_agent_ids.contains(&id) {
+                    chat_view.update(cx, |view, cx| {
+                        if view.conversation_id() == Some(conversation_id) {
+                            view.handle_tool_call_input(id, arguments, cx);
+                        }
+                    });
+                }
             }
             StreamManagerEvent::ToolCallResult {
                 conversation_id,
@@ -2236,11 +2389,16 @@ impl ChattyApp {
                     }
                 });
 
-                chat_view.update(cx, |view, cx| {
-                    if view.conversation_id() == Some(conversation_id) {
-                        view.handle_tool_call_result(id, result, cx);
-                    }
-                });
+                if self.active_invoke_agent_ids.remove(&id) {
+                    // invoke_agent result — sub-agent progress already finalized via
+                    // the progress channel; skip creating a ToolCallBlock result.
+                } else {
+                    chat_view.update(cx, |view, cx| {
+                        if view.conversation_id() == Some(conversation_id) {
+                            view.handle_tool_call_result(id, result, cx);
+                        }
+                    });
+                }
             }
             StreamManagerEvent::ToolCallError {
                 conversation_id,
@@ -2265,11 +2423,16 @@ impl ChattyApp {
                     }
                 });
 
-                chat_view.update(cx, |view, cx| {
-                    if view.conversation_id() == Some(conversation_id) {
-                        view.handle_tool_call_error(id, error, cx);
-                    }
-                });
+                if self.active_invoke_agent_ids.remove(&id) {
+                    // invoke_agent error — sub-agent progress handles error
+                    // finalization via the progress channel.
+                } else {
+                    chat_view.update(cx, |view, cx| {
+                        if view.conversation_id() == Some(conversation_id) {
+                            view.handle_tool_call_error(id, error, cx);
+                        }
+                    });
+                }
             }
             StreamManagerEvent::ApprovalRequested {
                 conversation_id,
@@ -2695,18 +2858,38 @@ impl ChattyApp {
     /// Returns `true` when the message was handled as an arg-based slash command
     /// (so the caller should NOT forward it to the LLM).
     fn try_handle_arg_slash_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-        if let Some(prompt) = text.strip_prefix("/agent ") {
-            let prompt = prompt.trim().to_string();
-            if prompt.is_empty() {
+        if let Some(rest) = text.strip_prefix("/agent ") {
+            let rest = rest.trim().to_string();
+            if rest.is_empty() {
                 self.chat_view.update(cx, |view, cx| {
                     view.add_info_message(
-                        "Usage: `/agent <prompt>` — provide a prompt for the sub-agent."
+                        "Usage: `/agent <prompt>` or `/agent <name> <prompt>` — \
+                         dispatch to a local sub-agent or a registered A2A agent."
                             .to_string(),
                         cx,
                     );
                 });
             } else {
-                self.launch_agent(prompt, cx);
+                // Check if the first word matches a registered A2A agent name.
+                let (agent_name, prompt_for_agent) = {
+                    let mut words = rest.splitn(2, char::is_whitespace);
+                    let first = words.next().unwrap_or("").to_string();
+                    let tail = words.next().unwrap_or("").trim().to_string();
+                    (first, tail)
+                };
+
+                let is_a2a_agent = !prompt_for_agent.is_empty()
+                    && cx
+                        .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+                        .and_then(|m| m.find_enabled(&agent_name).map(|_| true))
+                        .unwrap_or(false);
+
+                if is_a2a_agent {
+                    self.launch_a2a_agent(agent_name, prompt_for_agent, cx);
+                } else {
+                    // Fall back to local sub-agent with the entire rest as the prompt.
+                    self.launch_agent(rest, cx);
+                }
             }
             return true;
         }
@@ -2727,6 +2910,140 @@ impl ChattyApp {
             return true;
         }
         false
+    }
+
+    /// Dispatch a task to a remote A2A agent and display the result.
+    fn launch_a2a_agent(&mut self, agent_name: String, prompt: String, cx: &mut Context<Self>) {
+        info!(agent = %agent_name, prompt = %prompt, "Dispatching task to remote A2A agent");
+
+        // Capture the config snapshot now (before the async spawn).
+        let config = cx
+            .try_global::<chatty_core::settings::models::A2aAgentsModel>()
+            .and_then(|m| m.find_enabled(&agent_name).cloned());
+
+        let Some(config) = config else {
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(
+                    format!("A2A agent \u{2018}{agent_name}\u{2019} not found or not enabled."),
+                    cx,
+                );
+            });
+            return;
+        };
+
+        // Capture conversation ID so we can inject the result even if the user
+        // navigates away while the remote call is in flight.
+        let launch_conv_id = cx
+            .try_global::<ConversationsStore>()
+            .and_then(|store| store.active_id().cloned());
+
+        // Show immediate progress feedback.
+        let prompt_for_display = prompt.clone();
+        self.chat_view.update(cx, |view, cx| {
+            view.start_sub_agent_progress(
+                &format!("[Agent: {agent_name}] {prompt_for_display}"),
+                cx,
+            );
+        });
+
+        let chat_view = self.chat_view.clone();
+        let prompt_label = prompt.clone();
+
+        cx.spawn(async move |weak, cx| {
+            use futures::StreamExt;
+
+            let client = chatty_core::services::A2aClient::new();
+
+            // Use streaming to match invoke_agent's visual behaviour.
+            let stream_result = client.send_message_stream(&config, &prompt).await;
+
+            let (success, result_text) =
+                match stream_result {
+                    Ok(mut stream) => {
+                        let mut response = String::new();
+                        let mut success = true;
+
+                        while let Some(event) = stream.next().await {
+                            match event {
+                            Ok(chatty_core::services::a2a_client::A2aStreamEvent::StatusUpdate {
+                                state,
+                                message,
+                                ..
+                            }) => {
+                                if state == "failed" {
+                                    success = false;
+                                    if let Some(msg) = message {
+                                        response = format!("\u{26a0}\u{fe0f} {msg}");
+                                    }
+                                } else if state == "working"
+                                    && let Some(ref msg) = message {
+                                        chat_view
+                                            .update(cx, |view, cx| {
+                                                view.append_sub_agent_progress(msg, cx);
+                                            })
+                                            .ok();
+                                    }
+                            }
+                            Ok(chatty_core::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
+                                text,
+                                ..
+                            }) => {
+                                response.push_str(&text);
+                            }
+                            Err(e) => {
+                                success = false;
+                                response = format!("\u{26a0}\u{fe0f} A2A error: {e:#}");
+                                break;
+                            }
+                        }
+                        }
+
+                        let result_text = if response.is_empty() {
+                            None
+                        } else {
+                            Some(response)
+                        };
+                        (success, result_text)
+                    }
+                    Err(e) => (false, Some(format!("\u{26a0}\u{fe0f} A2A error: {e:#}"))),
+                };
+
+            // Inject into conversation history.
+            if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
+                let user_entry = rig::completion::Message::User {
+                    content: rig::OneOrMany::one(rig::message::UserContent::text(format!(
+                        "[A2A task \u{2192} {agent_name}: {prompt_label}]"
+                    ))),
+                };
+                let result_entry = format!("[A2A result from {agent_name}]\n\n{txt}");
+                cx.update(|cx| {
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(conv_id) {
+                            conv.add_user_message_with_attachments(user_entry, vec![]);
+                            conv.finalize_response(result_entry, vec![], None);
+                        }
+                    });
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to inject A2A result into conversation"))
+                .ok();
+
+                if let Some(app) = weak.upgrade() {
+                    let conv_id_for_persist = conv_id.clone();
+                    app.update(cx, |app, cx| {
+                        app.persist_conversation(&conv_id_for_persist, cx);
+                    })
+                    .ok();
+                }
+            }
+
+            // Finalize the progress trace.
+            chat_view
+                .update(cx, |view, cx| {
+                    view.finalize_sub_agent_progress(success, result_text, cx)
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// `/agent <prompt>` — launch chatty-tui in headless mode with the given prompt.
@@ -2832,7 +3149,7 @@ impl ChattyApp {
                 let stderr_thread = std::thread::spawn(move || {
                     if let Some(stderr) = stderr {
                         let reader = std::io::BufReader::new(stderr);
-                        for line in reader.lines().flatten() {
+                        for line in reader.lines().map_while(Result::ok) {
                             let _ = progress_tx.send(line);
                         }
                     }
@@ -3536,13 +3853,17 @@ impl ChattyApp {
                 .ok();
 
             // Extract agent and history (ends with the user message after removal)
-            let (agent, history) = cx
+            let (agent, history, invoke_agent_progress_slot) = cx
                 .update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation(&conv_id) {
                         if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                             artifacts.clear();
                         }
-                        Ok((conv.agent().clone(), conv.history().to_vec()))
+                        Ok((
+                            conv.agent().clone(),
+                            conv.history().to_vec(),
+                            conv.invoke_agent_progress_slot(),
+                        ))
                     } else {
                         Err(anyhow::anyhow!("Conversation not found for regeneration"))
                     }
@@ -3577,6 +3898,7 @@ impl ChattyApp {
                 chat_view,
                 stream_manager,
                 cancel_flag_for_loop,
+                invoke_agent_progress_slot,
                 cx,
             )
             .await
@@ -3930,6 +4252,7 @@ async fn run_llm_stream(
     chat_view: Entity<ChatView>,
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     cancel_flag: Arc<AtomicBool>,
+    invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
     // 1. Create approval notification channels
@@ -4116,91 +4439,175 @@ async fn run_llm_stream(
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     }
 
-    // 5. Stream processing loop
+    // 5. Install invoke_agent progress channel
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+        chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+    >();
+    {
+        let mut slot = invoke_agent_progress_slot.lock().unwrap();
+        *slot = Some(progress_tx);
+    }
+
+    // 6. Stream processing loop
     debug!(conv_id = %conv_id, "Entering stream processing loop");
     use futures::StreamExt;
 
-    while let Some(chunk_result) = stream.next().await {
-        // Check cancellation token before processing
+    loop {
+        // Check cancellation before each iteration
         if cancel_flag.load(Ordering::Relaxed) {
             debug!(conv_id = %conv_id, "Stream cancelled via cancellation token");
             break;
         }
 
-        match chunk_result {
-            Ok(StreamChunk::Text(ref text)) => {
-                // Update the Conversation model (source of truth for background streams)
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.append_streaming_content(text);
+        tokio::select! {
+            biased;
+            // Handle invoke_agent progress events first (sub-agent visualisation)
+            Some(progress) = progress_rx.recv() => {
+                use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+                match progress {
+                    InvokeAgentProgress::Started { agent_name, prompt } => {
+                        let label = format!("[Agent: {}] {}", agent_name, prompt);
+                        chat_view
+                            .update(cx, |view, cx| {
+                                view.start_sub_agent_progress(&label, cx);
+                            })
+                            .ok();
                     }
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
-                .ok();
+                    InvokeAgentProgress::Text(text) => {
+                        chat_view
+                            .update(cx, |view, cx| {
+                                view.append_sub_agent_progress(&text, cx);
+                            })
+                            .ok();
+                    }
+                    InvokeAgentProgress::Finished { success, result } => {
+                        chat_view
+                            .update(cx, |view, cx| {
+                                view.finalize_sub_agent_progress(success, result, cx);
+                            })
+                            .ok();
+                    }
+                }
+                continue;
             }
-            Ok(StreamChunk::TokenUsage { .. }) => {
-                // Token usage tracked by StreamManager
-            }
-            Ok(StreamChunk::Done) => {
-                debug!(conv_id = %conv_id, "Received Done chunk");
-                break;
-            }
-            Ok(StreamChunk::Error(ref err)) => {
-                error!(error = %err, conv_id = %conv_id, "Stream error");
+            // Process LLM stream chunks
+            chunk_result = stream.next() => {
+                let chunk_result = match chunk_result {
+                    Some(r) => r,
+                    None => break,
+                };
 
-                // Detect authentication errors (401/Unauthorized)
-                if err.contains("401") || err.contains("Unauthorized") {
-                    tracing::warn!("Detected Azure auth error - token likely expired");
-                    if let Some(cache) = cx
-                        .update(|cx| {
-                            cx.try_global::<crate::chatty::auth::AzureTokenCache>()
-                                .cloned()
+                match chunk_result {
+                    Ok(StreamChunk::Text(ref text)) => {
+                        // Update the Conversation model (source of truth for background streams)
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                conv.append_streaming_content(text);
+                            }
                         })
-                        .ok()
-                        .flatten()
-                    {
-                        if let Err(e) = cache.refresh_token().await {
-                            error!(error = ?e, "Failed to refresh Azure token after 401 error");
-                        } else {
-                            tracing::info!("Azure token refreshed successfully.");
+                        .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
+                        .ok();
+                    }
+                    Ok(StreamChunk::TokenUsage { .. }) => {
+                        // Token usage tracked by StreamManager
+                    }
+                    Ok(StreamChunk::Done) => {
+                        debug!(conv_id = %conv_id, "Received Done chunk");
+                        // Forward to StreamManager before breaking
+                        if let Some(ref sm) = stream_manager {
+                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                                sm.handle_chunk(&conv_id, StreamChunk::Done, cx)
+                            })
+                            .ok();
+                        }
+                        break;
+                    }
+                    Ok(StreamChunk::Error(ref err)) => {
+                        error!(error = %err, conv_id = %conv_id, "Stream error");
+
+                        // Detect authentication errors (401/Unauthorized)
+                        if err.contains("401") || err.contains("Unauthorized") {
+                            tracing::warn!("Detected Azure auth error - token likely expired");
+                            if let Some(cache) = cx
+                                .update(|cx| {
+                                    cx.try_global::<crate::chatty::auth::AzureTokenCache>()
+                                        .cloned()
+                                })
+                                .ok()
+                                .flatten()
+                            {
+                                if let Err(e) = cache.refresh_token().await {
+                                    error!(error = ?e, "Failed to refresh Azure token after 401 error");
+                                } else {
+                                    tracing::info!("Azure token refreshed successfully.");
+                                }
+                            }
                         }
                     }
+                    Ok(_) => {
+                        // ToolCall*, Approval* chunks: no local state update needed
+                    }
+                    Err(ref e) => {
+                        error!(error = %e, conv_id = %conv_id, "Stream error");
+                    }
                 }
-            }
-            Ok(_) => {
-                // ToolCall*, Approval* chunks: no local state update needed
-            }
-            Err(ref e) => {
-                error!(error = %e, conv_id = %conv_id, "Stream error");
-            }
-        }
 
-        // Forward ALL chunks to StreamManager (emits events for UI subscription)
-        match chunk_result {
-            Ok(chunk) => {
-                let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
-                if let Some(ref sm) = stream_manager {
-                    sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                        sm.handle_chunk(&conv_id, chunk, cx)
+                // Forward ALL chunks to StreamManager (emits events for UI subscription)
+                match chunk_result {
+                    Ok(chunk) => {
+                        let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+                        if let Some(ref sm) = stream_manager {
+                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                                sm.handle_chunk(&conv_id, chunk, cx)
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
+                            .ok();
+                        }
+                        if is_break {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(ref sm) = stream_manager {
+                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                                sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
+                            })
+                            .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
+                            .ok();
+                        }
+                        break;
+                    }
+                }
+            } // end of stream.next() branch
+        } // end of tokio::select!
+    } // end of loop
+
+    // Drain remaining progress events after stream ends
+    while let Ok(progress) = progress_rx.try_recv() {
+        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+        match progress {
+            InvokeAgentProgress::Text(text) => {
+                chat_view
+                    .update(cx, |view, cx| {
+                        view.append_sub_agent_progress(&text, cx);
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
                     .ok();
-                }
-                if is_break {
-                    break;
-                }
             }
-            Err(e) => {
-                if let Some(ref sm) = stream_manager {
-                    sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                        sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
+            InvokeAgentProgress::Finished { success, result } => {
+                chat_view
+                    .update(cx, |view, cx| {
+                        view.finalize_sub_agent_progress(success, result, cx);
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
                     .ok();
-                }
-                break;
             }
+            _ => {}
         }
+    }
+
+    // Clear the progress slot sender so stale references don't accumulate
+    {
+        let mut slot = invoke_agent_progress_slot.lock().unwrap();
+        *slot = None;
     }
 
     // 6. Extract trace and finalize via StreamManager

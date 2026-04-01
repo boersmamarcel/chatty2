@@ -2,7 +2,8 @@
 //!
 //! Routes:
 //! - `GET  /a2a/{module}/.well-known/agent.json` — per-module agent card
-//! - `POST /a2a/{module}` — A2A JSON-RPC (`message/send`, `tasks/get`)
+//! - `POST /a2a/{module}` — A2A JSON-RPC (`message/send`, `message/stream`,
+//!   `tasks/get`)
 //! - `GET  /.well-known/agent.json` — aggregated gateway agent card
 
 use std::sync::Arc;
@@ -11,13 +12,15 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
+use chatty_module_registry::ModuleRegistry;
 use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
-
-use chatty_module_registry::ModuleRegistry;
 
 use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 
@@ -107,6 +110,9 @@ pub(crate) async fn a2a_jsonrpc(
 
     match body.method.as_str() {
         "message/send" => handle_message_send(&module_name, body.id, body.params, registry).await,
+        "message/stream" => handle_message_stream(&module_name, body.id, body.params, registry)
+            .await
+            .into_response(),
         "tasks/get" => handle_tasks_get(&module_name, body.id, body.params).await,
         method => (
             StatusCode::OK,
@@ -221,6 +227,243 @@ async fn handle_message_send(
 }
 
 // ---------------------------------------------------------------------------
+// message/stream: SSE streaming variant of message/send
+// ---------------------------------------------------------------------------
+
+async fn handle_message_stream(
+    module_name: &str,
+    id: Option<Value>,
+    params: Option<Value>,
+    registry: Arc<RwLock<ModuleRegistry>>,
+) -> axum::response::Response {
+    use chatty_wasm_runtime::{ChatRequest, Message, Role};
+
+    let params = match params {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(JsonRpcResponse::err(
+                        id,
+                        -32602,
+                        "params are required for message/stream",
+                    ))
+                    .unwrap_or_default(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let content = params
+        .pointer("/message/parts/0/text")
+        .or_else(|| params.pointer("/message/text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let task_id = format!("task-{}", crate::gateway::new_id());
+    let module_name = module_name.to_string();
+
+    // Verify the module exists before starting the stream.
+    {
+        let reg = registry.read().await;
+        if reg.get(&module_name).is_none() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(JsonRpcResponse::err(
+                        id.clone(),
+                        -32602,
+                        format!("module '{}' not found", module_name),
+                    ))
+                    .unwrap_or_default(),
+                ),
+            )
+                .into_response();
+        }
+    }
+
+    let req = ChatRequest {
+        messages: vec![Message {
+            role: Role::User,
+            content,
+        }],
+        conversation_id: String::new(),
+    };
+
+    // Create a progress channel for real-time streaming of module log messages.
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Build an SSE stream that interleaves progress events with the chat result.
+    let stream = async_stream::stream! {
+        // 1. "working" status
+        let working = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "id": task_id,
+                "status": { "state": "working" },
+                "final": false
+            }
+        });
+        yield Ok::<_, std::convert::Infallible>(Event::default().data(working.to_string()));
+
+        // 2. Spawn chat in a separate task, install progress sender
+        let mut chat_handle = tokio::task::spawn_blocking({
+            let registry = registry.clone();
+            let module_name = module_name.clone();
+            let req = req;
+            let progress_tx = progress_tx;
+            move || {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    let mut reg = registry.write().await;
+                    if let Some(m) = reg.get_mut(&module_name) {
+                        m.set_progress_sender(progress_tx);
+                        m.chat(req).await
+                    } else {
+                        Err(anyhow::anyhow!("module '{}' not found", module_name))
+                    }
+                })
+            }
+        });
+
+        // 3. Interleave progress events with chat completion
+        let mut chat_done = false;
+        let mut chat_result = None;
+
+        loop {
+            if chat_done {
+                break;
+            }
+
+            tokio::select! {
+                biased;
+                // Check for progress messages first
+                Some(msg) = progress_rx.recv() => {
+                    let progress = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "id": task_id,
+                            "status": {
+                                "state": "working",
+                                "message": { "parts": [{ "type": "text", "text": msg }] }
+                            },
+                            "final": false
+                        }
+                    });
+                    yield Ok(Event::default().data(progress.to_string()));
+                }
+                // Chat task completed
+                result = &mut chat_handle => {
+                    chat_done = true;
+                    chat_result = Some(result);
+                }
+            }
+        }
+
+        // Drain any remaining progress
+        while let Ok(msg) = progress_rx.try_recv() {
+            let progress = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "id": task_id,
+                    "status": {
+                        "state": "working",
+                        "message": { "parts": [{ "type": "text", "text": msg }] }
+                    },
+                    "final": false
+                }
+            });
+            yield Ok(Event::default().data(progress.to_string()));
+        }
+
+        // 4. Emit final result
+        match chat_result {
+            Some(Ok(Ok(resp))) => {
+                let artifact = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "artifact": {
+                            "parts": [{ "type": "text", "text": resp.content }],
+                            "index": 0,
+                            "lastChunk": true
+                        }
+                    }
+                });
+                yield Ok(Event::default().data(artifact.to_string()));
+
+                let completed = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "status": { "state": "completed" },
+                        "final": true
+                    }
+                });
+                yield Ok(Event::default().data(completed.to_string()));
+            }
+            Some(Ok(Err(e))) => {
+                let failed = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "status": {
+                            "state": "failed",
+                            "message": { "parts": [{ "type": "text", "text": e.to_string() }] }
+                        },
+                        "final": true
+                    }
+                });
+                yield Ok(Event::default().data(failed.to_string()));
+            }
+            Some(Err(e)) => {
+                let failed = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "status": {
+                            "state": "failed",
+                            "message": { "parts": [{ "type": "text", "text": format!("Task panicked: {e}") }] }
+                        },
+                        "final": true
+                    }
+                });
+                yield Ok(Event::default().data(failed.to_string()));
+            }
+            None => {
+                let failed = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "id": task_id,
+                        "status": {
+                            "state": "failed",
+                            "message": { "parts": [{ "type": "text", "text": "No result received" }] }
+                        },
+                        "final": true
+                    }
+                });
+                yield Ok(Event::default().data(failed.to_string()));
+            }
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // tasks/get: return a simple "not found" since we are stateless
 // ---------------------------------------------------------------------------
 
@@ -273,5 +516,8 @@ pub(crate) fn agent_card_to_json(card: &AgentCard) -> Value {
         "description": card.description,
         "version": card.version,
         "skills": skills,
+        "capabilities": {
+            "streaming": true
+        },
     })
 }

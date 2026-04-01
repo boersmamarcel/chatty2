@@ -1,0 +1,19 @@
+[module]
+name = "benford-agent"
+version = "0.1.0"
+description = "Forensic Benford's Law auditor — agentic tool-calling loop inside WASM"
+wasm = "benford_agent.wasm"
+
+[capabilities]
+tools = ["compute_benford_distribution", "chi_square_test"]
+chat = true
+agent = true
+
+[protocols]
+openai_compat = true
+mcp = true
+a2a = true
+
+[resources]
+max_memory_mb = 32
+max_execution_ms = 30000

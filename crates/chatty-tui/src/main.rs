@@ -166,22 +166,24 @@ async fn main() -> Result<()> {
     chatty_core::init_repositories()
         .context("Failed to initialize settings repositories (is HOME set?)")?;
 
-    // Load providers, models, and execution settings
-    let (providers_result, models_result, exec_settings_result) = tokio::join!(
+    // Load providers, models, execution settings, and A2A agents
+    let (providers_result, models_result, exec_settings_result, a2a_agents_result) = tokio::join!(
         chatty_core::provider_repository().load_all(),
         chatty_core::models_repository().load_all(),
         chatty_core::execution_settings_repository().load(),
+        chatty_core::a2a_repository().load_all(),
     );
 
     let providers = providers_result.context("Failed to load providers")?;
     let models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
+    let remote_agents = a2a_agents_result.unwrap_or_default();
 
     // Default workspace_dir to CWD at launch so tools have an explicit root
-    if execution_settings.workspace_dir.is_none() {
-        if let Ok(cwd) = std::env::current_dir() {
-            execution_settings.workspace_dir = Some(cwd.to_string_lossy().to_string());
-        }
+    if execution_settings.workspace_dir.is_none()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        execution_settings.workspace_dir = Some(cwd.to_string_lossy().to_string());
     }
 
     // Apply CLI tool overrides
@@ -346,6 +348,7 @@ async fn main() -> Result<()> {
         search_settings,
         embedding_service,
         user_secrets,
+        remote_agents,
         event_tx,
         cli.headless, // headless mode means we are running as a sub-agent
     );

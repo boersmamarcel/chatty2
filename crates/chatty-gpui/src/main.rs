@@ -425,6 +425,9 @@ fn main() {
         // Initialize MCP servers model with empty state - will be populated async
         cx.set_global(settings::models::McpServersModel::new());
 
+        // Initialize A2A agents model with empty state - will be populated async
+        cx.set_global(chatty_core::settings::models::A2aAgentsModel::new());
+
         // Initialize execution settings with default - will be populated async
         cx.set_global(settings::models::ExecutionSettingsModel::default());
 
@@ -855,6 +858,13 @@ fn main() {
                         }
                         info!("Models loaded");
 
+                        // Refresh the module runtime so the gateway gets a real
+                        // HostLlmProvider now that models/providers are available.
+                        // The initial refresh_runtime() call at startup runs before
+                        // providers finish loading asynchronously, which causes the
+                        // gateway to use the noop provider.
+                        settings::controllers::module_settings_controller::refresh_runtime(cx);
+
                         // Always attempt to auto-discover Ollama models on startup
                         debug!("Attempting Ollama model auto-discovery");
 
@@ -1000,6 +1010,37 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load MCP server configurations");
+                }
+            }
+        })
+        .detach();
+
+        // Load A2A agent configurations asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = chatty_core::a2a_repository();
+            match repo.load_all().await {
+                Ok(agents) => {
+                    let names: Vec<String> = agents.iter().filter(|a| a.enabled).map(|a| a.name.clone()).collect();
+                    cx.update(|cx| {
+                        cx.update_global::<chatty_core::settings::models::A2aAgentsModel, _>(|model, _cx| {
+                            model.replace_all(agents);
+                        });
+                        info!(count = names.len(), "A2A agent configurations loaded");
+                        cx.refresh_windows();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global A2A agents after load"))
+                    .ok();
+
+                    // Probe agent cards for all enabled agents in the background
+                    for name in names {
+                        cx.update(|cx| {
+                            settings::controllers::a2a_controller::probe_agent_card(name, cx);
+                        })
+                        .ok();
+                    }
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load A2A agent configurations");
                 }
             }
         })

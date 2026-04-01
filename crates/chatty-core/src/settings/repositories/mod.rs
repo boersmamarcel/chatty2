@@ -1,3 +1,5 @@
+pub mod a2a_json_repository;
+pub mod a2a_repository;
 pub mod execution_settings_json_repository;
 pub mod execution_settings_repository;
 pub mod general_settings_json_repository;
@@ -17,6 +19,8 @@ pub mod training_settings_repository;
 pub mod user_secrets_json_repository;
 pub mod user_secrets_repository;
 
+pub use a2a_json_repository::A2aJsonRepository;
+pub use a2a_repository::A2aRepository;
 pub use execution_settings_json_repository::ExecutionSettingsJsonRepository;
 pub use execution_settings_repository::ExecutionSettingsRepository;
 pub use general_settings_json_repository::GeneralSettingsJsonRepository;

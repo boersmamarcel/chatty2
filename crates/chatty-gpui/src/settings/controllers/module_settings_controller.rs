@@ -1,28 +1,542 @@
+use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::{
     ModuleSettingsModel, default_module_dir, normalize_module_dir,
 };
-use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 use anyhow::{Context, Result};
+use chatty_core::settings::models::providers_store::ProviderType;
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
+use chatty_wasm_runtime::{
+    CompletionResponse, LlmProvider, Message, ResourceLimits, Role, TokenUsage, ToolCall,
+};
 use gpui::{App, AsyncApp};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
-struct NoopLlmProvider;
+// ---------------------------------------------------------------------------
+// HostLlmProvider — bridges WASM module llm::complete() to real LLM APIs
+// ---------------------------------------------------------------------------
 
-impl LlmProvider for NoopLlmProvider {
+/// Configuration captured from GPUI globals for the LLM provider.
+#[derive(Clone, Debug)]
+struct LlmConfig {
+    provider_type: ProviderType,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model_identifier: String,
+    temperature: f32,
+    max_tokens: Option<i32>,
+}
+
+struct HostLlmProvider {
+    config: LlmConfig,
+    client: reqwest::Client,
+}
+
+impl HostLlmProvider {
+    fn new(config: LlmConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
+        Self { config, client }
+    }
+
+    fn effective_model(&self, model: &str) -> String {
+        if model.is_empty() {
+            self.config.model_identifier.clone()
+        } else {
+            model.to_string()
+        }
+    }
+
+    fn role_str(role: &Role) -> &'static str {
+        match role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        }
+    }
+
+    async fn complete_openai(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        tools: Option<String>,
+    ) -> Result<CompletionResponse, String> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or(match self.config.provider_type {
+                ProviderType::Ollama => "http://localhost:11434",
+                ProviderType::Mistral => "https://api.mistral.ai",
+                _ => "https://api.openai.com",
+            });
+        let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": Self::role_str(&m.role),
+                    "content": &m.content,
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": msgs,
+            "temperature": self.config.temperature,
+        });
+
+        if let Some(max) = self.config.max_tokens {
+            body["max_tokens"] = serde_json::json!(max);
+        }
+
+        if let Some(ref tools_json) = tools
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(tools_json)
+        {
+            body["tools"] = parsed;
+        }
+
+        let mut req = self.client.post(&url);
+        if let Some(ref key) = self.config.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        req = req.header("Content-Type", "application/json");
+
+        let resp = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("LLM API returned {status}: {text}"));
+        }
+
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+        Self::parse_openai_response(&data)
+    }
+
+    async fn complete_anthropic(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        tools: Option<String>,
+    ) -> Result<CompletionResponse, String> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com");
+        let url = format!("{}/v1/messages", base.trim_end_matches('/'));
+
+        let (system_msg, chat_msgs): (Vec<_>, Vec<_>) = messages
+            .iter()
+            .partition(|m| matches!(m.role, Role::System));
+
+        let msgs: Vec<serde_json::Value> = chat_msgs
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": Self::role_str(&m.role),
+                    "content": &m.content,
+                })
+            })
+            .collect();
+
+        let max_tokens = self.config.max_tokens.unwrap_or(4096);
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": msgs,
+            "max_tokens": max_tokens,
+            "temperature": self.config.temperature,
+        });
+
+        if let Some(sys) = system_msg.first() {
+            body["system"] = serde_json::json!(&sys.content);
+        }
+
+        if let Some(ref tools_json) = tools
+            && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json)
+        {
+            let anthropic_tools: Vec<serde_json::Value> = parsed
+                    .iter()
+                    .filter_map(|t| {
+                        let func = t.get("function")?;
+                        Some(serde_json::json!({
+                            "name": func.get("name")?,
+                            "description": func.get("description").unwrap_or(&serde_json::json!("")),
+                            "input_schema": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object"})),
+                        }))
+                    })
+                    .collect();
+            if !anthropic_tools.is_empty() {
+                body["tools"] = serde_json::json!(anthropic_tools);
+            }
+        }
+
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or("Anthropic API key not configured")?;
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Anthropic API returned {status}: {text}"));
+        }
+
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+        Self::parse_anthropic_response(&data)
+    }
+
+    async fn complete_gemini(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        tools: Option<String>,
+    ) -> Result<CompletionResponse, String> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://generativelanguage.googleapis.com");
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or("Gemini API key not configured")?;
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent",
+            base.trim_end_matches('/'),
+            model,
+        );
+
+        let contents: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| !matches!(m.role, Role::System))
+            .map(|m| {
+                let role = match m.role {
+                    Role::User => "user",
+                    _ => "model",
+                };
+                serde_json::json!({
+                    "role": role,
+                    "parts": [{"text": &m.content}],
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({ "contents": contents });
+
+        if let Some(sys) = messages.iter().find(|m| matches!(m.role, Role::System)) {
+            body["systemInstruction"] = serde_json::json!({"parts": [{"text": &sys.content}]});
+        }
+
+        body["generationConfig"] = serde_json::json!({
+            "temperature": self.config.temperature,
+        });
+        if let Some(max) = self.config.max_tokens {
+            body["generationConfig"]["maxOutputTokens"] = serde_json::json!(max);
+        }
+
+        // Tools mapping for Gemini (simplified — function declarations only)
+        if let Some(ref tools_json) = tools
+            && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json)
+        {
+            let decls: Vec<serde_json::Value> = parsed
+                    .iter()
+                    .filter_map(|t| {
+                        let func = t.get("function")?;
+                        Some(serde_json::json!({
+                            "name": func.get("name")?,
+                            "description": func.get("description").unwrap_or(&serde_json::json!("")),
+                            "parameters": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object"})),
+                        }))
+                    })
+                    .collect();
+            if !decls.is_empty() {
+                body["tools"] = serde_json::json!([{"functionDeclarations": decls}]);
+            }
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Gemini API returned {status}: {text}"));
+        }
+
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+        // Parse Gemini response
+        let candidate = data
+            .pointer("/candidates/0/content/parts")
+            .and_then(|p| p.as_array());
+
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
+
+        if let Some(parts) = candidate {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    content.push_str(text);
+                }
+                if let Some(fc) = part.get("functionCall") {
+                    tool_calls.push(ToolCall {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: fc
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        arguments: fc
+                            .get("args")
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|| "{}".to_string()),
+                    });
+                }
+            }
+        }
+
+        let usage = data.get("usageMetadata").map(|u| TokenUsage {
+            input_tokens: u
+                .get("promptTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+            output_tokens: u
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+        });
+
+        Ok(CompletionResponse {
+            content,
+            tool_calls,
+            usage,
+        })
+    }
+
+    fn parse_openai_response(data: &serde_json::Value) -> Result<CompletionResponse, String> {
+        let choice = data
+            .pointer("/choices/0/message")
+            .ok_or("No choices in response")?;
+
+        let content = choice
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let tool_calls = choice
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|tc| {
+                        let func = tc.get("function")?;
+                        Some(ToolCall {
+                            id: tc
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            name: func
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            arguments: func
+                                .get("arguments")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("{}")
+                                .to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let usage = data.get("usage").map(|u| TokenUsage {
+            input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            output_tokens: u
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+        });
+
+        Ok(CompletionResponse {
+            content,
+            tool_calls,
+            usage,
+        })
+    }
+
+    fn parse_anthropic_response(data: &serde_json::Value) -> Result<CompletionResponse, String> {
+        let blocks = data
+            .get("content")
+            .and_then(|c| c.as_array())
+            .ok_or("No content in Anthropic response")?;
+
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
+
+        for block in blocks {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        content.push_str(text);
+                    }
+                }
+                Some("tool_use") => {
+                    tool_calls.push(ToolCall {
+                        id: block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        name: block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        arguments: block
+                            .get("input")
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "{}".to_string()),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let usage = data.get("usage").map(|u| TokenUsage {
+            input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        });
+
+        Ok(CompletionResponse {
+            content,
+            tool_calls,
+            usage,
+        })
+    }
+}
+
+impl LlmProvider for HostLlmProvider {
     fn complete(
         &self,
-        _model: &str,
-        _messages: Vec<Message>,
-        _tools: Option<String>,
+        model: &str,
+        messages: Vec<Message>,
+        tools: Option<String>,
     ) -> Result<CompletionResponse, String> {
-        Err("Host LLM integration is not wired for GPUI module runtime yet.".to_string())
+        let effective_model = self.effective_model(model);
+        debug!(
+            provider = ?self.config.provider_type,
+            model = %effective_model,
+            message_count = messages.len(),
+            has_tools = tools.is_some(),
+            "HostLlmProvider::complete"
+        );
+
+        // The LlmProvider trait is synchronous but we need async HTTP.
+        // Use block_in_place + block_on as recommended in the trait docs.
+        tokio::task::block_in_place(|| {
+            let handle = tokio::runtime::Handle::current();
+            handle.block_on(async {
+                match self.config.provider_type {
+                    ProviderType::Anthropic => {
+                        self.complete_anthropic(&effective_model, messages, tools)
+                            .await
+                    }
+                    ProviderType::Gemini => {
+                        self.complete_gemini(&effective_model, messages, tools)
+                            .await
+                    }
+                    // OpenAI, Ollama, Mistral, AzureOpenAI all use OpenAI-compatible API
+                    _ => {
+                        self.complete_openai(&effective_model, messages, tools)
+                            .await
+                    }
+                }
+            })
+        })
     }
+}
+
+/// Build the LLM provider from the current GPUI globals.
+///
+/// Picks the first configured model and its provider to serve as the host
+/// LLM for WASM modules. Returns `None` if no models/providers are configured.
+fn build_llm_provider(cx: &App) -> Option<Arc<dyn LlmProvider>> {
+    use crate::settings::models::{ModelsModel, ProviderModel};
+
+    let models = cx.try_global::<ModelsModel>()?;
+    let providers = cx.try_global::<ProviderModel>()?;
+
+    let model_config = models.models().first()?;
+    let provider_config = providers
+        .providers()
+        .iter()
+        .find(|p| p.provider_type == model_config.provider_type)?;
+
+    info!(
+        provider = ?provider_config.provider_type,
+        model = %model_config.model_identifier,
+        "Building HostLlmProvider for WASM modules"
+    );
+
+    let config = LlmConfig {
+        provider_type: provider_config.provider_type.clone(),
+        api_key: provider_config.api_key.clone(),
+        base_url: provider_config.base_url.clone(),
+        model_identifier: model_config.model_identifier.clone(),
+        temperature: model_config.temperature,
+        max_tokens: model_config.max_tokens,
+    };
+
+    Some(Arc::new(HostLlmProvider::new(config)))
 }
 
 #[derive(Default)]
@@ -31,17 +545,30 @@ struct ScanSnapshot {
     scan_error: Option<String>,
 }
 
-fn registry_provider() -> Arc<dyn LlmProvider> {
-    Arc::new(NoopLlmProvider)
-}
-
-fn build_registry(module_dir: &str) -> Result<ModuleRegistry> {
-    let mut registry = ModuleRegistry::new(registry_provider(), ResourceLimits::default())
+fn build_registry(module_dir: &str, llm_provider: Arc<dyn LlmProvider>) -> Result<ModuleRegistry> {
+    let mut registry = ModuleRegistry::new(llm_provider, ResourceLimits::default())
         .context("failed to create module registry")?;
     registry
         .scan_directory(module_dir)
         .with_context(|| format!("failed to scan module directory {module_dir}"))?;
     Ok(registry)
+}
+
+/// Noop provider used only for module validation during scanning
+/// (modules are loaded but not executed, so llm::complete is never called).
+fn noop_provider() -> Arc<dyn LlmProvider> {
+    struct Noop;
+    impl LlmProvider for Noop {
+        fn complete(
+            &self,
+            _model: &str,
+            _messages: Vec<Message>,
+            _tools: Option<String>,
+        ) -> Result<CompletionResponse, String> {
+            Err("LLM not available in validation context".to_string())
+        }
+    }
+    Arc::new(Noop)
 }
 
 fn scan_modules(module_dir: &str) -> ScanSnapshot {
@@ -66,7 +593,7 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
     };
 
     let mut validation_registry =
-        match ModuleRegistry::new(registry_provider(), ResourceLimits::default()) {
+        match ModuleRegistry::new(noop_provider(), ResourceLimits::default()) {
             Ok(registry) => registry,
             Err(err) => {
                 return ScanSnapshot {
@@ -314,6 +841,10 @@ fn save_mcp_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
 
 pub fn refresh_runtime(cx: &mut App) {
     let settings = cx.global::<ModuleSettingsModel>().clone();
+    let llm_provider = build_llm_provider(cx).unwrap_or_else(|| {
+        warn!("No LLM provider configured; WASM modules will not be able to call llm::complete()");
+        noop_provider()
+    });
     let generation = {
         let state = cx.global_mut::<DiscoveredModulesModel>();
         state.refresh_generation += 1;
@@ -356,7 +887,8 @@ pub fn refresh_runtime(cx: &mut App) {
 
             let registry_result = tokio::task::spawn_blocking({
                 let module_dir = settings.module_dir.clone();
-                move || build_registry(&module_dir)
+                let provider = llm_provider.clone();
+                move || build_registry(&module_dir, provider)
             })
             .await
             .unwrap_or_else(|err| Err(anyhow::anyhow!("Module registry task failed: {err}")));

@@ -59,30 +59,29 @@ pub fn update_server_api_key(server_name: String, api_key: Option<String>, cx: &
     cx.refresh_windows();
 
     // 3. Reconnect if the server was enabled so the new key takes effect
-    if was_enabled {
-        if let Some(config) = updated_servers
+    if was_enabled
+        && let Some(config) = updated_servers
             .iter()
             .find(|s| s.name == server_name)
             .cloned()
-        {
-            let service = cx.global::<McpService>().clone();
-            let name = config.name.clone();
+    {
+        let service = cx.global::<McpService>().clone();
+        let name = config.name.clone();
 
-            cx.spawn(async move |cx| {
-                if let Err(e) = service.disconnect_server(&name).await {
-                    error!(server = %name, error = ?e, "Failed to disconnect for API key update");
-                }
-                if let Err(e) = service.connect_server(config).await {
-                    error!(server = %name, error = ?e, "Failed to reconnect with new API key");
-                }
+        cx.spawn(async move |cx| {
+            if let Err(e) = service.disconnect_server(&name).await {
+                error!(server = %name, error = ?e, "Failed to disconnect for API key update");
+            }
+            if let Err(e) = service.connect_server(config).await {
+                error!(server = %name, error = ?e, "Failed to reconnect with new API key");
+            }
 
-                cx.update(|cx| {
-                    emit_rebuild_required(cx);
-                })
-                .ok();
+            cx.update(|cx| {
+                emit_rebuild_required(cx);
             })
-            .detach();
-        }
+            .ok();
+        })
+        .detach();
     }
 
     // 4. Save async to disk

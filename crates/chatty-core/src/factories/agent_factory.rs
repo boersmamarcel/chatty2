@@ -19,10 +19,11 @@ use crate::tools::{
     CreateChartTool, CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool,
     DescribeDataTool, EditExcelTool, EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool,
     FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
-    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, ListDirectoryTool, ListMcpTool,
-    ListToolsTool, MoveFileTool, PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts,
-    QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool,
-    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool,
+    ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool,
+    PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
+    ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
+    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
 
@@ -173,7 +174,12 @@ fn active_native_tool_names(
     has_browser_use: bool,
     has_daytona: bool,
 ) -> HashSet<String> {
-    let mut names = HashSet::from([String::from("list_tools"), String::from("read_skill")]);
+    let mut names = HashSet::from([
+        String::from("list_tools"),
+        String::from("read_skill"),
+        String::from("list_agents"),
+        String::from("invoke_agent"),
+    ]);
 
     if has_add_mcp {
         names.extend(
@@ -437,9 +443,13 @@ fn collect_tools(
     sub_agent_tool: Option<SubAgentTool>,
     browser_use_tool: Option<BrowserUseTool>,
     daytona_tool: Option<DaytonaTool>,
+    list_agents_tool: ListAgentsTool,
+    invoke_agent_tool: InvokeAgentTool,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
+    tools.push(Box::new(list_agents_tool)); // always present
+    tools.push(Box::new(invoke_agent_tool)); // always present
     if let Some(t) = mcp_mgmt.list {
         tools.push(Box::new(t));
     }
@@ -574,7 +584,15 @@ impl AgentClient {
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
-    ) -> Result<(Self, Option<std::sync::Arc<ShellSession>>)> {
+        module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
+        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
+    ) -> Result<(
+        Self,
+        Option<std::sync::Arc<ShellSession>>,
+        crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
+    )> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
 
@@ -1161,7 +1179,11 @@ impl AgentClient {
                     })
                     .unwrap_or(false);
                 tracing::debug!("Sub-agent tool enabled");
-                Some(SubAgentTool::new(sub_model_id, sub_auto_approve))
+                Some(SubAgentTool::new(
+                    sub_model_id,
+                    sub_auto_approve,
+                    available_model_ids,
+                ))
             } else {
                 if !allow_sub_agent {
                     tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
@@ -1221,6 +1243,14 @@ impl AgentClient {
             daytona_tool.is_some(),
             mcp_tool_info,
         );
+
+        // Create list_agents tool (always available, shows A2A agents + local module agents)
+        let list_agents_tool =
+            ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
+
+        // Create invoke_agent tool (always available, calls agents by name)
+        let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
@@ -1361,6 +1391,18 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        // list_agents + invoke_agent are always present
+        tool_sections.push(
+            "- **list_agents**: List all available agents (remote A2A and local WASM modules). \
+             Call this to discover agents before invoking them."
+                .to_string(),
+        );
+        tool_sections.push(
+            "- **invoke_agent**: Invoke a named agent with a prompt. Use `list_agents` first to \
+             discover available agents, then call `invoke_agent` with the agent's name and your \
+             prompt. The agent runs autonomously and returns its response."
+                .to_string(),
+        );
         if execute_code_tool.is_some() {
             tool_sections.push(
                 "- **execute_code**: Execute code in an isolated Docker sandbox. \
@@ -1385,7 +1427,9 @@ impl AgentClient {
                 "- **sub_agent**: Delegate a task to an independent sub-agent that has access to \
                  the same tools. The sub-agent runs autonomously and returns the result. \
                  Use this to parallelize work or isolate complex sub-tasks. Each sub-agent \
-                 starts fresh — include all necessary context in the task description."
+                 starts fresh — include all necessary context in the task description. \
+                 You can optionally pass a `model` parameter to run the sub-agent with a \
+                 different model (e.g., a faster model for simple tasks)."
                     .to_string(),
             );
         }
@@ -1560,11 +1604,17 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Anthropic(agent), shell_session_out))
+                Ok((
+                    AgentClient::Anthropic(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::OpenAI => {
                 let key =
@@ -1638,12 +1688,18 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::OpenAI(agent), shell_session_out))
+                Ok((
+                    AgentClient::OpenAI(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::Gemini => {
                 let key =
@@ -1683,11 +1739,17 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Gemini(agent), shell_session_out))
+                Ok((
+                    AgentClient::Gemini(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::Mistral => {
                 let key = api_key
@@ -1731,11 +1793,17 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Mistral(agent), shell_session_out))
+                Ok((
+                    AgentClient::Mistral(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -1778,11 +1846,17 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::Ollama(agent), shell_session_out))
+                Ok((
+                    AgentClient::Ollama(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
             ProviderType::AzureOpenAI => {
                 let raw_endpoint = base_url.ok_or_else(|| {
@@ -1963,12 +2037,18 @@ impl AgentClient {
                     sub_agent_tool.clone(),
                     browser_use_tool.clone(),
                     daytona_tool.clone(),
+                    list_agents_tool.clone(),
+                    invoke_agent_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
-                Ok((AgentClient::AzureOpenAI(agent), shell_session_out))
+                Ok((
+                    AgentClient::AzureOpenAI(agent),
+                    shell_session_out,
+                    invoke_agent_progress_slot.clone(),
+                ))
             }
         }
     }
@@ -2098,6 +2178,7 @@ mod tests {
             "read_skill must always be reserved to prevent MCP conflicts"
         );
         assert!(names.contains("list_tools"));
+        assert!(names.contains("list_agents"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
-use crate::tools::PendingArtifacts;
+use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
 
 /// User feedback signal for an individual assistant message
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,6 +74,8 @@ pub struct Conversation {
     working_dir: Option<PathBuf>,
     /// Effective workspace directory the current agent was built with.
     agent_workspace_dir: Option<PathBuf>,
+    /// Progress slot for the invoke_agent tool in this conversation's agent.
+    invoke_agent_progress_slot: crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
 impl Conversation {
@@ -94,6 +96,10 @@ impl Conversation {
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
+        module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
+        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -116,24 +122,29 @@ impl Conversation {
         // Shell session is created inside the factory when execution is enabled.
         // The factory returns it so we can store it on the Conversation for reuse
         // across agent rebuilds (MCP changes, model switches).
-        let (agent, shell_session) = AgentClient::from_model_config_with_tools(
-            model_config,
-            provider_config,
-            mcp_tools,
-            exec_settings,
-            pending_approvals,
-            pending_write_approvals,
-            Some(pending_artifacts.clone()),
-            None, // Factory creates session on-demand when execution is enabled
-            user_secrets,
-            theme_colors,
-            memory_service,
-            search_settings,
-            embedding_service,
-            allow_sub_agent,
-        )
-        .await
-        .context("Failed to create agent from config")?;
+        let (agent, shell_session, invoke_agent_progress_slot) =
+            AgentClient::from_model_config_with_tools(
+                model_config,
+                provider_config,
+                mcp_tools,
+                exec_settings,
+                pending_approvals,
+                pending_write_approvals,
+                Some(pending_artifacts.clone()),
+                None, // Factory creates session on-demand when execution is enabled
+                user_secrets,
+                theme_colors,
+                memory_service,
+                search_settings,
+                embedding_service,
+                allow_sub_agent,
+                module_agents,
+                gateway_port,
+                remote_agents,
+                available_model_ids,
+            )
+            .await
+            .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -157,6 +168,7 @@ impl Conversation {
             shell_session,
             working_dir: None,
             agent_workspace_dir,
+            invoke_agent_progress_slot,
         })
     }
 
@@ -176,6 +188,10 @@ impl Conversation {
         search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
         embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
         allow_sub_agent: bool,
+        module_agents: Vec<LocalModuleAgentSummary>,
+        gateway_port: Option<u16>,
+        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+        available_model_ids: Vec<String>,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -196,24 +212,29 @@ impl Conversation {
             .map(PathBuf::from);
 
         // Reconstruct agent; factory creates shell session on-demand when execution is enabled
-        let (agent, shell_session) = AgentClient::from_model_config_with_tools(
-            model_config,
-            provider_config,
-            mcp_tools,
-            exec_settings,
-            pending_approvals,
-            pending_write_approvals,
-            Some(pending_artifacts.clone()),
-            None, // Factory creates session on-demand
-            user_secrets,
-            theme_colors,
-            memory_service,
-            search_settings,
-            embedding_service,
-            allow_sub_agent,
-        )
-        .await
-        .context("Failed to create agent from config")?;
+        let (agent, shell_session, invoke_agent_progress_slot) =
+            AgentClient::from_model_config_with_tools(
+                model_config,
+                provider_config,
+                mcp_tools,
+                exec_settings,
+                pending_approvals,
+                pending_write_approvals,
+                Some(pending_artifacts.clone()),
+                None, // Factory creates session on-demand
+                user_secrets,
+                theme_colors,
+                memory_service,
+                search_settings,
+                embedding_service,
+                allow_sub_agent,
+                module_agents,
+                gateway_port,
+                remote_agents,
+                available_model_ids,
+            )
+            .await
+            .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)
@@ -276,6 +297,7 @@ impl Conversation {
             shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
             agent_workspace_dir,
+            invoke_agent_progress_slot,
         })
     }
 
@@ -629,6 +651,21 @@ impl Conversation {
     /// Get the shell session for this conversation (if enabled)
     pub fn shell_session(&self) -> Option<std::sync::Arc<ShellSession>> {
         self.shell_session.clone()
+    }
+
+    /// Get the invoke_agent progress slot for this conversation's agent
+    pub fn invoke_agent_progress_slot(
+        &self,
+    ) -> crate::tools::invoke_agent_tool::InvokeAgentProgressSlot {
+        self.invoke_agent_progress_slot.clone()
+    }
+
+    /// Set the invoke_agent progress slot (after agent rebuild)
+    pub fn set_invoke_agent_progress_slot(
+        &mut self,
+        slot: crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
+    ) {
+        self.invoke_agent_progress_slot = slot;
     }
 
     /// Set or replace the shell session for this conversation

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
@@ -127,6 +128,16 @@ impl WasmModule {
     }
 
     // -----------------------------------------------------------------------
+    // Progress channel
+    // -----------------------------------------------------------------------
+
+    /// Install a progress sender so module log messages are forwarded as
+    /// real-time progress events during `chat()`.
+    pub fn set_progress_sender(&mut self, tx: UnboundedSender<String>) {
+        self.store.data_mut().progress_tx = Some(tx);
+    }
+
+    // -----------------------------------------------------------------------
     // Guest export wrappers
     // -----------------------------------------------------------------------
 
@@ -136,17 +147,25 @@ impl WasmModule {
     /// runs out of fuel, or exceeds the wall-clock timeout.
     pub async fn chat(&mut self, req: ChatRequest) -> Result<ChatResponse> {
         let timeout = Duration::from_millis(self.limits.max_execution_ms);
-        let agent = self.module.chatty_module_agent();
-        let store = &mut self.store;
 
-        tokio::time::timeout(timeout, async move {
-            agent
-                .call_chat(store, &req)
-                .context("WASM trap in agent::chat")?
-                .map_err(|e| anyhow::anyhow!("agent::chat returned error: {e}"))
-        })
-        .await
-        .context("agent::chat timed out")?
+        let result = {
+            let agent = self.module.chatty_module_agent();
+            let store = &mut self.store;
+
+            tokio::time::timeout(timeout, async move {
+                agent
+                    .call_chat(store, &req)
+                    .context("WASM trap in agent::chat")?
+                    .map_err(|e| anyhow::anyhow!("agent::chat returned error: {e}"))
+            })
+            .await
+            .context("agent::chat timed out")?
+        };
+
+        // Clear progress sender after chat completes
+        self.store.data_mut().progress_tx = None;
+
+        result
     }
 
     /// Call the `agent::invoke-tool` export with a timeout.

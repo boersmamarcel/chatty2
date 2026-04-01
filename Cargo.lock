@@ -1797,6 +1797,7 @@ name = "chatty-protocol-gateway"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
  "chatty-module-registry",
  "chatty-wasm-runtime",
