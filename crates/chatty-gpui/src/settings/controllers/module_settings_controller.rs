@@ -236,10 +236,9 @@ impl HostLlmProvider {
             .as_deref()
             .ok_or("Gemini API key not configured")?;
         let url = format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
+            "{}/v1beta/models/{}:generateContent",
             base.trim_end_matches('/'),
             model,
-            api_key
         );
 
         let contents: Vec<serde_json::Value> = messages
@@ -293,6 +292,7 @@ impl HostLlmProvider {
         let resp = self
             .client
             .post(&url)
+            .header("x-goog-api-key", api_key)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
