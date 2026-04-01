@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1719,7 +1719,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-gpui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-module-registry"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chatty-wasm-runtime",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-protocol-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-tui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chatty-core",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-wasm-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
