@@ -97,10 +97,10 @@ impl HostLlmProvider {
             body["max_tokens"] = serde_json::json!(max);
         }
 
-        if let Some(ref tools_json) = tools {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(tools_json) {
-                body["tools"] = parsed;
-            }
+        if let Some(ref tools_json) = tools
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(tools_json)
+        {
+            body["tools"] = parsed;
         }
 
         let mut req = self.client.post(&url);
@@ -169,9 +169,10 @@ impl HostLlmProvider {
             body["system"] = serde_json::json!(&sys.content);
         }
 
-        if let Some(ref tools_json) = tools {
-            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json) {
-                let anthropic_tools: Vec<serde_json::Value> = parsed
+        if let Some(ref tools_json) = tools
+            && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json)
+        {
+            let anthropic_tools: Vec<serde_json::Value> = parsed
                     .iter()
                     .filter_map(|t| {
                         let func = t.get("function")?;
@@ -182,9 +183,8 @@ impl HostLlmProvider {
                         }))
                     })
                     .collect();
-                if !anthropic_tools.is_empty() {
-                    body["tools"] = serde_json::json!(anthropic_tools);
-                }
+            if !anthropic_tools.is_empty() {
+                body["tools"] = serde_json::json!(anthropic_tools);
             }
         }
 
@@ -270,9 +270,10 @@ impl HostLlmProvider {
         }
 
         // Tools mapping for Gemini (simplified — function declarations only)
-        if let Some(ref tools_json) = tools {
-            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json) {
-                let decls: Vec<serde_json::Value> = parsed
+        if let Some(ref tools_json) = tools
+            && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json)
+        {
+            let decls: Vec<serde_json::Value> = parsed
                     .iter()
                     .filter_map(|t| {
                         let func = t.get("function")?;
@@ -283,9 +284,8 @@ impl HostLlmProvider {
                         }))
                     })
                     .collect();
-                if !decls.is_empty() {
-                    body["tools"] = serde_json::json!([{"functionDeclarations": decls}]);
-                }
+            if !decls.is_empty() {
+                body["tools"] = serde_json::json!([{"functionDeclarations": decls}]);
             }
         }
 

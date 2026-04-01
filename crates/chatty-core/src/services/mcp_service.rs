@@ -43,14 +43,14 @@ impl McpConnection {
         // headers (e.g. Homey), which rmcp can't auto-detect as AuthRequired.
         // Also catches servers where GET returns 200 HTML (e.g. HuggingFace),
         // which causes rmcp's discover_metadata() to fail on JSON parsing.
-        if config.api_key.as_ref().is_none_or(|k| k.is_empty()) {
-            if let Some(auth_servers) = Self::probe_oauth_metadata(&url).await {
-                info!(
-                    server = %name,
-                    "Server advertises OAuth via resource metadata, using OAuth flow"
-                );
-                return Self::connect_with_oauth(&name, &url, Some(auth_servers)).await;
-            }
+        if config.api_key.as_ref().is_none_or(|k| k.is_empty())
+            && let Some(auth_servers) = Self::probe_oauth_metadata(&url).await
+        {
+            info!(
+                server = %name,
+                "Server advertises OAuth via resource metadata, using OAuth flow"
+            );
+            return Self::connect_with_oauth(&name, &url, Some(auth_servers)).await;
         }
 
         // Try connecting with retries for transient transport errors (e.g.

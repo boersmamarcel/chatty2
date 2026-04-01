@@ -47,9 +47,9 @@ pub fn load_files_for_dir(dir: &std::path::Path) -> Vec<String> {
 /// after `@`).
 pub fn at_query_from(input_text: &str) -> Option<String> {
     let last_line = input_text.lines().next_back().unwrap_or(input_text);
-    let trimmed = last_line.trim_end();
-    let at_pos = trimmed.rfind('@')?;
-    let after_at = &trimmed[at_pos + 1..];
+    let at_pos = last_line.rfind('@')?;
+    let after_at = &last_line[at_pos + 1..];
+    // Close the menu as soon as the user types a space (including trailing).
     if after_at.chars().any(char::is_whitespace) {
         return None;
     }
@@ -390,14 +390,15 @@ impl InputState {
 
     /// Return filtered items from the cached file list for the current input.
     pub fn at_menu_items(&self) -> Vec<&String> {
-        let text = self.peek_input();
+        let text = self.textarea.lines().join("\n");
         at_menu_items_for(&text, &self.at_menu_files)
     }
 
     /// Whether the current input contains an `@` query (regardless of whether
     /// the file cache has been populated yet).
     pub fn has_at_query(&self) -> bool {
-        at_query_from(&self.peek_input()).is_some()
+        let raw = self.textarea.lines().join("\n");
+        at_query_from(&raw).is_some()
     }
 
     /// Whether the `@` mention picker should be shown.

@@ -1423,7 +1423,7 @@ impl ChattyApp {
             // Use the conversation-level override first, then fall back to the global setting.
             let skills_dir: Option<PathBuf> = conversation_working_dir.clone().or_else(|| {
                 cx.try_global::<ExecutionSettingsModel>()
-                    .and_then(|s| s.workspace_dir.as_ref().map(|p| PathBuf::from(p)))
+                    .and_then(|s| s.workspace_dir.as_ref().map(PathBuf::from))
             });
             self.refresh_chat_input_skills(skills_dir.as_deref(), cx);
         }
@@ -2975,15 +2975,14 @@ impl ChattyApp {
                                     if let Some(msg) = message {
                                         response = format!("\u{26a0}\u{fe0f} {msg}");
                                     }
-                                } else if state == "working" {
-                                    if let Some(ref msg) = message {
+                                } else if state == "working"
+                                    && let Some(ref msg) = message {
                                         chat_view
                                             .update(cx, |view, cx| {
                                                 view.append_sub_agent_progress(msg, cx);
                                             })
                                             .ok();
                                     }
-                                }
                             }
                             Ok(chatty_core::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
                                 text,
@@ -3150,7 +3149,7 @@ impl ChattyApp {
                 let stderr_thread = std::thread::spawn(move || {
                     if let Some(stderr) = stderr {
                         let reader = std::io::BufReader::new(stderr);
-                        for line in reader.lines().flatten() {
+                        for line in reader.lines().map_while(Result::ok) {
                             let _ = progress_tx.send(line);
                         }
                     }

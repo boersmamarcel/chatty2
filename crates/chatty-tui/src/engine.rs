@@ -599,12 +599,11 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::ToolCallInput { id, arguments } => {
-                if !self.active_invoke_agent_ids.contains(&id) {
-                    if let Some(last) = self.messages.last_mut()
-                        && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
-                    {
-                        tc.input.push_str(&arguments);
-                    }
+                if !self.active_invoke_agent_ids.contains(&id)
+                    && let Some(last) = self.messages.last_mut()
+                    && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
+                {
+                    tc.input.push_str(&arguments);
                 }
                 EngineAction::Redraw
             }
@@ -1040,11 +1039,10 @@ impl ChatEngine {
                                     if let Some(msg) = message {
                                         response = format!("\u{26a0}\u{fe0f} {msg}");
                                     }
-                                } else if state == "working" {
-                                    if let Some(ref msg) = message {
-                                        let _ =
-                                            event_tx.send(AppEvent::SubAgentProgress(msg.clone()));
-                                    }
+                                } else if state == "working"
+                                    && let Some(ref msg) = message
+                                {
+                                    let _ = event_tx.send(AppEvent::SubAgentProgress(msg.clone()));
                                 }
                             }
                             Ok(
@@ -1570,7 +1568,7 @@ fn common_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
 fn copy_text_to_clipboard(text: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return copy_via_command("pbcopy", &[], text);
+        copy_via_command("pbcopy", &[], text)
     }
     #[cfg(target_os = "windows")]
     {
@@ -1647,7 +1645,7 @@ fn run_sub_agent_process(
     let stderr_thread = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let _ = event_tx.send(AppEvent::SubAgentProgress(line));
             }
         }

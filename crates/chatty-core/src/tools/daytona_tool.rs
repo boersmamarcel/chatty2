@@ -743,14 +743,14 @@ impl DaytonaTool {
                 if found.contains(&candidate) {
                     continue;
                 }
-                if let Some(bytes) = self.download_file_bytes(sandbox_id, &candidate).await {
-                    if !bytes.is_empty() {
-                        // File exists — record it (we'll re-download in download_generated_files,
-                        // but this confirms the path is valid)
-                        info!(sandbox_id, path = %candidate, size = bytes.len(), "Found explicit output file");
-                        found.push(candidate);
-                        break;
-                    }
+                if let Some(bytes) = self.download_file_bytes(sandbox_id, &candidate).await
+                    && !bytes.is_empty()
+                {
+                    // File exists — record it (we'll re-download in download_generated_files,
+                    // but this confirms the path is valid)
+                    info!(sandbox_id, path = %candidate, size = bytes.len(), "Found explicit output file");
+                    found.push(candidate);
+                    break;
                 }
             }
         }

@@ -139,11 +139,11 @@ impl MontySandbox {
             }
 
             // Check import statements
-            if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
-                if !Self::is_supported_import(trimmed) {
-                    debug!(import = trimmed, "MontySandbox: unsupported import");
-                    return false;
-                }
+            if (trimmed.starts_with("import ") || trimmed.starts_with("from "))
+                && !Self::is_supported_import(trimmed)
+            {
+                debug!(import = trimmed, "MontySandbox: unsupported import");
+                return false;
             }
 
             // Reject subprocess / socket / ctypes — they could escape the sandbox

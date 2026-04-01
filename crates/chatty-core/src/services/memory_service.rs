@@ -636,8 +636,13 @@ pub fn memory_data_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Serialize memory-service tests to avoid Tantivy file-lock contention
+    /// when multiple `MemoryService` instances run in parallel test threads.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn test_remember_and_search_within_session() {
+        let _guard = SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
 
@@ -663,6 +668,7 @@ mod tests {
     /// similarity search), only keyword matches work.
     #[tokio::test]
     async fn test_lex_only_requires_keyword_overlap() {
+        let _guard = SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
 
@@ -686,6 +692,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_persists_across_reopen() {
+        let _guard = SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
 
         // Session 1: store a memory
