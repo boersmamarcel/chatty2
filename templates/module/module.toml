@@ -9,6 +9,10 @@ tools = []
 chat = true
 agent = true
 
+[capabilities.host-imports]
+process = false
+http = false
+
 [protocols]
 openai_compat = true
 mcp = true

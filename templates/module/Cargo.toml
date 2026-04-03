@@ -6,7 +6,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-chatty-module-sdk = { path = "../../crates/chatty-module-sdk" }
+chatty-module-sdk = { git = "https://github.com/boersmamarcel/chatty2.git", rev = "ad6eabe" }
 serde_json = "1"
 
 # Standalone crate — intentionally NOT part of the main chatty workspace.
