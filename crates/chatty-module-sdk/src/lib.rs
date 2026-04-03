@@ -57,7 +57,7 @@
 // `$crate::` from the `export_module!` macro.
 wit_bindgen::generate!({
     world: "module",
-    path: "../../wit",
+    path: "wit",
 });
 
 // ---------------------------------------------------------------------------

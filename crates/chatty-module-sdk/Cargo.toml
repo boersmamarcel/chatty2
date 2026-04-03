@@ -3,6 +3,12 @@ name = "chatty-module-sdk"
 version = "0.1.0"
 edition = "2024"
 description = "SDK for building chatty WASM agent modules — compile to wasm32-wasip2"
+license = "MIT"
+repository = "https://github.com/boersmamarcel/chatty2"
+readme = "README.md"
+keywords = ["wasm", "agent", "module", "chatty", "wit"]
+categories = ["wasm", "api-bindings"]
+include = ["src/**/*.rs", "wit/**/*.wit", "Cargo.toml", "README.md", "LICENSE"]
 
 [dependencies]
 wit-bindgen = "0.51.0"

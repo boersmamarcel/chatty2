@@ -1,0 +1,186 @@
+package chatty:module@0.1.0;
+
+/// The contract between chatty (host) and WASM modules (guest).
+///
+/// Host imports: llm, config, logging — minimal trust surface.
+/// Guest exports: agent — chat, tool invocation, and discovery.
+
+// ---------------------------------------------------------------------------
+// Shared types used across host and guest interfaces
+// ---------------------------------------------------------------------------
+
+/// Common types shared between host and guest.
+interface types {
+    /// Role of a message participant.
+    enum role {
+        system,
+        user,
+        assistant,
+    }
+
+    /// A single message in a conversation.
+    record message {
+        role: role,
+        content: string,
+    }
+
+    /// A tool call requested by the LLM.
+    record tool-call {
+        /// Unique identifier for this tool call.
+        id: string,
+        /// Name of the tool to invoke.
+        name: string,
+        /// JSON-encoded arguments for the tool.
+        arguments: string,
+    }
+
+    /// Token usage statistics for a completion.
+    record token-usage {
+        input-tokens: u32,
+        output-tokens: u32,
+    }
+
+    /// Response from the host LLM completion API.
+    record completion-response {
+        /// The text content of the completion.
+        content: string,
+        /// Any tool calls the LLM wants to make.
+        tool-calls: list<tool-call>,
+        /// Token usage for this completion.
+        usage: option<token-usage>,
+    }
+
+    /// A tool definition that a module exposes.
+    record tool-definition {
+        /// Unique name for the tool (e.g. "web-search").
+        name: string,
+        /// Human-readable description shown to the LLM.
+        description: string,
+        /// JSON Schema describing the tool's parameters.
+        parameters-schema: string,
+    }
+
+    /// A skill that the agent can perform.
+    record skill {
+        /// Unique name for the skill.
+        name: string,
+        /// Human-readable description of the skill.
+        description: string,
+        /// Example prompts that trigger this skill.
+        examples: list<string>,
+    }
+
+    /// Metadata card describing the agent module.
+    record agent-card {
+        /// Unique identifier for the agent (e.g. "code-reviewer").
+        name: string,
+        /// Human-readable display name.
+        display-name: string,
+        /// Description of what the agent does.
+        description: string,
+        /// Version of the agent module (semver).
+        version: string,
+        /// Skills the agent provides.
+        skills: list<skill>,
+        /// Tools the agent exposes.
+        tools: list<tool-definition>,
+    }
+
+    /// Request sent to a guest agent's chat function.
+    record chat-request {
+        /// The conversation history.
+        messages: list<message>,
+        /// Unique identifier for this conversation.
+        conversation-id: string,
+    }
+
+    /// Response returned from a guest agent's chat function.
+    record chat-response {
+        /// The agent's reply text.
+        content: string,
+        /// Any tool calls the agent wants the host to execute.
+        tool-calls: list<tool-call>,
+        /// Token usage for this response, if tracked.
+        usage: option<token-usage>,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host imports — provided by chatty to WASM modules
+// ---------------------------------------------------------------------------
+
+/// LLM completion service provided by the host.
+interface llm {
+    use types.{message, completion-response};
+
+    /// Run a completion against a host-managed model.
+    ///
+    /// * `model`    — model identifier (e.g. "claude-sonnet-4-20250514")
+    /// * `messages` — conversation history
+    /// * `tools`    — optional JSON-encoded tool definitions for the LLM
+    ///
+    /// Returns the completion response or an error string.
+    complete: func(model: string, messages: list<message>, tools: option<string>) -> result<completion-response, string>;
+}
+
+/// Key-value configuration provided by the host.
+interface config {
+    /// Retrieve a configuration value by key.
+    ///
+    /// Returns `none` if the key is not set.
+    get: func(key: string) -> option<string>;
+}
+
+/// Structured logging provided by the host.
+interface logging {
+    /// Emit a log message at the given level.
+    ///
+    /// * `level`   — one of "trace", "debug", "info", "warn", "error"
+    /// * `message` — the log message
+    log: func(level: string, message: string);
+}
+
+// ---------------------------------------------------------------------------
+// Guest exports — provided by WASM modules to chatty
+// ---------------------------------------------------------------------------
+
+/// The primary interface every chatty module must implement.
+interface agent {
+    use types.{chat-request, chat-response, tool-definition, agent-card};
+
+    /// Handle a chat request and return a response.
+    ///
+    /// The module may call host imports (llm, config, logging) during
+    /// execution. The returned response can include tool calls that the
+    /// host will execute and feed back in subsequent messages.
+    chat: func(req: chat-request) -> result<chat-response, string>;
+
+    /// Invoke a tool exposed by this module.
+    ///
+    /// * `name` — tool name (must match a name from `list-tools`)
+    /// * `args` — JSON-encoded arguments
+    ///
+    /// Returns the tool's JSON-encoded output or an error string.
+    invoke-tool: func(name: string, args: string) -> result<string, string>;
+
+    /// List all tools this module provides.
+    list-tools: func() -> list<tool-definition>;
+
+    /// Return the agent's metadata card.
+    get-agent-card: func() -> agent-card;
+}
+
+// ---------------------------------------------------------------------------
+// World — wires host imports and guest exports together
+// ---------------------------------------------------------------------------
+
+/// The world that every chatty WASM module targets.
+world module {
+    // Host → Guest imports
+    import llm;
+    import config;
+    import logging;
+
+    // Guest → Host exports
+    export agent;
+}
