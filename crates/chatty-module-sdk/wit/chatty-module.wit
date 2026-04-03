@@ -140,6 +140,81 @@ interface logging {
     log: func(level: string, message: string);
 }
 
+/// Subprocess execution provided by the host.
+///
+/// Modules must declare `process = true` in their manifest's
+/// `[capabilities.host-imports]` section to use this interface.
+/// The host may deny access at runtime if the capability is not granted.
+interface process {
+    /// Request to spawn a subprocess on the host.
+    record spawn-request {
+        /// The command to execute (e.g. "git", "chromium").
+        command: string,
+        /// Arguments passed to the command.
+        args: list<string>,
+        /// Working directory. If not set, uses the host default.
+        working-dir: option<string>,
+        /// Data to write to the process's stdin before closing it.
+        stdin: option<string>,
+        /// Maximum execution time in milliseconds. If not set, uses host default.
+        timeout-ms: option<u64>,
+    }
+
+    /// Result of a completed subprocess.
+    record spawn-result {
+        /// Process exit code (0 = success).
+        exit-code: s32,
+        /// Captured stdout.
+        stdout: string,
+        /// Captured stderr.
+        stderr: string,
+    }
+
+    /// Spawn a subprocess and wait for it to complete.
+    ///
+    /// The host enforces allowed commands via the module's capability
+    /// declarations. Attempting to run an unallowed command returns an error.
+    spawn: func(req: spawn-request) -> result<spawn-result, string>;
+}
+
+/// HTTP client provided by the host.
+///
+/// Modules must declare `http = true` in their manifest's
+/// `[capabilities.host-imports]` section to use this interface.
+/// The host proxies all requests, enforcing domain allowlists and
+/// injecting credentials as needed. Modules never see raw API keys.
+interface http {
+    /// An outbound HTTP request.
+    record http-request {
+        /// HTTP method (GET, POST, PUT, DELETE, etc.).
+        method: string,
+        /// Fully qualified URL.
+        url: string,
+        /// Request headers as key-value pairs.
+        headers: list<tuple<string, string>>,
+        /// Optional request body.
+        body: option<list<u8>>,
+        /// Maximum time to wait for a response, in milliseconds.
+        timeout-ms: option<u64>,
+    }
+
+    /// An HTTP response from the host.
+    record http-response {
+        /// HTTP status code (e.g. 200, 404).
+        status: u16,
+        /// Response headers as key-value pairs.
+        headers: list<tuple<string, string>>,
+        /// Response body bytes.
+        body: list<u8>,
+    }
+
+    /// Send an HTTP request and return the response.
+    ///
+    /// The host enforces domain allowlists declared in the module manifest.
+    /// Requests to disallowed domains return an error.
+    request: func(req: http-request) -> result<http-response, string>;
+}
+
 // ---------------------------------------------------------------------------
 // Guest exports — provided by WASM modules to chatty
 // ---------------------------------------------------------------------------
@@ -180,6 +255,8 @@ world module {
     import llm;
     import config;
     import logging;
+    import process;
+    import http;
 
     // Guest → Host exports
     export agent;

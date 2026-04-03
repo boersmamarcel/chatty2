@@ -140,6 +140,80 @@ pub mod log {
     }
 }
 
+/// Host-provided subprocess execution.
+///
+/// Wraps the `process::spawn` host import. Only available to modules that
+/// declare `process = true` in their manifest's `[capabilities.host-imports]`.
+pub mod process {
+    pub use super::chatty::module::process::{SpawnRequest, SpawnResult};
+
+    /// Spawn a subprocess on the host and wait for it to complete.
+    ///
+    /// # Arguments
+    /// * `command`     — executable name (e.g. `"git"`, `"chromium"`)
+    /// * `args`        — command-line arguments
+    /// * `working_dir` — optional working directory
+    /// * `stdin`       — optional data to write to stdin
+    /// * `timeout_ms`  — optional timeout in milliseconds
+    ///
+    /// # Returns
+    /// The spawn result (exit code, stdout, stderr) or an error string.
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        stdin: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> Result<SpawnResult, String> {
+        let req = SpawnRequest {
+            command: command.to_string(),
+            args: args.to_vec(),
+            working_dir: working_dir.map(|s| s.to_string()),
+            stdin: stdin.map(|s| s.to_string()),
+            timeout_ms,
+        };
+        super::chatty::module::process::spawn(&req)
+    }
+}
+
+/// Host-provided HTTP client.
+///
+/// Wraps the `http::request` host import. Only available to modules that
+/// declare `http = true` in their manifest's `[capabilities.host-imports]`.
+/// The host enforces domain allowlists and injects credentials — modules
+/// never see raw API keys.
+pub mod http {
+    pub use super::chatty::module::http::{HttpRequest, HttpResponse};
+
+    /// Send an HTTP request through the host proxy.
+    ///
+    /// # Arguments
+    /// * `method`     — HTTP method (e.g. `"GET"`, `"POST"`)
+    /// * `url`        — fully qualified URL
+    /// * `headers`    — request headers as key-value pairs
+    /// * `body`       — optional request body bytes
+    /// * `timeout_ms` — optional timeout in milliseconds
+    ///
+    /// # Returns
+    /// The HTTP response or an error string.
+    pub fn request(
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&[u8]>,
+        timeout_ms: Option<u64>,
+    ) -> Result<HttpResponse, String> {
+        let req = HttpRequest {
+            method: method.to_string(),
+            url: url.to_string(),
+            headers: headers.to_vec(),
+            body: body.map(|b| b.to_vec()),
+            timeout_ms,
+        };
+        super::chatty::module::http::request(&req)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ModuleExports trait
 // ---------------------------------------------------------------------------

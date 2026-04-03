@@ -2,13 +2,15 @@
 //!
 //! Provides [`WasmModule`] which loads a WASM component compiled to
 //! `wasm32-wasip2`, manages resource limits, and implements the host-side
-//! WIT interface (`llm`, `config`, `logging`).
+//! WIT interface (`llm`, `config`, `logging`, `process`, `http`).
 
 mod host;
 mod limits;
 mod module;
 
-pub use host::{LlmProvider, ModuleManifest};
+pub use host::{
+    HttpClient, HttpResponse, LlmProvider, ModuleManifest, ProcessExecutor, ProcessResult,
+};
 pub use limits::ResourceLimits;
 pub use module::WasmModule;
 

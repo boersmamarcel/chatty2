@@ -323,6 +323,8 @@ impl ModuleRegistry {
             &manifest.wasm_path,
             runtime_manifest,
             self.llm_provider.clone(),
+            None,
+            None,
             limits,
         )
         .with_context(|| {

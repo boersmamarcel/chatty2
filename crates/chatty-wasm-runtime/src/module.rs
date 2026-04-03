@@ -12,7 +12,7 @@ use crate::bindings::Module;
 use crate::bindings::chatty::module::types::{
     AgentCard, ChatRequest, ChatResponse, ToolDefinition,
 };
-use crate::host::{LlmProvider, ModuleManifest, ModuleState};
+use crate::host::{HttpClient, LlmProvider, ModuleManifest, ModuleState, ProcessExecutor};
 use crate::limits::ResourceLimits;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +61,8 @@ impl WasmModule {
         path: &Path,
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
+        process_executor: Option<Arc<dyn ProcessExecutor>>,
+        http_client: Option<Arc<dyn HttpClient>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
         info!(path = %path.display(), module = %manifest.name, "loading WASM module");
@@ -68,7 +70,7 @@ impl WasmModule {
         let component =
             Component::from_file(engine, path).context("failed to load WASM component")?;
 
-        Self::from_component(engine, &component, manifest, llm_provider, limits)
+        Self::from_component(engine, &component, manifest, llm_provider, process_executor, http_client, limits)
     }
 
     /// Load a WASM component from raw bytes and instantiate it.
@@ -79,12 +81,14 @@ impl WasmModule {
         bytes: &[u8],
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
+        process_executor: Option<Arc<dyn ProcessExecutor>>,
+        http_client: Option<Arc<dyn HttpClient>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
         let component =
             Component::from_binary(engine, bytes).context("failed to parse WASM component")?;
 
-        Self::from_component(engine, &component, manifest, llm_provider, limits)
+        Self::from_component(engine, &component, manifest, llm_provider, process_executor, http_client, limits)
     }
 
     fn from_component(
@@ -92,6 +96,8 @@ impl WasmModule {
         component: &Component,
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
+        process_executor: Option<Arc<dyn ProcessExecutor>>,
+        http_client: Option<Arc<dyn HttpClient>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
         let mut linker: Linker<ModuleState> = Linker::new(engine);
@@ -104,7 +110,7 @@ impl WasmModule {
         Module::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 
-        let state = ModuleState::new(manifest, llm_provider, &limits);
+        let state = ModuleState::new(manifest, llm_provider, process_executor, http_client, &limits);
         let mut store = Store::new(engine, state);
 
         // Register memory limiter.
@@ -252,6 +258,8 @@ mod tests {
             Path::new("/nonexistent/path/module.wasm"),
             ModuleManifest::new("test"),
             provider,
+            None,
+            None,
             limits,
         );
         assert!(result.is_err());
@@ -267,6 +275,8 @@ mod tests {
             b"not valid wasm",
             ModuleManifest::new("test"),
             provider,
+            None,
+            None,
             limits,
         );
         assert!(result.is_err());

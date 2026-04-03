@@ -32,6 +32,106 @@ pub trait LlmProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// ProcessExecutor trait
+// ---------------------------------------------------------------------------
+
+/// Callback interface for subprocess execution.
+///
+/// The host supplies an implementation that spawns processes on behalf of
+/// WASM modules.  The implementation should enforce capability checks
+/// (allowed commands, working directory restrictions) before executing.
+pub trait ProcessExecutor: Send + Sync {
+    /// Spawn a subprocess and wait for completion.
+    fn spawn(
+        &self,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        stdin: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> Result<ProcessResult, String>;
+}
+
+/// Result of a completed subprocess, returned to the WASM module.
+#[derive(Debug, Clone)]
+pub struct ProcessResult {
+    /// Process exit code (0 = success).
+    pub exit_code: i32,
+    /// Captured stdout.
+    pub stdout: String,
+    /// Captured stderr.
+    pub stderr: String,
+}
+
+// ---------------------------------------------------------------------------
+// HttpClient trait
+// ---------------------------------------------------------------------------
+
+/// Callback interface for outbound HTTP requests.
+///
+/// The host supplies an implementation that proxies HTTP requests on behalf
+/// of WASM modules.  The implementation should enforce domain allowlists
+/// and inject credentials as needed — modules never see raw API keys.
+pub trait HttpClient: Send + Sync {
+    /// Send an HTTP request and return the response.
+    fn request(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&[u8]>,
+        timeout_ms: Option<u64>,
+    ) -> Result<HttpResponse, String>;
+}
+
+/// HTTP response returned to the WASM module.
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers.
+    pub headers: Vec<(String, String)>,
+    /// Response body bytes.
+    pub body: Vec<u8>,
+}
+
+/// A no-op process executor that always returns an error.
+///
+/// Used as the default when no process capability is granted.
+pub(crate) struct DenyProcessExecutor;
+
+impl ProcessExecutor for DenyProcessExecutor {
+    fn spawn(
+        &self,
+        _command: &str,
+        _args: &[String],
+        _working_dir: Option<&str>,
+        _stdin: Option<&str>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<ProcessResult, String> {
+        Err("process::spawn is not available — module does not have process capability".into())
+    }
+}
+
+/// A no-op HTTP client that always returns an error.
+///
+/// Used as the default when no HTTP capability is granted.
+pub(crate) struct DenyHttpClient;
+
+impl HttpClient for DenyHttpClient {
+    fn request(
+        &self,
+        _method: &str,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: Option<&[u8]>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<HttpResponse, String> {
+        Err("http::request is not available — module does not have http capability".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ModuleManifest
 // ---------------------------------------------------------------------------
 
@@ -84,6 +184,10 @@ pub(crate) struct ModuleState {
     pub(crate) manifest: ModuleManifest,
     /// Callback for LLM completions.
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
+    /// Callback for subprocess execution.
+    pub(crate) process_executor: Arc<dyn ProcessExecutor>,
+    /// Callback for HTTP requests.
+    pub(crate) http_client: Arc<dyn HttpClient>,
     /// WASI Preview 2 context — provides the WASI host implementations
     /// required by modules compiled for `wasm32-wasip2`.
     pub(crate) wasi_ctx: WasiCtx,
@@ -97,6 +201,8 @@ impl ModuleState {
     pub(crate) fn new(
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
+        process_executor: Option<Arc<dyn ProcessExecutor>>,
+        http_client: Option<Arc<dyn HttpClient>>,
         resource_limits: &ResourceLimits,
     ) -> Self {
         let limits = wasmtime::StoreLimitsBuilder::new()
@@ -113,6 +219,10 @@ impl ModuleState {
             limits,
             manifest,
             llm_provider,
+            process_executor: process_executor
+                .unwrap_or_else(|| Arc::new(DenyProcessExecutor)),
+            http_client: http_client
+                .unwrap_or_else(|| Arc::new(DenyHttpClient)),
             wasi_ctx,
             table,
             progress_tx: None,
@@ -205,6 +315,75 @@ impl crate::bindings::chatty::module::logging::Host for ModuleState {
     }
 }
 
+impl crate::bindings::chatty::module::process::Host for ModuleState {
+    fn spawn(
+        &mut self,
+        req: crate::bindings::chatty::module::process::SpawnRequest,
+    ) -> Result<crate::bindings::chatty::module::process::SpawnResult, String> {
+        debug!(
+            module = %self.manifest.name,
+            command = %req.command,
+            args = ?req.args,
+            "process::spawn called by WASM module"
+        );
+        let result = self.process_executor.spawn(
+            &req.command,
+            &req.args,
+            req.working_dir.as_deref(),
+            req.stdin.as_deref(),
+            req.timeout_ms,
+        );
+        match &result {
+            Ok(r) => debug!(
+                module = %self.manifest.name,
+                exit_code = r.exit_code,
+                "process::spawn completed"
+            ),
+            Err(e) => warn!(module = %self.manifest.name, error = %e, "process::spawn failed"),
+        }
+        result.map(|r| crate::bindings::chatty::module::process::SpawnResult {
+            exit_code: r.exit_code,
+            stdout: r.stdout,
+            stderr: r.stderr,
+        })
+    }
+}
+
+impl crate::bindings::chatty::module::http::Host for ModuleState {
+    fn request(
+        &mut self,
+        req: crate::bindings::chatty::module::http::HttpRequest,
+    ) -> Result<crate::bindings::chatty::module::http::HttpResponse, String> {
+        debug!(
+            module = %self.manifest.name,
+            method = %req.method,
+            url = %req.url,
+            "http::request called by WASM module"
+        );
+        let result = self.http_client.request(
+            &req.method,
+            &req.url,
+            &req.headers,
+            req.body.as_deref(),
+            req.timeout_ms,
+        );
+        match &result {
+            Ok(r) => debug!(
+                module = %self.manifest.name,
+                status = r.status,
+                body_len = r.body.len(),
+                "http::request completed"
+            ),
+            Err(e) => warn!(module = %self.manifest.name, error = %e, "http::request failed"),
+        }
+        result.map(|r| crate::bindings::chatty::module::http::HttpResponse {
+            status: r.status,
+            headers: r.headers,
+            body: r.body,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -251,7 +430,7 @@ mod tests {
         let manifest = ModuleManifest::new("test-module")
             .with_config("api_key", "secret123")
             .with_config("endpoint", "https://example.com");
-        ModuleState::new(manifest, provider, &ResourceLimits::default())
+        ModuleState::new(manifest, provider, None, None, &ResourceLimits::default())
     }
 
     #[test]
