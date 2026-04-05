@@ -1,6 +1,8 @@
 pub mod a2a_store;
 pub mod execution_settings;
+pub mod extensions_store;
 pub mod general_model;
+pub mod hive_settings;
 pub mod mcp_store;
 pub mod models_store;
 pub mod module_settings;
@@ -12,7 +14,9 @@ pub mod user_secrets_store;
 
 pub use a2a_store::A2aAgentsModel;
 pub use execution_settings::ExecutionSettingsModel;
+pub use extensions_store::ExtensionsModel;
 pub use general_model::GeneralSettingsModel;
+pub use hive_settings::HiveSettingsModel;
 pub use mcp_store::McpServersModel;
 pub use models_store::ModelsModel;
 pub use module_settings::ModuleSettingsModel;
