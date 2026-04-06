@@ -240,8 +240,6 @@ pub fn toggle_extension(id: String, cx: &mut App) {
 
 /// Add a custom MCP server extension (user-configured, not from Hive).
 pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &mut App) {
-    let extensions = cx.global_mut::<ExtensionsModel>();
-    let id = format!("mcp-{name}");
     let config = McpServerConfig {
         name: name.clone(),
         url,
@@ -249,17 +247,27 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
         enabled: true,
         is_module: false,
     };
+
+    // Add to unified extensions store
+    let extensions = cx.global_mut::<ExtensionsModel>();
+    let id = format!("mcp-{name}");
     extensions.add(InstalledExtension {
         id,
-        display_name: name,
+        display_name: name.clone(),
         description: String::new(),
-        kind: ExtensionKind::McpServer(config),
+        kind: ExtensionKind::McpServer(config.clone()),
         source: ExtensionSource::Custom,
         enabled: true,
     });
     save_extensions_async(extensions.clone(), cx);
-    emit_rebuild_required(cx);
-    cx.refresh_windows();
+
+    // Also push into the legacy McpServersModel so McpService can connect
+    crate::settings::controllers::mcp_controller::create_server(
+        name,
+        config.url,
+        config.api_key,
+        cx,
+    );
 }
 
 // ── Persistence helpers ────────────────────────────────────────────────────
