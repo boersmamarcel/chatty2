@@ -199,6 +199,51 @@ wasm = "{wasm_filename}"
     toml
 }
 
+/// Well-known extension ID for the built-in Hive MCP server.
+pub const HIVE_MCP_EXT_ID: &str = "mcp-hive";
+
+/// Ensure the built-in Hive registry MCP server exists in the extensions model
+/// and the MCP server list. Called on first launch so users can enable it once
+/// the Hive MCP endpoint is deployed (see hive issue #55).
+///
+/// Returns `true` if a new entry was added (caller should persist both stores).
+pub fn ensure_default_hive_mcp(
+    registry_url: &str,
+    extensions: &mut ExtensionsModel,
+    mcp_servers: &mut Vec<McpServerConfig>,
+) -> bool {
+    if extensions.is_installed(HIVE_MCP_EXT_ID) {
+        return false;
+    }
+
+    let mcp_url = format!("{registry_url}/mcp");
+    let config = McpServerConfig {
+        name: "hive".to_string(),
+        url: mcp_url,
+        api_key: None,
+        enabled: false,
+        is_module: false,
+    };
+
+    extensions.add(InstalledExtension {
+        id: HIVE_MCP_EXT_ID.to_string(),
+        display_name: "Hive Registry".to_string(),
+        description: "Search, browse, and manage Hive modules via MCP.".to_string(),
+        kind: ExtensionKind::McpServer(config.clone()),
+        source: ExtensionSource::Hive {
+            module_name: "hive-mcp".to_string(),
+            version: "built-in".to_string(),
+        },
+        enabled: false,
+    });
+
+    if !mcp_servers.iter().any(|s| s.name == "hive") {
+        mcp_servers.push(config);
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +317,27 @@ mod tests {
             enabled: true,
         };
         assert!(!needs_update(&ext, "99.0.0"));
+    }
+
+    #[test]
+    fn ensure_default_hive_mcp_adds_on_first_run() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
+        assert!(added);
+        assert!(ext.is_installed(HIVE_MCP_EXT_ID));
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "hive");
+        assert!(!servers[0].enabled);
+    }
+
+    #[test]
+    fn ensure_default_hive_mcp_idempotent() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
+        let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
+        assert!(!added);
+        assert_eq!(ext.extensions.len(), 1);
     }
 }

@@ -11,54 +11,26 @@ use gpui::{App, AsyncApp};
 use tracing::{error, info, warn};
 
 /// The well-known ID for the built-in Hive MCP extension.
-const HIVE_MCP_EXT_ID: &str = "mcp-hive";
-
 // ── Default Hive MCP ──────────────────────────────────────────────────────
 
 /// Ensure the Hive registry MCP server is present in the Extensions store
-/// and in McpServersModel. Added on first launch so users can simply enable
-/// it once the Hive MCP server is deployed (see hive issue #55).
+/// and in McpServersModel. Thin GPUI wrapper around [`chatty_core::install::ensure_default_hive_mcp`].
 ///
 /// Returns `true` if a new entry was added (caller should persist).
 pub fn ensure_default_hive_mcp(cx: &mut App) -> bool {
-    let extensions = cx.global::<ExtensionsModel>();
-    if extensions.is_installed(HIVE_MCP_EXT_ID) {
-        return false;
-    }
-
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
-    let mcp_url = format!("{registry_url}/mcp");
+    let mut mcp_servers = cx.global::<McpServersModel>().servers().to_vec();
 
-    let config = McpServerConfig {
-        name: "hive".to_string(),
-        url: mcp_url,
-        api_key: None,
-        enabled: false, // disabled until the MCP endpoint is deployed
-        is_module: false,
-    };
-
-    // Add to unified Extensions store
     let extensions = cx.global_mut::<ExtensionsModel>();
-    extensions.add(InstalledExtension {
-        id: HIVE_MCP_EXT_ID.to_string(),
-        display_name: "Hive Registry".to_string(),
-        description: "Search, browse, and manage Hive modules via MCP.".to_string(),
-        kind: ExtensionKind::McpServer(config.clone()),
-        source: ExtensionSource::Hive {
-            module_name: "hive-mcp".to_string(),
-            version: "built-in".to_string(),
-        },
-        enabled: false,
-    });
+    let added = install::ensure_default_hive_mcp(&registry_url, extensions, &mut mcp_servers);
 
-    // Also add to legacy McpServersModel so McpService knows about it
-    let mcp_model = cx.global_mut::<McpServersModel>();
-    if !mcp_model.servers().iter().any(|s| s.name == "hive") {
-        mcp_model.servers_mut().push(config);
+    if added {
+        let mcp_model = cx.global_mut::<McpServersModel>();
+        mcp_model.replace_all(mcp_servers);
+        info!("Added default Hive MCP server extension (disabled)");
     }
 
-    info!("Added default Hive MCP server extension (disabled)");
-    true
+    added
 }
 
 // ── Authentication ─────────────────────────────────────────────────────────

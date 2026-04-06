@@ -458,15 +458,47 @@ fn apply_tool_overrides(
 
 async fn start_mcp_servers() -> Option<McpService> {
     let mcp_repo = chatty_core::mcp_repository();
-    let servers = match mcp_repo.load_all().await {
+    let mut servers = match mcp_repo.load_all().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = ?e, "Failed to load MCP server configs");
-            return None;
+            vec![]
         }
     };
 
-    if servers.is_empty() {
+    // Load extensions and ensure the built-in Hive MCP server exists
+    let ext_repo = chatty_core::extensions_repository();
+    let hive_repo = chatty_core::hive_settings_repository();
+    let (ext_result, hive_result) = tokio::join!(ext_repo.load(), hive_repo.load());
+
+    let mut extensions = ext_result.unwrap_or_default();
+    let hive_settings = hive_result.unwrap_or_default();
+
+    let hive_added = chatty_core::install::ensure_default_hive_mcp(
+        &hive_settings.registry_url,
+        &mut extensions,
+        &mut servers,
+    );
+
+    // Merge enabled MCP servers from extensions into the server list
+    for ext_server in extensions.mcp_servers() {
+        if !servers.iter().any(|s| s.name == ext_server.name) {
+            servers.push(ext_server);
+        }
+    }
+
+    // Persist if we added the default Hive MCP entry
+    if hive_added {
+        if let Err(e) = ext_repo.save(extensions).await {
+            tracing::warn!(error = ?e, "Failed to persist default Hive MCP extension");
+        }
+        if let Err(e) = mcp_repo.save_all(servers.clone()).await {
+            tracing::warn!(error = ?e, "Failed to persist MCP servers after adding Hive default");
+        }
+    }
+
+    let enabled_servers: Vec<_> = servers.into_iter().filter(|s| s.enabled).collect();
+    if enabled_servers.is_empty() {
         return None;
     }
 
@@ -476,12 +508,9 @@ async fn start_mcp_servers() -> Option<McpService> {
         .map_err(|_| tracing::warn!("MCP_SERVICE already initialized"))
         .ok();
 
-    // Fire server connections in the background so startup is not blocked.
-    // Whatever servers have connected by the time init_conversation() runs
-    // will have their tools available; the rest become available after /clear.
     let svc = service.clone();
     tokio::spawn(async move {
-        if let Err(e) = svc.connect_all(servers).await {
+        if let Err(e) = svc.connect_all(enabled_servers).await {
             tracing::error!(error = ?e, "Failed to connect to MCP servers");
         }
     });
