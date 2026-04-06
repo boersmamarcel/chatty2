@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,8 +92,39 @@ pub struct DownloadResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthTokenResponse {
     pub token: String,
-    pub user_id: String,
-    pub username: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+impl AuthTokenResponse {
+    /// Extract the username from the JWT claims (base64-decoded payload).
+    /// Returns `None` if the token is malformed or missing the `username` claim.
+    pub fn username(&self) -> Option<String> {
+        self.jwt_claim("username")
+    }
+
+    /// Extract the user ID (`sub` claim) from the JWT.
+    pub fn user_id(&self) -> Option<String> {
+        self.jwt_claim("sub")
+    }
+
+    fn jwt_claim(&self, key: &str) -> Option<String> {
+        let payload = self.token.split('.').nth(1)?;
+        // JWT uses base64url (no padding) — add padding and decode
+        let padded = match payload.len() % 4 {
+            2 => format!("{payload}=="),
+            3 => format!("{payload}="),
+            _ => payload.to_string(),
+        };
+        let bytes = base64::engine::general_purpose::URL_SAFE
+            .decode(padded)
+            .or_else(|_| {
+                base64::engine::general_purpose::STANDARD.decode(payload)
+            })
+            .ok()?;
+        let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        claims.get(key)?.as_str().map(|s| s.to_string())
+    }
 }
 
 // ── Categories ─────────────────────────────────────────────────────────────

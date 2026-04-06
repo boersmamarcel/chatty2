@@ -43,14 +43,15 @@ pub fn login(email: String, password: String, cx: &mut App) {
     cx.spawn(async move |cx| {
         match client.login(&email, &password).await {
             Ok(auth) => {
+                let username = auth.username().unwrap_or_default();
                 cx.update(|cx| {
                     let settings = cx.global_mut::<HiveSettingsModel>();
                     settings.token = Some(auth.token);
-                    settings.username = Some(auth.username.clone());
+                    settings.username = Some(username.clone());
                     settings.email = Some(email);
                     save_hive_settings_async(settings.clone(), cx);
                     cx.refresh_windows();
-                    info!(username = %auth.username, "Logged in to Hive registry");
+                    info!(username = %username, "Logged in to Hive registry");
                 })
                 .ok();
             }
@@ -79,11 +80,11 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
                 cx.update(|cx| {
                     let settings = cx.global_mut::<HiveSettingsModel>();
                     settings.token = Some(auth.token);
-                    settings.username = Some(auth.username.clone());
+                    settings.username = Some(username.clone());
                     settings.email = Some(email);
                     save_hive_settings_async(settings.clone(), cx);
                     cx.refresh_windows();
-                    info!(username = %auth.username, "Registered with Hive registry");
+                    info!(username = %username, "Registered with Hive registry");
                 })
                 .ok();
             }

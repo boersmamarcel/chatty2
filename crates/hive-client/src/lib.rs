@@ -37,7 +37,7 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = HiveRegistryClient::new("https://registry.example.com");
 //! let auth = client.login("user@example.com", "password123!").await?;
-//! println!("Logged in as {}", auth.username);
+//! println!("Logged in as {}", auth.username().unwrap_or_default());
 //! # Ok(())
 //! # }
 //! ```
