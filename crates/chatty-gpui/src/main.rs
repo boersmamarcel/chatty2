@@ -1145,6 +1145,26 @@ fn main() {
                 })
                 .ok();
             }
+
+            // Ensure the built-in Hive MCP server extension exists
+            cx.update(|cx| {
+                let added =
+                    settings::controllers::extensions_controller::ensure_default_hive_mcp(cx);
+                if added {
+                    // Persist the new extension and MCP server entries
+                    let ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
+                    let mcp_servers = cx
+                        .global::<settings::models::McpServersModel>()
+                        .servers()
+                        .to_vec();
+                    cx.spawn(|_cx: &mut AsyncApp| async move {
+                        let _ = chatty_core::extensions_repository().save(ext_model).await;
+                        let _ = chatty_core::mcp_repository().save_all(mcp_servers).await;
+                    })
+                    .detach();
+                }
+            })
+            .ok();
         })
         .detach();
 
