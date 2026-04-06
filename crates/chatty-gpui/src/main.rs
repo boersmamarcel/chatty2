@@ -444,6 +444,11 @@ fn main() {
         cx.set_global(settings::models::ModuleSettingsModel::default());
         cx.set_global(settings::models::DiscoveredModulesModel::default());
 
+        // Initialize Hive/extensions globals
+        cx.set_global(settings::models::HiveSettingsModel::default());
+        cx.set_global(settings::models::ExtensionsModel::default());
+        cx.set_global(settings::models::MarketplaceState::default());
+
         settings::controllers::module_settings_controller::refresh_runtime(cx);
 
         // Initialize agent memory service asynchronously.
@@ -1109,6 +1114,36 @@ fn main() {
                 Err(e) => {
                     warn!(error = ?e, "Failed to load module settings, using defaults");
                 }
+            }
+        })
+        .detach();
+
+        // Load Hive settings and extensions asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let (hive_result, ext_result) = tokio::join!(
+                chatty_core::hive_settings_repository().load(),
+                chatty_core::extensions_repository().load(),
+            );
+
+            if let Ok(hive) = hive_result {
+                cx.update(|cx| {
+                    info!(
+                        registry = %hive.registry_url,
+                        logged_in = hive.token.is_some(),
+                        "Hive settings loaded"
+                    );
+                    cx.set_global(hive);
+                })
+                .ok();
+            }
+
+            if let Ok(ext) = ext_result {
+                let count = ext.extensions.len();
+                cx.update(|cx| {
+                    info!(count, "Extensions loaded from disk");
+                    cx.set_global(ext);
+                })
+                .ok();
             }
         })
         .detach();
