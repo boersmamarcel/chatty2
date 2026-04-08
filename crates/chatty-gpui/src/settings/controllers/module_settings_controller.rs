@@ -2,7 +2,10 @@ use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::{
     ModuleSettingsModel, default_module_dir, normalize_module_dir,
 };
-use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
+use crate::settings::models::{
+    AgentConfigEvent, DiscoveredModuleEntry, DiscoveredModulesModel, GlobalAgentConfigNotifier,
+    ModuleLoadStatus,
+};
 use anyhow::{Context, Result};
 use chatty_core::settings::models::providers_store::ProviderType;
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
@@ -708,6 +711,19 @@ fn apply_scan_snapshot(
         };
     }
     cx.refresh_windows();
+
+    // Notify the active agent to rebuild so it picks up newly
+    // discovered (or removed) module agents.
+    if let Some(weak_notifier) = cx
+        .try_global::<GlobalAgentConfigNotifier>()
+        .and_then(|g| g.entity.clone())
+        && let Some(notifier) = weak_notifier.upgrade()
+    {
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(AgentConfigEvent::RebuildRequired);
+        });
+    }
+
     true
 }
 

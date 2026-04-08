@@ -150,7 +150,8 @@ wasm = "{wasm_filename}"
 "#
     );
 
-    // Capabilities
+    // Capabilities — use Hive manifest if present, otherwise default to
+    // chat + agent since marketplace modules are expected to be usable.
     if let Some(caps) = manifest.get("capabilities") {
         toml.push_str("\n[capabilities]\n");
         if let Some(tools) = caps.get("tools").and_then(|v| v.as_array()) {
@@ -169,6 +170,10 @@ wasm = "{wasm_filename}"
         if caps.get("agent").and_then(|v| v.as_bool()).unwrap_or(false) {
             toml.push_str("agent = true\n");
         }
+    } else {
+        // No capabilities declared — assume the module supports chat and
+        // agent mode. The module scanner will validate by loading the WASM.
+        toml.push_str("\n[capabilities]\nchat = true\nagent = true\n");
     }
 
     // Protocols
@@ -254,6 +259,9 @@ mod tests {
         let toml = build_module_toml("test-mod", "0.1.0", "A test", "test-mod.wasm", &manifest);
         assert!(toml.contains("name = \"test-mod\""));
         assert!(toml.contains("wasm = \"test-mod.wasm\""));
+        // No capabilities in manifest → defaults to chat + agent
+        assert!(toml.contains("chat = true"));
+        assert!(toml.contains("agent = true"));
     }
 
     #[test]

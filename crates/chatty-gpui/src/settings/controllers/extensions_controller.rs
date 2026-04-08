@@ -6,6 +6,7 @@ use chatty_core::settings::models::extensions_store::{
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::chatty::services::mcp_service::McpService;
+use crate::settings::controllers::module_settings_controller;
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use crate::settings::models::marketplace_state::MarketplaceState;
 use gpui::{App, AsyncApp};
@@ -214,7 +215,11 @@ pub fn install_extension(
                         Ok(ext) => {
                             info!(id = %ext.id, "Installed extension from Hive");
                             save_extensions_async(extensions.clone(), cx);
-                            emit_rebuild_required(cx);
+                            // Rescan module directory so the new WASM module
+                            // appears in DiscoveredModulesModel and becomes
+                            // available as an agent tool. The scan completion
+                            // triggers RebuildRequired automatically.
+                            module_settings_controller::refresh_runtime(cx);
                         }
                         Err(e) => {
                             error!(error = ?e, "Failed to install extension");
@@ -247,7 +252,7 @@ pub fn uninstall_extension(id: String, cx: &mut App) {
         Ok(()) => {
             info!(id = %id, "Uninstalled extension");
             save_extensions_async(extensions.clone(), cx);
-            emit_rebuild_required(cx);
+            module_settings_controller::refresh_runtime(cx);
         }
         Err(e) => {
             error!(error = ?e, id = %id, "Failed to uninstall extension");
