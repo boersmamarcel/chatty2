@@ -1,0 +1,8 @@
+name = "echo-agent"
+display_name = "Echo Agent"
+description = "A demo agent that echoes and transforms text. Supports chat via LLM and a transform_text tool."
+version = "0.1.0"
+license = "MIT"
+tags = ["demo", "echo", "text", "transform"]
+category = "utility"
+pricing_model = "free"

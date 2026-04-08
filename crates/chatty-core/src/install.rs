@@ -176,7 +176,9 @@ wasm = "{wasm_filename}"
         toml.push_str("\n[capabilities]\nchat = true\nagent = true\n");
     }
 
-    // Protocols
+    // Protocols — use Hive manifest if present, otherwise default to a2a = true
+    // since every chatty-module-sdk module implements the WIT agent interface
+    // which IS the A2A protocol.
     if let Some(protos) = manifest.get("protocols") {
         toml.push_str("\n[protocols]\n");
         for key in &["openai_compat", "mcp", "a2a"] {
@@ -184,6 +186,8 @@ wasm = "{wasm_filename}"
                 toml.push_str(&format!("{key} = true\n"));
             }
         }
+    } else {
+        toml.push_str("\n[protocols]\na2a = true\n");
     }
 
     // Resources
@@ -262,6 +266,8 @@ mod tests {
         // No capabilities in manifest → defaults to chat + agent
         assert!(toml.contains("chat = true"));
         assert!(toml.contains("agent = true"));
+        // No protocols in manifest → defaults to a2a = true
+        assert!(toml.contains("a2a = true"));
     }
 
     #[test]
