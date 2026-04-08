@@ -21,7 +21,8 @@ use crate::tools::{
     FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
     GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool,
     ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool,
-    PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, QueryDataTool,
+    PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, PublishModuleTool,
+    QueryDataTool,
     ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
     SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
@@ -445,6 +446,7 @@ fn collect_tools(
     daytona_tool: Option<DaytonaTool>,
     list_agents_tool: ListAgentsTool,
     invoke_agent_tool: InvokeAgentTool,
+    publish_module_tool: Option<PublishModuleTool>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
     tools.push(Box::new(list_tools)); // always present
@@ -550,6 +552,9 @@ fn collect_tools(
         tools.push(Box::new(t));
     }
     if let Some(t) = daytona_tool {
+        tools.push(Box::new(t));
+    }
+    if let Some(t) = publish_module_tool {
         tools.push(Box::new(t));
     }
     tools
@@ -1252,6 +1257,25 @@ impl AgentClient {
         let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
+        // If an MCP server exposes `publish_module`, create a composite native tool
+        // that reads the WASM file from disk and forwards it via MCP — avoids
+        // shuttling large base64 blobs through the LLM context window.
+        let publish_module_tool: Option<PublishModuleTool> = mcp_tools.as_ref().and_then(|servers| {
+            for (_name, tools, sink) in servers {
+                if tools.iter().any(|t| &*t.name == "publish_module") {
+                    let ws = exec_settings
+                        .as_ref()
+                        .and_then(|s| s.workspace_dir.clone());
+                    tracing::info!(
+                        server = %_name,
+                        "Creating publish_wasm_module composite tool (backed by MCP publish_module)"
+                    );
+                    return Some(PublishModuleTool::new(sink.clone(), ws));
+                }
+            }
+            None
+        });
+
         // Build a compact tool capability summary so the LLM knows what it can do
         // from the very first turn — without requiring the user to ask or the model
         // to call list_tools first.
@@ -1450,6 +1474,15 @@ impl AgentClient {
                     .to_string(),
             );
         }
+        if publish_module_tool.is_some() {
+            tool_sections.push(
+                "- **publish_wasm_module**: Publish a WASM module to the hive registry. \
+                 Provide the path to the .wasm file and a TOML manifest string. The tool \
+                 reads the binary, base64-encodes it, and uploads it automatically. \
+                 Use this instead of manually reading and encoding the file."
+                    .to_string(),
+            );
+        }
         // read_skill is always present — it's the on-demand companion to the slim
         // skill descriptions that appear in the automatic context block.
         tool_sections.push(
@@ -1606,6 +1639,7 @@ impl AgentClient {
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
                     invoke_agent_tool.clone(),
+                    publish_module_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1690,6 +1724,7 @@ impl AgentClient {
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
                     invoke_agent_tool.clone(),
+                    publish_module_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -1741,6 +1776,7 @@ impl AgentClient {
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
                     invoke_agent_tool.clone(),
+                    publish_module_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1795,6 +1831,7 @@ impl AgentClient {
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
                     invoke_agent_tool.clone(),
+                    publish_module_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1848,6 +1885,7 @@ impl AgentClient {
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
                     invoke_agent_tool.clone(),
+                    publish_module_tool.clone(),
                 );
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -2039,6 +2077,7 @@ impl AgentClient {
                     daytona_tool.clone(),
                     list_agents_tool.clone(),
                     invoke_agent_tool.clone(),
+                    publish_module_tool.clone(),
                 );
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =

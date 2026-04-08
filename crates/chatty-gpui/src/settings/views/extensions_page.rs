@@ -8,6 +8,8 @@ use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub fn extensions_page() -> SettingPage {
     SettingPage::new("Extensions")
@@ -204,9 +206,15 @@ fn installed_extensions_group() -> SettingGroup {
 // ── Marketplace ────────────────────────────────────────────────────────────
 
 fn marketplace_group() -> SettingGroup {
+    // Persist the search InputState across re-renders so typing works.
+    let persistent_input: Rc<RefCell<Option<Entity<InputState>>>> =
+        Rc::new(RefCell::new(None));
+
     SettingGroup::new()
         .title("Browse Marketplace")
-        .items(vec![SettingItem::render(|_options, window, cx| {
+        .items(vec![SettingItem::render({
+            let persistent_input = persistent_input.clone();
+            move |_options, window, cx| {
             let state = cx.global::<MarketplaceState>();
             let loading = state.loading;
             let error = state.error.clone();
@@ -214,11 +222,16 @@ fn marketplace_group() -> SettingGroup {
             let featured = state.featured.clone();
             let installed = cx.global::<ExtensionsModel>().clone();
 
-            let search_input = cx.new(|cx| {
-                let input = InputState::new(window, cx)
-                    .placeholder("Search extensions...");
-                input
-            });
+            let search_input = {
+                let existing = persistent_input.borrow().clone();
+                existing.unwrap_or_else(|| {
+                    let input = cx.new(|cx| {
+                        InputState::new(window, cx).placeholder("Search extensions...")
+                    });
+                    *persistent_input.borrow_mut() = Some(input.clone());
+                    input
+                })
+            };
 
             v_flex()
                 .w_full()
@@ -341,7 +354,7 @@ fn marketplace_group() -> SettingGroup {
                     })
                 })
                 .into_any_element()
-        })])
+        }})])
 }
 
 // ── Add Custom Extension ───────────────────────────────────────────────────

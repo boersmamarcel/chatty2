@@ -5,6 +5,7 @@ use chatty_core::settings::models::extensions_store::{
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::mcp_store::{McpServerConfig, McpServersModel};
+use crate::chatty::services::mcp_service::McpService;
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use crate::settings::models::marketplace_state::MarketplaceState;
 use gpui::{App, AsyncApp};
@@ -44,12 +45,14 @@ pub fn login(email: String, password: String, cx: &mut App) {
         match client.login(&email, &password).await {
             Ok(auth) => {
                 let username = auth.username().unwrap_or_default();
+                let token = auth.token.clone();
                 cx.update(|cx| {
                     let settings = cx.global_mut::<HiveSettingsModel>();
                     settings.token = Some(auth.token);
                     settings.username = Some(username.clone());
                     settings.email = Some(email);
                     save_hive_settings_async(settings.clone(), cx);
+                    sync_hive_token_to_mcp(Some(token), cx);
                     cx.refresh_windows();
                     info!(username = %username, "Logged in to Hive registry");
                 })
@@ -77,12 +80,14 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
     cx.spawn(async move |cx| {
         match client.register(&username, &email, &password).await {
             Ok(auth) => {
+                let token = auth.token.clone();
                 cx.update(|cx| {
                     let settings = cx.global_mut::<HiveSettingsModel>();
                     settings.token = Some(auth.token);
                     settings.username = Some(username.clone());
                     settings.email = Some(email);
                     save_hive_settings_async(settings.clone(), cx);
+                    sync_hive_token_to_mcp(Some(token), cx);
                     cx.refresh_windows();
                     info!(username = %username, "Registered with Hive registry");
                 })
@@ -109,6 +114,7 @@ pub fn logout(cx: &mut App) {
     settings.username = None;
     settings.email = None;
     save_hive_settings_async(settings.clone(), cx);
+    sync_hive_token_to_mcp(None, cx);
     cx.refresh_windows();
     info!("Logged out from Hive registry");
 }
@@ -294,6 +300,58 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
     );
 }
 
+// ── Hive ↔ MCP token sync ──────────────────────────────────────────────────
+
+/// Propagate the Hive JWT token into the "hive" MCP server's `api_key` so
+/// that MCP tool calls include the `Authorization: Bearer <token>` header.
+///
+/// Pass `None` to clear the token (e.g. on logout).
+/// If the server is currently enabled and connected, it is reconnected so
+/// the new credentials take effect immediately.
+fn sync_hive_token_to_mcp(token: Option<String>, cx: &mut App) {
+    let (updated_servers, was_enabled, config) = {
+        let model = cx.global_mut::<McpServersModel>();
+        let mut was_enabled = false;
+
+        if let Some(server) = model.servers_mut().iter_mut().find(|s| s.name == "hive") {
+            was_enabled = server.enabled;
+            server.api_key = token;
+        } else {
+            return;
+        }
+
+        let config = model
+            .servers()
+            .iter()
+            .find(|s| s.name == "hive")
+            .cloned();
+        (model.servers().to_vec(), was_enabled, config)
+    };
+
+    save_servers_async(updated_servers, cx);
+
+    if was_enabled {
+        if let Some(config) = config {
+            let service = cx.global::<McpService>().clone();
+            let name = config.name.clone();
+
+            cx.spawn(async move |cx| {
+                if let Err(e) = service.disconnect_server(&name).await {
+                    warn!(server = %name, error = ?e, "Failed to disconnect hive MCP for token update");
+                }
+                if let Err(e) = service.connect_server(config).await {
+                    error!(server = %name, error = ?e, "Failed to reconnect hive MCP with updated token");
+                }
+                cx.update(|cx| {
+                    emit_rebuild_required(cx);
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+}
+
 // ── Persistence helpers ────────────────────────────────────────────────────
 
 fn save_extensions_async(model: ExtensionsModel, cx: &mut App) {
@@ -311,6 +369,16 @@ fn save_hive_settings_async(model: HiveSettingsModel, cx: &mut App) {
         let repo = chatty_core::hive_settings_repository();
         if let Err(e) = repo.save(model).await {
             error!(error = ?e, "Failed to save Hive settings");
+        }
+    })
+    .detach();
+}
+
+fn save_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::mcp_repository();
+        if let Err(e) = repo.save_all(servers).await {
+            error!(error = ?e, "Failed to save MCP servers after token sync");
         }
     })
     .detach();

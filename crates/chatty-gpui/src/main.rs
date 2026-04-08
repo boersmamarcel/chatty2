@@ -977,6 +977,25 @@ fn main() {
                         });
                         info!("MCP server configurations loaded");
 
+                        // Inject the stored Hive JWT token into the "hive" MCP
+                        // server config so authenticated tool calls work on
+                        // startup without requiring an extra login.
+                        let mut servers_clone = servers_clone;
+                        if let Some(token) = cx
+                            .global::<chatty_core::settings::models::hive_settings::HiveSettingsModel>()
+                            .token
+                            .clone()
+                        {
+                            if let Some(hive_cfg) =
+                                servers_clone.iter_mut().find(|s| s.name == "hive")
+                            {
+                                if hive_cfg.api_key.as_ref().is_none_or(|k| k.is_empty()) {
+                                    hive_cfg.api_key = Some(token);
+                                    info!("Injected Hive token into MCP server config for startup");
+                                }
+                            }
+                        }
+
                         // Connect to all enabled MCP servers and track auth status
                         let mcp_service = cx.global::<chatty::services::McpService>().clone();
                         cx.spawn(async move |cx: &mut AsyncApp| {

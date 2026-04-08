@@ -10,6 +10,9 @@ use gpui_component::setting::{
 };
 use gpui_component::{ActiveTheme, Disableable, h_flex, v_flex};
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 pub fn modules_page() -> SettingPage {
     SettingPage::new("Modules")
         .description(
@@ -69,21 +72,34 @@ fn directory_group() -> SettingGroup {
     let platform_default = default_module_dir();
     let help_text: SharedString = format!("Platform default: {}", platform_default).into();
 
+    // Persist the InputState across re-renders so typing works.
+    let persistent_input: Rc<RefCell<Option<Entity<InputState>>>> =
+        Rc::new(RefCell::new(None));
+
     SettingGroup::new()
         .title("Module Directory")
         .description(
             "The directory Chatty scans for WASM modules on startup. \
              Each sub-directory containing a `module.toml` is loaded as a module.",
         )
-        .items(vec![SettingItem::render(move |_options, window, cx| {
+        .items(vec![SettingItem::render({
+            let persistent_input = persistent_input.clone();
+            move |_options, window, cx| {
             let current_dir = cx.global::<ModuleSettingsModel>().module_dir.clone();
             let placeholder: SharedString = default_module_dir().into();
 
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .default_value(current_dir)
-            });
+            let input = {
+                let existing = persistent_input.borrow().clone();
+                existing.unwrap_or_else(|| {
+                    let inp = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder(placeholder.clone())
+                            .default_value(current_dir)
+                    });
+                    *persistent_input.borrow_mut() = Some(inp.clone());
+                    inp
+                })
+            };
 
             let input_clone = input.clone();
             let help = help_text.clone();
@@ -121,7 +137,7 @@ fn directory_group() -> SettingGroup {
                         .child(help),
                 )
                 .into_any_element()
-        })])
+        }})])
 }
 
 fn discovered_modules_group() -> SettingGroup {
