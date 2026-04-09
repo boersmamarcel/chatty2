@@ -8,7 +8,7 @@ use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex, v_flex,
 };
 
 pub fn extensions_page() -> SettingPage {
@@ -238,13 +238,13 @@ fn marketplace_group() -> SettingGroup {
                         ),
                 )
                 // Error message
-                .when(error.is_some(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger_foreground)
-                            .child(error.unwrap_or_default()),
-                    )
+                .when_some(error, |this, error| {
+                    this.child(Alert::error("marketplace-error", error).small().on_close(
+                        |_event, _window, cx| {
+                            let state = cx.global_mut::<MarketplaceState>();
+                            state.error = None;
+                        },
+                    ))
                 })
                 // Results or featured
                 .children({
