@@ -11,6 +11,10 @@ pub enum ClientError {
     #[error("registry returned HTTP {status}: {body}")]
     Http { status: u16, body: String },
 
+    /// The server requires authentication but no valid token was provided (401).
+    #[error("authentication required (401)")]
+    Unauthorized,
+
     /// The requested module or version was not found.
     #[error("module not found: {0}")]
     NotFound(String),

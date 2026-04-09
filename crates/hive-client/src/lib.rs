@@ -15,12 +15,15 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = HiveRegistryClient::new("https://registry.example.com");
 //!
-//! // Search for modules.
+//! // Search for modules (no auth required).
 //! let results = client.search("readability").await?;
 //! println!("Found {} modules", results.total);
 //!
 //! // Download a specific version (requires auth token).
-//! let dl = client.download("readability-auditor", "0.1.0").await?;
+//! let auth = client.login("user@example.com", "password123!").await?;
+//! let authed = HiveRegistryClient::new("https://registry.example.com")
+//!     .with_token(auth.token);
+//! let dl = authed.download("readability-auditor", "0.1.0").await?;
 //! println!("trust: {}", dl.trust_level);
 //! # Ok(())
 //! # }

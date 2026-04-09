@@ -25,6 +25,7 @@ pub struct HiveRegistryClient {
     base_url: String,
     http: reqwest::Client,
     cache: Option<Cache>,
+    token: Option<String>,
 }
 
 impl HiveRegistryClient {
@@ -47,6 +48,7 @@ impl HiveRegistryClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http,
             cache: None,
+            token: None,
         }
     }
 
@@ -54,6 +56,12 @@ impl HiveRegistryClient {
     pub fn with_cache_dir(mut self, dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         self.cache = Some(Cache::new(dir)?);
         Ok(self)
+    }
+
+    /// Set the Bearer token used for authenticated endpoints (e.g. downloads).
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
     }
 
     // ── Authentication ─────────────────────────────────────────────────────
@@ -223,9 +231,16 @@ impl HiveRegistryClient {
 
         tracing::debug!(%url, "downloading module");
 
-        let response = self.http.get(&url).send().await?;
+        let mut request = self.http.get(&url);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = request.send().await?;
         let status = response.status();
 
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(ClientError::NotFound(format!("{name}@{version}")));
         }

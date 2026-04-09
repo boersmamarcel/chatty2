@@ -197,7 +197,11 @@ pub fn install_extension(
     cx: &mut App,
 ) {
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
-    let client = HiveRegistryClient::new(&registry_url);
+    let token = cx.global::<HiveSettingsModel>().token.clone();
+    let mut client = HiveRegistryClient::new(&registry_url);
+    if let Some(tok) = token {
+        client = client.with_token(tok);
+    }
 
     cx.spawn(async move |cx| {
         match client.download(&name, &version).await {
@@ -227,6 +231,15 @@ pub fn install_extension(
                             state.set_error(format!("Install failed: {e}"));
                         }
                     }
+                    cx.refresh_windows();
+                })
+                .ok();
+            }
+            Err(chatty_core::hive::ClientError::Unauthorized) => {
+                warn!(name = %name, "Download requires authentication");
+                cx.update(|cx| {
+                    let state = cx.global_mut::<MarketplaceState>();
+                    state.set_error("Login required to download modules. Please sign in first.".to_string());
                     cx.refresh_windows();
                 })
                 .ok();
