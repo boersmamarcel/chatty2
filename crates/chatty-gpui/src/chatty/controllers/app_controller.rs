@@ -44,14 +44,28 @@ use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
 /// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
 ///
-/// Only modules with `agent = true` and a `Loaded` status are included.
+/// Only modules with `agent = true`, a `Loaded` status, and enabled in `ExtensionsModel`
+/// are included.
 fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
+    let enabled_ids: std::collections::HashSet<String> = cx
+        .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+        .map(|ext| {
+            ext.wasm_module_ids()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+
     cx.try_global::<DiscoveredModulesModel>()
         .map(|model| {
             model
                 .modules
                 .iter()
-                .filter(|m| m.agent && matches!(m.status, ModuleLoadStatus::Loaded))
+                .filter(|m| {
+                    m.agent
+                        && matches!(m.status, ModuleLoadStatus::Loaded)
+                        && enabled_ids.contains(&m.name)
+                })
                 .map(|m| LocalModuleAgentSummary {
                     name: m.name.clone(),
                     version: m.version.clone(),

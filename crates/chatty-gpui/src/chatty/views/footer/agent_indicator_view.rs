@@ -46,11 +46,16 @@ impl RenderOnce for AgentIndicatorView {
         if let Some(dm) = cx.try_global::<DiscoveredModulesModel>() {
             for m in &dm.modules {
                 if m.agent && matches!(m.status, ModuleLoadStatus::Loaded) {
+                    // Look up the extension to get enabled state and ID
+                    let (enabled, ext_id) = store
+                        .find(&m.name)
+                        .map(|ext| (ext.enabled, Some(ext.id.clone())))
+                        .unwrap_or((true, None));
                     agents.push(AgentEntry {
                         name: m.name.clone(),
                         kind_label: "Module",
-                        enabled: true, // loaded modules are always active
-                        ext_id: None,
+                        enabled,
+                        ext_id,
                     });
                 }
             }
