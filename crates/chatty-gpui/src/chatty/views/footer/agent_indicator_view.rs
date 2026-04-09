@@ -1,5 +1,5 @@
-use crate::settings::controllers::extensions_controller;
 use crate::settings::models::extensions_store::ExtensionsModel;
+use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
@@ -7,6 +7,16 @@ use gpui_component::{ActiveTheme, Icon, IconName, Sizable, button::*, h_flex};
 
 const AGENT_POPOVER_MIN_WIDTH: f32 = 200.0;
 const AGENT_POPOVER_MAX_WIDTH: f32 = 300.0;
+
+/// A single agent entry for display in the footer indicator.
+#[derive(Clone)]
+struct AgentEntry {
+    name: String,
+    kind_label: &'static str,
+    enabled: bool,
+    /// Extension ID for A2A agents (used for toggle), None for module agents.
+    ext_id: Option<String>,
+}
 
 #[derive(IntoElement, Default)]
 pub struct AgentIndicatorView;
@@ -19,11 +29,35 @@ impl AgentIndicatorView {
 
 impl RenderOnce for AgentIndicatorView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let store = cx.global::<ExtensionsModel>();
-        let all_agents = store.all_a2a_agents();
-        let total_count = all_agents.len();
-        let enabled_count = store.enabled_a2a_count();
+        let mut agents: Vec<AgentEntry> = Vec::new();
 
+        // 1. A2A protocol agents from ExtensionsModel
+        let store = cx.global::<ExtensionsModel>();
+        for (id, cfg, enabled) in store.all_a2a_agents() {
+            agents.push(AgentEntry {
+                name: cfg.name,
+                kind_label: "A2A",
+                enabled,
+                ext_id: Some(id),
+            });
+        }
+
+        // 2. WASM module agents from DiscoveredModulesModel
+        if let Some(dm) = cx.try_global::<DiscoveredModulesModel>() {
+            for m in &dm.modules {
+                if m.agent && matches!(m.status, ModuleLoadStatus::Loaded) {
+                    agents.push(AgentEntry {
+                        name: m.name.clone(),
+                        kind_label: "Module",
+                        enabled: true, // loaded modules are always active
+                        ext_id: None,
+                    });
+                }
+            }
+        }
+
+        let total_count = agents.len();
+        let enabled_count = agents.iter().filter(|a| a.enabled).count();
         let agent_color = rgb(0x22C55E); // Green-500
 
         div().when(total_count > 0, |this| {
@@ -31,7 +65,7 @@ impl RenderOnce for AgentIndicatorView {
                 .ghost()
                 .xsmall()
                 .tooltip(format!(
-                    "{} agent{} enabled",
+                    "{} agent{} active",
                     enabled_count,
                     if enabled_count == 1 { "" } else { "s" }
                 ))
@@ -57,7 +91,7 @@ impl RenderOnce for AgentIndicatorView {
                     .trigger(indicator_button)
                     .appearance(false)
                     .content(move |_, _window, cx| {
-                        let agents = all_agents.clone();
+                        let agents = agents.clone();
 
                         div()
                             .flex()
@@ -76,15 +110,13 @@ impl RenderOnce for AgentIndicatorView {
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(cx.theme().foreground)
                                     .pb_2()
-                                    .child("A2A Agents"),
+                                    .child("Agents"),
                             )
                             .child(div().h(px(1.0)).w_full().bg(cx.theme().border).mb_2())
                             .children(
                                 agents
                                     .into_iter()
-                                    .map(|(id, cfg, enabled)| {
-                                        render_agent_item(id, cfg.name, enabled)
-                                    })
+                                    .map(render_agent_item)
                                     .collect::<Vec<_>>(),
                             )
                     }),
@@ -94,8 +126,9 @@ impl RenderOnce for AgentIndicatorView {
 }
 
 /// Render a single agent item in the popover.
-fn render_agent_item(ext_id: String, name: String, enabled: bool) -> impl IntoElement {
-    let button_id = SharedString::from(format!("toggle-agent-{}", name));
+fn render_agent_item(entry: AgentEntry) -> impl IntoElement {
+    let button_id = SharedString::from(format!("toggle-agent-{}", entry.name));
+    let ext_id = entry.ext_id.clone();
 
     div()
         .flex()
@@ -106,15 +139,31 @@ fn render_agent_item(ext_id: String, name: String, enabled: bool) -> impl IntoEl
         .px_2()
         .py_1()
         .rounded_md()
-        .child(div().text_sm().child(name))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(div().text_sm().child(entry.name))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui::rgb(0x9CA3AF))
+                        .child(entry.kind_label),
+                ),
+        )
         .child(
             Button::new(button_id)
                 .xsmall()
-                .when(enabled, |btn| btn.primary())
-                .when(!enabled, |btn| btn.ghost())
-                .child(if enabled { "Enabled" } else { "Disabled" })
-                .on_click(move |_event, _window, cx| {
-                    extensions_controller::toggle_extension(ext_id.clone(), cx);
+                .when(entry.enabled, |btn| btn.primary())
+                .when(!entry.enabled, |btn| btn.ghost())
+                .child(if entry.enabled { "Active" } else { "Disabled" })
+                .when_some(ext_id, |btn, ext_id| {
+                    btn.on_click(move |_event, _window, cx| {
+                        crate::settings::controllers::extensions_controller::toggle_extension(
+                            ext_id.clone(),
+                            cx,
+                        );
+                    })
                 }),
         )
 }
