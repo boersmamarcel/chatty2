@@ -240,6 +240,8 @@ pub fn uninstall_extension(id: String, cx: &mut App) {
         }
         Err(e) => {
             error!(error = ?e, id = %id, "Failed to uninstall extension");
+            let state = cx.global_mut::<MarketplaceState>();
+            state.set_error(format!("Uninstall failed: {e}"));
         }
     }
     cx.refresh_windows();

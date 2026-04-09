@@ -8,7 +8,7 @@ use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex, v_flex,
+    ActiveTheme, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex, v_flex,
 };
 
 pub fn extensions_page() -> SettingPage {
@@ -174,7 +174,7 @@ fn installed_extensions_group() -> SettingGroup {
                                         Button::new(SharedString::from(format!("remove-{id}")))
                                             .small()
                                             .ghost()
-                                            .label("✕")
+                                            .icon(Icon::new(IconName::Delete).size(px(14.)))
                                             .on_click({
                                                 let id = id.clone();
                                                 move |_, _window, cx| {
@@ -303,11 +303,19 @@ fn marketplace_group() -> SettingGroup {
                                     ),
                             )
                             .child(if is_installed {
-                                Button::new(SharedString::from(format!("installed-{name}")))
+                                Button::new(SharedString::from(format!("uninstall-{name}")))
                                     .small()
                                     .ghost()
-                                    .disabled(true)
-                                    .label("Installed ✓")
+                                    .label("Uninstall")
+                                    .on_click({
+                                        let name = name.clone();
+                                        move |_, _window, cx| {
+                                            extensions_controller::uninstall_extension(
+                                                name.clone(),
+                                                cx,
+                                            );
+                                        }
+                                    })
                                     .into_any_element()
                             } else {
                                 Button::new(SharedString::from(format!("install-{name}")))
