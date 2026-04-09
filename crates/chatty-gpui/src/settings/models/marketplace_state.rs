@@ -3,6 +3,7 @@ use gpui::Global;
 
 /// Ephemeral UI state for the Extensions marketplace browser.
 /// Not persisted — rebuilt every time the page is opened.
+#[allow(dead_code)]
 #[derive(Clone, Default)]
 pub struct MarketplaceState {
     pub search_query: String,
@@ -17,6 +18,7 @@ pub struct MarketplaceState {
 }
 
 impl MarketplaceState {
+    #[allow(dead_code)]
     pub fn clear_search(&mut self) {
         self.search_query.clear();
         self.search_results.clear();
@@ -43,6 +45,7 @@ impl MarketplaceState {
         self.page = page;
     }
 
+    #[allow(dead_code)]
     pub fn has_more_pages(&self, per_page: i64) -> bool {
         self.page * per_page < self.total
     }

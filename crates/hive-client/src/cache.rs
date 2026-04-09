@@ -48,7 +48,13 @@ impl Cache {
     fn entry_path(&self, key: &str) -> PathBuf {
         let safe: String = key
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         Path::join(&self.dir, format!("{safe}.json"))
     }

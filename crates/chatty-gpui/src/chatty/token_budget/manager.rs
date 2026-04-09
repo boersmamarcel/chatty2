@@ -325,9 +325,9 @@ pub fn gather_snapshot_inputs(
     cx: &mut gpui::App,
 ) -> Option<SnapshotInputs> {
     use crate::chatty::models::ConversationsStore;
-    use crate::settings::models::mcp_store::McpServersModel;
     use crate::settings::models::token_tracking_settings::TokenTrackingSettings;
     use crate::settings::models::{ExecutionSettingsModel, ModelsModel};
+    use chatty_core::settings::models::extensions_store::ExtensionsModel;
 
     // ── Model config ──────────────────────────────────────────────────────────
     let conv = cx
@@ -347,7 +347,7 @@ pub fn gather_snapshot_inputs(
         .unwrap_or(4096);
 
     let exec_settings = cx.global::<ExecutionSettingsModel>().clone();
-    let mcp_server_count = cx.global::<McpServersModel>().enabled_count();
+    let mcp_server_count = cx.global::<ExtensionsModel>().enabled_mcp_count();
 
     // ── Tool hint (for cache key) ─────────────────────────────────────────────
     let (tool_count, tool_hint) = build_tool_hint(&exec_settings, mcp_server_count);

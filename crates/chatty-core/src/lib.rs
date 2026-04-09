@@ -61,12 +61,10 @@ static USER_SECRETS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::UserSec
 static MODULE_SETTINGS_REPOSITORY: OnceLock<
     Arc<dyn settings::repositories::ModuleSettingsRepository>,
 > = OnceLock::new();
-static HIVE_SETTINGS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::HiveSettingsRepository>,
-> = OnceLock::new();
-static EXTENSIONS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::ExtensionsRepository>,
-> = OnceLock::new();
+static HIVE_SETTINGS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::HiveSettingsRepository>> =
+    OnceLock::new();
+static EXTENSIONS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ExtensionsRepository>> =
+    OnceLock::new();
 
 /// Initialize all repository singletons. Must be called once at startup before
 /// any repository is accessed. Returns an error if the config directory cannot

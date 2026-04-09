@@ -38,10 +38,7 @@ pub struct PublishModuleTool {
 }
 
 impl PublishModuleTool {
-    pub fn new(
-        server_sink: rmcp::service::ServerSink,
-        workspace_dir: Option<String>,
-    ) -> Self {
+    pub fn new(server_sink: rmcp::service::ServerSink, workspace_dir: Option<String>) -> Self {
         Self {
             server_sink: Arc::new(server_sink),
             workspace_dir,
@@ -88,7 +85,7 @@ impl Tool for PublishModuleTool {
                              category = \\\"utility\\\"\\n\
                              pricing_model = \\\"free\\\"\"\n\
                          }"
-                .to_string(),
+            .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -110,9 +107,9 @@ impl Tool for PublishModuleTool {
         let path = self.resolve_path(&args.wasm_path);
 
         // Read WASM binary from disk
-        let wasm_bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read WASM file at {}: {}", path.display(), e))?;
+        let wasm_bytes = tokio::fs::read(&path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read WASM file at {}: {}", path.display(), e)
+        })?;
 
         if wasm_bytes.len() < 4 || &wasm_bytes[..4] != b"\x00asm" {
             return Err(anyhow::anyhow!(

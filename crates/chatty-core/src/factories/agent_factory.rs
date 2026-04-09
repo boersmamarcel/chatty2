@@ -22,9 +22,8 @@ use crate::tools::{
     GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool,
     ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool,
     PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, PublishModuleTool,
-    QueryDataTool,
-    ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
-    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool,
+    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
 

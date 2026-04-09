@@ -7,7 +7,7 @@
 //! The old files are left in place (read-only fallback) but are no longer
 //! written to by the new code path.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::extensions_store::{
@@ -29,7 +29,7 @@ pub fn migrate_legacy_configs(extensions: &mut ExtensionsModel) -> bool {
     migrated
 }
 
-fn migrate_mcp_servers(config_dir: &PathBuf, extensions: &mut ExtensionsModel) -> bool {
+fn migrate_mcp_servers(config_dir: &Path, extensions: &mut ExtensionsModel) -> bool {
     let path = config_dir.join("mcp_servers.json");
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
@@ -66,7 +66,7 @@ fn migrate_mcp_servers(config_dir: &PathBuf, extensions: &mut ExtensionsModel) -
     migrated
 }
 
-fn migrate_a2a_agents(config_dir: &PathBuf, extensions: &mut ExtensionsModel) -> bool {
+fn migrate_a2a_agents(config_dir: &Path, extensions: &mut ExtensionsModel) -> bool {
     let path = config_dir.join("a2a_agents.json");
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
@@ -132,7 +132,10 @@ mod tests {
         assert!(migrated);
         assert_eq!(model.extensions.len(), 1);
         assert_eq!(model.extensions[0].id, "mcp-github");
-        assert!(matches!(model.extensions[0].kind, ExtensionKind::McpServer(_)));
+        assert!(matches!(
+            model.extensions[0].kind,
+            ExtensionKind::McpServer(_)
+        ));
     }
 
     #[test]

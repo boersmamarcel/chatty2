@@ -4,7 +4,7 @@
 //! hex-encoded SHA-256 hash of the `.wasm` binary with the publisher's
 //! private key. The signature is Base64-encoded.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -104,7 +104,7 @@ pub fn verify_wasm_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 

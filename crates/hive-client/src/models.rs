@@ -118,9 +118,7 @@ impl AuthTokenResponse {
         };
         let bytes = base64::engine::general_purpose::URL_SAFE
             .decode(padded)
-            .or_else(|_| {
-                base64::engine::general_purpose::STANDARD.decode(payload)
-            })
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload))
             .ok()?;
         let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         claims.get(key)?.as_str().map(|s| s.to_string())

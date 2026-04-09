@@ -7,7 +7,9 @@ use gpui::*;
 use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex,
+};
 
 pub fn extensions_page() -> SettingPage {
     SettingPage::new("Extensions")
@@ -72,14 +74,11 @@ fn hive_account_group() -> SettingGroup {
                             .text_color(cx.theme().muted_foreground)
                             .child("Not signed in"),
                     )
-                    .child(
-                        Button::new("hive-login")
-                            .small()
-                            .label("Sign In")
-                            .on_click(|_, window, cx| {
-                                show_login_dialog(window, cx);
-                            }),
-                    )
+                    .child(Button::new("hive-login").small().label("Sign In").on_click(
+                        |_, window, cx| {
+                            show_login_dialog(window, cx);
+                        },
+                    ))
                     .child(
                         Button::new("hive-register")
                             .small()
@@ -157,42 +156,34 @@ fn installed_extensions_group() -> SettingGroup {
                                 h_flex()
                                     .gap_1()
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "toggle-{id}"
-                                        )))
-                                        .small()
-                                        .ghost()
-                                        .label(if ext.enabled {
-                                            "Disable"
-                                        } else {
-                                            "Enable"
-                                        })
-                                        .on_click({
-                                            let toggle_id = toggle_id.clone();
-                                            move |_, _window, cx| {
-                                                extensions_controller::toggle_extension(
-                                                    toggle_id.clone(),
-                                                    cx,
-                                                );
-                                            }
-                                        }),
+                                        Button::new(SharedString::from(format!("toggle-{id}")))
+                                            .small()
+                                            .ghost()
+                                            .label(if ext.enabled { "Disable" } else { "Enable" })
+                                            .on_click({
+                                                let toggle_id = toggle_id.clone();
+                                                move |_, _window, cx| {
+                                                    extensions_controller::toggle_extension(
+                                                        toggle_id.clone(),
+                                                        cx,
+                                                    );
+                                                }
+                                            }),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "remove-{id}"
-                                        )))
-                                        .small()
-                                        .ghost()
-                                        .label("✕")
-                                        .on_click({
-                                            let id = id.clone();
-                                            move |_, _window, cx| {
-                                                extensions_controller::uninstall_extension(
-                                                    id.clone(),
-                                                    cx,
-                                                );
-                                            }
-                                        }),
+                                        Button::new(SharedString::from(format!("remove-{id}")))
+                                            .small()
+                                            .ghost()
+                                            .label("✕")
+                                            .on_click({
+                                                let id = id.clone();
+                                                move |_, _window, cx| {
+                                                    extensions_controller::uninstall_extension(
+                                                        id.clone(),
+                                                        cx,
+                                                    );
+                                                }
+                                            }),
                                     ),
                             )
                     }))
@@ -216,13 +207,10 @@ fn marketplace_group() -> SettingGroup {
 
             // use_keyed_state persists the InputState entity across re-renders
             // so the input keeps focus and typed text between frames.
-            let search_input = window.use_keyed_state(
-                "marketplace-search-input",
-                cx,
-                |window, cx| {
+            let search_input =
+                window.use_keyed_state("marketplace-search-input", cx, |window, cx| {
                     InputState::new(window, cx).placeholder("Search extensions...")
-                },
-            );
+                });
 
             v_flex()
                 .w_full()
@@ -374,12 +362,8 @@ fn add_custom_group() -> SettingGroup {
 // ── Dialogs ────────────────────────────────────────────────────────────────
 
 fn show_login_dialog(window: &mut Window, cx: &mut App) {
-    let email_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("Email")
-    });
-    let password_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("Password")
-    });
+    let email_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email"));
+    let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
@@ -412,15 +396,11 @@ fn show_login_dialog(window: &mut Window, cx: &mut App) {
 }
 
 fn show_register_dialog(window: &mut Window, cx: &mut App) {
-    let username_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("Username (3-39 chars, lowercase)")
-    });
-    let email_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("Email")
-    });
-    let password_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("Password (12+ characters)")
-    });
+    let username_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder("Username (3-39 chars, lowercase)"));
+    let email_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email"));
+    let password_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder("Password (12+ characters)"));
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
@@ -442,17 +422,11 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
                         let email_input = email_input.clone();
                         let password_input = password_input.clone();
                         move |_, window, cx| {
-                            let username =
-                                username_input.read(cx).value().trim().to_string();
+                            let username = username_input.read(cx).value().trim().to_string();
                             let email = email_input.read(cx).value().trim().to_string();
                             let password = password_input.read(cx).value().to_string();
-                            if !username.is_empty()
-                                && !email.is_empty()
-                                && password.len() >= 12
-                            {
-                                extensions_controller::register(
-                                    username, email, password, cx,
-                                );
+                            if !username.is_empty() && !email.is_empty() && password.len() >= 12 {
+                                extensions_controller::register(username, email, password, cx);
                                 window.close_dialog(cx);
                             }
                         }
@@ -462,15 +436,10 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
 }
 
 fn show_add_mcp_dialog(window: &mut Window, cx: &mut App) {
-    let name_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("e.g. github-mcp")
-    });
-    let url_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("http://localhost:3000/mcp")
-    });
-    let key_input = cx.new(|cx| {
-        InputState::new(window, cx).placeholder("Optional API key")
-    });
+    let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. github-mcp"));
+    let url_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder("http://localhost:3000/mcp"));
+    let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Optional API key"));
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
@@ -499,9 +468,7 @@ fn show_add_mcp_dialog(window: &mut Window, cx: &mut App) {
                                 if v.is_empty() { None } else { Some(v) }
                             };
                             if !name.is_empty() && !url.is_empty() {
-                                extensions_controller::add_custom_mcp(
-                                    name, url, api_key, cx,
-                                );
+                                extensions_controller::add_custom_mcp(name, url, api_key, cx);
                                 window.close_dialog(cx);
                             }
                         }

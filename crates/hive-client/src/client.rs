@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -197,11 +197,8 @@ impl HiveRegistryClient {
 
     /// List all published versions of a module.
     pub async fn list_versions(&self, name: &str) -> Result<VersionList, ClientError> {
-        self.get_json::<VersionList>(
-            &format!("/api/modules/{}/versions", urlencoded(name)),
-            &(),
-        )
-        .await
+        self.get_json::<VersionList>(&format!("/api/modules/{}/versions", urlencoded(name)), &())
+            .await
     }
 
     // ── List categories ────────────────────────────────────────────────────
@@ -217,11 +214,7 @@ impl HiveRegistryClient {
     ///
     /// Performs integrity (SHA-256) and signature (Ed25519) verification.
     /// Returns [`ClientError::SignatureInvalid`] on any mismatch.
-    pub async fn download(
-        &self,
-        name: &str,
-        version: &str,
-    ) -> Result<DownloadResult, ClientError> {
+    pub async fn download(&self, name: &str, version: &str) -> Result<DownloadResult, ClientError> {
         let url = format!(
             "{}/api/modules/{}/{}",
             self.base_url,
@@ -252,10 +245,8 @@ impl HiveRegistryClient {
             });
         }
 
-        let registry_hash =
-            header_str(response.headers(), "x-wasm-sha256").map(str::to_owned);
-        let signature =
-            header_str(response.headers(), "x-signature").map(str::to_owned);
+        let registry_hash = header_str(response.headers(), "x-wasm-sha256").map(str::to_owned);
+        let signature = header_str(response.headers(), "x-signature").map(str::to_owned);
         let publisher_public_key =
             header_str(response.headers(), "x-publisher-public-key").map(str::to_owned);
 
@@ -263,17 +254,20 @@ impl HiveRegistryClient {
 
         // Integrity check
         let computed_hash = hex::encode(Sha256::digest(&wasm_vec));
-        if let Some(ref expected) = registry_hash {
-            if &computed_hash != expected {
-                return Err(ClientError::SignatureInvalid(format!(
-                    "hash mismatch: expected {expected}, got {computed_hash}"
-                )));
-            }
+        if let Some(ref expected) = registry_hash
+            && &computed_hash != expected
+        {
+            return Err(ClientError::SignatureInvalid(format!(
+                "hash mismatch: expected {expected}, got {computed_hash}"
+            )));
         }
 
         // Signature verification
-        let trust_level =
-            verify_ed25519(&computed_hash, signature.as_deref(), publisher_public_key.as_deref())?;
+        let trust_level = verify_ed25519(
+            &computed_hash,
+            signature.as_deref(),
+            publisher_public_key.as_deref(),
+        )?;
 
         // Fetch manifest from version metadata
         let manifest = match self.list_versions(name).await {
@@ -327,10 +321,10 @@ impl HiveRegistryClient {
     }
 
     fn maybe_store_cache(&self, key: &str, list: &ModuleList) {
-        if let Some(cache) = &self.cache {
-            if let Err(e) = cache.store(key, list) {
-                tracing::warn!(error = %e, "failed to write module list cache");
-            }
+        if let Some(cache) = &self.cache
+            && let Err(e) = cache.store(key, list)
+        {
+            tracing::warn!(error = %e, "failed to write module list cache");
         }
     }
 }
@@ -349,8 +343,7 @@ fn verify_ed25519(
                 signature: sig.to_string(),
                 publisher_public_key: pub_key.to_string(),
             };
-            verify::verify_module(&input)
-                .map_err(|e| ClientError::SignatureInvalid(e.to_string()))
+            verify::verify_module(&input).map_err(|e| ClientError::SignatureInvalid(e.to_string()))
         }
         _ => Ok(TrustLevel::Local),
     }

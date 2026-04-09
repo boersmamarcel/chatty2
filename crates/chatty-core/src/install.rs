@@ -50,7 +50,13 @@ pub fn install_wasm_module(
     std::fs::write(dest.join(&wasm_filename), &download.wasm)?;
 
     // Build module.toml from the Hive manifest JSON (or generate a minimal one)
-    let toml_content = build_module_toml(name, version, description, &wasm_filename, &download.manifest);
+    let toml_content = build_module_toml(
+        name,
+        version,
+        description,
+        &wasm_filename,
+        &download.manifest,
+    );
     std::fs::write(dest.join("module.toml"), toml_content)?;
 
     let ext = InstalledExtension {
@@ -99,17 +105,14 @@ pub fn install_mcp_extension(
 }
 
 /// Uninstall an extension by ID. Removes WASM files for module extensions.
-pub fn uninstall_extension(
-    id: &str,
-    extensions: &mut ExtensionsModel,
-) -> Result<(), InstallError> {
+pub fn uninstall_extension(id: &str, extensions: &mut ExtensionsModel) -> Result<(), InstallError> {
     // If it's a WASM module, clean up files on disk
-    if let Some(ext) = extensions.find(id) {
-        if matches!(ext.kind, ExtensionKind::WasmModule) {
-            let module_dir = PathBuf::from(default_module_dir()).join(id);
-            if module_dir.exists() {
-                std::fs::remove_dir_all(&module_dir)?;
-            }
+    if let Some(ext) = extensions.find(id)
+        && matches!(ext.kind, ExtensionKind::WasmModule)
+    {
+        let module_dir = PathBuf::from(default_module_dir()).join(id);
+        if module_dir.exists() {
+            std::fs::remove_dir_all(&module_dir)?;
         }
     }
 
@@ -192,8 +195,14 @@ wasm = "{wasm_filename}"
 
     // Resources
     if let Some(res) = manifest.get("resources") {
-        let mem = res.get("max_memory_mb").and_then(|v| v.as_u64()).unwrap_or(0);
-        let exec = res.get("max_execution_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+        let mem = res
+            .get("max_memory_mb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let exec = res
+            .get("max_execution_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         if mem > 0 || exec > 0 {
             toml.push_str("\n[resources]\n");
             if mem > 0 {

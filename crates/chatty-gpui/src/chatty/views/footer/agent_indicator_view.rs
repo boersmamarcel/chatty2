@@ -1,41 +1,37 @@
-use crate::assets::CustomIcon;
 use crate::settings::controllers::extensions_controller;
 use crate::settings::models::extensions_store::ExtensionsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
-use gpui_component::{ActiveTheme, Icon, Sizable, button::*, h_flex};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable, button::*, h_flex};
 
-// Popover dimensions
-const MCP_POPOVER_MIN_WIDTH: f32 = 200.0;
-const MCP_POPOVER_MAX_WIDTH: f32 = 300.0;
+const AGENT_POPOVER_MIN_WIDTH: f32 = 200.0;
+const AGENT_POPOVER_MAX_WIDTH: f32 = 300.0;
 
 #[derive(IntoElement, Default)]
-pub struct McpIndicatorView;
+pub struct AgentIndicatorView;
 
-impl McpIndicatorView {
+impl AgentIndicatorView {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl RenderOnce for McpIndicatorView {
+impl RenderOnce for AgentIndicatorView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let store = cx.global::<ExtensionsModel>();
-        let all_servers = store.all_mcp_servers();
-        let total_count = all_servers.len();
-        let enabled_count = store.enabled_mcp_count();
+        let all_agents = store.all_a2a_agents();
+        let total_count = all_agents.len();
+        let enabled_count = store.enabled_a2a_count();
 
-        // MCP blue color (matches brand)
-        let mcp_color = rgb(0x3B82F6); // Blue-500
+        let agent_color = rgb(0x22C55E); // Green-500
 
         div().when(total_count > 0, |this| {
-            // Main indicator button
-            let indicator_button = Button::new("mcp-indicator")
+            let indicator_button = Button::new("agent-indicator")
                 .ghost()
                 .xsmall()
                 .tooltip(format!(
-                    "{} MCP server{} enabled",
+                    "{} agent{} enabled",
                     enabled_count,
                     if enabled_count == 1 { "" } else { "s" }
                 ))
@@ -44,25 +40,24 @@ impl RenderOnce for McpIndicatorView {
                         .gap_1()
                         .items_center()
                         .child(
-                            Icon::new(CustomIcon::McpServer)
+                            Icon::new(IconName::Bot)
                                 .size(px(12.0))
-                                .text_color(mcp_color),
+                                .text_color(agent_color),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(mcp_color)
+                                .text_color(agent_color)
                                 .child(enabled_count.to_string()),
                         ),
                 );
 
-            // Popover with server list
             this.child(
-                Popover::new("mcp-server-list")
+                Popover::new("agent-list")
                     .trigger(indicator_button)
                     .appearance(false)
                     .content(move |_, _window, cx| {
-                        let servers = all_servers.clone();
+                        let agents = all_agents.clone();
 
                         div()
                             .flex()
@@ -73,22 +68,22 @@ impl RenderOnce for McpIndicatorView {
                             .rounded_md()
                             .shadow_md()
                             .p_2()
-                            .min_w(px(MCP_POPOVER_MIN_WIDTH))
-                            .max_w(px(MCP_POPOVER_MAX_WIDTH))
+                            .min_w(px(AGENT_POPOVER_MIN_WIDTH))
+                            .max_w(px(AGENT_POPOVER_MAX_WIDTH))
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(cx.theme().foreground)
                                     .pb_2()
-                                    .child("MCP Servers"),
+                                    .child("A2A Agents"),
                             )
                             .child(div().h(px(1.0)).w_full().bg(cx.theme().border).mb_2())
                             .children(
-                                servers
+                                agents
                                     .into_iter()
                                     .map(|(id, cfg, enabled)| {
-                                        render_server_item(id, cfg.name, enabled)
+                                        render_agent_item(id, cfg.name, enabled)
                                     })
                                     .collect::<Vec<_>>(),
                             )
@@ -98,9 +93,9 @@ impl RenderOnce for McpIndicatorView {
     }
 }
 
-/// Render a single server item in the popover
-fn render_server_item(ext_id: String, name: String, enabled: bool) -> impl IntoElement {
-    let button_id = SharedString::from(format!("toggle-{}", name));
+/// Render a single agent item in the popover.
+fn render_agent_item(ext_id: String, name: String, enabled: bool) -> impl IntoElement {
+    let button_id = SharedString::from(format!("toggle-agent-{}", name));
 
     div()
         .flex()
