@@ -252,25 +252,32 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 |:-----|:----------------------|:--------:|
 | `list_tools` | List all available tools and their schemas | — |
 | `sub_agent` | Spawn a headless `chatty-tui` sub-agent with its own tools and return the result | ✓ |
+| `publish_wasm_module` | Publish a WASM module to the Hive registry — provide the `.wasm` file path and a TOML manifest; the tool reads and encodes the binary automatically (available when a Hive MCP server is configured) | ✓ |
 
-### MCP Servers
+### Extensions & MCP Servers
 
-[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) lets your LLM agent interact with external tools and data sources beyond the built-ins. Chatty has first-class MCP support — configure a server in Settings and its tools become available to the agent automatically.
+Chatty has a unified **Extensions** page (**Settings > Extensions**) that consolidates MCP servers, A2A agents, and WASM modules in one place.
 
-**To add an MCP server:**
+**Browse the Hive Marketplace** — discover and install community extensions directly from within Chatty:
+
+1. Go to **Settings > Extensions**
+2. Optionally sign in or register for a Hive account (top of the page)
+3. Use the **Browse Marketplace** section to search for extensions and click **Install**
+4. Installed extensions appear in the **Installed** section where you can enable, disable, or uninstall them
+
+**Add a custom MCP server manually:**
 
 1. Start your MCP server process separately (Chatty connects to it; it does not launch it)
-2. Go to **Settings > MCP Servers**
-3. Click **Add Server**
+2. Go to **Settings > Extensions** → **Add Custom Extension**
+3. Click **Add MCP Server**
 4. Enter the server **URL** and an optional **API key** (sent as `Authorization: Bearer <key>`)
-5. Enable the server when you're ready to use it
 
 The agent can also manage its own MCP servers at runtime — add, edit, list, and delete servers via tool calls — with API key masking so your secrets are never exposed to the agent.
 
 <details>
 <summary><strong>Recommended MCP Servers</strong></summary>
 
-Here are MCP servers that pair well with Chatty agents. Since Chatty connects to already-running servers, start each server first and then add its URL in Settings > MCP Servers.
+Here are MCP servers that pair well with Chatty agents. Since Chatty connects to already-running servers, start each server first and then add its URL via Settings > Extensions → Add Custom Extension.
 
 #### GitHub (`@modelcontextprotocol/server-github`)
 Search code, browse issues and PRs, read file contents from repos.
@@ -673,7 +680,7 @@ Once built, place your module in the platform-native modules directory so Chatty
     └── my_agent.wasm
 ```
 
-You can view or change the modules directory and other runtime settings in **Settings > Modules**. The panel also lets you enable/disable the module runtime and configure the gateway port (default 3000).
+You can view or change the modules directory and other runtime settings in **Settings > Extensions**. The panel also lets you enable/disable the module runtime and configure the gateway port (default 3000).
 
 `chatty-module-sdk` is a standalone crate (not part of the main workspace) that lets you build custom agent modules compiled to `wasm32-wasip2`. It provides the `ModuleExports` trait, `export_module!` macro, and typed host import wrappers for LLM completion, config lookup, and structured logging.
 
