@@ -125,9 +125,9 @@ impl Tool for PublishModuleTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.resolve_path(&args.wasm_path).map_err(|e| {
-            anyhow::anyhow!("Path resolution failed: {e}")
-        })?;
+        let path = self
+            .resolve_path(&args.wasm_path)
+            .map_err(|e| anyhow::anyhow!("Path resolution failed: {e}"))?;
 
         // Read WASM binary from disk
         let wasm_bytes = tokio::fs::read(&path).await.map_err(|e| {
