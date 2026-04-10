@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-gpui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-module-registry"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chatty-wasm-runtime",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-protocol-gateway"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chatty-core",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-wasm-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4853,7 +4853,7 @@ dependencies = [
 
 [[package]]
 name = "hive-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
