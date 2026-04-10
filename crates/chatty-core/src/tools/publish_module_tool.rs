@@ -45,14 +45,35 @@ impl PublishModuleTool {
         }
     }
 
-    fn resolve_path(&self, path: &str) -> std::path::PathBuf {
+    fn resolve_path(&self, path: &str) -> Result<std::path::PathBuf, anyhow::Error> {
         let p = std::path::PathBuf::from(path);
-        if p.is_absolute() {
+        let resolved = if p.is_absolute() {
             p
         } else if let Some(ref ws) = self.workspace_dir {
             std::path::PathBuf::from(ws).join(path)
         } else {
             p
+        };
+
+        // Canonicalize to resolve symlinks and ../ components, then enforce
+        // that the result lives inside the workspace directory.
+        if let Some(ref ws) = self.workspace_dir {
+            let ws_canon = std::path::PathBuf::from(ws)
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("Cannot resolve workspace dir: {e}"))?;
+            let resolved_canon = resolved
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("Cannot resolve path {}: {e}", resolved.display()))?;
+            if !resolved_canon.starts_with(&ws_canon) {
+                return Err(anyhow::anyhow!(
+                    "Path {} is outside the workspace ({})",
+                    resolved_canon.display(),
+                    ws_canon.display()
+                ));
+            }
+            Ok(resolved_canon)
+        } else {
+            Ok(resolved)
         }
     }
 }
@@ -104,7 +125,9 @@ impl Tool for PublishModuleTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.resolve_path(&args.wasm_path);
+        let path = self.resolve_path(&args.wasm_path).map_err(|e| {
+            anyhow::anyhow!("Path resolution failed: {e}")
+        })?;
 
         // Read WASM binary from disk
         let wasm_bytes = tokio::fs::read(&path).await.map_err(|e| {

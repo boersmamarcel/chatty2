@@ -269,7 +269,11 @@ impl HiveRegistryClient {
             publisher_public_key.as_deref(),
         )?;
 
-        // Fetch manifest from version metadata
+        // Fetch manifest from version metadata.
+        // NOTE: This is a known extra HTTP round-trip. The download endpoint
+        // doesn't include the manifest in its response, so we must call
+        // list_versions separately. If the API adds manifest headers in the
+        // future, this call can be eliminated.
         let manifest = match self.list_versions(name).await {
             Ok(vl) => vl
                 .items
@@ -297,7 +301,11 @@ impl HiveRegistryClient {
         T: serde::de::DeserializeOwned,
     {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.http.get(&url).query(query).send().await?;
+        let mut request = self.http.get(&url).query(query);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = request.send().await?;
         let status = response.status();
 
         if status == reqwest::StatusCode::NOT_FOUND {

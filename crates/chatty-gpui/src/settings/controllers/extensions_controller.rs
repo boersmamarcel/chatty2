@@ -58,6 +58,7 @@ pub fn login(email: String, password: String, cx: &mut App) {
                     cx.refresh_windows();
                     info!(username = %username, "Logged in to Hive registry");
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after login"))
                 .ok();
             }
             Err(e) => {
@@ -67,6 +68,7 @@ pub fn login(email: String, password: String, cx: &mut App) {
                     state.set_error(format!("Login failed: {e}"));
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after login error"))
                 .ok();
             }
         },
@@ -93,6 +95,7 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
                     cx.refresh_windows();
                     info!(username = %username, "Registered with Hive registry");
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after registration"))
                 .ok();
             }
             Err(e) => {
@@ -102,6 +105,7 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
                     state.set_error(format!("Registration failed: {e}"));
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after registration error"))
                 .ok();
             }
         },
@@ -150,6 +154,7 @@ pub fn search_marketplace(query: String, cx: &mut App) {
             }
             cx.refresh_windows();
         })
+        .map_err(|e| warn!(error = ?e, "Failed to update UI after marketplace search"))
         .ok();
     })
     .detach();
@@ -202,6 +207,7 @@ pub fn install_extension(
                     }
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
                 .ok();
             }
             Err(chatty_core::hive::ClientError::Unauthorized) => {
@@ -213,6 +219,7 @@ pub fn install_extension(
                     );
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after auth error"))
                 .ok();
             }
             Err(e) => {
@@ -222,6 +229,7 @@ pub fn install_extension(
                     state.set_error(format!("Download failed: {e}"));
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after download error"))
                 .ok();
             }
         }
@@ -300,6 +308,7 @@ fn handle_mcp_toggle(config: McpServerConfig, is_enabled: bool, cx: &mut App) {
                             .set_mcp_auth_status(name.clone(), McpAuthStatus::Authenticated);
                         cx.refresh_windows();
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to update UI after MCP connect"))
                     .ok();
                 }
                 Err(e) => {
@@ -317,6 +326,7 @@ fn handle_mcp_toggle(config: McpServerConfig, is_enabled: bool, cx: &mut App) {
                             .set_mcp_auth_status(name.clone(), status);
                         cx.refresh_windows();
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to update UI after MCP connect error"))
                     .ok();
                     return;
                 }
@@ -330,12 +340,14 @@ fn handle_mcp_toggle(config: McpServerConfig, is_enabled: bool, cx: &mut App) {
                     .set_mcp_auth_status(name.clone(), McpAuthStatus::NotRequired);
                 cx.refresh_windows();
             })
+            .map_err(|e| warn!(error = ?e, "Failed to update UI after MCP disconnect"))
             .ok();
         }
 
         cx.update(|cx| {
             emit_rebuild_required(cx);
         })
+        .map_err(|e| warn!(error = ?e, "Failed to emit rebuild after MCP toggle"))
         .ok();
     })
     .detach();
@@ -369,11 +381,13 @@ fn handle_a2a_probe(
                     }
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after A2A probe"))
                 .ok();
                 cx.update(|cx| {
                     let model = cx.global::<ExtensionsModel>().clone();
                     save_extensions_async(model, cx);
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to persist extensions after A2A probe"))
                 .ok();
             }
             Err(e) => {
@@ -384,6 +398,7 @@ fn handle_a2a_probe(
                         .set_a2a_status(agent_name, A2aAgentStatus::Failed(err_msg));
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to update UI after A2A probe error"))
                 .ok();
             }
         }

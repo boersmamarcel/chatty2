@@ -10,7 +10,6 @@ pub mod exporters;
 pub mod factories;
 pub use hive_client as hive;
 pub mod install;
-pub mod migration;
 pub mod models;
 pub mod repositories;
 pub mod sandbox;

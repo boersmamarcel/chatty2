@@ -135,6 +135,29 @@ pub fn module_path(name: &str) -> PathBuf {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/// Escape a string for use inside a TOML basic string (`"..."`).
+/// Handles backslashes, double quotes, and control characters.
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                // TOML unicode escape: \uXXXX
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    out.push_str(&format!("\\u{unit:04X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Build a `module.toml` from the Hive manifest JSON. Falls back to a
 /// minimal manifest if the JSON doesn't contain the expected fields.
 fn build_module_toml(
@@ -144,6 +167,11 @@ fn build_module_toml(
     wasm_filename: &str,
     manifest: &serde_json::Value,
 ) -> String {
+    let name = toml_escape(name);
+    let version = toml_escape(version);
+    let description = toml_escape(description);
+    let wasm_filename = toml_escape(wasm_filename);
+
     let mut toml = format!(
         r#"[module]
 name = "{name}"
@@ -161,7 +189,7 @@ wasm = "{wasm_filename}"
             let tool_list: Vec<String> = tools
                 .iter()
                 .filter_map(|t| t.as_str())
-                .map(|s| format!("\"{s}\""))
+                .map(|s| format!("\"{}\"", toml_escape(s)))
                 .collect();
             if !tool_list.is_empty() {
                 toml.push_str(&format!("tools = [{}]\n", tool_list.join(", ")));

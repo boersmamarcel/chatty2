@@ -20,6 +20,11 @@ impl Cache {
     }
 
     /// Write `list` to `<dir>/<key>.json`, overwriting any previous value.
+    ///
+    /// Uses synchronous `std::fs::write` intentionally — cached payloads are
+    /// small JSON blobs (typically < 50 KB) so the blocking cost is negligible.
+    /// Converting to `tokio::fs` would require making the `Cache` API async,
+    /// which adds complexity without meaningful benefit.
     pub fn store(&self, key: &str, list: &ModuleList) -> std::io::Result<()> {
         let path = self.entry_path(key);
         let json = serde_json::to_vec(list)

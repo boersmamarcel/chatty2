@@ -1054,45 +1054,43 @@ fn main() {
 
                             cx.update(|cx| {
                                 use settings::models::mcp_store::McpAuthStatus;
-                                let model = cx.global_mut::<settings::models::McpServersModel>();
-                                for (name, ok, err_msg) in &results {
-                                    let status = if *ok {
-                                        McpAuthStatus::Authenticated
-                                    } else if let Some(msg) = err_msg {
-                                        if msg.contains("Auth required")
-                                            || msg.contains("AuthRequired")
-                                        {
-                                            McpAuthStatus::NeedsAuth
+
+                                // Derive status once per connection result, then
+                                // write to both models (ExtensionsModel is
+                                // canonical; McpServersModel kept for legacy).
+                                let statuses: Vec<(String, McpAuthStatus)> = results
+                                    .into_iter()
+                                    .map(|(name, ok, err_msg)| {
+                                        let status = if ok {
+                                            McpAuthStatus::Authenticated
+                                        } else if let Some(ref msg) = err_msg {
+                                            if msg.contains("Auth required")
+                                                || msg.contains("AuthRequired")
+                                            {
+                                                McpAuthStatus::NeedsAuth
+                                            } else {
+                                                McpAuthStatus::Failed(msg.clone())
+                                            }
                                         } else {
-                                            McpAuthStatus::Failed(msg.clone())
-                                        }
-                                    } else {
-                                        McpAuthStatus::Failed("Unknown error".to_string())
-                                    };
-                                    model.set_auth_status(name.clone(), status);
+                                            McpAuthStatus::Failed("Unknown error".to_string())
+                                        };
+                                        (name, status)
+                                    })
+                                    .collect();
+
+                                let model = cx.global_mut::<settings::models::McpServersModel>();
+                                for (name, status) in &statuses {
+                                    model.set_auth_status(name.clone(), status.clone());
                                 }
 
-                                // Sync auth statuses to ExtensionsModel
                                 let ext_model = cx.global_mut::<settings::models::ExtensionsModel>();
-                                for (name, ok, err_msg) in results {
-                                    let status = if ok {
-                                        McpAuthStatus::Authenticated
-                                    } else if let Some(ref msg) = err_msg {
-                                        if msg.contains("Auth required")
-                                            || msg.contains("AuthRequired")
-                                        {
-                                            McpAuthStatus::NeedsAuth
-                                        } else {
-                                            McpAuthStatus::Failed(msg.clone())
-                                        }
-                                    } else {
-                                        McpAuthStatus::Failed("Unknown error".to_string())
-                                    };
+                                for (name, status) in statuses {
                                     ext_model.set_mcp_auth_status(name, status);
                                 }
 
                                 cx.refresh_windows();
                             })
+                            .map_err(|e| warn!(error = ?e, "Failed to update MCP auth statuses"))
                             .ok();
                         })
                         .detach();
