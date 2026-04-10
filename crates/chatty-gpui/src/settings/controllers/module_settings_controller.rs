@@ -1,8 +1,9 @@
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
-use crate::settings::models::module_settings::{
-    ModuleSettingsModel, default_module_dir, normalize_module_dir,
+use crate::settings::models::module_settings::ModuleSettingsModel;
+use crate::settings::models::{
+    AgentConfigEvent, DiscoveredModuleEntry, DiscoveredModulesModel, GlobalAgentConfigNotifier,
+    ModuleLoadStatus,
 };
-use crate::settings::models::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 use anyhow::{Context, Result};
 use chatty_core::settings::models::providers_store::ProviderType;
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
@@ -708,6 +709,19 @@ fn apply_scan_snapshot(
         };
     }
     cx.refresh_windows();
+
+    // Notify the active agent to rebuild so it picks up newly
+    // discovered (or removed) module agents.
+    if let Some(weak_notifier) = cx
+        .try_global::<GlobalAgentConfigNotifier>()
+        .and_then(|g| g.entity.clone())
+        && let Some(notifier) = weak_notifier.upgrade()
+    {
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(AgentConfigEvent::RebuildRequired);
+        });
+    }
+
     true
 }
 
@@ -908,49 +922,4 @@ pub fn refresh_runtime(cx: &mut App) {
         }
     })
     .detach();
-}
-
-/// Persist module settings asynchronously.
-fn save_async(cx: &mut App) {
-    let settings = cx.global::<ModuleSettingsModel>().clone();
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::module_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save module settings");
-        }
-    })
-    .detach();
-}
-
-/// Toggle the module runtime on/off.
-pub fn toggle_enabled(cx: &mut App) {
-    let new_val = !cx.global::<ModuleSettingsModel>().enabled;
-    info!(enabled = new_val, "Toggling module runtime");
-    cx.global_mut::<ModuleSettingsModel>().enabled = new_val;
-    cx.refresh_windows();
-    refresh_runtime(cx);
-    save_async(cx);
-}
-
-/// Update the module directory path.
-pub fn set_module_dir(dir: String, cx: &mut App) {
-    let dir = normalize_module_dir(dir);
-    info!(dir = %dir, "Setting module directory");
-    cx.global_mut::<ModuleSettingsModel>().module_dir = dir;
-    cx.refresh_windows();
-    refresh_runtime(cx);
-    save_async(cx);
-}
-
-pub fn reset_module_dir(cx: &mut App) {
-    set_module_dir(default_module_dir(), cx);
-}
-
-/// Update the gateway port.
-pub fn set_gateway_port(port: u16, cx: &mut App) {
-    info!(port, "Setting gateway port");
-    cx.global_mut::<ModuleSettingsModel>().gateway_port = port;
-    cx.refresh_windows();
-    refresh_runtime(cx);
-    save_async(cx);
 }

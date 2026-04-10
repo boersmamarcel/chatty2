@@ -1,6 +1,6 @@
 use crate::assets::CustomIcon;
-use crate::settings::controllers::mcp_controller;
-use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
+use crate::settings::controllers::extensions_controller;
+use crate::settings::models::extensions_store::ExtensionsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
@@ -21,10 +21,10 @@ impl McpIndicatorView {
 
 impl RenderOnce for McpIndicatorView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let store = cx.global::<McpServersModel>();
-        let enabled_count = store.enabled_count();
-        let all_servers = store.servers().to_vec();
+        let store = cx.global::<ExtensionsModel>();
+        let all_servers = store.all_mcp_servers();
         let total_count = all_servers.len();
+        let enabled_count = store.enabled_mcp_count();
 
         // MCP blue color (matches brand)
         let mcp_color = rgb(0x3B82F6); // Blue-500
@@ -87,7 +87,9 @@ impl RenderOnce for McpIndicatorView {
                             .children(
                                 servers
                                     .into_iter()
-                                    .map(render_server_item)
+                                    .map(|(id, cfg, enabled)| {
+                                        render_server_item(id, cfg.name, enabled)
+                                    })
                                     .collect::<Vec<_>>(),
                             )
                     }),
@@ -97,9 +99,7 @@ impl RenderOnce for McpIndicatorView {
 }
 
 /// Render a single server item in the popover
-fn render_server_item(server: McpServerConfig) -> impl IntoElement {
-    let name = server.name.clone();
-    let enabled = server.enabled;
+fn render_server_item(ext_id: String, name: String, enabled: bool) -> impl IntoElement {
     let button_id = SharedString::from(format!("toggle-{}", name));
 
     div()
@@ -111,7 +111,7 @@ fn render_server_item(server: McpServerConfig) -> impl IntoElement {
         .px_2()
         .py_1()
         .rounded_md()
-        .child(div().text_sm().child(name.clone()))
+        .child(div().text_sm().child(name))
         .child(
             Button::new(button_id)
                 .xsmall()
@@ -119,7 +119,7 @@ fn render_server_item(server: McpServerConfig) -> impl IntoElement {
                 .when(!enabled, |btn| btn.ghost())
                 .child(if enabled { "Enabled" } else { "Disabled" })
                 .on_click(move |_event, _window, cx| {
-                    mcp_controller::toggle_server(name.clone(), cx);
+                    extensions_controller::toggle_extension(ext_id.clone(), cx);
                 }),
         )
 }

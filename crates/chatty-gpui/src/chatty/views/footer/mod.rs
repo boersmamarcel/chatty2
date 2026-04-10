@@ -1,3 +1,4 @@
+pub mod agent_indicator_view;
 pub mod auto_update_view;
 pub mod error_indicator_view;
 pub mod fetch_indicator_view;
@@ -8,6 +9,7 @@ pub mod status_footer_view;
 pub mod token_context_bar_view;
 pub mod tools_indicator_view;
 
+pub use agent_indicator_view::AgentIndicatorView;
 pub use auto_update_view::AutoUpdateView;
 pub use error_indicator_view::ErrorIndicatorView;
 pub use fetch_indicator_view::FetchIndicatorView;

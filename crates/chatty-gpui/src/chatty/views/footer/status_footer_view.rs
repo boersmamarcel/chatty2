@@ -1,7 +1,7 @@
 use crate::auto_updater::{AutoUpdateStatus, AutoUpdater};
 use crate::chatty::views::footer::{
-    AutoUpdateView, ErrorIndicatorView, FetchIndicatorView, McpIndicatorView, NetworkIndicatorView,
-    TokenContextBarView, ToolsIndicatorView,
+    AgentIndicatorView, AutoUpdateView, ErrorIndicatorView, FetchIndicatorView, McpIndicatorView,
+    NetworkIndicatorView, TokenContextBarView, ToolsIndicatorView,
 };
 use gpui::*;
 use gpui_component::ActiveTheme as _;
@@ -74,7 +74,8 @@ impl RenderOnce for StatusFooterView {
                     .child(FetchIndicatorView::new())
                     .child(NetworkIndicatorView::new())
                     .child(ToolsIndicatorView::new())
-                    .child(McpIndicatorView::new()),
+                    .child(McpIndicatorView::new())
+                    .child(AgentIndicatorView::new()),
             )
     }
 }

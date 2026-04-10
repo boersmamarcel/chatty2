@@ -425,9 +425,6 @@ fn main() {
         // Initialize MCP servers model with empty state - will be populated async
         cx.set_global(settings::models::McpServersModel::new());
 
-        // Initialize A2A agents model with empty state - will be populated async
-        cx.set_global(chatty_core::settings::models::A2aAgentsModel::new());
-
         // Initialize execution settings with default - will be populated async
         cx.set_global(settings::models::ExecutionSettingsModel::default());
 
@@ -443,6 +440,11 @@ fn main() {
         // Initialize module settings with default - will be populated async
         cx.set_global(settings::models::ModuleSettingsModel::default());
         cx.set_global(settings::models::DiscoveredModulesModel::default());
+
+        // Initialize Hive/extensions globals
+        cx.set_global(settings::models::HiveSettingsModel::default());
+        cx.set_global(settings::models::ExtensionsModel::default());
+        cx.set_global(settings::models::MarketplaceState::default());
 
         settings::controllers::module_settings_controller::refresh_runtime(cx);
 
@@ -624,9 +626,43 @@ fn main() {
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(servers) = mcp_rx.recv().await {
                 cx.update(|cx| {
+                    // Legacy sync
                     cx.update_global::<settings::models::McpServersModel, _>(|model, _cx| {
-                        model.replace_all(servers);
+                        model.replace_all(servers.clone());
                     });
+
+                    // Sync into ExtensionsModel: add/update MCP servers from the
+                    // tool-modified list while preserving non-MCP extensions.
+                    {
+                        use chatty_core::settings::models::extensions_store::{
+                            ExtensionKind, ExtensionSource, ExtensionsModel, InstalledExtension,
+                        };
+                        let ext_model = cx.global_mut::<ExtensionsModel>();
+                        for server in &servers {
+                            let ext_id = format!("mcp-{}", server.name);
+                            if let Some(ext) = ext_model.find_mut(&ext_id) {
+                                ext.enabled = server.enabled;
+                                ext.kind = ExtensionKind::McpServer(server.clone());
+                            } else {
+                                ext_model.add(InstalledExtension {
+                                    id: ext_id,
+                                    display_name: server.name.clone(),
+                                    description: String::new(),
+                                    kind: ExtensionKind::McpServer(server.clone()),
+                                    source: ExtensionSource::Custom,
+                                    enabled: server.enabled,
+                                });
+                            }
+                        }
+                        let ext_clone = ext_model.clone();
+                        let repo = chatty_core::extensions_repository();
+                        cx.spawn(|_cx: &mut AsyncApp| async move {
+                            if let Err(e) = repo.save(ext_clone).await {
+                                tracing::error!(error = ?e, "Failed to sync MCP update to extensions");
+                            }
+                        })
+                        .detach();
+                    }
 
                     if let Some(weak_notifier) = cx
                         .try_global::<settings::models::GlobalAgentConfigNotifier>()
@@ -972,6 +1008,44 @@ fn main() {
                         });
                         info!("MCP server configurations loaded");
 
+                        // Merge legacy MCP servers into ExtensionsModel so it
+                        // reflects servers that were only in mcp_servers.json.
+                        {
+                            use chatty_core::settings::models::extensions_store::{
+                                ExtensionKind, ExtensionSource, InstalledExtension,
+                            };
+                            let ext_model = cx.global_mut::<settings::models::ExtensionsModel>();
+                            for server in &servers_clone {
+                                let ext_id = format!("mcp-{}", server.name);
+                                if ext_model.find(&ext_id).is_none() {
+                                    ext_model.add(InstalledExtension {
+                                        id: ext_id,
+                                        display_name: server.name.clone(),
+                                        description: String::new(),
+                                        kind: ExtensionKind::McpServer(server.clone()),
+                                        source: ExtensionSource::Custom,
+                                        enabled: server.enabled,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Inject the stored Hive JWT token into the "hive" MCP
+                        // server config so authenticated tool calls work on
+                        // startup without requiring an extra login.
+                        let mut servers_clone = servers_clone;
+                        if let Some(token) = cx
+                            .global::<chatty_core::settings::models::hive_settings::HiveSettingsModel>()
+                            .token
+                            .clone()
+                            && let Some(hive_cfg) =
+                                servers_clone.iter_mut().find(|s| s.name == "hive")
+                            && hive_cfg.api_key.as_ref().is_none_or(|k| k.is_empty())
+                        {
+                            hive_cfg.api_key = Some(token);
+                            info!("Injected Hive token into MCP server config for startup");
+                        }
+
                         // Connect to all enabled MCP servers and track auth status
                         let mcp_service = cx.global::<chatty::services::McpService>().clone();
                         cx.spawn(async move |cx: &mut AsyncApp| {
@@ -980,25 +1054,43 @@ fn main() {
 
                             cx.update(|cx| {
                                 use settings::models::mcp_store::McpAuthStatus;
-                                let model = cx.global_mut::<settings::models::McpServersModel>();
-                                for (name, ok, err_msg) in results {
-                                    let status = if ok {
-                                        McpAuthStatus::Authenticated
-                                    } else if let Some(ref msg) = err_msg {
-                                        if msg.contains("Auth required")
-                                            || msg.contains("AuthRequired")
-                                        {
-                                            McpAuthStatus::NeedsAuth
+
+                                // Derive status once per connection result, then
+                                // write to both models (ExtensionsModel is
+                                // canonical; McpServersModel kept for legacy).
+                                let statuses: Vec<(String, McpAuthStatus)> = results
+                                    .into_iter()
+                                    .map(|(name, ok, err_msg)| {
+                                        let status = if ok {
+                                            McpAuthStatus::Authenticated
+                                        } else if let Some(ref msg) = err_msg {
+                                            if msg.contains("Auth required")
+                                                || msg.contains("AuthRequired")
+                                            {
+                                                McpAuthStatus::NeedsAuth
+                                            } else {
+                                                McpAuthStatus::Failed(msg.clone())
+                                            }
                                         } else {
-                                            McpAuthStatus::Failed(msg.clone())
-                                        }
-                                    } else {
-                                        McpAuthStatus::Failed("Unknown error".to_string())
-                                    };
-                                    model.set_auth_status(name, status);
+                                            McpAuthStatus::Failed("Unknown error".to_string())
+                                        };
+                                        (name, status)
+                                    })
+                                    .collect();
+
+                                let model = cx.global_mut::<settings::models::McpServersModel>();
+                                for (name, status) in &statuses {
+                                    model.set_auth_status(name.clone(), status.clone());
                                 }
+
+                                let ext_model = cx.global_mut::<settings::models::ExtensionsModel>();
+                                for (name, status) in statuses {
+                                    ext_model.set_mcp_auth_status(name, status);
+                                }
+
                                 cx.refresh_windows();
                             })
+                            .map_err(|e| warn!(error = ?e, "Failed to update MCP auth statuses"))
                             .ok();
                         })
                         .detach();
@@ -1022,19 +1114,39 @@ fn main() {
                 Ok(agents) => {
                     let names: Vec<String> = agents.iter().filter(|a| a.enabled).map(|a| a.name.clone()).collect();
                     cx.update(|cx| {
-                        cx.update_global::<chatty_core::settings::models::A2aAgentsModel, _>(|model, _cx| {
-                            model.replace_all(agents);
-                        });
                         info!(count = names.len(), "A2A agent configurations loaded");
+
+                        // Merge legacy A2A agents into ExtensionsModel
+                        {
+                            use chatty_core::settings::models::extensions_store::{
+                                ExtensionKind, ExtensionSource, InstalledExtension,
+                            };
+                            let ext_model = cx.global_mut::<settings::models::ExtensionsModel>();
+                            for agent in &agents {
+                                let ext_id = format!("a2a-{}", agent.name);
+                                if ext_model.find(&ext_id).is_none() {
+                                    ext_model.add(InstalledExtension {
+                                        id: ext_id,
+                                        display_name: agent.name.clone(),
+                                        description: String::new(),
+                                        kind: ExtensionKind::A2aAgent(agent.clone()),
+                                        source: ExtensionSource::Custom,
+                                        enabled: agent.enabled,
+                                    });
+                                }
+                            }
+                        }
+
                         cx.refresh_windows();
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to update global A2A agents after load"))
+                    .map_err(|e| warn!(error = ?e, "Failed to merge A2A agents into ExtensionsModel"))
                     .ok();
 
                     // Probe agent cards for all enabled agents in the background
                     for name in names {
+                        let ext_id = format!("a2a-{name}");
                         cx.update(|cx| {
-                            settings::controllers::a2a_controller::probe_agent_card(name, cx);
+                            settings::controllers::a2a_controller::probe_agent_card(ext_id, name, cx);
                         })
                         .ok();
                     }
@@ -1110,6 +1222,87 @@ fn main() {
                     warn!(error = ?e, "Failed to load module settings, using defaults");
                 }
             }
+        })
+        .detach();
+
+        // Load Hive settings and extensions asynchronously
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let (hive_result, ext_result) = tokio::join!(
+                chatty_core::hive_settings_repository().load(),
+                chatty_core::extensions_repository().load(),
+            );
+
+            if let Ok(hive) = hive_result {
+                cx.update(|cx| {
+                    info!(
+                        registry = %hive.registry_url,
+                        logged_in = hive.token.is_some(),
+                        "Hive settings loaded"
+                    );
+                    cx.set_global(hive);
+                })
+                .ok();
+            }
+
+            if let Ok(ext) = ext_result {
+                let count = ext.extensions.len();
+                cx.update(|cx| {
+                    info!(count, "Extensions loaded from disk");
+                    cx.set_global(ext);
+                })
+                .ok();
+            }
+
+            // Sync hive_settings.registry_url from the Hive MCP extension URL.
+            // extensions.json may have been edited to point at a different host
+            // while hive_settings.json was absent (defaulting to localhost:8080).
+            cx.update(|cx| {
+                let ext_model = cx.global::<settings::models::ExtensionsModel>();
+                if let Some(ext) = ext_model.find(chatty_core::install::HIVE_MCP_EXT_ID)
+                    && let settings::models::extensions_store::ExtensionKind::McpServer(ref cfg) =
+                        ext.kind
+                {
+                        let derived = cfg.url.trim_end_matches("/mcp").to_string();
+                        let hive = cx.global::<settings::models::HiveSettingsModel>();
+                        if !derived.is_empty() && derived != hive.registry_url {
+                            info!(
+                                old = %hive.registry_url,
+                                new = %derived,
+                                "Syncing Hive registry URL from extension"
+                            );
+                            let mut updated = hive.clone();
+                            updated.registry_url = derived;
+                            cx.set_global(updated.clone());
+                            cx.spawn(|_cx: &mut AsyncApp| async move {
+                                let _ = chatty_core::hive_settings_repository()
+                                    .save(updated)
+                                    .await;
+                            })
+                            .detach();
+                        }
+                }
+            })
+            .ok();
+
+            // Ensure the built-in Hive MCP server extension exists
+            cx.update(|cx| {
+                let added =
+                    settings::controllers::extensions_controller::ensure_default_hive_mcp(cx);
+                if added {
+                    // Persist the new extension and MCP server entries
+                    let ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
+                    let mcp_servers = cx
+                        .global::<settings::models::McpServersModel>()
+                        .servers()
+                        .to_vec();
+                    cx.spawn(|_cx: &mut AsyncApp| async move {
+                        let _ = chatty_core::extensions_repository().save(ext_model).await;
+                        let _ = chatty_core::mcp_repository().save_all(mcp_servers).await;
+                    })
+                    .detach();
+                }
+            })
+            .ok();
         })
         .detach();
 

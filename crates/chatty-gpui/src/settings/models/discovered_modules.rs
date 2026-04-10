@@ -4,9 +4,11 @@ use gpui::Global;
 #[derive(Clone, Debug)]
 pub enum ModuleLoadStatus {
     Loaded,
+    #[allow(dead_code)]
     Error(String),
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct DiscoveredModuleEntry {
     pub directory_name: String,

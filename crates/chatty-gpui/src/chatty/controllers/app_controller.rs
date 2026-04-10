@@ -44,14 +44,28 @@ use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
 /// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
 ///
-/// Only modules with `agent = true` and a `Loaded` status are included.
+/// Only modules with `agent = true`, a `Loaded` status, and enabled in `ExtensionsModel`
+/// are included.
 fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
+    let enabled_ids: std::collections::HashSet<String> = cx
+        .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+        .map(|ext| {
+            ext.wasm_module_ids()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+
     cx.try_global::<DiscoveredModulesModel>()
         .map(|model| {
             model
                 .modules
                 .iter()
-                .filter(|m| m.agent && matches!(m.status, ModuleLoadStatus::Loaded))
+                .filter(|m| {
+                    m.agent
+                        && matches!(m.status, ModuleLoadStatus::Loaded)
+                        && enabled_ids.contains(&m.name)
+                })
                 .map(|m| LocalModuleAgentSummary {
                     name: m.name.clone(),
                     version: m.version.clone(),
@@ -289,8 +303,8 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let (remote_agents, available_model_ids) = cx
         .update(|cx| {
             let agents = cx
-                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
-                .map(|m| m.agents().to_vec())
+                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                .map(|m| m.a2a_agent_configs())
                 .unwrap_or_default();
             let model_ids = cx
                 .try_global::<crate::settings::models::ModelsModel>()
@@ -1112,8 +1126,8 @@ impl ChattyApp {
                     let (remote_agents, available_model_ids) = cx
                         .update(|cx| {
                             let agents = cx
-                                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
-                                .map(|m| m.agents().to_vec())
+                                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                                .map(|m| m.a2a_agent_configs())
                                 .unwrap_or_default();
                             let model_ids = cx
                                 .try_global::<crate::settings::models::ModelsModel>()
@@ -1246,8 +1260,8 @@ impl ChattyApp {
                 .try_global::<crate::settings::models::ModuleSettingsModel>()
                 .map(|m| m.gateway_port);
             let remote_agents = cx
-                .try_global::<chatty_core::settings::models::A2aAgentsModel>()
-                .map(|m| m.agents().to_vec())
+                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                .map(|m| m.a2a_agent_configs())
                 .unwrap_or_default();
             let available_model_ids = cx
                 .try_global::<crate::settings::models::ModelsModel>()
@@ -1652,8 +1666,8 @@ impl ChattyApp {
                         let (remote_agents, available_model_ids) = cx
                             .update(|cx| {
                                 let agents = cx
-                                    .try_global::<chatty_core::settings::models::A2aAgentsModel>()
-                                    .map(|m| m.agents().to_vec())
+                                    .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                                    .map(|m| m.a2a_agent_configs())
                                     .unwrap_or_default();
                                 let model_ids = cx
                                     .try_global::<crate::settings::models::ModelsModel>()
@@ -2880,8 +2894,8 @@ impl ChattyApp {
 
                 let is_a2a_agent = !prompt_for_agent.is_empty()
                     && cx
-                        .try_global::<chatty_core::settings::models::A2aAgentsModel>()
-                        .and_then(|m| m.find_enabled(&agent_name).map(|_| true))
+                        .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                        .and_then(|m| m.find_enabled_a2a(&agent_name).map(|_| true))
                         .unwrap_or(false);
 
                 if is_a2a_agent {
@@ -2918,8 +2932,8 @@ impl ChattyApp {
 
         // Capture the config snapshot now (before the async spawn).
         let config = cx
-            .try_global::<chatty_core::settings::models::A2aAgentsModel>()
-            .and_then(|m| m.find_enabled(&agent_name).cloned());
+            .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+            .and_then(|m| m.find_enabled_a2a(&agent_name).cloned());
 
         let Some(config) = config else {
             self.chat_view.update(cx, |view, cx| {

@@ -1,0 +1,16 @@
+[package]
+name = "echo-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Example chatty module — an echo/transform agent that demonstrates host LLM calls and tool usage"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chatty-module-sdk = { path = "../../crates/chatty-module-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Standalone example — not part of the main workspace.
+[workspace]

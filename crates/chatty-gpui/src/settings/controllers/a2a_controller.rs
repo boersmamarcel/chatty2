@@ -1,128 +1,23 @@
 use chatty_core::services::A2aClient;
-use chatty_core::settings::models::a2a_store::{A2aAgentConfig, A2aAgentStatus, A2aAgentsModel};
+use chatty_core::settings::models::a2a_store::A2aAgentStatus;
+use chatty_core::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use gpui::{App, AsyncApp};
-use tracing::{error, info};
-
-/// Create a new A2A agent entry and persist to disk.
-pub fn create_agent(name: String, url: String, api_key: Option<String>, cx: &mut App) {
-    let name = name.trim().to_string();
-    let url = url.trim().to_string();
-    let api_key = api_key.filter(|k| !k.trim().is_empty());
-
-    // 1. Add to global state (starts enabled; connectivity is checked async)
-    let updated = {
-        let model = cx.global_mut::<A2aAgentsModel>();
-        model.agents_mut().push(A2aAgentConfig {
-            name: name.clone(),
-            url: url.clone(),
-            api_key,
-            enabled: true,
-            skills: vec![],
-        });
-        model.agents().to_vec()
-    };
-
-    // 2. Refresh UI immediately
-    cx.refresh_windows();
-
-    // 3. Save async to disk
-    save_agents_async(updated, cx);
-
-    info!(name = %name, url = %url, "Created new A2A agent");
-
-    // Probe the agent card in the background (name is moved into probe)
-    probe_agent_card(name, cx);
-}
-
-/// Update the API key for an existing A2A agent and persist to disk.
-pub fn update_agent_api_key(agent_name: String, api_key: Option<String>, cx: &mut App) {
-    let api_key = api_key.filter(|k| !k.trim().is_empty());
-
-    let updated = {
-        let model = cx.global_mut::<A2aAgentsModel>();
-        if let Some(agent) = model.agents_mut().iter_mut().find(|a| a.name == agent_name) {
-            agent.api_key = api_key;
-        } else {
-            error!(agent = %agent_name, "Agent not found for API key update");
-            return;
-        }
-        model.agents().to_vec()
-    };
-
-    cx.refresh_windows();
-    save_agents_async(updated, cx);
-
-    // Re-probe with new key
-    probe_agent_card(agent_name.clone(), cx);
-
-    info!(agent = %agent_name, "Updated A2A agent API key");
-}
-
-/// Toggle the enabled state of an A2A agent and persist to disk.
-pub fn toggle_agent(agent_name: String, cx: &mut App) {
-    let updated = {
-        let model = cx.global_mut::<A2aAgentsModel>();
-        if let Some(agent) = model.agents_mut().iter_mut().find(|a| a.name == agent_name) {
-            agent.enabled = !agent.enabled;
-            info!(
-                agent = %agent_name,
-                enabled = agent.enabled,
-                "Toggled A2A agent"
-            );
-        } else {
-            error!(agent = %agent_name, "Agent not found for toggle");
-            return;
-        }
-        model.agents().to_vec()
-    };
-
-    cx.refresh_windows();
-    save_agents_async(updated, cx);
-
-    // Probe only when enabling
-    let is_enabled = cx
-        .global::<A2aAgentsModel>()
-        .agents()
-        .iter()
-        .find(|a| a.name == agent_name)
-        .map(|a| a.enabled)
-        .unwrap_or(false);
-
-    if is_enabled {
-        probe_agent_card(agent_name, cx);
-    }
-}
-
-/// Delete an A2A agent by name and persist to disk.
-pub fn delete_agent(agent_name: String, cx: &mut App) {
-    let updated = {
-        let model = cx.global_mut::<A2aAgentsModel>();
-        model.agents_mut().retain(|a| a.name != agent_name);
-        model.remove_status(&agent_name);
-        model.agents().to_vec()
-    };
-
-    cx.refresh_windows();
-    save_agents_async(updated, cx);
-
-    info!(agent = %agent_name, "Deleted A2A agent");
-}
+use tracing::error;
 
 /// Fetch the agent card for a given agent and update the status in the global model.
-pub fn probe_agent_card(agent_name: String, cx: &mut App) {
-    // Snapshot config before spawning
+pub fn probe_agent_card(ext_id: String, agent_name: String, cx: &mut App) {
     let config = cx
-        .global::<A2aAgentsModel>()
-        .agents()
-        .iter()
-        .find(|a| a.name == agent_name)
-        .cloned();
+        .global::<ExtensionsModel>()
+        .find_a2a_by_name(&agent_name)
+        .and_then(|ext| match &ext.kind {
+            ExtensionKind::A2aAgent(cfg) => Some(cfg.clone()),
+            _ => None,
+        });
 
     let Some(config) = config else { return };
 
-    // Mark as connecting immediately
-    cx.global_mut::<A2aAgentsModel>()
-        .set_status(agent_name.clone(), A2aAgentStatus::Connecting);
+    cx.global_mut::<ExtensionsModel>()
+        .set_a2a_status(agent_name.clone(), A2aAgentStatus::Connecting);
     cx.refresh_windows();
 
     let client = A2aClient::new();
@@ -132,21 +27,20 @@ pub fn probe_agent_card(agent_name: String, cx: &mut App) {
             Ok(card) => {
                 let skills = card.skills.clone();
                 cx.update(|cx| {
-                    let model = cx.global_mut::<A2aAgentsModel>();
-                    model.set_status(agent_name.clone(), A2aAgentStatus::Connected);
-                    // Update cached skills
-                    if let Some(agent) =
-                        model.agents_mut().iter_mut().find(|a| a.name == agent_name)
+                    let model = cx.global_mut::<ExtensionsModel>();
+                    model.set_a2a_status(agent_name.clone(), A2aAgentStatus::Connected);
+                    if let Some(ext) = model.find_mut(&ext_id)
+                        && let ExtensionKind::A2aAgent(ref mut cfg) = ext.kind
                     {
-                        agent.skills = skills;
+                        cfg.skills = skills;
                     }
                     cx.refresh_windows();
                 })
                 .ok();
                 // Persist updated skills
                 cx.update(|cx| {
-                    let agents = cx.global::<A2aAgentsModel>().agents().to_vec();
-                    save_agents_async(agents, cx);
+                    let ext_model = cx.global::<ExtensionsModel>().clone();
+                    save_extensions_async(ext_model, cx);
                 })
                 .ok();
             }
@@ -154,8 +48,8 @@ pub fn probe_agent_card(agent_name: String, cx: &mut App) {
                 let err_msg = format!("{e:#}");
                 error!(agent = %agent_name, error = %err_msg, "Failed to fetch A2A agent card");
                 cx.update(|cx| {
-                    cx.global_mut::<A2aAgentsModel>()
-                        .set_status(agent_name, A2aAgentStatus::Failed(err_msg));
+                    cx.global_mut::<ExtensionsModel>()
+                        .set_a2a_status(agent_name.clone(), A2aAgentStatus::Failed(err_msg));
                     cx.refresh_windows();
                 })
                 .ok();
@@ -165,12 +59,11 @@ pub fn probe_agent_card(agent_name: String, cx: &mut App) {
     .detach();
 }
 
-/// Save agents asynchronously to disk.
-fn save_agents_async(agents: Vec<A2aAgentConfig>, cx: &mut App) {
+fn save_extensions_async(model: ExtensionsModel, cx: &mut App) {
     cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::a2a_repository();
-        if let Err(e) = repo.save_all(agents).await {
-            error!(error = ?e, "Failed to save A2A agents, changes will be lost on restart");
+        let repo = chatty_core::extensions_repository();
+        if let Err(e) = repo.save(model).await {
+            error!(error = ?e, "Failed to save extensions");
         }
     })
     .detach();
@@ -178,7 +71,7 @@ fn save_agents_async(agents: Vec<A2aAgentConfig>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 
     fn make_cfg(name: &str, enabled: bool) -> A2aAgentConfig {
         A2aAgentConfig {
