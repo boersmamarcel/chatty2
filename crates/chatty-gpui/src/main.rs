@@ -9,6 +9,7 @@ mod assets;
 mod auto_updater;
 mod chatty;
 mod cli_installer;
+pub mod global_entity;
 mod settings;
 
 use assets::ChattyAssets;
@@ -23,10 +24,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Upgrade the global weak ChattyApp entity and run a closure on it.
 /// No-op if the entity hasn't been registered or has been dropped.
 fn with_chatty_app(cx: &mut App, f: impl FnOnce(&mut ChattyApp, &mut Context<ChattyApp>)) {
-    if let Some(weak) = cx
+    if let Some(entity) = cx
         .try_global::<GlobalChattyApp>()
-        .and_then(|g| g.entity.clone())
-        && let Some(entity) = weak.upgrade()
+        .and_then(|g| g.try_upgrade())
     {
         entity.update(cx, f);
     }
@@ -231,7 +231,7 @@ fn register_actions(cx: &mut App) {
         // Stop all active streams gracefully
         if let Some(manager) = cx
             .try_global::<chatty::models::GlobalStreamManager>()
-            .and_then(|g| g.entity.clone())
+            .and_then(|g| g.get())
         {
             manager.update(cx, |mgr, cx| {
                 mgr.stop_all(cx);
@@ -592,9 +592,9 @@ fn main() {
 
         // Initialize models notifier entity for event subscriptions
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
-        cx.set_global(settings::models::GlobalModelsNotifier {
-            entity: Some(models_notifier.downgrade()),
-        });
+        cx.set_global(settings::models::GlobalModelsNotifier::new(
+            models_notifier.downgrade(),
+        ));
 
         // Create MCP update channel and spawn listener that updates global + emits event
         let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::channel::<
@@ -645,10 +645,9 @@ fn main() {
                         .detach();
                     }
 
-                    if let Some(weak_notifier) = cx
+                    if let Some(notifier) = cx
                         .try_global::<settings::models::GlobalAgentConfigNotifier>()
-                        .and_then(|g| g.entity.clone())
-                        && let Some(notifier) = weak_notifier.upgrade()
+                        .and_then(|g| g.try_upgrade())
                     {
                         notifier.update(cx, |_notifier, cx| {
                             cx.emit(settings::models::AgentConfigEvent::RebuildRequired);
@@ -665,17 +664,15 @@ fn main() {
         // Store a strong Entity reference in the global to prevent garbage collection
         // when the initialization closure's local variables go out of scope.
         let stream_manager = cx.new(|_cx| chatty::models::StreamManager::new());
-        cx.set_global(chatty::models::GlobalStreamManager {
-            entity: Some(stream_manager),
-        });
+        cx.set_global(chatty::models::GlobalStreamManager::new(stream_manager));
 
         // Initialize error store and notifier
         cx.set_global(chatty::models::ErrorStore::new(100)); // Max 100 entries
 
         let error_notifier = cx.new(|_cx| chatty::models::ErrorNotifier::new());
-        cx.set_global(chatty::models::GlobalErrorNotifier {
-            entity: Some(error_notifier.downgrade()),
-        });
+        cx.set_global(chatty::models::GlobalErrorNotifier::new(
+            error_notifier.downgrade(),
+        ));
 
         // Spawn background thread to consume errors from tracing layer
         // Bridge sync channel to tokio channel
@@ -697,10 +694,9 @@ fn main() {
                     });
 
                     // Notify UI
-                    if let Some(weak_notifier) = cx
+                    if let Some(notifier) = cx
                         .try_global::<chatty::models::GlobalErrorNotifier>()
-                        .and_then(|g| g.entity.clone())
-                        && let Some(notifier) = weak_notifier.upgrade()
+                        .and_then(|g| g.try_upgrade())
                     {
                         notifier.update(cx, |_notifier, cx| {
                             cx.emit(chatty::models::ErrorNotifierEvent::NewError);
@@ -864,10 +860,9 @@ fn main() {
                         });
 
                         // Emit ModelsReady event for subscribers
-                        if let Some(weak_notifier) = cx
+                        if let Some(notifier) = cx
                             .try_global::<settings::models::GlobalModelsNotifier>()
-                            .and_then(|g| g.entity.clone())
-                            && let Some(notifier) = weak_notifier.upgrade()
+                            .and_then(|g| g.try_upgrade())
                         {
                             notifier.update(cx, |_notifier, cx| {
                                 cx.emit(settings::models::ModelsNotifierEvent::ModelsReady);

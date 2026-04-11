@@ -1,7 +1,7 @@
 use crate::settings::controllers::user_secrets_controller;
 use crate::settings::models::user_secrets_store::UserSecretsModel;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, IntoElement, Render,
+    App, Context, FocusHandle, Focusable, FontWeight, IntoElement, Render,
     SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::{
@@ -16,12 +16,7 @@ use gpui_component::{Icon, IconName};
 
 // ── Global singleton ────────────────────────────────────────────────────────
 
-#[derive(Default)]
-pub struct GlobalSecretsTableView {
-    pub view: Option<Entity<SecretsTableView>>,
-}
-
-impl Global for GlobalSecretsTableView {}
+pub type GlobalSecretsTableView = crate::global_entity::GlobalStrongEntity<SecretsTableView>;
 
 // ── Table view entity ───────────────────────────────────────────────────────
 
@@ -318,20 +313,16 @@ pub fn user_secrets_page() -> SettingPage {
                 )
                 .items(vec![SettingItem::render(|_options, window, cx| {
                     let view = if let Some(existing) = cx.try_global::<GlobalSecretsTableView>() {
-                        if let Some(view) = existing.view.clone() {
+                        if let Some(view) = existing.get() {
                             view
                         } else {
                             let new_view = cx.new(|cx| SecretsTableView::new(window, cx));
-                            cx.set_global(GlobalSecretsTableView {
-                                view: Some(new_view.clone()),
-                            });
+                            cx.set_global(GlobalSecretsTableView::new(new_view.clone()));
                             new_view
                         }
                     } else {
                         let new_view = cx.new(|cx| SecretsTableView::new(window, cx));
-                        cx.set_global(GlobalSecretsTableView {
-                            view: Some(new_view.clone()),
-                        });
+                        cx.set_global(GlobalSecretsTableView::new(new_view.clone()));
                         new_view
                     };
 

@@ -578,7 +578,7 @@ impl ChattyApp {
             // Check if this conversation has an active stream via StreamManager
             let has_active_stream = cx
                 .try_global::<GlobalStreamManager>()
-                .and_then(|g| g.entity.clone())
+                .and_then(|g| g.get())
                 .map(|mgr| mgr.read(cx).is_streaming(&conv_id))
                 .unwrap_or(false);
 
@@ -711,7 +711,7 @@ impl ChattyApp {
         // Cancel any pending stream before creating a new conversation
         if let Some(manager) = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone())
+            .and_then(|g| g.get())
         {
             manager.update(cx, |mgr, cx| {
                 mgr.cancel_pending(cx);

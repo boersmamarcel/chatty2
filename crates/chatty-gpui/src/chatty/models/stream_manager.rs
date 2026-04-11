@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui::{Entity, EventEmitter, Global, Task};
+use gpui::{EventEmitter, Task};
 use tracing::{debug, warn};
 
 /// Minimum interval between batched TextChunk events (~250fps).
@@ -610,11 +610,7 @@ impl StreamManager {
 /// Global accessor for the StreamManager entity.
 /// Stores a strong `Entity` reference to prevent the StreamManager from being
 /// garbage collected when the initialization closure's local variables go out of scope.
-pub struct GlobalStreamManager {
-    pub entity: Option<Entity<StreamManager>>,
-}
-
-impl Global for GlobalStreamManager {}
+pub type GlobalStreamManager = crate::global_entity::GlobalStrongEntity<StreamManager>;
 
 #[cfg(test)]
 mod tests {

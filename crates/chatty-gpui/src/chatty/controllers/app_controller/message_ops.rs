@@ -54,7 +54,7 @@ impl ChattyApp {
         // Get StreamManager entity for dual-write
         let stream_manager = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone());
+            .and_then(|g| g.get());
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
@@ -265,7 +265,7 @@ impl ChattyApp {
         // Register stream with StreamManager (owns task + cancel flag)
         if let Some(manager) = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone())
+            .and_then(|g| g.get())
         {
             if let Some(ref conv_id) = conv_id_for_task {
                 manager.update(cx, |mgr, cx| {
@@ -676,7 +676,7 @@ impl ChattyApp {
         // Set trace on StreamManager so it's included in the StreamEnded event
         if let Some(manager) = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone())
+            .and_then(|g| g.get())
         {
             manager.update(cx, |mgr, _cx| {
                 mgr.set_trace(&conv_id, trace_json);
@@ -1116,7 +1116,7 @@ impl ChattyApp {
 
         let stream_manager = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone());
+            .and_then(|g| g.get());
 
         let conv_id_for_task = conv_id.clone();
         let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
@@ -1187,7 +1187,7 @@ impl ChattyApp {
         // Register stream with StreamManager
         if let Some(manager) = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone())
+            .and_then(|g| g.get())
         {
             manager.update(cx, |mgr, cx| {
                 mgr.register_stream(conv_id_for_task, task, cancel_flag, pending_artifacts, cx);

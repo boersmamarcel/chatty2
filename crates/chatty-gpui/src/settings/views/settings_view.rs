@@ -145,22 +145,22 @@ impl Render for SettingsView {
                                     if let Some(existing_view) =
                                         cx.try_global::<GlobalModelsListView>()
                                     {
-                                        if let Some(view) = existing_view.view.clone() {
+                                        if let Some(view) = existing_view.get() {
                                             view
                                         } else {
                                             let new_view =
                                                 cx.new(|cx| ModelsListView::new(window, cx));
-                                            cx.set_global(GlobalModelsListView {
-                                                view: Some(new_view.clone()),
-                                            });
+                                            cx.set_global(GlobalModelsListView::new(
+                                                new_view.clone(),
+                                            ));
                                             new_view
                                         }
                                     } else {
                                         let new_view =
                                             cx.new(|cx| ModelsListView::new(window, cx));
-                                        cx.set_global(GlobalModelsListView {
-                                            view: Some(new_view.clone()),
-                                        });
+                                        cx.set_global(GlobalModelsListView::new(
+                                            new_view.clone(),
+                                        ));
                                         new_view
                                     };
 

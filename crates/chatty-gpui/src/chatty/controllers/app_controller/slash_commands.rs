@@ -626,7 +626,7 @@ impl ChattyApp {
                             .as_ref()
                             .and_then(|id| {
                                 cx.try_global::<GlobalStreamManager>()
-                                    .and_then(|g| g.entity.clone())
+                                    .and_then(|g| g.get())
                                     .map(|mgr| mgr.read(cx).is_streaming(id))
                             })
                             .unwrap_or(false);

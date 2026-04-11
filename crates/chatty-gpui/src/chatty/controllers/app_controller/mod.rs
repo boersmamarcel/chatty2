@@ -365,12 +365,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
 }
 
 /// Global state to hold the main ChattyApp entity
-#[derive(Default)]
-pub struct GlobalChattyApp {
-    pub entity: Option<WeakEntity<ChattyApp>>,
-}
-
-impl Global for GlobalChattyApp {}
+pub type GlobalChattyApp = crate::global_entity::GlobalWeakEntity<ChattyApp>;
 
 pub struct ChattyApp {
     pub chat_view: Entity<ChatView>,
@@ -407,9 +402,7 @@ impl ChattyApp {
         // Create the agent config notifier and keep the strong entity alive in ChattyApp
         // so GlobalAgentConfigNotifier's WeakEntity remains upgradeable for the app's lifetime.
         let mcp_notifier = cx.new(|_cx| AgentConfigNotifier::new());
-        cx.set_global(GlobalAgentConfigNotifier {
-            entity: Some(mcp_notifier.downgrade()),
-        });
+        cx.set_global(GlobalAgentConfigNotifier::new(mcp_notifier.downgrade()));
 
         let app = Self {
             chat_view,
@@ -424,9 +417,7 @@ impl ChattyApp {
         // Store entity in global state for later access
         let app_weak = cx.entity().downgrade();
         if !cx.has_global::<GlobalChattyApp>() {
-            cx.set_global(GlobalChattyApp {
-                entity: Some(app_weak),
-            });
+            cx.set_global(GlobalChattyApp::new(app_weak));
         } else {
             cx.update_global::<GlobalChattyApp, _>(|global, _| {
                 global.entity = Some(app_weak);
@@ -561,10 +552,9 @@ impl ChattyApp {
         .detach();
 
         // SUBSCRIPTION 3: McpNotifier events — rebuild agent when MCP servers change
-        if let Some(weak_notifier) = cx
+        if let Some(notifier) = cx
             .try_global::<GlobalAgentConfigNotifier>()
-            .and_then(|g| g.entity.clone())
-            && let Some(notifier) = weak_notifier.upgrade()
+            .and_then(|g| g.try_upgrade())
         {
             cx.subscribe(
                 &notifier,
@@ -580,7 +570,7 @@ impl ChattyApp {
         // SUBSCRIPTION 4: StreamManager events — decoupled UI updates
         if let Some(manager) = cx
             .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.entity.clone())
+            .and_then(|g| g.get())
         {
             cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
                 app.handle_stream_manager_event(event, cx);

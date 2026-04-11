@@ -7,10 +7,9 @@ use tracing::{debug, error, info, warn};
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the current execution tool settings (bash, filesystem, MCP management).
 fn notify_tool_set_changed(cx: &mut App) {
-    if let Some(weak_notifier) = cx
+    if let Some(notifier) = cx
         .try_global::<GlobalAgentConfigNotifier>()
-        .and_then(|g| g.entity.clone())
-        && let Some(notifier) = weak_notifier.upgrade()
+        .and_then(|g| g.try_upgrade())
     {
         info!("Notifying tool set changed — triggering agent rebuild");
         notifier.update(cx, |_notifier, cx| {

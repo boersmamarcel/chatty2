@@ -1,4 +1,5 @@
-use gpui::{EventEmitter, Global, WeakEntity};
+use gpui::EventEmitter;
+use crate::global_entity::GlobalWeakEntity;
 
 /// Events that signal the active agent needs to be rebuilt.
 ///
@@ -29,9 +30,4 @@ impl AgentConfigNotifier {
 }
 
 /// Global wrapper for the notifier entity.
-#[derive(Default)]
-pub struct GlobalAgentConfigNotifier {
-    pub entity: Option<WeakEntity<AgentConfigNotifier>>,
-}
-
-impl Global for GlobalAgentConfigNotifier {}
+pub type GlobalAgentConfigNotifier = GlobalWeakEntity<AgentConfigNotifier>;
