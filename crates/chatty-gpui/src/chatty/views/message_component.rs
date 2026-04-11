@@ -74,7 +74,6 @@ impl DisplayMessage {
     }
 }
 
-
 /// Build GPUI elements from pre-parsed cached content.
 ///
 /// Mirrors the logic of the thinking-block + code-block + math rendering paths

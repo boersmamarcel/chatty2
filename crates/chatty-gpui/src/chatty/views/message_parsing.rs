@@ -576,7 +576,10 @@ mod tests {
     fn incomplete_code_block_detected_in_streaming() {
         let input = "text\n```python\nprint('hi')";
         let segs = parse_markdown_segments(input, true);
-        assert!(segs.iter().any(|s| matches!(s, MarkdownSegment::IncompleteCodeBlock { .. })));
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, MarkdownSegment::IncompleteCodeBlock { .. }))
+        );
     }
 
     #[test]
@@ -587,9 +590,11 @@ mod tests {
             segs.iter()
                 .any(|s| matches!(s, MarkdownSegment::UnclosedCodeBlock { .. }))
         );
-        assert!(!segs
-            .iter()
-            .any(|s| matches!(s, MarkdownSegment::IncompleteCodeBlock { .. })));
+        assert!(
+            !segs
+                .iter()
+                .any(|s| matches!(s, MarkdownSegment::IncompleteCodeBlock { .. }))
+        );
     }
 
     #[test]

@@ -7,6 +7,11 @@ use gpui_component::{Icon, Sizable};
 use std::ops::Range;
 use std::time::Duration;
 
+const PROVISIONAL_BG_OPACITY: f32 = 0.75;
+const PROVISIONAL_BORDER_OPACITY: f32 = 0.75;
+const PROVISIONAL_TEXT_OPACITY: f32 = 0.95;
+const LANGUAGE_BADGE_BG_OPACITY: f32 = 0.35;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CodeBlockRenderMode {
     Highlighted,
@@ -98,17 +103,17 @@ impl RenderOnce for CodeBlockComponent {
         let styled_text = StyledText::new(code.clone()).with_highlights(styles);
         let is_provisional = render_mode == CodeBlockRenderMode::Provisional;
         let bg_color = if is_provisional {
-            theme.muted.opacity(0.75)
+            theme.muted.opacity(PROVISIONAL_BG_OPACITY)
         } else {
             theme.muted
         };
         let border_color = if is_provisional {
-            theme.border.opacity(0.75)
+            theme.border.opacity(PROVISIONAL_BORDER_OPACITY)
         } else {
             theme.border
         };
         let code_text_color = if is_provisional {
-            theme.muted_foreground.opacity(0.95)
+            theme.muted_foreground.opacity(PROVISIONAL_TEXT_OPACITY)
         } else {
             theme.foreground
         };
@@ -137,7 +142,7 @@ impl RenderOnce for CodeBlockComponent {
                                     .px_2()
                                     .py_1()
                                     .rounded_sm()
-                                    .bg(border_color.opacity(0.35))
+                                    .bg(border_color.opacity(LANGUAGE_BADGE_BG_OPACITY))
                                     .text_xs()
                                     .font_family("monospace")
                                     .text_color(header_text_color)
@@ -152,7 +157,7 @@ impl RenderOnce for CodeBlockComponent {
                                         ))
                                         .text_xs()
                                         .text_color(header_text_color)
-                                        .child("Streaming code… rendering when complete")
+                                        .child("Streaming code... rendering when complete")
                                         .with_animation(
                                             ElementId::Name(
                                                 format!("streaming-code-hint-anim-{}", block_index)
@@ -188,7 +193,7 @@ impl RenderOnce for CodeBlockComponent {
                     .text_size(px(13.0))
                     .line_height(relative(1.5))
                     .text_color(code_text_color)
-                    .child(styled_text)
+                    .child(styled_text),
             )
     }
 }
