@@ -189,3 +189,180 @@ macro_rules! build_with_mcp_tools {
 }
 
 pub(super) use build_with_mcp_tools;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    // ── filter_mcp_tool_info ────────────────────────────────────────────────
+
+    #[test]
+    fn filter_mcp_tool_info_no_duplicates() {
+        let reserved = HashSet::new();
+        let input = vec![
+            ("server-a".into(), "tool_1".into(), "desc".into()),
+            ("server-b".into(), "tool_2".into(), "desc".into()),
+        ];
+        let result = filter_mcp_tool_info(input, &reserved);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn filter_mcp_tool_info_removes_reserved_names() {
+        let reserved: HashSet<String> = ["read_file".into()].into();
+        let input = vec![
+            ("server-a".into(), "read_file".into(), "conflicts".into()),
+            ("server-a".into(), "custom_tool".into(), "ok".into()),
+        ];
+        let result = filter_mcp_tool_info(input, &reserved);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, "custom_tool");
+    }
+
+    #[test]
+    fn filter_mcp_tool_info_removes_cross_server_duplicates() {
+        let reserved = HashSet::new();
+        let input = vec![
+            ("server-a".into(), "shared_tool".into(), "first".into()),
+            ("server-b".into(), "shared_tool".into(), "duplicate".into()),
+            ("server-b".into(), "unique_tool".into(), "ok".into()),
+        ];
+        let result = filter_mcp_tool_info(input, &reserved);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "server-a");
+        assert_eq!(result[0].1, "shared_tool");
+        assert_eq!(result[1].1, "unique_tool");
+    }
+
+    #[test]
+    fn filter_mcp_tool_info_empty_input() {
+        let result = filter_mcp_tool_info(vec![], &HashSet::new());
+        assert!(result.is_empty());
+    }
+
+    // ── strip_format_from_schema ────────────────────────────────────────────
+
+    #[test]
+    fn strip_format_removes_top_level_format() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "type": "string",
+                "format": "uri"
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        assert!(!schema.contains_key("format"));
+        assert_eq!(schema["type"], "string");
+    }
+
+    #[test]
+    fn strip_format_removes_nested_in_properties() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "format": "uri" },
+                    "name": { "type": "string" }
+                }
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(!props["url"].as_object().unwrap().contains_key("format"));
+        assert_eq!(props["name"]["type"], "string");
+    }
+
+    #[test]
+    fn strip_format_removes_from_items() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "type": "array",
+                "items": { "type": "string", "format": "email" }
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        assert!(!schema["items"].as_object().unwrap().contains_key("format"));
+    }
+
+    #[test]
+    fn strip_format_removes_from_any_of() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "anyOf": [
+                    { "type": "string", "format": "uri" },
+                    { "type": "integer" }
+                ]
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        let variants = schema["anyOf"].as_array().unwrap();
+        assert!(!variants[0].as_object().unwrap().contains_key("format"));
+    }
+
+    #[test]
+    fn strip_format_removes_from_defs() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "$defs": {
+                    "Url": { "type": "string", "format": "uri" }
+                }
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        let defs = schema["$defs"].as_object().unwrap();
+        assert!(!defs["Url"].as_object().unwrap().contains_key("format"));
+    }
+
+    #[test]
+    fn strip_format_preserves_non_format_fields() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "type": "string",
+                "description": "A URL",
+                "format": "uri",
+                "minLength": 1
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        assert!(!schema.contains_key("format"));
+        assert_eq!(schema["description"], "A URL");
+        assert_eq!(schema["minLength"], 1);
+    }
+
+    #[test]
+    fn strip_format_handles_deeply_nested() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "type": "object",
+                "properties": {
+                    "nested": {
+                        "type": "object",
+                        "properties": {
+                            "deep": { "type": "string", "format": "date-time" }
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        strip_format_from_schema(&mut schema);
+        let deep = &schema["properties"]["nested"]["properties"]["deep"];
+        assert!(!deep.as_object().unwrap().contains_key("format"));
+    }
+
+    #[test]
+    fn strip_format_no_op_when_no_format() {
+        let mut schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }))
+            .unwrap();
+        let original = schema.clone();
+        strip_format_from_schema(&mut schema);
+        assert_eq!(schema, original);
+    }
+}

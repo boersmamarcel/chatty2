@@ -491,3 +491,84 @@ fn token_budget_estimation_delta_with_actuals() {
     // We estimated 8_100, provider said 8_500 → under-estimated by 400
     assert_eq!(delta, 400);
 }
+
+// ── Additional serialization roundtrips ──────────────────────────────────────
+
+/// ExecutionSettingsModel must survive a JSON roundtrip.
+#[test]
+fn execution_settings_json_roundtrip() {
+    use chatty_core::settings::models::ExecutionSettingsModel;
+
+    let mut settings = ExecutionSettingsModel::default();
+    settings.filesystem_read_enabled = true;
+    settings.filesystem_write_enabled = false;
+    settings.git_enabled = true;
+
+    let json = serde_json::to_string(&settings).expect("serialization failed");
+    let loaded: ExecutionSettingsModel =
+        serde_json::from_str(&json).expect("deserialization failed");
+
+    assert_eq!(loaded.filesystem_read_enabled, true);
+    assert_eq!(loaded.filesystem_write_enabled, false);
+    assert_eq!(loaded.git_enabled, true);
+}
+
+/// SearchSettingsModel must survive a JSON roundtrip.
+#[test]
+fn search_settings_json_roundtrip() {
+    use chatty_core::settings::models::SearchSettingsModel;
+
+    let mut settings = SearchSettingsModel::default();
+    settings.tavily_api_key = Some("tavily-key-123".to_string());
+    settings.enabled = true;
+
+    let json = serde_json::to_string(&settings).expect("serialization failed");
+    let loaded: SearchSettingsModel = serde_json::from_str(&json).expect("deserialization failed");
+
+    assert_eq!(loaded.tavily_api_key, Some("tavily-key-123".to_string()));
+    assert_eq!(loaded.enabled, true);
+}
+
+/// TrainingSettingsModel must survive a JSON roundtrip.
+#[test]
+fn training_settings_json_roundtrip() {
+    use chatty_core::settings::models::TrainingSettingsModel;
+
+    let settings = TrainingSettingsModel::default();
+    let json = serde_json::to_string(&settings).expect("serialization failed");
+    let _loaded: TrainingSettingsModel =
+        serde_json::from_str(&json).expect("deserialization failed");
+}
+
+/// HiveSettingsModel must survive a JSON roundtrip.
+#[test]
+fn hive_settings_json_roundtrip() {
+    use chatty_core::settings::models::HiveSettingsModel;
+
+    let mut settings = HiveSettingsModel::default();
+    settings.token = Some("hive-token-abc".to_string());
+
+    let json = serde_json::to_string(&settings).expect("serialization failed");
+    let loaded: HiveSettingsModel = serde_json::from_str(&json).expect("deserialization failed");
+
+    assert_eq!(loaded.token, Some("hive-token-abc".to_string()));
+}
+
+/// ModelConfig deserialization handles missing optional fields (backward compat).
+#[test]
+fn model_config_missing_optional_fields_use_defaults() {
+    // Minimal JSON — only required fields
+    let json = r#"{
+        "id": "test",
+        "name": "Test Model",
+        "provider_type": "open_a_i",
+        "model_identifier": "gpt-4"
+    }"#;
+
+    let config: ModelConfig = serde_json::from_str(json).expect("deserialization failed");
+    assert_eq!(config.id, "test");
+    assert_eq!(config.model_identifier, "gpt-4");
+    // Optional fields should default
+    assert!(!config.supports_images);
+    assert!(!config.supports_pdf);
+}

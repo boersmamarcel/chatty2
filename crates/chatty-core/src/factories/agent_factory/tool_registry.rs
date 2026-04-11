@@ -164,14 +164,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn always_includes_read_skill() {
+    fn always_includes_baseline_tools() {
         let names = active_native_tool_names(&ToolAvailability::default());
-        assert!(
-            names.contains("read_skill"),
-            "read_skill must always be reserved to prevent MCP conflicts"
-        );
-        assert!(names.contains("list_tools"));
-        assert!(names.contains("list_agents"));
+        for tool in ["read_skill", "list_tools", "list_agents", "invoke_agent"] {
+            assert!(names.contains(tool), "{tool} must always be present");
+        }
+        // Baseline count: 4 always-on tools
+        assert_eq!(names.len(), 4);
+    }
+
+    #[test]
+    fn includes_fs_read_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            fs_read: true,
+            ..Default::default()
+        });
+        for tool in ["read_file", "read_binary", "list_directory", "glob_search"] {
+            assert!(names.contains(tool), "{tool} missing for fs_read");
+        }
+    }
+
+    #[test]
+    fn includes_fs_write_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            fs_write: true,
+            ..Default::default()
+        });
+        for tool in [
+            "write_file",
+            "create_directory",
+            "delete_file",
+            "move_file",
+            "apply_diff",
+        ] {
+            assert!(names.contains(tool), "{tool} missing for fs_write");
+        }
+    }
+
+    #[test]
+    fn includes_shell_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            shell: true,
+            ..Default::default()
+        });
+        for tool in ["shell_execute", "shell_set_env", "shell_cd", "shell_status"] {
+            assert!(names.contains(tool), "{tool} missing for shell");
+        }
+    }
+
+    #[test]
+    fn includes_git_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            git: true,
+            ..Default::default()
+        });
+        for tool in [
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_add",
+            "git_create_branch",
+            "git_switch_branch",
+            "git_commit",
+        ] {
+            assert!(names.contains(tool), "{tool} missing for git");
+        }
     }
 
     #[test]
@@ -180,10 +237,172 @@ mod tests {
             search: true,
             ..Default::default()
         });
+        for tool in ["search_code", "find_files", "find_definition"] {
+            assert!(names.contains(tool), "{tool} missing for search");
+        }
+    }
 
-        assert!(names.contains("list_tools"));
-        assert!(names.contains("search_code"));
-        assert!(names.contains("find_files"));
-        assert!(names.contains("find_definition"));
+    #[test]
+    fn includes_mcp_management_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            add_mcp: true,
+            ..Default::default()
+        });
+        for tool in [
+            "list_mcp_services",
+            "add_mcp_service",
+            "delete_mcp_service",
+            "edit_mcp_service",
+        ] {
+            assert!(names.contains(tool), "{tool} missing for add_mcp");
+        }
+    }
+
+    #[test]
+    fn includes_excel_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            excel_read: true,
+            excel_write: true,
+            ..Default::default()
+        });
+        for tool in ["read_excel", "write_excel", "edit_excel"] {
+            assert!(names.contains(tool), "{tool} missing for excel");
+        }
+    }
+
+    #[test]
+    fn includes_pdf_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            pdf_to_image: true,
+            pdf_info: true,
+            pdf_extract_text: true,
+            ..Default::default()
+        });
+        for tool in ["pdf_to_image", "pdf_info", "pdf_extract_text"] {
+            assert!(names.contains(tool), "{tool} missing for pdf");
+        }
+    }
+
+    #[test]
+    fn includes_data_query_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            data_query: true,
+            ..Default::default()
+        });
+        for tool in ["query_data", "describe_data"] {
+            assert!(names.contains(tool), "{tool} missing for data_query");
+        }
+    }
+
+    #[test]
+    fn includes_memory_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            memory: true,
+            ..Default::default()
+        });
+        for tool in ["remember", "save_skill", "search_memory"] {
+            assert!(names.contains(tool), "{tool} missing for memory");
+        }
+    }
+
+    #[test]
+    fn includes_single_flag_tools() {
+        // Tools that are a single flag → single tool name
+        let cases = [
+            ("fetch", "fetch"),
+            ("add_attachment", "add_attachment"),
+            ("compile_typst", "compile_typst"),
+            ("execute_code", "execute_code"),
+            ("search_web", "search_web"),
+            ("sub_agent", "sub_agent"),
+            ("browser_use", "browser_use"),
+            ("daytona", "daytona_run"),
+            ("publish_module", "publish_wasm_module"),
+        ];
+
+        for (flag, expected_tool) in cases {
+            let mut tools = ToolAvailability::default();
+            match flag {
+                "fetch" => tools.fetch = true,
+                "add_attachment" => tools.add_attachment = true,
+                "compile_typst" => tools.compile_typst = true,
+                "execute_code" => tools.execute_code = true,
+                "search_web" => tools.search_web = true,
+                "sub_agent" => tools.sub_agent = true,
+                "browser_use" => tools.browser_use = true,
+                "daytona" => tools.daytona = true,
+                "publish_module" => tools.publish_module = true,
+                _ => unreachable!(),
+            }
+            let names = active_native_tool_names(&tools);
+            assert!(
+                names.contains(expected_tool),
+                "flag {flag} should register tool {expected_tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_flags_enabled_produces_superset() {
+        let all = ToolAvailability {
+            fs_read: true,
+            fs_write: true,
+            add_mcp: true,
+            fetch: true,
+            shell: true,
+            git: true,
+            search: true,
+            add_attachment: true,
+            excel_read: true,
+            excel_write: true,
+            pdf_to_image: true,
+            pdf_info: true,
+            pdf_extract_text: true,
+            data_query: true,
+            compile_typst: true,
+            execute_code: true,
+            memory: true,
+            search_web: true,
+            sub_agent: true,
+            browser_use: true,
+            daytona: true,
+            publish_module: true,
+        };
+        let names = active_native_tool_names(&all);
+        // Every individual flag's tools should be present
+        let none_names = active_native_tool_names(&ToolAvailability::default());
+        assert!(names.len() > none_names.len());
+        // All baseline tools still present
+        for tool in &none_names {
+            assert!(names.contains(tool));
+        }
+    }
+
+    #[test]
+    fn disabled_flags_do_not_leak_tools() {
+        let names = active_native_tool_names(&ToolAvailability::default());
+        // These should NOT be present when all flags are false
+        for tool in [
+            "read_file",
+            "write_file",
+            "shell_execute",
+            "git_status",
+            "search_code",
+            "read_excel",
+            "pdf_info",
+            "fetch",
+            "search_web",
+            "remember",
+            "sub_agent",
+            "browser_use",
+            "daytona_run",
+            "execute_code",
+            "compile_typst",
+        ] {
+            assert!(
+                !names.contains(tool),
+                "{tool} should NOT be present when all flags are false"
+            );
+        }
     }
 }
