@@ -118,6 +118,8 @@ impl AutoUpdater {
             }
         }
 
+        // Auto-updater needs custom UA + optional GitHub auth headers, so it
+        // builds its own client rather than using the centralised factory.
         let client = reqwest::Client::builder()
             .user_agent("chatty-auto-updater/1.0")
             .default_headers(headers)
@@ -915,7 +917,7 @@ async fn download_file(
     path: &PathBuf,
     cx: &mut AsyncApp,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    let client = chatty_core::services::http_client::default_client(120);
     let response = client.get(url).send().await?;
 
     if !response.status().is_success() {

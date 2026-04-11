@@ -49,7 +49,7 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
 
     let tags_response: OllamaTagsResponse = response.json().await?;
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::default_client(30);
     let mut models = Vec::new();
 
     for m in tags_response.models {

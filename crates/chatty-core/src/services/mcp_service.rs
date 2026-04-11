@@ -385,7 +385,7 @@ impl McpConnection {
             .with_context(|| format!("Failed to exchange OAuth code for {name}"))?;
 
         // Build an authorized transport and connect
-        let auth_client = AuthClient::new(reqwest::Client::default(), auth_manager);
+        let auth_client = AuthClient::new(super::http_client::default_client(30), auth_manager);
 
         let transport = StreamableHttpClientTransport::with_client(
             auth_client,
@@ -456,7 +456,7 @@ impl McpConnection {
         };
         auth_manager.set_metadata(metadata);
 
-        let auth_client = AuthClient::new(reqwest::Client::default(), auth_manager);
+        let auth_client = AuthClient::new(super::http_client::default_client(30), auth_manager);
 
         let transport = StreamableHttpClientTransport::with_client(
             auth_client,

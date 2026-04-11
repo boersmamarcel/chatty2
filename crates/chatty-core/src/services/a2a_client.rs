@@ -7,7 +7,6 @@
 
 use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
-use reqwest::Client;
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
@@ -45,26 +44,20 @@ pub enum A2aStreamEvent {
 /// A lightweight HTTP client for remote A2A agents.
 #[derive(Clone)]
 pub struct A2aClient {
-    http: Client,
+    http: reqwest::Client,
 }
 
 impl A2aClient {
     pub fn new() -> Self {
         Self {
-            http: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to build A2A HTTP client"),
+            http: crate::services::http_client::default_client(30),
         }
     }
 
     /// Create a client with a custom timeout (useful for long-running agent calls).
     pub fn with_timeout(timeout: std::time::Duration) -> Self {
         Self {
-            http: Client::builder()
-                .timeout(timeout)
-                .build()
-                .expect("Failed to build A2A HTTP client"),
+            http: crate::services::http_client::default_client(timeout.as_secs()),
         }
     }
 

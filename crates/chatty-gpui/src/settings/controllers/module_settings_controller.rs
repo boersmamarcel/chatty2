@@ -38,10 +38,7 @@ struct HostLlmProvider {
 
 impl HostLlmProvider {
     fn new(config: LlmConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_default();
+        let client = chatty_core::services::http_client::default_client(120);
         Self { config, client }
     }
 
