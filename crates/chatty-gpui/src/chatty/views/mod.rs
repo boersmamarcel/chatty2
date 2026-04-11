@@ -13,6 +13,8 @@ pub mod math_parser;
 pub mod math_renderer;
 pub mod mermaid_component;
 pub mod message_component;
+mod message_math_render;
+mod message_parsing;
 pub use chatty_core::models::message_types;
 pub mod parsed_cache;
 pub mod sidebar_view;

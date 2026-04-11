@@ -1,6 +1,31 @@
 // chatty-core: UI-agnostic agent framework, tools, services, and models.
 //
 // This crate contains no GPUI dependencies and can be used with any UI frontend.
+//
+// # Singleton Inventory
+//
+// All process-global singletons are listed here for discoverability.
+// They fall into three categories:
+//
+// ## Service singletons (this file)
+// - `MCP_UPDATE_SENDER` — mpsc channel for MCP config updates (OnceLock)
+// - `MCP_SERVICE`        — shared McpService instance for tool context (OnceLock)
+//
+// ## Repository singletons (this file, via RepositoryRegistry)
+// - `REGISTRY` — holds all repository Arc<dyn …> instances, initialized by
+//   `init_repositories()`. Accessor functions below provide typed access.
+//
+// ## Domain-local singletons (in their respective modules)
+// - `GLOBAL_WRITE_APPROVAL_MODE` — tools/filesystem_write_tool.rs (OnceLock<Mutex>)
+// - `AZURE_TOKEN_CACHE`          — factories/agent_factory/mod.rs (LazyLock<Mutex>)
+// - `MCP_WRITE_LOCK`             — settings/models/mcp_store.rs (LazyLock<Mutex>)
+// - `PATH_AUGMENTED`             — auth/azure_auth.rs (OnceLock<bool>)
+// - `OAUTH_CREDENTIAL_REPOSITORY` — settings/repositories/mod.rs (OnceLock)
+//
+// Design rationale: domain-local singletons stay near their usage to avoid
+// coupling unrelated modules through a central registry. Service and repository
+// singletons are centralized here because they're cross-cutting concerns
+// needed by many modules.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
