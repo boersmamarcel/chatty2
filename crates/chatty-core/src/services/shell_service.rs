@@ -475,6 +475,7 @@ impl ShellSession {
         )
         .await?;
 
+        // SAFETY: ensure_started() guarantees process is Some on Ok return
         let proc = process.as_mut().unwrap();
         let marker = uuid::Uuid::new_v4().to_string().replace('-', "");
         let marker_prefix = format!("__CHATTY_SHELL_MARKER_{}_", marker);

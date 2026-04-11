@@ -1151,10 +1151,7 @@ impl ChatView {
     /// Load message history from a conversation
     pub fn load_history(
         &mut self,
-        history: &[rig::completion::Message],
-        traces: &[Option<serde_json::Value>],
-        attachment_paths: &[Vec<PathBuf>],
-        message_feedback: &[Option<crate::chatty::models::MessageFeedback>],
+        entries: &[chatty_core::models::MessageEntry],
         cx: &mut Context<Self>,
     ) {
         use rig::completion::Message;
@@ -1174,12 +1171,12 @@ impl ChatView {
 
         self.messages.clear();
 
-        for (idx, msg) in history.iter().enumerate() {
-            let feedback = message_feedback.get(idx).cloned().flatten();
-            match msg {
+        for (idx, entry) in entries.iter().enumerate() {
+            let feedback = entry.feedback.clone();
+            match &entry.message {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
-                    let attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
+                    let attachments = entry.attachment_paths.clone();
                     if !user_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,
@@ -1201,30 +1198,27 @@ impl ChatView {
                     // Eagerly create trace view from persisted JSON so tool traces
                     // are visible when reopening a conversation.
                     let system_trace_view =
-                        traces
-                            .get(idx)
-                            .and_then(|t| t.as_ref())
-                            .and_then(|trace_json| {
-                                match serde_json::from_value::<super::message_types::SystemTrace>(
-                                    trace_json.clone(),
-                                ) {
-                                    Ok(trace) if trace.has_items() => Some(cx.new(|_cx| {
-                                        super::trace_components::SystemTraceView::new(trace)
-                                    })),
-                                    Ok(_) => None, // trace exists but has no items
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            idx,
-                                            error = ?e,
-                                            json_preview = %format!("{:.200}", trace_json),
-                                            "Failed to deserialize SystemTrace in load_history"
-                                        );
-                                        None
-                                    }
+                        entry.system_trace.as_ref().and_then(|trace_json| {
+                            match serde_json::from_value::<super::message_types::SystemTrace>(
+                                trace_json.clone(),
+                            ) {
+                                Ok(trace) if trace.has_items() => Some(cx.new(|_cx| {
+                                    super::trace_components::SystemTraceView::new(trace)
+                                })),
+                                Ok(_) => None, // trace exists but has no items
+                                Err(e) => {
+                                    tracing::warn!(
+                                        idx,
+                                        error = ?e,
+                                        json_preview = %format!("{:.200}", trace_json),
+                                        "Failed to deserialize SystemTrace in load_history"
+                                    );
+                                    None
                                 }
-                            });
+                            }
+                        });
 
-                    let attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
+                    let attachments = entry.attachment_paths.clone();
                     if !assistant_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::Assistant,
@@ -1348,32 +1342,24 @@ impl ChatView {
             .child(Skeleton::new().w(px(220.)).h(px(16.)).rounded(px(4.)))
             .child(Skeleton::new().w(px(180.)).h(px(16.)).rounded(px(4.)))
     }
-}
 
-impl Render for ChatView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Pre-render side effects: sticky scroll, input clearing, model refresh.
+    fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
         // async layout changes (image loading, SVG math, code blocks) always
         // converge to the true bottom. Detect user scroll-away to disable.
         if self.stick_to_bottom {
-            // offset() and max_offset() both reflect the last prepaint, so
-            // they are consistent. Content growth doesn't cause a false
-            // positive because offset was set to -max_offset in that same
-            // prepaint; only a user scroll event can move offset away.
             let offset = self.scroll_handle.offset();
             let max_offset = self.scroll_handle.max_offset();
             let distance_from_bottom = max_offset.height + offset.y;
 
             if distance_from_bottom > px(10.0) && max_offset.height > px(0.0) {
-                // User scrolled away from bottom — disable sticky mode
                 self.stick_to_bottom = false;
                 trace!(
                     distance = %distance_from_bottom,
                     "Sticky scroll disabled: user scrolled up"
                 );
             } else {
-                // Still at bottom. Re-assert so THIS frame's (possibly larger)
-                // content_size will be used by clamp_scroll_position.
                 self.scroll_handle.scroll_to_bottom();
             }
         }
@@ -1394,8 +1380,6 @@ impl Render for ChatView {
                         .unwrap_or(true)
                 {
                     info!("No conversations and models available, triggering creation");
-                    // We need to trigger conversation creation on the parent ChattyApp
-                    // This will be handled by sending a signal
                 }
             }
         }
@@ -1410,7 +1394,6 @@ impl Render for ChatView {
 
             if !models_list.is_empty() {
                 self.chat_input_state.update(cx, |state, _cx| {
-                    // Only update if the list is different or empty
                     if state.available_models().is_empty()
                         || state.available_models() != models_list.as_slice()
                     {
@@ -1420,6 +1403,163 @@ impl Render for ChatView {
                 });
             }
         }
+    }
+
+    /// Render the scrollable message list area including the loading skeleton.
+    fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_awaiting = self.is_awaiting_response();
+        let chat_view_entity = cx.entity();
+
+        // Temporarily move state out to avoid split borrows
+        let collapsed_tool_calls = std::mem::take(&mut self.collapsed_tool_calls);
+        let diff_expanded = std::mem::take(&mut self.diff_expanded);
+        let mut parsed_cache = std::mem::take(&mut self.parsed_cache);
+        let mut streaming_cache = self.streaming_parse_cache.take();
+
+        let visible_messages: Vec<(usize, &DisplayMessage)> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| {
+                !(msg.is_streaming
+                    && msg.content.is_empty()
+                    && !msg
+                        .live_trace
+                        .as_ref()
+                        .is_some_and(|trace| trace.has_items()))
+            })
+            .collect();
+
+        let last_visible_assistant_idx = visible_messages
+            .iter()
+            .rev()
+            .find(|(_, msg)| {
+                matches!(msg.role, MessageRole::Assistant)
+                    && !msg.is_streaming
+                    && msg.live_trace.is_none()
+            })
+            .map(|(idx, _)| *idx);
+
+        let rendered: Vec<_> = visible_messages
+            .into_iter()
+            .map(|(index, msg)| {
+                let entity_clone = chat_view_entity.clone();
+                let entity_for_diff = chat_view_entity.clone();
+                let entity_for_feedback = chat_view_entity.clone();
+                let entity_for_regenerate = chat_view_entity.clone();
+                let history_index = msg.history_index;
+                let is_last_message = last_visible_assistant_idx == Some(index);
+                let mut no_cache: Option<StreamingParseState> = None;
+                let sc = if msg.is_streaming {
+                    &mut streaming_cache
+                } else {
+                    &mut no_cache
+                };
+                render_message(
+                    msg,
+                    index,
+                    is_last_message,
+                    &collapsed_tool_calls,
+                    &diff_expanded,
+                    &mut MessageRenderCaches {
+                        parsed: &mut parsed_cache,
+                        streaming: sc,
+                    },
+                    move |msg_idx, tool_idx, cx| {
+                        entity_clone.update(cx, |chat_view, cx| {
+                            let key = (msg_idx, tool_idx);
+                            let current = chat_view
+                                .collapsed_tool_calls
+                                .get(&key)
+                                .copied()
+                                .unwrap_or(true);
+                            chat_view.collapsed_tool_calls.insert(key, !current);
+                            cx.notify();
+                        });
+                    },
+                    move |msg_idx, tool_idx, cx| {
+                        entity_for_diff.update(cx, |chat_view, cx| {
+                            let key = (msg_idx, tool_idx);
+                            let current = chat_view
+                                .diff_expanded
+                                .get(&key)
+                                .copied()
+                                .unwrap_or(false);
+                            chat_view.diff_expanded.insert(key, !current);
+                            cx.notify();
+                        });
+                    },
+                    move |msg_idx, feedback, cx| {
+                        entity_for_feedback.update(cx, |chat_view, cx| {
+                            if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
+                                display_msg.feedback = feedback.clone();
+                            }
+                            if let Some(h_idx) = history_index {
+                                cx.emit(ChatViewEvent::FeedbackChanged {
+                                    history_index: h_idx,
+                                    feedback,
+                                });
+                            }
+                            cx.notify();
+                        });
+                    },
+                    move |_msg_idx, cx| {
+                        entity_for_regenerate.update(cx, |_chat_view, cx| {
+                            if let Some(h_idx) = history_index {
+                                cx.emit(ChatViewEvent::RegenerateMessage {
+                                    history_index: h_idx,
+                                });
+                            }
+                        });
+                    },
+                    cx,
+                )
+            })
+            .collect();
+
+        // Move state back
+        self.parsed_cache = parsed_cache;
+        self.streaming_parse_cache = streaming_cache;
+        self.collapsed_tool_calls = collapsed_tool_calls;
+        self.diff_expanded = diff_expanded;
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(
+                div()
+                    .id("chat-messages")
+                    .track_scroll(&self.scroll_handle)
+                    .overflow_scroll()
+                    .size_full()
+                    .child(
+                        div()
+                            .p_4()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .children(rendered)
+                            .when(is_awaiting, |this| {
+                                this.child(self.render_loading_skeleton())
+                            }),
+                    ),
+            )
+            .vertical_scrollbar(&self.scroll_handle)
+    }
+
+    /// Return the pending approval if it belongs to the current conversation.
+    fn active_approval_for_display(&self) -> Option<PendingApprovalInfo> {
+        self.pending_approval
+            .as_ref()
+            .filter(|approval| self.conversation_id.as_ref() == Some(&approval.conversation_id))
+            .cloned()
+    }
+}
+
+impl Render for ChatView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_render(window, cx);
 
         let has_pending_approval = self.pending_approval.is_some();
         let view_entity_for_keys = cx.entity();
@@ -1437,9 +1577,7 @@ impl Render for ChatView {
             .flex_col()
             .bg(cx.theme().background)
             .overflow_hidden()
-            // Add top padding on macOS for floating toggle button
             .when(cfg!(target_os = "macos"), |this| this.pt(px(24.)))
-            // Handle keyboard shortcuts for approval bar
             .when(has_pending_approval, |this| {
                 this.on_key_down(move |event: &KeyDownEvent, _window, cx| {
                     let modifiers = event.keystroke.modifiers;
@@ -1450,7 +1588,6 @@ impl Render for ChatView {
                         key, modifiers.platform
                     );
 
-                    // Validate that the pending approval belongs to the current conversation
                     if pending_conv_id.as_ref() != current_conv_id.as_ref() {
                         warn!(
                             "Ignoring keyboard shortcut: approval belongs to different conversation (pending: {:?}, current: {:?})",
@@ -1459,7 +1596,6 @@ impl Render for ChatView {
                         return;
                     }
 
-                    // Use platform modifier (Cmd on macOS, Ctrl elsewhere)
                     if modifiers.platform {
                         warn!("Platform modifier pressed with key: {}", key);
                         match key.as_str() {
@@ -1489,178 +1625,10 @@ impl Render for ChatView {
                     }
                 })
             })
-            .child(
-                // Message list - scrollable area
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child({
-                        let is_awaiting = self.is_awaiting_response();
-                        div()
-                            .id("chat-messages")
-                            .track_scroll(&self.scroll_handle)
-                            .overflow_scroll()
-                            .size_full()
-                            .child(
-                                div()
-                                    .p_4()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_4()
-                                    .children({
-                                        let collapsed_tool_calls =
-                                            self.collapsed_tool_calls.clone();
-                                        let diff_expanded =
-                                            self.diff_expanded.clone();
-                                        let chat_view_entity = cx.entity();
-
-                                        // Temporarily move caches out to avoid split borrow
-                                        // (self.messages is borrowed immutably below)
-                                        let mut parsed_cache =
-                                            std::mem::take(&mut self.parsed_cache);
-                                        let mut streaming_cache =
-                                            self.streaming_parse_cache.take();
-
-                                        // Compute visible messages and find the last visible assistant index
-                                        let visible_messages: Vec<(usize, &DisplayMessage)> =
-                                            self.messages
-                                                .iter()
-                                                .enumerate()
-                                                .filter(|(_, msg)| {
-                                                    // Skip empty streaming messages that have no
-                                                    // tool calls yet (we show skeleton instead).
-                                                    // Once tool calls arrive the message must be
-                                                    // visible so the trace/approval bar is shown.
-                                                    !(msg.is_streaming
-                                                        && msg.content.is_empty()
-                                                        && !msg
-                                                            .live_trace
-                                                            .as_ref()
-                                                            .is_some_and(|trace| trace.has_items()))
-                                                })
-                                                .collect();
-
-                                        let last_visible_assistant_idx = visible_messages
-                                            .iter()
-                                            .rev()
-                                            .find(|(_, msg)| {
-                                                matches!(msg.role, MessageRole::Assistant)
-                                                    && !msg.is_streaming
-                                                    && msg.live_trace.is_none()
-                                            })
-                                            .map(|(idx, _)| *idx);
-
-                                        let rendered: Vec<_> = visible_messages
-                                            .into_iter()
-                                            .map(|(index, msg)| {
-                                                let entity_clone = chat_view_entity.clone();
-                                                let entity_for_diff = chat_view_entity.clone();
-                                                let entity_for_feedback = chat_view_entity.clone();
-                                                let entity_for_regenerate = chat_view_entity.clone();
-                                                let history_index = msg.history_index;
-                                                let is_last_message = last_visible_assistant_idx == Some(index);
-                                                // Only pass the streaming cache for the
-                                                // active streaming message; non-streaming
-                                                // messages use the persistent parsed_cache.
-                                                let mut no_cache: Option<StreamingParseState> = None;
-                                                let sc = if msg.is_streaming {
-                                                    &mut streaming_cache
-                                                } else {
-                                                    &mut no_cache
-                                                };
-                                                render_message(
-                                                    msg,
-                                                    index,
-                                                    is_last_message,
-                                                    &collapsed_tool_calls,
-                                                    &diff_expanded,
-                                                    &mut MessageRenderCaches {
-                                                        parsed: &mut parsed_cache,
-                                                        streaming: sc,
-                                                    },
-                                                    move |msg_idx, tool_idx, cx| {
-                                                        entity_clone.update(cx, |chat_view, cx| {
-                                                            let key = (msg_idx, tool_idx);
-                                                            let current = chat_view
-                                                                .collapsed_tool_calls
-                                                                .get(&key)
-                                                                .copied()
-                                                                .unwrap_or(true);
-
-                                                            chat_view
-                                                                .collapsed_tool_calls
-                                                                .insert(key, !current);
-                                                            cx.notify();
-                                                        });
-                                                    },
-                                                    move |msg_idx, tool_idx, cx| {
-                                                        entity_for_diff.update(cx, |chat_view, cx| {
-                                                            let key = (msg_idx, tool_idx);
-                                                            let current = chat_view
-                                                                .diff_expanded
-                                                                .get(&key)
-                                                                .copied()
-                                                                .unwrap_or(false);
-
-                                                            chat_view
-                                                                .diff_expanded
-                                                                .insert(key, !current);
-                                                            cx.notify();
-                                                        });
-                                                    },
-                                                    move |msg_idx, feedback, cx| {
-                                                        entity_for_feedback.update(cx, |chat_view, cx| {
-                                                            // Update display state
-                                                            if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
-                                                                display_msg.feedback = feedback.clone();
-                                                            }
-                                                            // Emit event for persistence
-                                                            if let Some(h_idx) = history_index {
-                                                                cx.emit(ChatViewEvent::FeedbackChanged {
-                                                                    history_index: h_idx,
-                                                                    feedback,
-                                                                });
-                                                            }
-                                                            cx.notify();
-                                                        });
-                                                    },
-                                                    move |_msg_idx, cx| {
-                                                        entity_for_regenerate.update(cx, |_chat_view, cx| {
-                                                            if let Some(h_idx) = history_index {
-                                                                cx.emit(ChatViewEvent::RegenerateMessage {
-                                                                    history_index: h_idx,
-                                                                });
-                                                            }
-                                                        });
-                                                    },
-                                                    cx,
-                                                )
-                                            })
-                                            .collect();
-
-                                        // Move caches back
-                                        self.parsed_cache = parsed_cache;
-                                        self.streaming_parse_cache = streaming_cache;
-
-                                        rendered
-                                    })
-                                    .when(is_awaiting, |this| {
-                                        this.child(self.render_loading_skeleton())
-                                    }),
-                            )
-                    })
-                    .vertical_scrollbar(&self.scroll_handle),
-            )
-            // Floating approval bar (if pending and belongs to current conversation)
-            .when_some(
-                self.pending_approval.as_ref().filter(|approval| {
-                    // Only show approval if it belongs to current conversation
-                    self.conversation_id.as_ref() == Some(&approval.conversation_id)
-                }).cloned(),
-                |this, pending| {
-                    let view_entity = cx.entity();
-                    this.child(
+            .child(self.render_message_list(cx))
+            .when_some(self.active_approval_for_display(), |this, pending| {
+                let view_entity = cx.entity();
+                this.child(
                     div().child(
                         super::approval_prompt_bar::ApprovalPromptBar::new(
                             pending.command,
@@ -1678,7 +1646,6 @@ impl Render for ChatView {
                 )
             })
             .child(
-                // Chat input - fixed at bottom
                 div()
                     .flex_shrink_0()
                     .p_4()

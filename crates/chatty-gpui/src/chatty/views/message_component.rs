@@ -621,6 +621,7 @@ fn build_streaming_parse_result(
     });
 
     let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
+        // SAFETY: can_reuse_prefix checks prev.is_some_and(...)
         let prev_state = prev.unwrap();
         let prev_segments = &prev_state.result.segments;
         let mut segments = Vec::with_capacity(content_segment_count);
@@ -634,6 +635,7 @@ fn build_streaming_parse_result(
         }
 
         // Re-parse only the last content segment
+        // SAFETY: content_segment_count > 0 (checked by can_reuse_prefix)
         let last = content_segments.into_iter().last().unwrap();
         segments.push(parse_content_segment_streaming(last, prev_state, cx));
 
@@ -706,6 +708,7 @@ fn parse_content_segment_streaming(
                 }
 
                 // Parse only the last md segment
+                // SAFETY: md_count > 0 (checked above)
                 let last = markdown_segs.into_iter().last().unwrap();
                 result.push(parse_markdown_segment_streaming(last, prev_mds, cx));
 

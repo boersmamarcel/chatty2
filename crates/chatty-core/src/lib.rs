@@ -82,10 +82,18 @@ pub fn init_repositories() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns `true` once `init_repositories()` has completed successfully.
+/// Frontends can call this during startup to surface a clear error dialog
+/// instead of hitting the panic in `registry()`.
+pub fn is_initialized() -> bool {
+    REPOSITORY_REGISTRY.get().is_some()
+}
+
 fn registry() -> &'static RepositoryRegistry {
-    REPOSITORY_REGISTRY
-        .get()
-        .expect("init_repositories() not called")
+    REPOSITORY_REGISTRY.get().expect(
+        "BUG: init_repositories() was not called before accessing a repository. \
+         This is a programming error in the application startup sequence.",
+    )
 }
 
 /// Returns a cloned Arc to the provider repository.

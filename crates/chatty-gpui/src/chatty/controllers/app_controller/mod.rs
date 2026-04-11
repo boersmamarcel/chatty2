@@ -738,7 +738,7 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
     };
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64;
 
     Some(ConversationData {
@@ -765,7 +765,7 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
         created_at: conv
             .created_at()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs() as i64,
         updated_at: now,
         working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),

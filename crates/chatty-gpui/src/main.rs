@@ -20,6 +20,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Upgrade the global weak ChattyApp entity and run a closure on it.
+/// No-op if the entity hasn't been registered or has been dropped.
+fn with_chatty_app(cx: &mut App, f: impl FnOnce(&mut ChattyApp, &mut Context<ChattyApp>)) {
+    if let Some(weak) = cx
+        .try_global::<GlobalChattyApp>()
+        .and_then(|g| g.entity.clone())
+        && let Some(entity) = weak.upgrade()
+    {
+        entity.update(cx, f);
+    }
+}
+
 /// Global signal that fires once the agent memory service has finished initializing
 /// (successfully or not). Conversation creation awaits this to avoid a race where the
 /// agent would be built without memory tools.
@@ -253,66 +265,35 @@ fn register_actions(cx: &mut App) {
     });
     cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
         debug!("Toggle sidebar action triggered");
-        // Get the ChattyApp entity and toggle the sidebar
-        if let Some(weak_entity) = cx
-            .try_global::<GlobalChattyApp>()
-            .and_then(|global| global.entity.clone())
-            && let Some(entity) = weak_entity.upgrade()
-        {
-            entity.update(cx, |app, cx| {
-                app.sidebar_view.update(cx, |sidebar, cx| {
-                    sidebar.toggle_collapsed(cx);
-                });
+        with_chatty_app(cx, |app, cx| {
+            app.sidebar_view.update(cx, |sidebar, cx| {
+                sidebar.toggle_collapsed(cx);
             });
-        }
+        });
     });
     cx.on_action(|_: &NewConversation, cx: &mut App| {
         debug!("New conversation action triggered");
-        if let Some(weak_entity) = cx
-            .try_global::<GlobalChattyApp>()
-            .and_then(|global| global.entity.clone())
-            && let Some(entity) = weak_entity.upgrade()
-        {
-            entity.update(cx, |app, cx| {
-                app.start_new_conversation(cx);
-            });
-        }
+        with_chatty_app(cx, |app, cx| {
+            app.start_new_conversation(cx);
+        });
     });
     cx.on_action(|_: &PreviousConversation, cx: &mut App| {
         debug!("Previous conversation action triggered");
-        if let Some(weak_entity) = cx
-            .try_global::<GlobalChattyApp>()
-            .and_then(|global| global.entity.clone())
-            && let Some(entity) = weak_entity.upgrade()
-        {
-            entity.update(cx, |app, cx| {
-                app.navigate_conversation(-1, cx);
-            });
-        }
+        with_chatty_app(cx, |app, cx| {
+            app.navigate_conversation(-1, cx);
+        });
     });
     cx.on_action(|_: &NextConversation, cx: &mut App| {
         debug!("Next conversation action triggered");
-        if let Some(weak_entity) = cx
-            .try_global::<GlobalChattyApp>()
-            .and_then(|global| global.entity.clone())
-            && let Some(entity) = weak_entity.upgrade()
-        {
-            entity.update(cx, |app, cx| {
-                app.navigate_conversation(1, cx);
-            });
-        }
+        with_chatty_app(cx, |app, cx| {
+            app.navigate_conversation(1, cx);
+        });
     });
     cx.on_action(|_: &DeleteActiveConversation, cx: &mut App| {
         debug!("Delete active conversation action triggered");
-        if let Some(weak_entity) = cx
-            .try_global::<GlobalChattyApp>()
-            .and_then(|global| global.entity.clone())
-            && let Some(entity) = weak_entity.upgrade()
-        {
-            entity.update(cx, |app, cx| {
-                app.delete_active_conversation(cx);
-            });
-        }
+        with_chatty_app(cx, |app, cx| {
+            app.delete_active_conversation(cx);
+        });
     });
     cx.on_action(|_: &InstallCli, cx: &mut App| {
         debug!("Install CLI action triggered");
@@ -981,15 +962,9 @@ fn main() {
             // All tier-1 loads complete; trigger conversation loading
             info!("Models, providers, and execution settings loaded, triggering conversation load");
             cx.update(|cx| {
-                if let Some(weak_entity) = cx
-                    .try_global::<GlobalChattyApp>()
-                    .and_then(|global| global.entity.clone())
-                    && let Some(entity) = weak_entity.upgrade()
-                {
-                    entity.update(cx, |app, cx| {
-                        app.load_conversations_after_models_ready(cx);
-                    });
-                }
+                with_chatty_app(cx, |app, cx| {
+                    app.load_conversations_after_models_ready(cx);
+                });
             })
             .map_err(|e| warn!(error = ?e, "Failed to trigger conversation load"))
             .ok();

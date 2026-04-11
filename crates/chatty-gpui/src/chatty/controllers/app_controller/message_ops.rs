@@ -918,7 +918,7 @@ impl ChattyApp {
                                     .unwrap_or(0.0);
                                 let now_ts = std::time::SystemTime::now()
                                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                    .unwrap()
+                                    .unwrap_or_default()
                                     .as_secs() as i64;
                                 // Also update metadata so sidebar reflects the new title
                                 store.upsert_metadata(&conv_id_for_title, &new_title, cost, now_ts);
@@ -1552,7 +1552,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
 
     // Clear the progress slot sender so stale references don't accumulate
     {
-        let mut slot = invoke_agent_progress_slot.lock().unwrap();
+        let mut slot = invoke_agent_progress_slot.lock();
         *slot = None;
     }
 

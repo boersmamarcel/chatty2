@@ -40,23 +40,29 @@ pub struct RegenerationRecord {
     pub regeneration_timestamp: i64,
 }
 
+/// Per-message metadata stored alongside the rig `Message`.
+///
+/// This replaces the previous parallel-arrays design where separate Vecs for
+/// traces, attachments, timestamps, and feedback had to be kept manually
+/// synchronized. With `MessageEntry`, all per-message data is collocated and
+/// impossible to desynchronize.
+#[derive(Clone, Debug)]
+pub struct MessageEntry {
+    pub message: Message,
+    pub system_trace: Option<serde_json::Value>,
+    pub attachment_paths: Vec<PathBuf>,
+    pub timestamp: Option<i64>,
+    pub feedback: Option<MessageFeedback>,
+}
+
 /// A single conversation with an AI agent
 pub struct Conversation {
     id: String,
     title: String,
     model_id: String,
     agent: AgentClient,
-    // ── Parallel arrays ──────────────────────────────────────────────
-    // The following Vecs are all parallel to `history` (one entry per message).
-    // Every push to `history` must be accompanied by a push to each Vec.
-    // Both `add_user_message_with_attachments` and `finalize_response` push
-    // to all five arrays atomically.
-    history: Vec<Message>,
-    system_traces: Vec<Option<serde_json::Value>>,
-    attachment_paths: Vec<Vec<PathBuf>>,
-    message_timestamps: Vec<Option<i64>>,
-    message_feedback: Vec<Option<MessageFeedback>>,
-    // ── End parallel arrays ──────────────────────────────────────────
+    /// All messages with their metadata, in chronological order.
+    entries: Vec<MessageEntry>,
     /// Regeneration records capturing original responses before replacement (DPO preference pairs)
     regeneration_records: Vec<RegenerationRecord>,
     token_usage: ConversationTokenUsage,
@@ -126,11 +132,7 @@ impl Conversation {
             title,
             model_id: model_config.id.clone(),
             agent,
-            history: Vec::new(),
-            system_traces: Vec::new(),
-            attachment_paths: Vec::new(),
-            message_timestamps: Vec::new(),
-            message_feedback: Vec::new(),
+            entries: Vec::new(),
             regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
             created_at: now,
@@ -199,17 +201,26 @@ impl Conversation {
             "Deserialized traces in from_data"
         );
 
-        // Deserialize attachment paths
+        // Deserialize per-message metadata (with fallbacks for older data)
         let attachment_paths =
             Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
-
-        // Deserialize message timestamps (with fallback to empty if not present)
         let message_timestamps =
             Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
-
-        // Deserialize message feedback (with fallback to empty if not present)
         let message_feedback =
             Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
+
+        // Zip the deserialized arrays into MessageEntry structs
+        let entries: Vec<MessageEntry> = history
+            .into_iter()
+            .enumerate()
+            .map(|(i, message)| MessageEntry {
+                message,
+                system_trace: system_traces.get(i).cloned().flatten(),
+                attachment_paths: attachment_paths.get(i).cloned().unwrap_or_default(),
+                timestamp: message_timestamps.get(i).copied().flatten(),
+                feedback: message_feedback.get(i).cloned().flatten(),
+            })
+            .collect();
 
         // Deserialize regeneration records (with fallback to empty if not present)
         let regeneration_records =
@@ -228,11 +239,7 @@ impl Conversation {
             title: data.title,
             model_id: data.model_id,
             agent,
-            history,
-            system_traces,
-            attachment_paths,
-            message_timestamps,
-            message_feedback,
+            entries,
             regeneration_records,
             token_usage,
             created_at,
@@ -255,13 +262,14 @@ impl Conversation {
     ) {
         let now = SystemTime::now();
         let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-        self.history.push(message);
-        self.system_traces.push(None);
-        self.attachment_paths.push(attachments);
-        self.message_timestamps.push(Some(timestamp));
-        self.message_feedback.push(None);
+        self.entries.push(MessageEntry {
+            message,
+            system_trace: None,
+            attachment_paths: attachments,
+            timestamp: Some(timestamp),
+            feedback: None,
+        });
         self.updated_at = now;
-        self.debug_assert_parallel_arrays_aligned();
     }
 
     /// Remove the last message from history if it is a User message.
@@ -273,22 +281,14 @@ impl Conversation {
     ///
     /// Returns `true` if a user message was removed, `false` otherwise.
     pub fn remove_last_user_message(&mut self) -> bool {
-        if self.history.is_empty() {
-            return false;
+        if let Some(last) = self.entries.last() {
+            if matches!(last.message, Message::User { .. }) {
+                self.entries.pop();
+                self.updated_at = SystemTime::now();
+                return true;
+            }
         }
-        let last_idx = self.history.len() - 1;
-        if !matches!(self.history[last_idx], Message::User { .. }) {
-            return false;
-        }
-
-        self.history.pop();
-        self.system_traces.pop();
-        self.attachment_paths.pop();
-        self.message_timestamps.pop();
-        self.message_feedback.pop();
-        self.updated_at = SystemTime::now();
-        self.debug_assert_parallel_arrays_aligned();
-        true
+        false
     }
 
     /// Finalize response after stream is consumed.
@@ -310,35 +310,14 @@ impl Conversation {
 
         let now = SystemTime::now();
         let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-        self.history.push(assistant_message);
-        self.system_traces.push(trace);
-        self.attachment_paths.push(attachments);
-        self.message_timestamps.push(Some(timestamp));
-        self.message_feedback.push(None);
+        self.entries.push(MessageEntry {
+            message: assistant_message,
+            system_trace: trace,
+            attachment_paths: attachments,
+            timestamp: Some(timestamp),
+            feedback: None,
+        });
         self.updated_at = now;
-        self.debug_assert_parallel_arrays_aligned();
-    }
-
-    /// Verify all parallel arrays have the same length.
-    /// Only active in debug builds (zero cost in release).
-    fn debug_assert_parallel_arrays_aligned(&self) {
-        let len = self.history.len();
-        debug_assert_eq!(self.system_traces.len(), len, "system_traces misaligned");
-        debug_assert_eq!(
-            self.attachment_paths.len(),
-            len,
-            "attachment_paths misaligned"
-        );
-        debug_assert_eq!(
-            self.message_timestamps.len(),
-            len,
-            "message_timestamps misaligned"
-        );
-        debug_assert_eq!(
-            self.message_feedback.len(),
-            len,
-            "message_feedback misaligned"
-        );
     }
 
     /// Get conversation ID
@@ -362,14 +341,15 @@ impl Conversation {
         &self.model_id
     }
 
-    /// Get the complete conversation history
-    pub fn history(&self) -> &[Message] {
-        &self.history
+    /// Get all message entries (messages with their metadata)
+    pub fn entries(&self) -> &[MessageEntry] {
+        &self.entries
     }
 
-    /// Get system traces
-    pub fn system_traces(&self) -> &[Option<serde_json::Value>] {
-        &self.system_traces
+    /// Collect just the rig `Message`s (for LLM API calls).
+    /// Callers that need messages alongside their metadata should use `entries()`.
+    pub fn messages(&self) -> Vec<Message> {
+        self.entries.iter().map(|e| e.message.clone()).collect()
     }
 
     /// Get creation timestamp
@@ -384,12 +364,15 @@ impl Conversation {
 
     /// Get the count of messages in history
     pub fn message_count(&self) -> usize {
-        self.history.len()
+        self.entries.len()
     }
+
+    // ── Serialization (backward-compatible with ConversationData format) ─────
 
     /// Serialize message history to JSON string
     pub fn serialize_history(&self) -> Result<String> {
-        serde_json::to_string(&self.history).context("Failed to serialize message history")
+        let messages: Vec<&Message> = self.entries.iter().map(|e| &e.message).collect();
+        serde_json::to_string(&messages).context("Failed to serialize message history")
     }
 
     /// Deserialize message history from JSON string
@@ -399,14 +382,9 @@ impl Conversation {
 
     /// Serialize system traces to JSON string
     pub fn serialize_traces(&self) -> Result<String> {
-        if self.system_traces.len() != self.history.len() {
-            tracing::warn!(
-                traces_len = self.system_traces.len(),
-                history_len = self.history.len(),
-                "system_traces length does not match history length during serialization"
-            );
-        }
-        serde_json::to_string(&self.system_traces).context("Failed to serialize system traces")
+        let traces: Vec<Option<&serde_json::Value>> =
+            self.entries.iter().map(|e| e.system_trace.as_ref()).collect();
+        serde_json::to_string(&traces).context("Failed to serialize system traces")
     }
 
     /// Deserialize system traces from JSON string
@@ -414,15 +392,10 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize system traces")
     }
 
-    /// Get attachment paths (parallel to history)
-    pub fn attachment_paths(&self) -> &[Vec<PathBuf>] {
-        &self.attachment_paths
-    }
-
     /// Serialize attachment paths to JSON string
     pub fn serialize_attachment_paths(&self) -> Result<String> {
-        serde_json::to_string(&self.attachment_paths)
-            .context("Failed to serialize attachment paths")
+        let paths: Vec<&Vec<PathBuf>> = self.entries.iter().map(|e| &e.attachment_paths).collect();
+        serde_json::to_string(&paths).context("Failed to serialize attachment paths")
     }
 
     /// Deserialize attachment paths from JSON string
@@ -430,16 +403,10 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize attachment paths")
     }
 
-    /// Get message timestamps (parallel to history)
-    #[allow(dead_code)]
-    pub fn message_timestamps(&self) -> &[Option<i64>] {
-        &self.message_timestamps
-    }
-
     /// Serialize message timestamps to JSON string
     pub fn serialize_message_timestamps(&self) -> Result<String> {
-        serde_json::to_string(&self.message_timestamps)
-            .context("Failed to serialize message timestamps")
+        let timestamps: Vec<Option<i64>> = self.entries.iter().map(|e| e.timestamp).collect();
+        serde_json::to_string(&timestamps).context("Failed to serialize message timestamps")
     }
 
     /// Deserialize message timestamps from JSON string
@@ -447,23 +414,19 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize message timestamps")
     }
 
-    /// Get message feedback (parallel to history)
-    pub fn message_feedback(&self) -> &[Option<MessageFeedback>] {
-        &self.message_feedback
-    }
-
     /// Set feedback for a specific message by index
     pub fn set_message_feedback(&mut self, index: usize, feedback: Option<MessageFeedback>) {
-        if index < self.message_feedback.len() {
-            self.message_feedback[index] = feedback;
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.feedback = feedback;
             self.updated_at = SystemTime::now();
         }
     }
 
     /// Serialize message feedback to JSON string
     pub fn serialize_message_feedback(&self) -> Result<String> {
-        serde_json::to_string(&self.message_feedback)
-            .context("Failed to serialize message feedback")
+        let feedback: Vec<Option<&MessageFeedback>> =
+            self.entries.iter().map(|e| e.feedback.as_ref()).collect();
+        serde_json::to_string(&feedback).context("Failed to serialize message feedback")
     }
 
     /// Deserialize message feedback from JSON string
@@ -511,20 +474,20 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize regeneration records")
     }
 
-    /// Remove the last assistant message and its trace from all parallel arrays.
+    /// Remove the last assistant message and its metadata.
     /// Returns the (text, timestamp) of the removed message if found, or None.
     /// Used during regeneration to replace the old response.
     pub fn remove_last_assistant_message(&mut self) -> Option<(String, Option<i64>)> {
-        if self.history.len() < 2 {
+        if self.entries.len() < 2 {
             return None;
         }
-        let last_idx = self.history.len() - 1;
-        if !matches!(self.history[last_idx], Message::Assistant { .. }) {
+        let last = self.entries.last()?;
+        if !matches!(last.message, Message::Assistant { .. }) {
             return None;
         }
 
         // Extract text from assistant message before removing
-        let text = match &self.history[last_idx] {
+        let text = match &last.message {
             Message::Assistant { content, .. } => content
                 .iter()
                 .filter_map(|ac| match ac {
@@ -535,15 +498,9 @@ impl Conversation {
                 .join(""),
             _ => String::new(),
         };
-        let timestamp = self.message_timestamps.get(last_idx).copied().flatten();
+        let timestamp = last.timestamp;
 
-        // Pop from all parallel arrays
-        self.history.pop();
-        self.system_traces.pop();
-        self.attachment_paths.pop();
-        self.message_timestamps.pop();
-        self.message_feedback.pop();
-
+        self.entries.pop();
         self.updated_at = SystemTime::now();
         Some((text, timestamp))
     }
@@ -552,36 +509,41 @@ impl Conversation {
     ///
     /// `new_history` is the output of `summarize_oldest_half()`: a single summary
     /// message followed by the tail of the original history starting at
-    /// `original_tail_offset`. All parallel arrays are rebuilt to match:
-    /// - Index 0 (summary message) gets default/empty metadata.
-    /// - Indices 1..N map to the original entries at `original_tail_offset..`.
+    /// `original_tail_offset`. Metadata from the preserved tail is carried over;
+    /// the summary message at index 0 gets default/empty metadata.
     pub fn replace_history(&mut self, new_history: Vec<Message>, original_tail_offset: usize) {
-        let tail_start = original_tail_offset.min(self.system_traces.len());
+        let tail_start = original_tail_offset.min(self.entries.len());
 
-        let mut new_traces = Vec::with_capacity(new_history.len());
-        let mut new_attachments = Vec::with_capacity(new_history.len());
-        let mut new_timestamps = Vec::with_capacity(new_history.len());
-        let mut new_feedback = Vec::with_capacity(new_history.len());
+        let mut new_entries = Vec::with_capacity(new_history.len());
 
-        // Default metadata for the summary message at index 0
-        new_traces.push(None);
-        new_attachments.push(vec![]);
-        new_timestamps.push(None);
-        new_feedback.push(None);
+        // Summary message at index 0 with default metadata
+        if let Some(summary_msg) = new_history.first() {
+            new_entries.push(MessageEntry {
+                message: summary_msg.clone(),
+                system_trace: None,
+                attachment_paths: vec![],
+                timestamp: None,
+                feedback: None,
+            });
+        }
 
-        // Preserve metadata for the kept tail of the original history
-        new_traces.extend(self.system_traces[tail_start..].iter().cloned());
-        new_attachments.extend(self.attachment_paths[tail_start..].iter().cloned());
-        new_timestamps.extend(self.message_timestamps[tail_start..].iter().cloned());
-        new_feedback.extend(self.message_feedback[tail_start..].iter().cloned());
+        // Preserve metadata from the kept tail of the original history
+        for (msg, old_entry) in new_history
+            .into_iter()
+            .skip(1)
+            .zip(self.entries[tail_start..].iter())
+        {
+            new_entries.push(MessageEntry {
+                message: msg,
+                system_trace: old_entry.system_trace.clone(),
+                attachment_paths: old_entry.attachment_paths.clone(),
+                timestamp: old_entry.timestamp,
+                feedback: old_entry.feedback.clone(),
+            });
+        }
 
-        self.history = new_history;
-        self.system_traces = new_traces;
-        self.attachment_paths = new_attachments;
-        self.message_timestamps = new_timestamps;
-        self.message_feedback = new_feedback;
+        self.entries = new_entries;
         self.updated_at = SystemTime::now();
-        self.debug_assert_parallel_arrays_aligned();
     }
 
     /// Get the agent

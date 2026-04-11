@@ -6,7 +6,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatEngine, Command, EngineAction};
+use crate::engine::{ChatEngine, Command, EngineAction, NavigableList};
 use crate::events::AppEvent;
 use crate::ui::{self, InputState};
 

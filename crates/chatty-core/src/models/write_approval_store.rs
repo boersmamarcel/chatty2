@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::oneshot;
+
+use parking_lot::Mutex;
 
 /// Decision for a filesystem write approval request
 #[derive(Clone, Debug)]
@@ -108,7 +110,7 @@ impl WriteApprovalStore {
 
     /// Resolve an approval request by ID
     pub fn resolve(&self, id: &str, decision: WriteApprovalDecision) -> bool {
-        let mut pending = self.pending_requests.lock().unwrap();
+        let mut pending = self.pending_requests.lock();
         if let Some(request) = pending.remove(id) {
             let _ = request.responder.send(decision);
             true

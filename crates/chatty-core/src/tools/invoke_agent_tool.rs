@@ -1,7 +1,8 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
@@ -100,9 +101,8 @@ impl InvokeAgentTool {
 
     /// Send a progress event through the slot (if a sender is installed).
     fn send_progress(&self, event: InvokeAgentProgress) {
-        if let Ok(guard) = self.progress_slot.lock()
-            && let Some(tx) = guard.as_ref()
-        {
+        let guard = self.progress_slot.lock();
+        if let Some(tx) = guard.as_ref() {
             let _ = tx.send(event);
         }
     }

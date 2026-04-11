@@ -1,22 +1,20 @@
 mod mcp_helpers;
 mod preamble_builder;
+mod provider_builder;
 mod tool_collector;
 mod tool_registry;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use rig::agent::Agent;
-use rig::client::CompletionClient;
-use std::sync::OnceLock;
 
-use crate::auth::{AzureTokenCache, azure_auth};
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
 use crate::services::memory_service::MemoryService;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
-use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
-use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
+use crate::settings::models::models_store::ModelConfig;
+use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
 use crate::tools::{
@@ -36,16 +34,12 @@ use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 
-use mcp_helpers::{
-    McpTools, build_with_mcp_tools, filter_mcp_tool_info, sanitize_mcp_tools_for_openai,
-};
+use mcp_helpers::{McpTools, filter_mcp_tool_info};
 use preamble_builder::build_preamble;
 use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
 pub use tool_registry::ToolAvailability;
-
-static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
 /// Contextual dependencies for building an agent.
 ///
@@ -92,9 +86,6 @@ impl AgentClient {
         Option<std::sync::Arc<ShellSession>>,
         crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
     )> {
-        let api_key = provider_config.api_key.clone();
-        let base_url = provider_config.base_url.clone();
-
         // Destructure context for local use
         let AgentBuildContext {
             mcp_tools,
@@ -530,7 +521,7 @@ impl AgentClient {
                             .map(|s| s.approval_mode.clone())
                             .unwrap_or_default();
                         let approvals = pending_approvals.clone().unwrap_or_else(|| {
-                            std::sync::Arc::new(std::sync::Mutex::new(
+                            std::sync::Arc::new(parking_lot::Mutex::new(
                                 std::collections::HashMap::new(),
                             ))
                         });
@@ -830,448 +821,51 @@ impl AgentClient {
             &secret_key_names,
         );
 
-        match &provider_config.provider_type {
-            ProviderType::Anthropic => {
-                let key = api_key
-                    .ok_or_else(|| anyhow!("API key not configured for Anthropic provider"))?;
+        // Build native tools once (all providers use the same set)
+        let tool_vec = native_tools!(
+            list_tools: list_tools,
+            fs_read: fs_read_tools,
+            fs_write: fs_write_tools,
+            add_attachment: add_attachment_tool,
+            pdf_to_image: pdf_to_image_tool,
+            pdf_info: pdf_info_tool,
+            pdf_extract_text: pdf_extract_text_tool,
+            mcp_mgmt: mcp_mgmt_tools,
+            fetch_tool: fetch_tool,
+            shell_tools: shell_tools,
+            git_tools: git_tools,
+            search_tools: search_tools,
+            excel_read: excel_read_tool,
+            excel_write: excel_write_tools,
+            data_query: data_query_tools,
+            chart_tool: chart_tool,
+            typst_tool: typst_tool,
+            execute_code_tool: execute_code_tool,
+            remember_tool: remember_tool,
+            save_skill_tool: save_skill_tool,
+            search_memory_tool: search_memory_tool,
+            read_skill_tool: read_skill_tool,
+            search_web_tool: search_web_tool,
+            sub_agent_tool: sub_agent_tool,
+            browser_use_tool: browser_use_tool,
+            daytona_tool: daytona_tool,
+            list_agents_tool: list_agents_tool,
+            invoke_agent_tool: invoke_agent_tool,
+            publish_module_tool: publish_module_tool,
+        )
+        .into_tool_vec();
 
-                let client = rig::providers::anthropic::Client::new(&key)?;
-                let mut builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(&preamble)
-                    .temperature(model_config.temperature as f64);
+        let agent = provider_builder::build_provider_agent(
+            model_config,
+            provider_config,
+            &preamble,
+            tool_vec,
+            mcp_tools,
+            &native_tool_names,
+        )
+        .await?;
 
-                if let Some(max_tokens) = model_config.max_tokens {
-                    builder = builder.max_tokens(max_tokens as u64);
-                }
-
-                let tool_vec = native_tools!(
-                    list_tools: list_tools,
-                    fs_read: fs_read_tools,
-                    fs_write: fs_write_tools,
-                    add_attachment: add_attachment_tool.clone(),
-                    pdf_to_image: pdf_to_image_tool.clone(),
-                    pdf_info: pdf_info_tool.clone(),
-                    pdf_extract_text: pdf_extract_text_tool.clone(),
-                    mcp_mgmt: mcp_mgmt_tools,
-                    fetch_tool: fetch_tool.clone(),
-                    shell_tools: shell_tools,
-                    git_tools: git_tools,
-                    search_tools: search_tools,
-                    excel_read: excel_read_tool.clone(),
-                    excel_write: excel_write_tools.clone(),
-                    data_query: data_query_tools.clone(),
-                    chart_tool: chart_tool.clone(),
-                    typst_tool: typst_tool.clone(),
-                    execute_code_tool: execute_code_tool.clone(),
-                    remember_tool: remember_tool.clone(),
-                    save_skill_tool: save_skill_tool.clone(),
-                    search_memory_tool: search_memory_tool.clone(),
-                    read_skill_tool: read_skill_tool.clone(),
-                    search_web_tool: search_web_tool.clone(),
-                    sub_agent_tool: sub_agent_tool.clone(),
-                    browser_use_tool: browser_use_tool.clone(),
-                    daytona_tool: daytona_tool.clone(),
-                    list_agents_tool: list_agents_tool.clone(),
-                    invoke_agent_tool: invoke_agent_tool.clone(),
-                    publish_module_tool: publish_module_tool.clone(),
-                )
-                .into_tool_vec();
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
-
-                Ok((
-                    AgentClient::Anthropic(agent),
-                    shell_session_out,
-                    invoke_agent_progress_slot.clone(),
-                ))
-            }
-            ProviderType::OpenAI => {
-                let key =
-                    api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
-
-                let client = rig::providers::openai::Client::new(&key)?;
-                let mut builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(&preamble);
-
-                let is_reasoning_model = {
-                    let id = model_config.model_identifier.as_str();
-                    let is_o_series = {
-                        let mut chars = id.chars();
-                        chars.next() == Some('o')
-                            && chars.next().is_some_and(|c| c.is_ascii_digit())
-                    };
-                    is_o_series || id.starts_with("gpt-5")
-                };
-
-                if model_config.supports_temperature && !is_reasoning_model {
-                    builder = builder.temperature(model_config.temperature as f64);
-                }
-
-                if is_reasoning_model || !model_config.supports_temperature {
-                    // TODO(#127): Remove once rig-core handles reasoning IDs correctly (not fixed as of v0.32).
-                    builder = builder.additional_params(serde_json::json!({
-                        "reasoning": {
-                            "summary": "auto"
-                        }
-                    }));
-                }
-
-                let tool_vec = native_tools!(
-                    list_tools: list_tools,
-                    fs_read: fs_read_tools,
-                    fs_write: fs_write_tools,
-                    add_attachment: add_attachment_tool.clone(),
-                    pdf_to_image: pdf_to_image_tool.clone(),
-                    pdf_info: pdf_info_tool.clone(),
-                    pdf_extract_text: pdf_extract_text_tool.clone(),
-                    mcp_mgmt: mcp_mgmt_tools,
-                    fetch_tool: fetch_tool.clone(),
-                    shell_tools: shell_tools,
-                    git_tools: git_tools,
-                    search_tools: search_tools,
-                    excel_read: excel_read_tool.clone(),
-                    excel_write: excel_write_tools.clone(),
-                    data_query: data_query_tools.clone(),
-                    chart_tool: chart_tool.clone(),
-                    typst_tool: typst_tool.clone(),
-                    execute_code_tool: execute_code_tool.clone(),
-                    remember_tool: remember_tool.clone(),
-                    save_skill_tool: save_skill_tool.clone(),
-                    search_memory_tool: search_memory_tool.clone(),
-                    read_skill_tool: read_skill_tool.clone(),
-                    search_web_tool: search_web_tool.clone(),
-                    sub_agent_tool: sub_agent_tool.clone(),
-                    browser_use_tool: browser_use_tool.clone(),
-                    daytona_tool: daytona_tool.clone(),
-                    list_agents_tool: list_agents_tool.clone(),
-                    invoke_agent_tool: invoke_agent_tool.clone(),
-                    publish_module_tool: publish_module_tool.clone(),
-                )
-                .into_tool_vec();
-                let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
-
-                Ok((
-                    AgentClient::OpenAI(agent),
-                    shell_session_out,
-                    invoke_agent_progress_slot.clone(),
-                ))
-            }
-            ProviderType::Gemini => {
-                let key =
-                    api_key.ok_or_else(|| anyhow!("API key not configured for Gemini provider"))?;
-
-                let client = rig::providers::gemini::Client::new(&key)?;
-                let builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(&preamble)
-                    .temperature(model_config.temperature as f64);
-
-                let tool_vec = native_tools!(
-                    list_tools: list_tools,
-                    fs_read: fs_read_tools,
-                    fs_write: fs_write_tools,
-                    add_attachment: add_attachment_tool.clone(),
-                    pdf_to_image: pdf_to_image_tool.clone(),
-                    pdf_info: pdf_info_tool.clone(),
-                    pdf_extract_text: pdf_extract_text_tool.clone(),
-                    mcp_mgmt: mcp_mgmt_tools,
-                    fetch_tool: fetch_tool.clone(),
-                    shell_tools: shell_tools,
-                    git_tools: git_tools,
-                    search_tools: search_tools,
-                    excel_read: excel_read_tool.clone(),
-                    excel_write: excel_write_tools.clone(),
-                    data_query: data_query_tools.clone(),
-                    chart_tool: chart_tool.clone(),
-                    typst_tool: typst_tool.clone(),
-                    execute_code_tool: execute_code_tool.clone(),
-                    remember_tool: remember_tool.clone(),
-                    save_skill_tool: save_skill_tool.clone(),
-                    search_memory_tool: search_memory_tool.clone(),
-                    read_skill_tool: read_skill_tool.clone(),
-                    search_web_tool: search_web_tool.clone(),
-                    sub_agent_tool: sub_agent_tool.clone(),
-                    browser_use_tool: browser_use_tool.clone(),
-                    daytona_tool: daytona_tool.clone(),
-                    list_agents_tool: list_agents_tool.clone(),
-                    invoke_agent_tool: invoke_agent_tool.clone(),
-                    publish_module_tool: publish_module_tool.clone(),
-                )
-                .into_tool_vec();
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
-
-                Ok((
-                    AgentClient::Gemini(agent),
-                    shell_session_out,
-                    invoke_agent_progress_slot.clone(),
-                ))
-            }
-            ProviderType::Mistral => {
-                let key = api_key
-                    .ok_or_else(|| anyhow!("API key not configured for Mistral provider"))?;
-
-                let client = rig::providers::mistral::Client::new(&key)?;
-                let mut builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(&preamble)
-                    .temperature(model_config.temperature as f64);
-
-                if let Some(max_tokens) = model_config.max_tokens {
-                    builder = builder.max_tokens(max_tokens as u64);
-                }
-
-                let tool_vec = native_tools!(
-                    list_tools: list_tools,
-                    fs_read: fs_read_tools,
-                    fs_write: fs_write_tools,
-                    add_attachment: add_attachment_tool.clone(),
-                    pdf_to_image: pdf_to_image_tool.clone(),
-                    pdf_info: pdf_info_tool.clone(),
-                    pdf_extract_text: pdf_extract_text_tool.clone(),
-                    mcp_mgmt: mcp_mgmt_tools,
-                    fetch_tool: fetch_tool.clone(),
-                    shell_tools: shell_tools,
-                    git_tools: git_tools,
-                    search_tools: search_tools,
-                    excel_read: excel_read_tool.clone(),
-                    excel_write: excel_write_tools.clone(),
-                    data_query: data_query_tools.clone(),
-                    chart_tool: chart_tool.clone(),
-                    typst_tool: typst_tool.clone(),
-                    execute_code_tool: execute_code_tool.clone(),
-                    remember_tool: remember_tool.clone(),
-                    save_skill_tool: save_skill_tool.clone(),
-                    search_memory_tool: search_memory_tool.clone(),
-                    read_skill_tool: read_skill_tool.clone(),
-                    search_web_tool: search_web_tool.clone(),
-                    sub_agent_tool: sub_agent_tool.clone(),
-                    browser_use_tool: browser_use_tool.clone(),
-                    daytona_tool: daytona_tool.clone(),
-                    list_agents_tool: list_agents_tool.clone(),
-                    invoke_agent_tool: invoke_agent_tool.clone(),
-                    publish_module_tool: publish_module_tool.clone(),
-                )
-                .into_tool_vec();
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
-
-                Ok((
-                    AgentClient::Mistral(agent),
-                    shell_session_out,
-                    invoke_agent_progress_slot.clone(),
-                ))
-            }
-            ProviderType::Ollama => {
-                let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-
-                let client = rig::providers::ollama::Client::builder()
-                    .api_key(rig::client::Nothing)
-                    .base_url(&url)
-                    .build()?;
-
-                let builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(&preamble)
-                    .temperature(model_config.temperature as f64);
-
-                let tool_vec = native_tools!(
-                    list_tools: list_tools,
-                    fs_read: fs_read_tools,
-                    fs_write: fs_write_tools,
-                    add_attachment: add_attachment_tool.clone(),
-                    pdf_to_image: pdf_to_image_tool.clone(),
-                    pdf_info: pdf_info_tool.clone(),
-                    pdf_extract_text: pdf_extract_text_tool.clone(),
-                    mcp_mgmt: mcp_mgmt_tools,
-                    fetch_tool: fetch_tool.clone(),
-                    shell_tools: shell_tools,
-                    git_tools: git_tools,
-                    search_tools: search_tools,
-                    excel_read: excel_read_tool.clone(),
-                    excel_write: excel_write_tools.clone(),
-                    data_query: data_query_tools.clone(),
-                    chart_tool: chart_tool.clone(),
-                    typst_tool: typst_tool.clone(),
-                    execute_code_tool: execute_code_tool.clone(),
-                    remember_tool: remember_tool.clone(),
-                    save_skill_tool: save_skill_tool.clone(),
-                    search_memory_tool: search_memory_tool.clone(),
-                    read_skill_tool: read_skill_tool.clone(),
-                    search_web_tool: search_web_tool.clone(),
-                    sub_agent_tool: sub_agent_tool.clone(),
-                    browser_use_tool: browser_use_tool.clone(),
-                    daytona_tool: daytona_tool.clone(),
-                    list_agents_tool: list_agents_tool.clone(),
-                    invoke_agent_tool: invoke_agent_tool.clone(),
-                    publish_module_tool: publish_module_tool.clone(),
-                )
-                .into_tool_vec();
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
-
-                Ok((
-                    AgentClient::Ollama(agent),
-                    shell_session_out,
-                    invoke_agent_progress_slot.clone(),
-                ))
-            }
-            ProviderType::AzureOpenAI => {
-                let raw_endpoint = base_url.ok_or_else(|| {
-                    anyhow!("Endpoint URL not configured for Azure OpenAI provider")
-                })?;
-
-                let endpoint = normalize_azure_endpoint(&raw_endpoint);
-
-                let api_version = model_config
-                    .extra_params
-                    .get("api_version")
-                    .map(|s| s.as_str())
-                    .unwrap_or(AZURE_DEFAULT_API_VERSION);
-
-                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-                    return Err(anyhow!(
-                        "Invalid Azure endpoint URL (must start with https://): '{}'",
-                        endpoint
-                    ));
-                }
-
-                let auth = match provider_config.azure_auth_method() {
-                    AzureAuthMethod::EntraId => {
-                        tracing::info!("Using Entra ID authentication with token cache");
-
-                        let cache = AZURE_TOKEN_CACHE.get_or_init(|| {
-                            match AzureTokenCache::new() {
-                                Ok(cache) => Some(cache),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = ?e,
-                                        "Failed to create Azure token cache, will fetch tokens directly each time"
-                                    );
-                                    None
-                                }
-                            }
-                        });
-
-                        let token = if let Some(cache) = cache {
-                            cache
-                                .get_token()
-                                .await
-                                .context("Failed to get cached Entra ID token")?
-                        } else {
-                            tracing::debug!("Using direct token fetch (cache unavailable)");
-                            azure_auth::fetch_entra_id_token()
-                                .await
-                                .context("Failed to fetch Entra ID token")?
-                        };
-
-                        rig::providers::azure::AzureOpenAIAuth::Token(token)
-                    }
-                    AzureAuthMethod::ApiKey => {
-                        tracing::info!("Using API Key authentication for Azure OpenAI");
-                        let key = api_key.ok_or_else(|| {
-                            anyhow!("API key not configured for Azure OpenAI provider")
-                        })?;
-                        rig::providers::azure::AzureOpenAIAuth::ApiKey(key)
-                    }
-                };
-
-                tracing::info!(
-                    endpoint = %endpoint,
-                    deployment = %model_config.model_identifier,
-                    api_version = %api_version,
-                    auth_method = ?provider_config.azure_auth_method(),
-                    "Building Azure OpenAI client"
-                );
-
-                let client = rig::providers::azure::Client::builder()
-                    .api_key(auth)
-                    .azure_endpoint(endpoint.clone())
-                    .api_version(api_version)
-                    .build()
-                    .map_err(|e| {
-                        anyhow!(
-                            "Failed to build Azure client with endpoint '{}': {}",
-                            endpoint,
-                            e
-                        )
-                    })?;
-
-                let mut builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(&preamble);
-
-                let is_reasoning_model = {
-                    let id = model_config.model_identifier.as_str();
-                    let is_o_series = {
-                        let mut chars = id.chars();
-                        chars.next() == Some('o')
-                            && chars.next().is_some_and(|c| c.is_ascii_digit())
-                    };
-                    is_o_series || id.starts_with("gpt-5")
-                };
-
-                if model_config.supports_temperature && !is_reasoning_model {
-                    builder = builder.temperature(model_config.temperature as f64);
-                }
-
-                if is_reasoning_model || !model_config.supports_temperature {
-                    builder = builder.additional_params(serde_json::json!({
-                        "reasoning_effort": "medium"
-                    }));
-                }
-
-                if let Some(max_tokens) = model_config.max_tokens {
-                    builder = builder.max_tokens(max_tokens as u64);
-                }
-
-                let tool_vec = native_tools!(
-                    list_tools: list_tools,
-                    fs_read: fs_read_tools,
-                    fs_write: fs_write_tools,
-                    add_attachment: add_attachment_tool.clone(),
-                    pdf_to_image: pdf_to_image_tool.clone(),
-                    pdf_info: pdf_info_tool.clone(),
-                    pdf_extract_text: pdf_extract_text_tool.clone(),
-                    mcp_mgmt: mcp_mgmt_tools,
-                    fetch_tool: fetch_tool.clone(),
-                    shell_tools: shell_tools,
-                    git_tools: git_tools,
-                    search_tools: search_tools,
-                    excel_read: excel_read_tool.clone(),
-                    excel_write: excel_write_tools.clone(),
-                    data_query: data_query_tools.clone(),
-                    chart_tool: chart_tool.clone(),
-                    typst_tool: typst_tool.clone(),
-                    execute_code_tool: execute_code_tool.clone(),
-                    remember_tool: remember_tool.clone(),
-                    save_skill_tool: save_skill_tool.clone(),
-                    search_memory_tool: search_memory_tool.clone(),
-                    read_skill_tool: read_skill_tool.clone(),
-                    search_web_tool: search_web_tool.clone(),
-                    sub_agent_tool: sub_agent_tool.clone(),
-                    browser_use_tool: browser_use_tool.clone(),
-                    daytona_tool: daytona_tool.clone(),
-                    list_agents_tool: list_agents_tool.clone(),
-                    invoke_agent_tool: invoke_agent_tool.clone(),
-                    publish_module_tool: publish_module_tool.clone(),
-                )
-                .into_tool_vec();
-                let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
-
-                Ok((
-                    AgentClient::AzureOpenAI(agent),
-                    shell_session_out,
-                    invoke_agent_progress_slot.clone(),
-                ))
-            }
-        }
+        Ok((agent, shell_session_out, invoke_agent_progress_slot))
     }
 
     /// Returns the provider name for logging/debugging.
@@ -1288,95 +882,10 @@ impl AgentClient {
     }
 }
 
-/// Normalize Azure endpoint URL:
-/// 1. Strip trailing slashes
-/// 2. Add https:// if missing
-/// 3. Extract base URL if user provided full path (e.g., .../openai/deployments/...)
-fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
-    let raw_endpoint = raw_endpoint.trim_end_matches('/').to_string();
-    let mut endpoint =
-        if raw_endpoint.starts_with("http://") || raw_endpoint.starts_with("https://") {
-            raw_endpoint
-        } else {
-            format!("https://{}", raw_endpoint)
-        };
-
-    let hostname_end = endpoint.find("://").and_then(|scheme_pos| {
-        endpoint[scheme_pos + 3..]
-            .find('/')
-            .map(|p| scheme_pos + 3 + p)
-    });
-
-    if let Some(path_start) = hostname_end
-        && let Some(pos) = endpoint[path_start..].find("/openai")
-    {
-        endpoint.truncate(path_start + pos);
-    }
-
-    endpoint
-}
-
 #[cfg(test)]
 mod tests {
     use super::mcp_helpers::filter_mcp_tool_info;
-    use super::normalize_azure_endpoint;
     use super::tool_registry::{ToolAvailability, active_native_tool_names};
-
-    #[test]
-    fn test_azure_url_normalization_basic() {
-        assert_eq!(
-            normalize_azure_endpoint("myresource.openai.azure.com"),
-            "https://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_with_https() {
-        assert_eq!(
-            normalize_azure_endpoint("https://myresource.openai.azure.com"),
-            "https://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_with_http() {
-        assert_eq!(
-            normalize_azure_endpoint("http://myresource.openai.azure.com"),
-            "http://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_trailing_slash() {
-        assert_eq!(
-            normalize_azure_endpoint("myresource.openai.azure.com/"),
-            "https://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_multiple_trailing_slashes() {
-        assert_eq!(
-            normalize_azure_endpoint("https://myresource.openai.azure.com///"),
-            "https://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_with_openai_path() {
-        assert_eq!(
-            normalize_azure_endpoint("https://my.openai.azure.com/openai/deployments/gpt4"),
-            "https://my.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_with_openai_deployments_path() {
-        assert_eq!(
-            normalize_azure_endpoint("https://test.openai.azure.com/openai/deployments/"),
-            "https://test.openai.azure.com"
-        );
-    }
 
     #[test]
     fn active_native_tool_names_always_includes_read_skill() {
@@ -1433,55 +942,5 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "server-a");
         assert_eq!(filtered[0].1, "custom_lookup");
-    }
-
-    #[test]
-    fn test_azure_url_normalization_openai_in_hostname() {
-        assert_eq!(
-            normalize_azure_endpoint("https://myresource.openai.azure.com"),
-            "https://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_openai_in_subdomain() {
-        assert_eq!(
-            normalize_azure_endpoint("https://openai.example.com"),
-            "https://openai.example.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_complex_path() {
-        assert_eq!(
-            normalize_azure_endpoint(
-                "myresource.openai.azure.com/openai/deployments/model/chat/completions"
-            ),
-            "https://myresource.openai.azure.com"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_path_without_openai() {
-        assert_eq!(
-            normalize_azure_endpoint("https://myresource.azure.com/api/v1"),
-            "https://myresource.azure.com/api/v1"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_custom_port() {
-        assert_eq!(
-            normalize_azure_endpoint("https://localhost:8080/openai/deployments"),
-            "https://localhost:8080"
-        );
-    }
-
-    #[test]
-    fn test_azure_url_normalization_no_scheme_with_path() {
-        assert_eq!(
-            normalize_azure_endpoint("myresource.openai.azure.com/openai"),
-            "https://myresource.openai.azure.com"
-        );
     }
 }

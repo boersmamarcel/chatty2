@@ -18,13 +18,13 @@ use crate::tools::ToolError;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 // Global approval mode for write operations (set once at startup, read by tools)
-static GLOBAL_WRITE_APPROVAL_MODE: std::sync::OnceLock<std::sync::Mutex<ApprovalMode>> =
+static GLOBAL_WRITE_APPROVAL_MODE: std::sync::OnceLock<parking_lot::Mutex<ApprovalMode>> =
     std::sync::OnceLock::new();
 
 /// Set the global write approval mode (call at startup)
 pub fn set_global_write_approval_mode(mode: ApprovalMode) {
-    GLOBAL_WRITE_APPROVAL_MODE.get_or_init(|| std::sync::Mutex::new(ApprovalMode::AlwaysAsk));
-    *GLOBAL_WRITE_APPROVAL_MODE.get().unwrap().lock().unwrap() = mode;
+    GLOBAL_WRITE_APPROVAL_MODE.get_or_init(|| parking_lot::Mutex::new(ApprovalMode::AlwaysAsk));
+    *GLOBAL_WRITE_APPROVAL_MODE.get().unwrap().lock() = mode;
 }
 
 /// Maximum characters to show in content preview
@@ -50,7 +50,7 @@ pub async fn request_write_approval(
 
     // Check global auto-approve setting
     if let Some(mode) = GLOBAL_WRITE_APPROVAL_MODE.get() {
-        let mode = mode.lock().unwrap().clone();
+        let mode = mode.lock().clone();
         if mode == ApprovalMode::AutoApproveAll {
             return Ok(true);
         }
@@ -70,7 +70,7 @@ pub async fn request_write_approval(
 
     // Insert the pending request
     {
-        let mut store = pending.lock().unwrap();
+        let mut store = pending.lock();
         store.insert(id.clone(), request);
     }
 
@@ -92,14 +92,14 @@ pub async fn request_write_approval(
         Ok(Err(_)) => {
             warn!(approval_id = %id, "Approval channel closed");
             // Clean up
-            let mut store = pending.lock().unwrap();
+            let mut store = pending.lock();
             store.remove(&id);
             Ok(false)
         }
         Err(_) => {
             warn!(approval_id = %id, "Write approval timed out");
             // Clean up
-            let mut store = pending.lock().unwrap();
+            let mut store = pending.lock();
             store.remove(&id);
             Err(anyhow::anyhow!(
                 "Write approval timed out after {} seconds",

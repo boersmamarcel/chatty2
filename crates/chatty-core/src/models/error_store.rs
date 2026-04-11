@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
 
 pub fn format_timestamp(time: SystemTime) -> String {
     match time.duration_since(UNIX_EPOCH) {
@@ -46,7 +48,7 @@ impl ErrorStore {
     }
 
     pub fn add_entry(&self, entry: ErrorEntry) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         entries.push(entry);
 
         // FIFO eviction when exceeding max
@@ -56,12 +58,12 @@ impl ErrorStore {
     }
 
     pub fn get_all_entries(&self) -> Vec<ErrorEntry> {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         entries.clone()
     }
 
     pub fn error_count(&self) -> usize {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         entries
             .iter()
             .filter(|e| e.level == ErrorLevel::Error)
@@ -69,7 +71,7 @@ impl ErrorStore {
     }
 
     pub fn warning_count(&self) -> usize {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         entries
             .iter()
             .filter(|e| e.level == ErrorLevel::Warning)
@@ -77,7 +79,7 @@ impl ErrorStore {
     }
 
     pub fn clear(&mut self) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         entries.clear();
     }
 }

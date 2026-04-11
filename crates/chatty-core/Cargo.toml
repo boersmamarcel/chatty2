@@ -38,6 +38,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 
+# Mutex without poisoning
+parking_lot.workspace = true
+
 # Crypto
 sha2.workspace = true
 

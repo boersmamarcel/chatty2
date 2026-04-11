@@ -236,7 +236,7 @@ impl ChattyApp {
                 // Also insert a metadata entry so the count and list are correct
                 let now_ts = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs() as i64;
                 cx.update_global::<ConversationsStore, _>(|store, _| {
                     store.upsert_metadata(&conv_id, &title, 0.0, now_ts);
@@ -388,7 +388,7 @@ impl ChattyApp {
                     // Save to disk
                     let now = SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_secs() as i64;
 
                     let data = ConversationData {
@@ -945,7 +945,7 @@ impl ChattyApp {
                                     let traces = conv.serialize_traces().ok()?;
                                     let now = SystemTime::now()
                                         .duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap()
+                                        .unwrap_or_default()
                                         .as_secs()
                                         as i64;
 
@@ -973,7 +973,7 @@ impl ChattyApp {
                                         created_at: conv
                                             .created_at()
                                             .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap()
+                                            .unwrap_or_default()
                                             .as_secs()
                                             as i64,
                                         updated_at: now,

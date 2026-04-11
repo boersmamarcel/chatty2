@@ -22,7 +22,10 @@ use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use super::jsonrpc::{
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, JsonRpcRequest,
+    json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
+};
 
 // ---------------------------------------------------------------------------
 // Handler: GET /a2a/{module}/.well-known/agent.json
@@ -36,11 +39,7 @@ pub(crate) async fn module_agent_card(
     let module = match reg.get_mut(&module_name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": format!("module '{}' not found", module_name) })),
-            )
-                .into_response();
+            return module_not_found_json(&module_name);
         }
     };
 
@@ -94,18 +93,12 @@ pub(crate) async fn a2a_jsonrpc(
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if body.jsonrpc != "2.0" {
-        return (
+        return json_rpc_error(
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(
-                    body.id,
-                    -32600,
-                    "Invalid Request: jsonrpc must be \"2.0\"",
-                ))
-                .unwrap_or_default(),
-            ),
-        )
-            .into_response();
+            body.id,
+            INVALID_REQUEST,
+            "Invalid Request: jsonrpc must be \"2.0\"",
+        );
     }
 
     match body.method.as_str() {
@@ -114,18 +107,12 @@ pub(crate) async fn a2a_jsonrpc(
             .await
             .into_response(),
         "tasks/get" => handle_tasks_get(&module_name, body.id, body.params).await,
-        method => (
+        method => json_rpc_error(
             StatusCode::OK,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(
-                    body.id,
-                    -32601,
-                    format!("Method not found: {}", method),
-                ))
-                .unwrap_or_default(),
-            ),
-        )
-            .into_response(),
+            body.id,
+            METHOD_NOT_FOUND,
+            format!("Method not found: {}", method),
+        ),
     }
 }
 
@@ -144,18 +131,12 @@ async fn handle_message_send(
     let params = match params {
         Some(p) => p,
         None => {
-            return (
+            return json_rpc_error(
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        "params are required for message/send",
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+                id,
+                INVALID_PARAMS,
+                "params are required for message/send",
+            );
         }
     };
 
@@ -179,50 +160,30 @@ async fn handle_message_send(
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        format!("module '{}' not found", module_name),
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+            return module_not_found(id, module_name);
         }
     };
 
     match module.chat(req).await {
         Ok(resp) => {
             let task_id = format!("task-{}", crate::gateway::new_id());
-            (
-                StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::ok(
-                        id,
-                        json!({
-                            "id": task_id,
-                            "status": { "state": "completed" },
-                            "artifacts": [{
-                                "parts": [{ "type": "text", "text": resp.content }]
-                            }]
-                        }),
-                    ))
-                    .unwrap_or_default(),
-                ),
+            json_rpc_ok(
+                id,
+                json!({
+                    "id": task_id,
+                    "status": { "state": "completed" },
+                    "artifacts": [{
+                        "parts": [{ "type": "text", "text": resp.content }]
+                    }]
+                }),
             )
-                .into_response()
         }
-        Err(e) => (
+        Err(e) => json_rpc_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(id, -32603, e.to_string()))
-                    .unwrap_or_default(),
-            ),
-        )
-            .into_response(),
+            id,
+            INTERNAL_ERROR,
+            e.to_string(),
+        ),
     }
 }
 
@@ -241,18 +202,12 @@ async fn handle_message_stream(
     let params = match params {
         Some(p) => p,
         None => {
-            return (
+            return json_rpc_error(
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        "params are required for message/stream",
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+                id,
+                INVALID_PARAMS,
+                "params are required for message/stream",
+            );
         }
     };
 
@@ -270,18 +225,7 @@ async fn handle_message_stream(
     {
         let reg = registry.read().await;
         if reg.get(&module_name).is_none() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id.clone(),
-                        -32602,
-                        format!("module '{}' not found", module_name),
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+            return module_not_found(id.clone(), &module_name);
         }
     }
 
@@ -479,18 +423,12 @@ async fn handle_tasks_get(
         .unwrap_or("unknown");
 
     // Stateless gateway — we don't persist tasks across requests.
-    (
+    json_rpc_error(
         StatusCode::OK,
-        Json(
-            serde_json::to_value(JsonRpcResponse::err(
-                id,
-                -32602,
-                format!("task '{}' not found (stateless gateway)", task_id),
-            ))
-            .unwrap_or_default(),
-        ),
+        id,
+        INVALID_PARAMS,
+        format!("task '{}' not found (stateless gateway)", task_id),
     )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
