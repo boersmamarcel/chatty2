@@ -910,7 +910,7 @@ impl AgentClient {
                 }
 
                 if is_reasoning_model || !model_config.supports_temperature {
-                    // TODO(#127): Remove once rig-core handles reasoning IDs correctly.
+                    // TODO(#127): Remove once rig-core handles reasoning IDs correctly (not fixed as of v0.32).
                     builder = builder.additional_params(serde_json::json!({
                         "reasoning": {
                             "summary": "auto"

@@ -6,12 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// Error type for publish module tool operations
-#[derive(Debug, thiserror::Error)]
-pub enum PublishModuleToolError {
-    #[error("Publish error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 #[derive(Deserialize, Serialize)]
 pub struct PublishModuleArgs {
@@ -80,7 +75,7 @@ impl PublishModuleTool {
 
 impl Tool for PublishModuleTool {
     const NAME: &'static str = "publish_wasm_module";
-    type Error = PublishModuleToolError;
+    type Error = ToolError;
     type Args = PublishModuleArgs;
     type Output = PublishModuleOutput;
 

@@ -5,14 +5,7 @@ use std::sync::Arc;
 
 use crate::sandbox::backend::Language;
 use crate::sandbox::manager::SandboxManager;
-
-// ── Error types ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, thiserror::Error)]
-pub enum ExecuteCodeError {
-    #[error("Sandbox error: {0}")]
-    SandboxError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 // ── Args / Output ────────────────────────────────────────────────────────────
 
@@ -59,7 +52,7 @@ impl ExecuteCodeTool {
 
 impl Tool for ExecuteCodeTool {
     const NAME: &'static str = "execute_code";
-    type Error = ExecuteCodeError;
+    type Error = ToolError;
     type Args = ExecuteCodeArgs;
     type Output = ExecuteCodeOutput;
 

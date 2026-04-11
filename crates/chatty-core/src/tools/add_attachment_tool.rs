@@ -6,16 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::models::attachment_validation::validate_attachment_async;
 use crate::services::filesystem_service::FileSystemService;
+use crate::tools::ToolError;
 
 /// Thread-safe storage for artifact paths queued during a stream.
 /// Drained after the stream completes to send as multimodal content.
 pub type PendingArtifacts = Arc<Mutex<Vec<PathBuf>>>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum AddAttachmentError {
-    #[error("Attachment error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
 
 #[derive(Deserialize, Serialize)]
 pub struct AddAttachmentArgs {
@@ -46,7 +41,7 @@ impl AddAttachmentTool {
 
 impl Tool for AddAttachmentTool {
     const NAME: &'static str = "add_attachment";
-    type Error = AddAttachmentError;
+    type Error = ToolError;
     type Args = AddAttachmentArgs;
     type Output = AddAttachmentOutput;
 
@@ -87,10 +82,9 @@ impl Tool for AddAttachmentTool {
 
         // Validate file (exists, size, extension)
         validate_attachment_async(&canonical).await.map_err(|e| {
-            AddAttachmentError::OperationError(anyhow::anyhow!(
+            ToolError::OperationFailed(format!(
                 "Attachment validation failed for '{}': {:?}",
-                args.path,
-                e
+                args.path, e
             ))
         })?;
 

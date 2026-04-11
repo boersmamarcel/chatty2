@@ -1,3 +1,17 @@
+/// Shared error type for tools with simple failure modes.
+/// Tools with genuinely distinct error categories keep their own types.
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    #[error("{0}")]
+    OperationFailed(String),
+}
+
+impl From<anyhow::Error> for ToolError {
+    fn from(e: anyhow::Error) -> Self {
+        ToolError::OperationFailed(e.to_string())
+    }
+}
+
 pub mod add_attachment_tool;
 pub mod add_mcp_tool;
 pub mod browser_use_tool;
@@ -72,7 +86,7 @@ pub use pdf_info_tool::PdfInfoTool;
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use publish_module_tool::PublishModuleTool;
 pub use read_skill_tool::ReadSkillTool;
-pub use remember_tool::{MemoryToolError, RememberTool};
+pub use remember_tool::RememberTool;
 pub use save_skill_tool::{SKILL_TITLE_PREFIX, SaveSkillTool};
 pub use search_memory_tool::{
     SearchMemoryTool, build_memory_context_block, merge_search_results, select_context_hits,

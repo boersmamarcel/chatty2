@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::settings::repositories::McpRepository;
+use crate::tools::ToolError;
 
 /// Arguments for listing MCP servers (no arguments needed)
 #[derive(Deserialize, Serialize)]
@@ -27,13 +28,6 @@ pub struct ListMcpToolOutput {
     pub note: String,
 }
 
-/// Error type for list_mcp tool
-#[derive(Debug, thiserror::Error)]
-pub enum ListMcpToolError {
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
-}
-
 /// Tool that lists all configured MCP servers.
 ///
 /// This gives the LLM visibility into what MCP servers are already configured,
@@ -51,7 +45,7 @@ impl ListMcpTool {
 
 impl Tool for ListMcpTool {
     const NAME: &'static str = "list_mcp_services";
-    type Error = ListMcpToolError;
+    type Error = ToolError;
     type Args = ListMcpToolArgs;
     type Output = ListMcpToolOutput;
 
@@ -74,9 +68,10 @@ impl Tool for ListMcpTool {
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let servers = self.repository.load_all().await.map_err(|e| {
-            ListMcpToolError::RepositoryError(format!("Failed to load servers: {}", e))
-        })?;
+        let servers =
+            self.repository.load_all().await.map_err(|e| {
+                ToolError::OperationFailed(format!("Failed to load servers: {}", e))
+            })?;
 
         tracing::info!(server_count = servers.len(), "list_mcp_services called");
 
@@ -228,9 +223,6 @@ mod tests {
 
         let result = tool.call(ListMcpToolArgs {}).await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ListMcpToolError::RepositoryError(_)
-        ));
+        assert!(matches!(result.unwrap_err(), ToolError::OperationFailed(_)));
     }
 }

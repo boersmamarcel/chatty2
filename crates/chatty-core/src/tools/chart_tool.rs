@@ -2,11 +2,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, thiserror::Error)]
-pub enum ChartToolError {
-    #[error("Chart error: {0}")]
-    ValidationError(String),
-}
+use crate::tools::ToolError;
 
 /// A single data point for bar, line, pie, donut, and area charts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,7 +89,7 @@ impl CreateChartTool {
 
 impl Tool for CreateChartTool {
     const NAME: &'static str = "create_chart";
-    type Error = ChartToolError;
+    type Error = ToolError;
     type Args = CreateChartArgs;
     type Output = ChartSpec;
 
@@ -234,7 +230,7 @@ impl Tool for CreateChartTool {
         match args.chart_type.as_str() {
             "bar" | "pie" | "donut" => {
                 if args.data.is_empty() {
-                    return Err(ChartToolError::ValidationError(
+                    return Err(ToolError::OperationFailed(
                         "Data array must not be empty".to_string(),
                     ));
                 }
@@ -246,7 +242,7 @@ impl Tool for CreateChartTool {
                     .as_ref()
                     .is_some_and(|s| !s.is_empty() && s.iter().all(|s| !s.data.is_empty()));
                 if !has_data && !has_series {
-                    return Err(ChartToolError::ValidationError(
+                    return Err(ToolError::OperationFailed(
                         "Either 'data' or 'series' (with non-empty data) must be provided"
                             .to_string(),
                     ));
@@ -255,13 +251,13 @@ impl Tool for CreateChartTool {
             "candlestick" => {
                 let empty = args.candlestick_data.as_ref().is_none_or(|d| d.is_empty());
                 if empty {
-                    return Err(ChartToolError::ValidationError(
+                    return Err(ToolError::OperationFailed(
                         "candlestick_data must not be empty for candlestick charts".to_string(),
                     ));
                 }
             }
             other => {
-                return Err(ChartToolError::ValidationError(format!(
+                return Err(ToolError::OperationFailed(format!(
                     "Unsupported chart type '{}'. Must be one of: bar, line, pie, donut, area, candlestick",
                     other
                 )));
@@ -294,7 +290,7 @@ impl Tool for CreateChartTool {
                     });
                 }
                 Err(e) => {
-                    return Err(ChartToolError::ValidationError(format!(
+                    return Err(ToolError::OperationFailed(format!(
                         "Chart created but failed to save PNG to '{save_path}': {e}"
                     )));
                 }

@@ -6,13 +6,7 @@ use std::sync::Arc;
 use crate::services::search_service::{
     CodeSearchService, DefinitionResult, GlobFilesResult, SearchResult,
 };
-
-/// Error type for search tool operations
-#[derive(Debug, thiserror::Error)]
-pub enum SearchToolError {
-    #[error("Search error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 // ─── search_code tool ───
 
@@ -38,7 +32,7 @@ impl SearchCodeTool {
 
 impl Tool for SearchCodeTool {
     const NAME: &'static str = "search_code";
-    type Error = SearchToolError;
+    type Error = ToolError;
     type Args = SearchCodeArgs;
     type Output = SearchResult;
 
@@ -117,7 +111,7 @@ impl FindFilesTool {
 
 impl Tool for FindFilesTool {
     const NAME: &'static str = "find_files";
-    type Error = SearchToolError;
+    type Error = ToolError;
     type Args = FindFilesArgs;
     type Output = GlobFilesResult;
 
@@ -178,7 +172,7 @@ impl FindDefinitionTool {
 
 impl Tool for FindDefinitionTool {
     const NAME: &'static str = "find_definition";
-    type Error = SearchToolError;
+    type Error = ToolError;
     type Args = FindDefinitionArgs;
     type Output = DefinitionResult;
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::settings::models::search_settings::SearchProvider;
+use crate::tools::ToolError;
 
 /// Request timeout for search API calls
 const SEARCH_TIMEOUT_SECS: u64 = 15;
@@ -43,13 +44,6 @@ pub struct SearchWebToolOutput {
     pub results: Vec<SearchResult>,
     /// Number of results returned
     pub result_count: usize,
-}
-
-/// Error type for the search_web tool
-#[derive(Debug, thiserror::Error)]
-pub enum SearchWebToolError {
-    #[error("Search error: {0}")]
-    SearchError(String),
 }
 
 // ── Tavily API types ────────────────────────────────────────────────────────
@@ -135,7 +129,7 @@ impl SearchWebTool {
         query: &str,
         max_results: usize,
         api_key: &str,
-    ) -> Result<Vec<SearchResult>, SearchWebToolError> {
+    ) -> Result<Vec<SearchResult>, ToolError> {
         let request = TavilySearchRequest {
             query: query.to_string(),
             max_results,
@@ -149,9 +143,7 @@ impl SearchWebTool {
             .json(&request)
             .send()
             .await
-            .map_err(|e| {
-                SearchWebToolError::SearchError(format!("Tavily request failed: {}", e))
-            })?;
+            .map_err(|e| ToolError::OperationFailed(format!("Tavily request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -159,14 +151,14 @@ impl SearchWebTool {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
-            return Err(SearchWebToolError::SearchError(format!(
+            return Err(ToolError::OperationFailed(format!(
                 "Tavily API returned {}: {}",
                 status, body
             )));
         }
 
         let tavily_response: TavilySearchResponse = response.json().await.map_err(|e| {
-            SearchWebToolError::SearchError(format!("Failed to parse Tavily response: {}", e))
+            ToolError::OperationFailed(format!("Failed to parse Tavily response: {}", e))
         })?;
 
         Ok(tavily_response
@@ -185,7 +177,7 @@ impl SearchWebTool {
         query: &str,
         max_results: usize,
         api_key: &str,
-    ) -> Result<Vec<SearchResult>, SearchWebToolError> {
+    ) -> Result<Vec<SearchResult>, ToolError> {
         let response = self
             .client
             .get("https://api.search.brave.com/res/v1/web/search")
@@ -194,7 +186,7 @@ impl SearchWebTool {
             .query(&[("q", query), ("count", &max_results.to_string() as &str)])
             .send()
             .await
-            .map_err(|e| SearchWebToolError::SearchError(format!("Brave request failed: {}", e)))?;
+            .map_err(|e| ToolError::OperationFailed(format!("Brave request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -202,14 +194,14 @@ impl SearchWebTool {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
-            return Err(SearchWebToolError::SearchError(format!(
+            return Err(ToolError::OperationFailed(format!(
                 "Brave Search API returned {}: {}",
                 status, body
             )));
         }
 
         let brave_response: BraveSearchResponse = response.json().await.map_err(|e| {
-            SearchWebToolError::SearchError(format!("Failed to parse Brave response: {}", e))
+            ToolError::OperationFailed(format!("Failed to parse Brave response: {}", e))
         })?;
 
         let results = brave_response
@@ -235,26 +227,24 @@ impl SearchWebTool {
         &self,
         query: &str,
         max_results: usize,
-    ) -> Result<Vec<SearchResult>, SearchWebToolError> {
+    ) -> Result<Vec<SearchResult>, ToolError> {
         let response = self
             .client
             .get("https://lite.duckduckgo.com/lite/")
             .query(&[("q", query)])
             .send()
             .await
-            .map_err(|e| {
-                SearchWebToolError::SearchError(format!("DuckDuckGo request failed: {}", e))
-            })?;
+            .map_err(|e| ToolError::OperationFailed(format!("DuckDuckGo request failed: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(SearchWebToolError::SearchError(format!(
+            return Err(ToolError::OperationFailed(format!(
                 "DuckDuckGo returned HTTP {}",
                 response.status()
             )));
         }
 
         let html = response.text().await.map_err(|e| {
-            SearchWebToolError::SearchError(format!("Failed to read DuckDuckGo response: {}", e))
+            ToolError::OperationFailed(format!("Failed to read DuckDuckGo response: {}", e))
         })?;
 
         let results = parse_ddg_lite_results(&html, max_results);
@@ -264,7 +254,7 @@ impl SearchWebTool {
 
 impl Tool for SearchWebTool {
     const NAME: &'static str = "search_web";
-    type Error = SearchWebToolError;
+    type Error = ToolError;
     type Args = SearchWebToolArgs;
     type Output = SearchWebToolOutput;
 
@@ -295,7 +285,7 @@ impl Tool for SearchWebTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let query = args.query.trim().to_string();
         if query.is_empty() {
-            return Err(SearchWebToolError::SearchError(
+            return Err(ToolError::OperationFailed(
                 "Search query cannot be empty".to_string(),
             ));
         }
@@ -434,7 +424,10 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     results
 }
 
-/// Strip HTML tags from a string, collapsing whitespace
+/// Lightweight HTML tag stripper that decodes common entities.
+/// Used for short search-result snippets where script/style blocks and
+/// block-level whitespace handling are unnecessary. For full HTML-to-text
+/// conversion see `fetch_tool::html_to_text`.
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;

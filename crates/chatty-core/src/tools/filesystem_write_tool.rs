@@ -12,7 +12,7 @@ use crate::models::write_approval_store::{
 };
 use crate::services::filesystem_service::FileSystemService;
 use crate::settings::models::execution_settings::ApprovalMode;
-use crate::tools::filesystem_tool::FileSystemToolError;
+use crate::tools::ToolError;
 
 /// Maximum wait time for user approval (5 minutes)
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -141,7 +141,7 @@ impl WriteFileTool {
 
 impl Tool for WriteFileTool {
     const NAME: &'static str = "write_file";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = WriteFileArgs;
     type Output = WriteFileOutput;
 
@@ -185,9 +185,9 @@ impl Tool for WriteFileTool {
 
         let approved = request_write_approval(&self.pending_approvals, operation).await?;
         if !approved {
-            return Err(FileSystemToolError::OperationError(anyhow::anyhow!(
-                "Write operation denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Write operation denied by user".to_string(),
+            ));
         }
 
         let bytes = args.content.len();
@@ -227,7 +227,7 @@ impl CreateDirectoryTool {
 
 impl Tool for CreateDirectoryTool {
     const NAME: &'static str = "create_directory";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = CreateDirectoryArgs;
     type Output = CreateDirectoryOutput;
 
@@ -294,7 +294,7 @@ impl DeleteFileTool {
 
 impl Tool for DeleteFileTool {
     const NAME: &'static str = "delete_file";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = DeleteFileArgs;
     type Output = DeleteFileOutput;
 
@@ -329,9 +329,9 @@ impl Tool for DeleteFileTool {
 
         let approved = request_write_approval(&self.pending_approvals, operation).await?;
         if !approved {
-            return Err(FileSystemToolError::OperationError(anyhow::anyhow!(
-                "Delete operation denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Delete operation denied by user".to_string(),
+            ));
         }
 
         self.service.delete_file(&args.path).await?;
@@ -374,7 +374,7 @@ impl MoveFileTool {
 
 impl Tool for MoveFileTool {
     const NAME: &'static str = "move_file";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = MoveFileArgs;
     type Output = MoveFileOutput;
 
@@ -414,9 +414,9 @@ impl Tool for MoveFileTool {
 
         let approved = request_write_approval(&self.pending_approvals, operation).await?;
         if !approved {
-            return Err(FileSystemToolError::OperationError(anyhow::anyhow!(
-                "Move operation denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Move operation denied by user".to_string(),
+            ));
         }
 
         self.service
@@ -463,7 +463,7 @@ impl ApplyDiffTool {
 
 impl Tool for ApplyDiffTool {
     const NAME: &'static str = "apply_diff";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = ApplyDiffArgs;
     type Output = ApplyDiffOutput;
 
@@ -509,9 +509,9 @@ impl Tool for ApplyDiffTool {
 
         let approved = request_write_approval(&self.pending_approvals, operation).await?;
         if !approved {
-            return Err(FileSystemToolError::OperationError(anyhow::anyhow!(
-                "Diff operation denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Diff operation denied by user".to_string(),
+            ));
         }
 
         let result = self

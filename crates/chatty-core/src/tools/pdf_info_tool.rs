@@ -6,12 +6,7 @@ use std::sync::Arc;
 
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::pdfium_utils::create_pdfium;
-
-#[derive(Debug, thiserror::Error)]
-pub enum PdfInfoError {
-    #[error("PDF info error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 #[derive(Deserialize, Serialize)]
 pub struct PdfInfoArgs {
@@ -60,7 +55,7 @@ const MAX_INFO_PAGES: u32 = 100;
 
 impl Tool for PdfInfoTool {
     const NAME: &'static str = "pdf_info";
-    type Error = PdfInfoError;
+    type Error = ToolError;
     type Args = PdfInfoArgs;
     type Output = PdfInfoOutput;
 
@@ -100,19 +95,16 @@ impl Tool for PdfInfoTool {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         if ext != "pdf" {
-            return Err(PdfInfoError::OperationError(anyhow::anyhow!(
+            return Err(ToolError::OperationFailed(format!(
                 "File '{}' is not a PDF (extension: {})",
-                args.path,
-                ext
+                args.path, ext
             )));
         }
 
         let pdf_path = canonical.clone();
         let result = tokio::task::spawn_blocking(move || get_pdf_info(&pdf_path))
             .await
-            .map_err(|e| {
-                PdfInfoError::OperationError(anyhow::anyhow!("Task join error: {}", e))
-            })??;
+            .map_err(|e| ToolError::OperationFailed(format!("Task join error: {}", e)))??;
 
         Ok(PdfInfoOutput {
             path: args.path,
@@ -141,10 +133,10 @@ struct PdfInfoResult {
     pages: Vec<PageInfo>,
 }
 
-fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, PdfInfoError> {
+fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, ToolError> {
     let pdfium = create_pdfium()?;
     let document = pdfium.load_pdf_from_file(pdf_path, None).map_err(|e| {
-        PdfInfoError::OperationError(anyhow::anyhow!(
+        ToolError::OperationFailed(format!(
             "Failed to open PDF '{}': {:?}",
             pdf_path.display(),
             e

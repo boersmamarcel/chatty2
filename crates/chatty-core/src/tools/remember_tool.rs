@@ -6,6 +6,7 @@ use tracing::warn;
 
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
+use crate::tools::ToolError;
 
 /// Arguments for the remember tool
 #[derive(Deserialize, Serialize)]
@@ -18,13 +19,6 @@ pub struct RememberToolArgs {
     /// Key-value tags for categorization (e.g., {"project": "chatty", "topic": "architecture"})
     #[serde(default)]
     pub tags: Option<HashMap<String, String>>,
-}
-
-/// Shared error type for memory tools (remember + search_memory).
-#[derive(Debug, thiserror::Error)]
-pub enum MemoryToolError {
-    #[error("Memory operation failed: {0}")]
-    OperationFailed(String),
 }
 
 /// Tool that allows the agent to store important information in persistent memory.
@@ -49,7 +43,7 @@ impl RememberTool {
 
 impl Tool for RememberTool {
     const NAME: &'static str = "remember";
-    type Error = MemoryToolError;
+    type Error = ToolError;
     type Args = RememberToolArgs;
     type Output = String;
 
@@ -116,7 +110,7 @@ impl Tool for RememberTool {
                             &tag_refs,
                         )
                         .await
-                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                        .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
                 }
                 Err(e) => {
                     // Fall back to BM25-only storage if embedding fails
@@ -124,14 +118,14 @@ impl Tool for RememberTool {
                     self.memory_service
                         .remember(&args.content, args.title.as_deref(), &tag_refs)
                         .await
-                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                        .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
                 }
             }
         } else {
             self.memory_service
                 .remember(&args.content, args.title.as_deref(), &tag_refs)
                 .await
-                .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
         }
 
         Ok(format!(

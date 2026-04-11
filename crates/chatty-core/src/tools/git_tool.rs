@@ -8,14 +8,7 @@ use crate::services::git_service::{
     GitAddOutput, GitCommitOutput, GitLogEntry, GitService, GitStatusOutput,
 };
 use crate::settings::models::execution_settings::ApprovalMode;
-
-// ── Error type ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, thiserror::Error)]
-pub enum GitToolError {
-    #[error("Git error: {0}")]
-    GitError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 // ── GitStatusTool ───────────────────────────────────────────────────────────
 
@@ -39,7 +32,7 @@ impl GitStatusTool {
 
 impl Tool for GitStatusTool {
     const NAME: &'static str = "git_status";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitStatusArgs;
     type Output = GitStatusOutput;
 
@@ -96,7 +89,7 @@ impl GitDiffTool {
 
 impl Tool for GitDiffTool {
     const NAME: &'static str = "git_diff";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitDiffArgs;
     type Output = GitDiffOutput;
 
@@ -164,7 +157,7 @@ impl GitLogTool {
 
 impl Tool for GitLogTool {
     const NAME: &'static str = "git_log";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitLogArgs;
     type Output = GitLogOutput;
 
@@ -229,7 +222,7 @@ impl GitAddTool {
 
 impl Tool for GitAddTool {
     const NAME: &'static str = "git_add";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitAddArgs;
     type Output = GitAddOutput;
 
@@ -266,9 +259,9 @@ impl Tool for GitAddTool {
         .await?;
 
         if !approved {
-            return Err(GitToolError::GitError(anyhow::anyhow!(
-                "Staging denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Staging denied by user".to_string(),
+            ));
         }
 
         tracing::debug!(paths = ?args.paths, "Staging files");
@@ -315,7 +308,7 @@ impl GitCreateBranchTool {
 
 impl Tool for GitCreateBranchTool {
     const NAME: &'static str = "git_create_branch";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitCreateBranchArgs;
     type Output = GitCreateBranchOutput;
 
@@ -349,9 +342,9 @@ impl Tool for GitCreateBranchTool {
         .await?;
 
         if !approved {
-            return Err(GitToolError::GitError(anyhow::anyhow!(
-                "Branch creation denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Branch creation denied by user".to_string(),
+            ));
         }
 
         tracing::debug!(name = %args.name, "Creating git branch");
@@ -401,7 +394,7 @@ impl GitSwitchBranchTool {
 
 impl Tool for GitSwitchBranchTool {
     const NAME: &'static str = "git_switch_branch";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitSwitchBranchArgs;
     type Output = GitSwitchBranchOutput;
 
@@ -435,9 +428,9 @@ impl Tool for GitSwitchBranchTool {
         .await?;
 
         if !approved {
-            return Err(GitToolError::GitError(anyhow::anyhow!(
-                "Branch switch denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Branch switch denied by user".to_string(),
+            ));
         }
 
         tracing::debug!(name = %args.name, "Switching git branch");
@@ -481,7 +474,7 @@ impl GitCommitTool {
 
 impl Tool for GitCommitTool {
     const NAME: &'static str = "git_commit";
-    type Error = GitToolError;
+    type Error = ToolError;
     type Args = GitCommitArgs;
     type Output = GitCommitOutput;
 
@@ -516,9 +509,9 @@ impl Tool for GitCommitTool {
         .await?;
 
         if !approved {
-            return Err(GitToolError::GitError(anyhow::anyhow!(
-                "Commit denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Commit denied by user".to_string(),
+            ));
         }
 
         tracing::debug!(message = %args.message, "Creating git commit");

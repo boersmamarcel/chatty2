@@ -6,14 +6,7 @@ use std::sync::Arc;
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::services::shell_service::{ShellOutput, ShellSession, ShellStatus};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
-
-// ── Error types ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, thiserror::Error)]
-pub enum ShellToolError {
-    #[error("Shell error: {0}")]
-    ShellError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 // ── ShellExecuteTool ─────────────────────────────────────────────────────────
 
@@ -74,7 +67,7 @@ impl ShellExecuteTool {
 
 impl Tool for ShellExecuteTool {
     const NAME: &'static str = "shell_execute";
-    type Error = ShellToolError;
+    type Error = ToolError;
     type Args = ShellExecuteArgs;
     type Output = ShellExecuteOutput;
 
@@ -111,16 +104,16 @@ impl Tool for ShellExecuteTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if !self.settings.enabled {
-            return Err(ShellToolError::ShellError(anyhow::anyhow!(
-                "Code execution is disabled. Enable it in Settings → Execution."
-            )));
+            return Err(ToolError::OperationFailed(
+                "Code execution is disabled. Enable it in Settings → Execution.".to_string(),
+            ));
         }
 
         let approved = self.request_approval(&args.command).await?;
         if !approved {
-            return Err(ShellToolError::ShellError(anyhow::anyhow!(
-                "Execution denied by user"
-            )));
+            return Err(ToolError::OperationFailed(
+                "Execution denied by user".to_string(),
+            ));
         }
 
         tracing::debug!(command = %args.command, "Executing in shell session");
@@ -158,7 +151,7 @@ impl ShellSetEnvTool {
 
 impl Tool for ShellSetEnvTool {
     const NAME: &'static str = "shell_set_env";
-    type Error = ShellToolError;
+    type Error = ToolError;
     type Args = ShellSetEnvArgs;
     type Output = ShellSetEnvOutput;
 
@@ -187,9 +180,9 @@ impl Tool for ShellSetEnvTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if !self.settings.enabled {
-            return Err(ShellToolError::ShellError(anyhow::anyhow!(
-                "Code execution is disabled. Enable it in Settings → Execution."
-            )));
+            return Err(ToolError::OperationFailed(
+                "Code execution is disabled. Enable it in Settings → Execution.".to_string(),
+            ));
         }
 
         tracing::debug!(key = %args.key, "Setting env var in shell session");
@@ -235,7 +228,7 @@ impl ShellCdTool {
 
 impl Tool for ShellCdTool {
     const NAME: &'static str = "shell_cd";
-    type Error = ShellToolError;
+    type Error = ToolError;
     type Args = ShellCdArgs;
     type Output = ShellCdOutput;
 
@@ -261,9 +254,9 @@ impl Tool for ShellCdTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if !self.settings.enabled {
-            return Err(ShellToolError::ShellError(anyhow::anyhow!(
-                "Code execution is disabled. Enable it in Settings → Execution."
-            )));
+            return Err(ToolError::OperationFailed(
+                "Code execution is disabled. Enable it in Settings → Execution.".to_string(),
+            ));
         }
 
         tracing::debug!(path = %args.path, "Changing directory in shell session");
@@ -332,7 +325,7 @@ impl ShellStatusTool {
 
 impl Tool for ShellStatusTool {
     const NAME: &'static str = "shell_status";
-    type Error = ShellToolError;
+    type Error = ToolError;
     type Args = ShellStatusArgs;
     type Output = ShellStatusOutput;
 

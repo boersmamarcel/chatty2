@@ -5,6 +5,8 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
+use crate::tools::ToolError;
+
 /// Default maximum response length in characters
 const DEFAULT_MAX_LENGTH: usize = 50_000;
 
@@ -40,13 +42,6 @@ pub struct FetchToolOutput {
     pub saved_to: Option<String>,
 }
 
-/// Error type for fetch tool
-#[derive(Debug, thiserror::Error)]
-pub enum FetchToolError {
-    #[error("Fetch error: {0}")]
-    FetchError(String),
-}
-
 /// Native fetch tool that provides read-only HTTP GET access to web content.
 ///
 /// Converts HTML responses to readable plain text, preserving non-HTML content as-is.
@@ -73,7 +68,7 @@ impl FetchTool {
 
 impl Tool for FetchTool {
     const NAME: &'static str = "fetch";
-    type Error = FetchToolError;
+    type Error = ToolError;
     type Args = FetchToolArgs;
     type Output = FetchToolOutput;
 
@@ -109,7 +104,7 @@ impl Tool for FetchTool {
 
         // Validate URL scheme
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(FetchToolError::FetchError(
+            return Err(ToolError::OperationFailed(
                 "URL must start with http:// or https://".to_string(),
             ));
         }
@@ -127,7 +122,7 @@ impl Tool for FetchTool {
             .get(&current_url)
             .send()
             .await
-            .map_err(|e| FetchToolError::FetchError(format!("Request failed: {}", e)))?;
+            .map_err(|e| ToolError::OperationFailed(format!("Request failed: {}", e)))?;
 
         for _ in 0..10 {
             if !response.status().is_redirection() {
@@ -138,7 +133,7 @@ impl Tool for FetchTool {
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| {
-                    FetchToolError::FetchError(
+                    ToolError::OperationFailed(
                         "Redirect response missing Location header".to_string(),
                     )
                 })?
@@ -150,11 +145,11 @@ impl Tool for FetchTool {
             } else {
                 // Relative URL — resolve against current
                 let base = reqwest::Url::parse(&current_url).map_err(|e| {
-                    FetchToolError::FetchError(format!("Invalid base URL for redirect: {}", e))
+                    ToolError::OperationFailed(format!("Invalid base URL for redirect: {}", e))
                 })?;
                 base.join(&location)
                     .map_err(|e| {
-                        FetchToolError::FetchError(format!("Invalid redirect URL: {}", e))
+                        ToolError::OperationFailed(format!("Invalid redirect URL: {}", e))
                     })?
                     .to_string()
             };
@@ -170,7 +165,7 @@ impl Tool for FetchTool {
                 .get(&current_url)
                 .send()
                 .await
-                .map_err(|e| FetchToolError::FetchError(format!("Redirect failed: {}", e)))?;
+                .map_err(|e| ToolError::OperationFailed(format!("Redirect failed: {}", e)))?;
         }
 
         let status = response.status().as_u16();
@@ -212,7 +207,7 @@ impl Tool for FetchTool {
 
         // Read body text
         let body = response.text().await.map_err(|e| {
-            FetchToolError::FetchError(format!("Failed to read response body: {}", e))
+            ToolError::OperationFailed(format!("Failed to read response body: {}", e))
         })?;
 
         // Convert HTML to readable text if appropriate
@@ -250,9 +245,9 @@ impl FetchTool {
         url: &str,
         status: u16,
         content_type: &str,
-    ) -> Result<FetchToolOutput, FetchToolError> {
+    ) -> Result<FetchToolOutput, ToolError> {
         let workspace = self.workspace_dir.as_ref().ok_or_else(|| {
-            FetchToolError::FetchError(
+            ToolError::OperationFailed(
                 "Cannot download binary files: no workspace directory configured. \
                  Set a workspace directory in Settings > Code Execution to enable file downloads."
                     .to_string(),
@@ -261,11 +256,11 @@ impl FetchTool {
 
         // Read binary body
         let bytes = response.bytes().await.map_err(|e| {
-            FetchToolError::FetchError(format!("Failed to read response body: {}", e))
+            ToolError::OperationFailed(format!("Failed to read response body: {}", e))
         })?;
 
         if bytes.len() > MAX_BINARY_BYTES {
-            return Err(FetchToolError::FetchError(format!(
+            return Err(ToolError::OperationFailed(format!(
                 "Response too large: {} bytes (max {} bytes / {} MB)",
                 bytes.len(),
                 MAX_BINARY_BYTES,
@@ -287,7 +282,7 @@ impl FetchTool {
         );
 
         tokio::fs::write(&save_path, &bytes).await.map_err(|e| {
-            FetchToolError::FetchError(format!(
+            ToolError::OperationFailed(format!(
                 "Failed to save file to {}: {}",
                 save_path.display(),
                 e
@@ -400,17 +395,17 @@ fn unique_path(path: PathBuf) -> PathBuf {
 /// Blocks loopback (127.x.x.x, ::1), RFC-1918 private ranges (10.x, 172.16-31.x, 192.168.x),
 /// link-local (169.254.x.x, fe80::), cloud metadata endpoints (169.254.169.254), and other
 /// reserved addresses to prevent SSRF attacks.
-fn validate_url_host(url: &str) -> Result<(), FetchToolError> {
+fn validate_url_host(url: &str) -> Result<(), ToolError> {
     let parsed = reqwest::Url::parse(url)
-        .map_err(|e| FetchToolError::FetchError(format!("Invalid URL: {}", e)))?;
+        .map_err(|e| ToolError::OperationFailed(format!("Invalid URL: {}", e)))?;
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| FetchToolError::FetchError("URL has no host".to_string()))?;
+        .ok_or_else(|| ToolError::OperationFailed("URL has no host".to_string()))?;
 
     // Check hostname-based blocklist first (catches localhost even without DNS)
     if is_blocked_hostname(host) {
-        return Err(FetchToolError::FetchError(format!(
+        return Err(ToolError::OperationFailed(format!(
             "Access denied: requests to '{}' are blocked for security (SSRF protection)",
             host
         )));
@@ -422,7 +417,7 @@ fn validate_url_host(url: &str) -> Result<(), FetchToolError> {
     if let Ok(ip) = ip_str.parse::<IpAddr>()
         && is_private_ip(&ip)
     {
-        return Err(FetchToolError::FetchError(format!(
+        return Err(ToolError::OperationFailed(format!(
             "Access denied: requests to private/internal IP '{}' are blocked for security (SSRF protection)",
             ip
         )));
@@ -441,7 +436,7 @@ fn validate_url_host(url: &str) -> Result<(), FetchToolError> {
                         resolved_ip = %addr.ip(),
                         "Blocked DNS-resolved private IP"
                     );
-                    return Err(FetchToolError::FetchError(format!(
+                    return Err(ToolError::OperationFailed(format!(
                         "Access denied: '{}' resolves to private/internal IP {} (SSRF protection)",
                         host,
                         addr.ip()
@@ -528,8 +523,10 @@ fn truncate_at_char_boundary(s: &str, max_len: usize) -> String {
 
 /// Convert HTML to readable plain text.
 ///
-/// Strips tags and extracts readable content. Uses a simple approach
-/// that handles common HTML elements without requiring a heavyweight parser.
+/// Comprehensive HTML-to-text converter: strips tags, skips script/style blocks,
+/// inserts newlines for block-level elements, normalises whitespace, and decodes
+/// entities. Contrast with `search_web_tool::strip_html_tags`, which is a
+/// lightweight tag stripper for short search-result snippets.
 fn html_to_text(html: &str) -> String {
     let mut result = String::with_capacity(html.len() / 2);
     let mut in_tag = false;

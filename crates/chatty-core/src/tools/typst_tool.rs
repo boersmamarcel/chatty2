@@ -1,15 +1,10 @@
 use super::path_utils::resolve_output_path;
 use crate::services::typst_compiler_service::TypstCompilerService;
+use crate::tools::ToolError;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-
-#[derive(Debug, thiserror::Error)]
-pub enum TypstToolError {
-    #[error("Typst tool error: {0}")]
-    Error(String),
-}
 
 /// Arguments for the compile_typst tool.
 #[derive(Deserialize, Serialize)]
@@ -46,7 +41,7 @@ impl CompileTypstTool {
 
 impl Tool for CompileTypstTool {
     const NAME: &'static str = "compile_typst";
-    type Error = TypstToolError;
+    type Error = ToolError;
     type Args = CompileTypstArgs;
     type Output = CompileTypstOutput;
 
@@ -102,14 +97,14 @@ impl Tool for CompileTypstTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         // Resolve output path using the shared path utility (same rules as chart_tool).
         let resolved = resolve_output_path(&args.output_path, self.workspace_dir.as_deref())
-            .map_err(TypstToolError::Error)?;
+            .map_err(ToolError::OperationFailed)?;
 
         // Ensure parent directory exists
         if let Some(parent) = resolved.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).map_err(|e| {
-                TypstToolError::Error(format!(
+                ToolError::OperationFailed(format!(
                     "Could not create directory '{}': {e}",
                     parent.display()
                 ))
@@ -119,11 +114,11 @@ impl Tool for CompileTypstTool {
         // Compile typst source to PDF
         let base_dir = self.workspace_dir.as_deref().map(Path::new);
         let (pdf_bytes, page_count) = TypstCompilerService::compile_to_pdf(&args.content, base_dir)
-            .map_err(|e| TypstToolError::Error(e.to_string()))?;
+            .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
 
         // Write PDF to disk
         std::fs::write(&resolved, &pdf_bytes).map_err(|e| {
-            TypstToolError::Error(format!(
+            ToolError::OperationFailed(format!(
                 "Failed to write PDF to '{}': {e}",
                 resolved.display()
             ))

@@ -4,13 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::services::filesystem_service::FileSystemService;
-
-/// Error type for filesystem tool operations
-#[derive(Debug, thiserror::Error)]
-pub enum FileSystemToolError {
-    #[error("Filesystem error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 // ─── read_file tool ───
 
@@ -38,7 +32,7 @@ impl ReadFileTool {
 
 impl Tool for ReadFileTool {
     const NAME: &'static str = "read_file";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = ReadFileArgs;
     type Output = ReadFileOutput;
 
@@ -104,7 +98,7 @@ impl ReadBinaryTool {
 
 impl Tool for ReadBinaryTool {
     const NAME: &'static str = "read_binary";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = ReadBinaryArgs;
     type Output = ReadBinaryOutput;
 
@@ -175,7 +169,7 @@ impl ListDirectoryTool {
 
 impl Tool for ListDirectoryTool {
     const NAME: &'static str = "list_directory";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = ListDirectoryArgs;
     type Output = ListDirectoryOutput;
 
@@ -251,7 +245,7 @@ impl GlobSearchTool {
 
 impl Tool for GlobSearchTool {
     const NAME: &'static str = "glob_search";
-    type Error = FileSystemToolError;
+    type Error = ToolError;
     type Args = GlobSearchArgs;
     type Output = GlobSearchOutput;
 

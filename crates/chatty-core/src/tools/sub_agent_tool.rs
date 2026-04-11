@@ -28,12 +28,7 @@ pub struct SubAgentOutput {
     pub success: bool,
 }
 
-/// Error type for sub_agent tool
-#[derive(Debug, thiserror::Error)]
-pub enum SubAgentError {
-    #[error("Sub-agent error: {0}")]
-    Error(String),
-}
+use crate::tools::ToolError;
 
 /// Tool that spawns a sub-agent (chatty-tui in headless mode) to handle a
 /// delegated task autonomously.
@@ -66,7 +61,7 @@ impl SubAgentTool {
 
 impl Tool for SubAgentTool {
     const NAME: &'static str = "sub_agent";
-    type Error = SubAgentError;
+    type Error = ToolError;
     type Args = SubAgentArgs;
     type Output = SubAgentOutput;
 
@@ -106,7 +101,7 @@ impl Tool for SubAgentTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task = args.task.trim().to_string();
         if task.is_empty() {
-            return Err(SubAgentError::Error(
+            return Err(ToolError::OperationFailed(
                 "Task description cannot be empty".to_string(),
             ));
         }
@@ -120,7 +115,7 @@ impl Tool for SubAgentTool {
             } else if !self.available_model_ids.is_empty()
                 && !self.available_model_ids.contains(&requested)
             {
-                return Err(SubAgentError::Error(format!(
+                return Err(ToolError::OperationFailed(format!(
                     "Unknown model '{}'. Available models: {}",
                     requested,
                     self.available_model_ids.join(", ")
@@ -156,7 +151,7 @@ impl Tool for SubAgentTool {
             tokio::task::spawn_blocking(move || run_sub_agent(exe, model_id, task, auto_approve))
                 .await
                 .map_err(|e| {
-                    SubAgentError::Error(format!("Sub-agent task failed to complete: {e}"))
+                    ToolError::OperationFailed(format!("Sub-agent task failed to complete: {e}"))
                 })?;
 
         match result {

@@ -3,6 +3,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::models::a2a_store::A2aAgentConfig;
+use crate::tools::ToolError;
 
 /// Arguments for listing A2A agents (no arguments needed)
 #[derive(Deserialize, Serialize)]
@@ -43,13 +44,6 @@ pub struct ListAgentsToolOutput {
     pub note: String,
 }
 
-/// Error type for list_agents tool
-#[derive(Debug, thiserror::Error)]
-pub enum ListAgentsToolError {
-    #[error("Agent error: {0}")]
-    AgentError(String),
-}
-
 /// Tool that lists all available agents: both remotely configured A2A agents and
 /// locally installed WASM module agents.
 ///
@@ -86,7 +80,7 @@ impl ListAgentsTool {
 
 impl Tool for ListAgentsTool {
     const NAME: &'static str = "list_agents";
-    type Error = ListAgentsToolError;
+    type Error = ToolError;
     type Args = ListAgentsToolArgs;
     type Output = ListAgentsToolOutput;
 

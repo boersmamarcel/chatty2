@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::warn;
 
-use super::remember_tool::MemoryToolError;
 use super::save_skill_tool::SKILL_TITLE_PREFIX;
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::{MemoryHit, MemoryHitSource, MemoryService};
+use crate::tools::ToolError;
 
 /// Arguments for the search_memory tool
 #[derive(Deserialize, Serialize)]
@@ -46,7 +46,7 @@ impl SearchMemoryTool {
 
 impl Tool for SearchMemoryTool {
     const NAME: &'static str = "search_memory";
-    type Error = MemoryToolError;
+    type Error = ToolError;
     type Args = SearchMemoryToolArgs;
     type Output = SearchMemoryToolOutput;
 
@@ -101,7 +101,7 @@ impl Tool for SearchMemoryTool {
             .memory_service
             .search(&args.query, args.top_k)
             .await
-            .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+            .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
 
         // Vector search (if embedding service is available)
         let vec_results = if let Some(ref embed_svc) = self.embedding_service {

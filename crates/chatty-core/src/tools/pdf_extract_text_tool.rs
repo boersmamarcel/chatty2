@@ -5,12 +5,7 @@ use std::sync::Arc;
 
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::pdfium_utils::create_pdfium;
-
-#[derive(Debug, thiserror::Error)]
-pub enum PdfExtractTextError {
-    #[error("PDF text extraction error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
+use crate::tools::ToolError;
 
 #[derive(Deserialize, Serialize)]
 pub struct PdfExtractTextArgs {
@@ -49,7 +44,7 @@ const MAX_PAGES: usize = 50;
 
 impl Tool for PdfExtractTextTool {
     const NAME: &'static str = "pdf_extract_text";
-    type Error = PdfExtractTextError;
+    type Error = ToolError;
     type Args = PdfExtractTextArgs;
     type Output = PdfExtractTextOutput;
 
@@ -94,10 +89,9 @@ impl Tool for PdfExtractTextTool {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         if ext != "pdf" {
-            return Err(PdfExtractTextError::OperationError(anyhow::anyhow!(
+            return Err(ToolError::OperationFailed(format!(
                 "File '{}' is not a PDF (extension: {})",
-                args.path,
-                ext
+                args.path, ext
             )));
         }
 
@@ -106,9 +100,7 @@ impl Tool for PdfExtractTextTool {
         let result =
             tokio::task::spawn_blocking(move || extract_text(&pdf_path, pages_arg.as_deref()))
                 .await
-                .map_err(|e| {
-                    PdfExtractTextError::OperationError(anyhow::anyhow!("Task join error: {}", e))
-                })??;
+                .map_err(|e| ToolError::OperationFailed(format!("Task join error: {}", e)))??;
 
         Ok(PdfExtractTextOutput {
             path: args.path,
@@ -127,10 +119,10 @@ struct ExtractResult {
 fn extract_text(
     pdf_path: &std::path::Path,
     pages: Option<&[u32]>,
-) -> Result<ExtractResult, PdfExtractTextError> {
+) -> Result<ExtractResult, ToolError> {
     let pdfium = create_pdfium()?;
     let document = pdfium.load_pdf_from_file(pdf_path, None).map_err(|e| {
-        PdfExtractTextError::OperationError(anyhow::anyhow!(
+        ToolError::OperationFailed(format!(
             "Failed to open PDF '{}': {:?}",
             pdf_path.display(),
             e
@@ -156,11 +148,7 @@ fn extract_text(
 
     for &page_idx in &page_indices {
         let page = document.pages().get(page_idx as u16).map_err(|e| {
-            PdfExtractTextError::OperationError(anyhow::anyhow!(
-                "Failed to get page {}: {:?}",
-                page_idx,
-                e
-            ))
+            ToolError::OperationFailed(format!("Failed to get page {}: {:?}", page_idx, e))
         })?;
 
         let text = page.text().map(|t| t.all()).unwrap_or_default();

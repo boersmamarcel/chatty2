@@ -8,13 +8,8 @@ use tracing::warn;
 
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::pdfium_utils::create_pdfium;
+use crate::tools::ToolError;
 use crate::tools::add_attachment_tool::PendingArtifacts;
-
-#[derive(Debug, thiserror::Error)]
-pub enum PdfToImageError {
-    #[error("PDF conversion error: {0}")]
-    OperationError(#[from] anyhow::Error),
-}
 
 #[derive(Deserialize, Serialize)]
 pub struct PdfToImageArgs {
@@ -64,7 +59,7 @@ const MAX_DPI: u32 = 300;
 
 impl Tool for PdfToImageTool {
     const NAME: &'static str = "pdf_to_image";
-    type Error = PdfToImageError;
+    type Error = ToolError;
     type Args = PdfToImageArgs;
     type Output = PdfToImageOutput;
 
@@ -118,10 +113,9 @@ impl Tool for PdfToImageTool {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         if ext != "pdf" {
-            return Err(PdfToImageError::OperationError(anyhow::anyhow!(
+            return Err(ToolError::OperationFailed(format!(
                 "File '{}' is not a PDF (extension: {})",
-                args.path,
-                ext
+                args.path, ext
             )));
         }
 
@@ -133,19 +127,15 @@ impl Tool for PdfToImageTool {
         // now-existing directory through the same validator to get the canonical path.
         let output_dir_path: PathBuf = if let Some(ref dir) = args.output_dir {
             self.service.create_directory(dir).await.map_err(|e| {
-                PdfToImageError::OperationError(anyhow::anyhow!(
+                ToolError::OperationFailed(format!(
                     "Failed to create output directory '{}': {}",
-                    dir,
-                    e
+                    dir, e
                 ))
             })?;
             self.service.resolve_path(dir).await?
         } else {
             crate::services::pdf_thumbnail::get_thumbnail_dir().map_err(|e| {
-                PdfToImageError::OperationError(anyhow::anyhow!(
-                    "Failed to create temp directory: {}",
-                    e
-                ))
+                ToolError::OperationFailed(format!("Failed to create temp directory: {}", e))
             })?
         };
 
@@ -156,9 +146,7 @@ impl Tool for PdfToImageTool {
             render_pdf_pages(&pdf_path, pages_arg.as_deref(), dpi, output_dir_path)
         })
         .await
-        .map_err(|e| {
-            PdfToImageError::OperationError(anyhow::anyhow!("Task join error: {}", e))
-        })??;
+        .map_err(|e| ToolError::OperationFailed(format!("Task join error: {}", e)))??;
 
         // Queue all rendered images as pending artifacts
         match self.pending_artifacts.lock() {
@@ -208,10 +196,10 @@ fn render_pdf_pages(
     pages: Option<&[u32]>,
     dpi: u32,
     output_dir: PathBuf,
-) -> Result<RenderResult, PdfToImageError> {
+) -> Result<RenderResult, ToolError> {
     let pdfium = create_pdfium()?;
     let document = pdfium.load_pdf_from_file(pdf_path, None).map_err(|e| {
-        PdfToImageError::OperationError(anyhow::anyhow!(
+        ToolError::OperationFailed(format!(
             "Failed to open PDF '{}': {:?}",
             pdf_path.display(),
             e
@@ -235,7 +223,7 @@ fn render_pdf_pages(
     };
 
     if page_indices.is_empty() {
-        return Err(PdfToImageError::OperationError(anyhow::anyhow!(
+        return Err(ToolError::OperationFailed(format!(
             "No valid pages to convert. PDF has {} page(s).",
             total_pages
         )));
@@ -256,11 +244,7 @@ fn render_pdf_pages(
 
     for &page_idx in &page_indices {
         let page = document.pages().get(page_idx as u16).map_err(|e| {
-            PdfToImageError::OperationError(anyhow::anyhow!(
-                "Failed to get page {}: {:?}",
-                page_idx,
-                e
-            ))
+            ToolError::OperationFailed(format!("Failed to get page {}: {:?}", page_idx, e))
         })?;
 
         let width = (page.width().value * scale) as i32;
@@ -271,11 +255,7 @@ fn render_pdf_pages(
             .set_maximum_height(height);
 
         let bitmap = page.render_with_config(&render_config).map_err(|e| {
-            PdfToImageError::OperationError(anyhow::anyhow!(
-                "Failed to render page {}: {:?}",
-                page_idx,
-                e
-            ))
+            ToolError::OperationFailed(format!("Failed to render page {}: {:?}", page_idx, e))
         })?;
 
         let image = bitmap.as_image();
@@ -284,10 +264,9 @@ fn render_pdf_pages(
         image
             .save_with_format(&output_path, image::ImageFormat::Png)
             .map_err(|e| {
-                PdfToImageError::OperationError(anyhow::anyhow!(
+                ToolError::OperationFailed(format!(
                     "Failed to save page {} as PNG: {:?}",
-                    page_idx,
-                    e
+                    page_idx, e
                 ))
             })?;
 

@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
-use crate::tools::remember_tool::MemoryToolError;
+use crate::tools::ToolError;
 
 /// Title prefix used to mark skill entries in memory.
 /// The injection code uses this prefix to partition facts from procedures.
@@ -62,7 +62,7 @@ impl SaveSkillTool {
 
 impl Tool for SaveSkillTool {
     const NAME: &'static str = "save_skill";
-    type Error = MemoryToolError;
+    type Error = ToolError;
     type Args = SaveSkillArgs;
     type Output = String;
 
@@ -127,21 +127,21 @@ impl Tool for SaveSkillTool {
                     self.memory_service
                         .remember_with_embedding(&content, embedding, Some(&title), &[])
                         .await
-                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                        .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
                 }
                 Err(e) => {
                     warn!(error = ?e, "Embedding failed, falling back to BM25-only storage");
                     self.memory_service
                         .remember(&content, Some(&title), &[])
                         .await
-                        .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                        .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
                 }
             }
         } else {
             self.memory_service
                 .remember(&content, Some(&title), &[])
                 .await
-                .map_err(|e| MemoryToolError::OperationFailed(e.to_string()))?;
+                .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
         }
 
         Ok(format!("Skill saved: \"{}\"", args.name))

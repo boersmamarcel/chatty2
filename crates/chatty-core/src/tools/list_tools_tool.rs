@@ -1,4 +1,5 @@
 use crate::factories::agent_factory::ToolAvailability;
+use crate::tools::ToolError;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -20,14 +21,6 @@ pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub source: String, // "native" or "mcp:{server_name}"
-}
-
-/// Error type for list_tools tool
-#[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
-pub enum ListToolsError {
-    #[error("Error listing tools: {0}")]
-    Error(String),
 }
 
 /// Tool that lists all available tools (both native and MCP)
@@ -402,7 +395,7 @@ impl ListToolsTool {
 
 impl Tool for ListToolsTool {
     const NAME: &'static str = "list_tools";
-    type Error = ListToolsError;
+    type Error = ToolError;
     type Args = ListToolsArgs;
     type Output = ListToolsOutput;
 

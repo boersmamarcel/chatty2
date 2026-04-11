@@ -3,6 +3,8 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::tools::ToolError;
+
 /// Base URL for the browser-use cloud API (v2)
 const BROWSER_USE_API_BASE: &str = "https://api.browser-use.com/api/v2";
 
@@ -30,13 +32,6 @@ pub struct BrowserUseToolOutput {
     pub output: String,
     /// Final status of the task
     pub status: String,
-}
-
-/// Error type for the browser_use tool
-#[derive(Debug, thiserror::Error)]
-pub enum BrowserUseToolError {
-    #[error("Browser-use error: {0}")]
-    ApiError(String),
 }
 
 // ── browser-use Cloud API types ─────────────────────────────────────────────
@@ -77,7 +72,7 @@ impl BrowserUseTool {
     }
 
     /// Submit a task to the browser-use cloud API and return the task ID.
-    async fn submit_task(&self, task: &str) -> Result<String, BrowserUseToolError> {
+    async fn submit_task(&self, task: &str) -> Result<String, ToolError> {
         let request = RunTaskRequest {
             task: task.to_string(),
         };
@@ -90,7 +85,7 @@ impl BrowserUseTool {
             .json(&request)
             .send()
             .await
-            .map_err(|e| BrowserUseToolError::ApiError(format!("Failed to submit task: {}", e)))?;
+            .map_err(|e| ToolError::OperationFailed(format!("Failed to submit task: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -98,21 +93,21 @@ impl BrowserUseTool {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
-            return Err(BrowserUseToolError::ApiError(format!(
+            return Err(ToolError::OperationFailed(format!(
                 "browser-use API returned {}: {}",
                 status, body
             )));
         }
 
         let run_response: RunTaskResponse = response.json().await.map_err(|e| {
-            BrowserUseToolError::ApiError(format!("Failed to parse run-task response: {}", e))
+            ToolError::OperationFailed(format!("Failed to parse run-task response: {}", e))
         })?;
 
         Ok(run_response.id)
     }
 
     /// Poll the task status until it completes or times out.
-    async fn poll_task(&self, task_id: &str) -> Result<TaskStatusResponse, BrowserUseToolError> {
+    async fn poll_task(&self, task_id: &str) -> Result<TaskStatusResponse, ToolError> {
         for attempt in 0..MAX_POLL_ATTEMPTS {
             let response = self
                 .client
@@ -121,7 +116,7 @@ impl BrowserUseTool {
                 .send()
                 .await
                 .map_err(|e| {
-                    BrowserUseToolError::ApiError(format!("Failed to poll task status: {}", e))
+                    ToolError::OperationFailed(format!("Failed to poll task status: {}", e))
                 })?;
 
             if !response.status().is_success() {
@@ -130,14 +125,14 @@ impl BrowserUseTool {
                     .text()
                     .await
                     .unwrap_or_else(|_| "(failed to read body)".to_string());
-                return Err(BrowserUseToolError::ApiError(format!(
+                return Err(ToolError::OperationFailed(format!(
                     "browser-use status API returned {}: {}",
                     status, body
                 )));
             }
 
             let status_response: TaskStatusResponse = response.json().await.map_err(|e| {
-                BrowserUseToolError::ApiError(format!("Failed to parse task status: {}", e))
+                ToolError::OperationFailed(format!("Failed to parse task status: {}", e))
             })?;
 
             info!(
@@ -160,7 +155,7 @@ impl BrowserUseTool {
         }
 
         let timeout_secs = MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 1000;
-        Err(BrowserUseToolError::ApiError(format!(
+        Err(ToolError::OperationFailed(format!(
             "Task {} timed out after {} polling attempts (~{} seconds)",
             task_id, MAX_POLL_ATTEMPTS, timeout_secs
         )))
@@ -169,7 +164,7 @@ impl BrowserUseTool {
 
 impl Tool for BrowserUseTool {
     const NAME: &'static str = "browser_use";
-    type Error = BrowserUseToolError;
+    type Error = ToolError;
     type Args = BrowserUseToolArgs;
     type Output = BrowserUseToolOutput;
 
@@ -199,7 +194,7 @@ impl Tool for BrowserUseTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task = args.task.trim().to_string();
         if task.is_empty() {
-            return Err(BrowserUseToolError::ApiError(
+            return Err(ToolError::OperationFailed(
                 "Task description cannot be empty".to_string(),
             ));
         }
