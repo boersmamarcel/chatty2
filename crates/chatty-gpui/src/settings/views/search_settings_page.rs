@@ -1,4 +1,5 @@
-use crate::settings::controllers::search_settings_controller;
+use crate::settings::controllers::{execution_settings_controller, search_settings_controller};
+use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::search_settings::{SearchProvider, SearchSettingsModel};
 use crate::settings::views::providers_view::masked_api_key_field;
 use gpui::{App, IntoElement, SharedString, Styled};
@@ -9,15 +10,38 @@ use gpui_component::{
 };
 
 pub fn search_settings_page() -> SettingPage {
-    SettingPage::new("External Services")
-        .description("Configure web search and external service integrations for the AI assistant")
+    SettingPage::new("Internet")
+        .description("Configure how the AI accesses the internet")
         .resettable(false)
         .groups(vec![
+            // ── Master toggle ────────────────────────────────────────────
+            SettingGroup::new()
+                .title("Internet Access")
+                .description(
+                    "Master switch for all internet-facing tools. When disabled, the AI \
+                     cannot fetch web pages, search the web, use browser automation, \
+                     or run code in cloud sandboxes.",
+                )
+                .items(vec![SettingItem::new(
+                    "Enable Internet Access",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<ExecutionSettingsModel>().fetch_enabled,
+                        |_val: bool, cx: &mut App| {
+                            execution_settings_controller::toggle_fetch(cx);
+                        },
+                    )
+                    .default_value(true),
+                )
+                .description(
+                    "Enables the built-in web fetch tool and gates all other internet \
+                     services below. Disable to completely prevent internet access.",
+                )]),
+            // ── Web Search ───────────────────────────────────────────────
             SettingGroup::new()
                 .title("Web Search")
                 .description(
-                    "Enable web search so the AI can look up current information. \
-                     Requires an API key for the selected search provider.",
+                    "Allow the AI to search the web for current information. \
+                     If no API key is configured, a basic DuckDuckGo fallback is used.",
                 )
                 .items(vec![
                     SettingItem::new(
@@ -84,30 +108,6 @@ pub fn search_settings_page() -> SettingPage {
                     )
                     .description("Select which search engine to use for web searches."),
                     SettingItem::new(
-                        "Max Results",
-                        SettingField::number_input(
-                            NumberFieldOptions {
-                                min: 1.0,
-                                max: 20.0,
-                                ..Default::default()
-                            },
-                            |cx: &App| cx.global::<SearchSettingsModel>().max_results as f64,
-                            |val: f64, cx: &mut App| {
-                                search_settings_controller::set_max_results(val as usize, cx);
-                            },
-                        )
-                        .default_value(5.0),
-                    )
-                    .description("Maximum number of search results to return per query (1-20)."),
-                ]),
-            SettingGroup::new()
-                .title("Search API Keys")
-                .description(
-                    "Enter your API keys for each search provider. \
-                     You only need a key for the provider you want to use.",
-                )
-                .items(vec![
-                    SettingItem::new(
                         "Tavily API Key",
                         masked_api_key_field(
                             |cx: &App| {
@@ -139,17 +139,47 @@ pub fn search_settings_page() -> SettingPage {
                         ),
                     )
                     .description("Get your API key from brave.com/search/api"),
+                    SettingItem::new(
+                        "Max Results",
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 1.0,
+                                max: 20.0,
+                                ..Default::default()
+                            },
+                            |cx: &App| cx.global::<SearchSettingsModel>().max_results as f64,
+                            |val: f64, cx: &mut App| {
+                                search_settings_controller::set_max_results(val as usize, cx);
+                            },
+                        )
+                        .default_value(5.0),
+                    )
+                    .description("Maximum number of search results to return per query (1-20)."),
                 ]),
+            // ── Browser Automation ───────────────────────────────────────
             SettingGroup::new()
-                .title("Browser Use")
+                .title("Browser Automation")
                 .description(
-                    "browser-use is a cloud service that lets the AI control a real web browser \
-                     to complete tasks described in natural language. \
-                     Get your API key from browser-use.com.",
+                    "Cloud service that lets the AI control a real web browser \
+                     to interact with websites (fill forms, click buttons, extract data). \
+                     Powered by browser-use.com.",
                 )
                 .items(vec![
                     SettingItem::new(
-                        "Browser Use API Key",
+                        "Enable Browser Automation",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<SearchSettingsModel>().browser_use_enabled,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_browser_use(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Activate the browser_use tool. Requires an API key below.",
+                    ),
+                    SettingItem::new(
+                        "API Key",
                         masked_api_key_field(
                             |cx: &App| {
                                 cx.global::<SearchSettingsModel>()
@@ -166,35 +196,32 @@ pub fn search_settings_page() -> SettingPage {
                             },
                         ),
                     )
-                    .description(
-                        "Enter your API key to activate the browser_use tool. \
-                         Get your key from browser-use.com/cloud",
-                    ),
-                    SettingItem::new(
-                        "Disable Browser Use",
-                        SettingField::switch(
-                            |cx: &App| !cx.global::<SearchSettingsModel>().browser_use_enabled,
-                            |_val: bool, cx: &mut App| {
-                                search_settings_controller::toggle_browser_use(cx);
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(
-                        "Toggle off to temporarily disable browser-use without removing your API key.",
-                    ),
+                    .description("Get your key from browser-use.com/cloud"),
                 ]),
+            // ── Cloud Sandbox ────────────────────────────────────────────
             SettingGroup::new()
-                .title("Daytona")
+                .title("Cloud Sandbox")
                 .description(
-                    "Daytona provides secure, isolated cloud sandbox environments for \
-                     running code. The AI can create an ephemeral sandbox, execute code, \
-                     return the output, and clean up automatically. \
-                     Get your API key from app.daytona.io.",
+                    "Secure, isolated cloud environments for running code. \
+                     The AI can spin up an ephemeral sandbox, execute code in any \
+                     language, and return the output. Powered by Daytona.",
                 )
                 .items(vec![
                     SettingItem::new(
-                        "Daytona API Key",
+                        "Enable Cloud Sandbox",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<SearchSettingsModel>().daytona_enabled,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_daytona(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Activate the daytona_run tool. Requires an API key below.",
+                    ),
+                    SettingItem::new(
+                        "API Key",
                         masked_api_key_field(
                             |cx: &App| {
                                 cx.global::<SearchSettingsModel>()
@@ -211,23 +238,7 @@ pub fn search_settings_page() -> SettingPage {
                             },
                         ),
                     )
-                    .description(
-                        "Enter your API key to activate the daytona_run tool. \
-                         Get your key from app.daytona.io",
-                    ),
-                    SettingItem::new(
-                        "Disable Daytona",
-                        SettingField::switch(
-                            |cx: &App| !cx.global::<SearchSettingsModel>().daytona_enabled,
-                            |_val: bool, cx: &mut App| {
-                                search_settings_controller::toggle_daytona(cx);
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(
-                        "Toggle off to temporarily disable Daytona without removing your API key.",
-                    ),
+                    .description("Get your key from app.daytona.io"),
                 ]),
         ])
 }

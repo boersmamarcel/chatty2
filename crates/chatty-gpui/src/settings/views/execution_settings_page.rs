@@ -47,20 +47,6 @@ pub fn execution_settings_page() -> SettingPage {
                          Disable to prevent the AI from modifying MCP server configurations.",
                     ),
                     SettingItem::new(
-                        "Enable Web Fetch",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<ExecutionSettingsModel>().fetch_enabled,
-                            |_val: bool, cx: &mut App| {
-                                execution_settings_controller::toggle_fetch(cx);
-                            },
-                        )
-                        .default_value(true),
-                    )
-                    .description(
-                        "Built-in read-only web fetch tool. Allows the AI to retrieve web pages \
-                         and API responses without requiring an MCP fetch server.",
-                    ),
-                    SettingItem::new(
                         "Enable Git Integration",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().git_enabled,
