@@ -13,12 +13,14 @@ pub mod mcp_token_store;
 pub mod memory_query;
 pub mod memory_service;
 pub mod mermaid_renderer_service;
+pub mod message_orchestrator;
 pub mod path_validator;
 pub mod pdf_thumbnail;
 pub mod pdfium_utils;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
+pub mod stream_processor;
 pub mod title_generator;
 pub mod typst_compiler_service;
 
@@ -32,6 +34,10 @@ pub use mcp_service::McpService;
 pub use memory_query::simplify_memory_query;
 pub use memory_service::MemoryService;
 pub use mermaid_renderer_service::MermaidRendererService;
+pub use message_orchestrator::{augment_with_memory, extract_user_text, gather_mcp_tools};
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;
+pub use stream_processor::{
+    ChunkAction, StreamChunkHandler, install_progress_channel, run_stream_loop,
+};
 pub use title_generator::generate_title;

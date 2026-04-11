@@ -19,7 +19,7 @@ use crate::chatty::models::{
 };
 use crate::chatty::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{generate_title, simplify_memory_query, stream_prompt};
+use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
@@ -201,12 +201,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    let mcp_tools = mcp_service
-        .get_all_tools_with_sinks()
-        .await
-        .map_err(|e| warn!(error = ?e, "Failed to get MCP tools"))
-        .ok();
-    let mcp_tools = mcp_tools.and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+    let mcp_tools = chatty_core::services::gather_mcp_tools(&mcp_service).await;
 
     let (
         exec_settings,
@@ -818,11 +813,7 @@ impl ChattyApp {
         // into the AgentClient. If an MCP server is added, removed, or restarted after this
         // point, the existing conversation will retain its original tool set. Open a new
         // conversation to pick up updated tool registrations.
-        let mcp_tools = mcp_service
-            .get_all_tools_with_sinks()
-            .await
-            .ok()
-            .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+        let mcp_tools = chatty_core::services::gather_mcp_tools(mcp_service).await;
 
         // Restore conversation using factory method (bash tool will be created in agent_factory if enabled)
         Conversation::from_data(
@@ -1062,11 +1053,8 @@ impl ChattyApp {
                             svc.clone()
                         })
                         .map_err(|e| anyhow::anyhow!("Failed to get MCP service: {}", e))?;
-                    let mcp_tools = mcp_service
-                        .get_all_tools_with_sinks()
-                        .await
-                        .ok()
-                        .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+                    let mcp_tools =
+                        chatty_core::services::gather_mcp_tools(&mcp_service).await;
 
                     // Get execution settings, approval stores, user secrets, and theme colors for tools
                     let (
@@ -1576,15 +1564,9 @@ impl ChattyApp {
                             .update(|cx| cx.global::<crate::chatty::services::McpService>().clone())
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-                        // Get MCP tools from active servers (outside of cx.update)
-                        let mcp_tools = mcp_service
-                            .get_all_tools_with_sinks()
-                            .await
-                            .map_err(|e| warn!(error = ?e, "Failed to get MCP tools"))
-                            .ok();
-
-                        let mcp_tools = mcp_tools
-                            .and_then(|tools| if tools.is_empty() { None } else { Some(tools) });
+                        // Get MCP tools from active servers
+                        let mcp_tools =
+                            chatty_core::services::gather_mcp_tools(&mcp_service).await;
 
                         debug!(
                             has_mcp_tools = mcp_tools.is_some(),
@@ -4383,45 +4365,14 @@ async fn run_llm_stream(
         let embedding_service = get_embedding_service(cx);
         let skill_service = get_skill_service(cx);
 
-        if let Some(mem_svc) = memory_service {
-            let raw_text = extract_user_message_text(&user_contents);
-            let query_text = simplify_memory_query(&raw_text);
-            info!(
-                conv_id = %conv_id,
-                raw_len = raw_text.len(),
-                query = %query_text,
-                "Memory auto-retrieval: searching"
-            );
-
-            let workspace_skills_dir = workspace_dir
-                .as_deref()
-                .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
-            if let Some(context_block) = chatty_core::services::load_auto_context_block(
-                chatty_core::services::AutoContextRequest {
-                    memory_service: &mem_svc,
-                    embedding_service: embedding_service.as_ref(),
-                    skill_service: &skill_service,
-                    query_text: &query_text,
-                    fallback_query_text: Some(&raw_text),
-                    workspace_skills_dir: workspace_skills_dir.as_deref(),
-                },
-            )
-            .await
-            {
-                let mut augmented = vec![rig::message::UserContent::Text(
-                    rig::completion::message::Text {
-                        text: context_block,
-                    },
-                )];
-                augmented.extend(user_contents);
-                debug!(conv_id = %conv_id, "Injected memory context into user message");
-                augmented
-            } else {
-                user_contents
-            }
-        } else {
-            user_contents
-        }
+        chatty_core::services::augment_with_memory(
+            user_contents,
+            memory_service.as_ref(),
+            embedding_service.as_ref(),
+            &skill_service,
+            workspace_dir.as_deref(),
+        )
+        .await
     };
 
     // 3. Call stream_prompt with augmented contents (context block included for the LLM)
@@ -4454,13 +4405,8 @@ async fn run_llm_stream(
     }
 
     // 5. Install invoke_agent progress channel
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
-        chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
-    >();
-    {
-        let mut slot = invoke_agent_progress_slot.lock().unwrap();
-        *slot = Some(progress_tx);
-    }
+    let mut progress_rx =
+        chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
 
     // 6. Stream processing loop
     debug!(conv_id = %conv_id, "Entering stream processing loop");

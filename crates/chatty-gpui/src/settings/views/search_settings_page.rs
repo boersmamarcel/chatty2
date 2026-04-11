@@ -22,20 +22,22 @@ pub fn search_settings_page() -> SettingPage {
                      cannot fetch web pages, search the web, use browser automation, \
                      or run code in cloud sandboxes.",
                 )
-                .items(vec![SettingItem::new(
-                    "Enable Internet Access",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<ExecutionSettingsModel>().fetch_enabled,
-                        |_val: bool, cx: &mut App| {
-                            execution_settings_controller::toggle_fetch(cx);
-                        },
+                .items(vec![
+                    SettingItem::new(
+                        "Enable Internet Access",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().fetch_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_fetch(cx);
+                            },
+                        )
+                        .default_value(true),
                     )
-                    .default_value(true),
-                )
-                .description(
-                    "Enables the built-in web fetch tool and gates all other internet \
+                    .description(
+                        "Enables the built-in web fetch tool and gates all other internet \
                      services below. Disable to completely prevent internet access.",
-                )]),
+                    ),
+                ]),
             // ── Web Search ───────────────────────────────────────────────
             SettingGroup::new()
                 .title("Web Search")
@@ -175,9 +177,7 @@ pub fn search_settings_page() -> SettingPage {
                         )
                         .default_value(true),
                     )
-                    .description(
-                        "Activate the browser_use tool. Requires an API key below.",
-                    ),
+                    .description("Activate the browser_use tool. Requires an API key below."),
                     SettingItem::new(
                         "API Key",
                         masked_api_key_field(
@@ -217,9 +217,7 @@ pub fn search_settings_page() -> SettingPage {
                         )
                         .default_value(true),
                     )
-                    .description(
-                        "Activate the daytona_run tool. Requires an API key below.",
-                    ),
+                    .description("Activate the daytona_run tool. Requires an API key below."),
                     SettingItem::new(
                         "API Key",
                         masked_api_key_field(

@@ -300,14 +300,7 @@ pub fn check_pressure(
 /// Concatenates all `Text` variants with a single space. Non-text content
 /// (images, PDFs) is skipped — we only want to count the message text tokens.
 pub fn extract_user_message_text(contents: &[rig::message::UserContent]) -> String {
-    contents
-        .iter()
-        .filter_map(|c| match c {
-            rig::message::UserContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    chatty_core::services::extract_user_text(contents)
 }
 
 /// Gather `SnapshotInputs` from GPUI globals and the conversation store.

@@ -10,8 +10,7 @@ use std::time::Duration;
 pub const USER_AGENT: &str = "Chatty/1.0 (Desktop AI Assistant)";
 
 /// Browser-like user-agent for web scraping (e.g. DuckDuckGo fallback).
-pub const BROWSER_USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// Build a standard HTTP client with the Chatty user-agent and the given
 /// timeout.

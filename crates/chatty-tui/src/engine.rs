@@ -277,20 +277,9 @@ impl ChatEngine {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Gather MCP tools if service is available
-        let mcp_tools = if let Some(ref mcp_service) = self.mcp_service {
-            match mcp_service.get_all_tools_with_sinks().await {
-                Ok(tools) if !tools.is_empty() => {
-                    info!(count = tools.len(), "MCP tools loaded");
-                    Some(tools)
-                }
-                Ok(_) => None,
-                Err(e) => {
-                    warn!(error = ?e, "Failed to load MCP tools");
-                    None
-                }
-            }
-        } else {
-            None
+        let mcp_tools = match self.mcp_service {
+            Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
+            None => None,
         };
 
         let es = &self.execution_settings;
@@ -367,20 +356,9 @@ impl ChatEngine {
 
         tokio::spawn(async move {
             // Gather MCP tools
-            let mcp_tools = if let Some(ref mcp_service) = mcp_service {
-                match mcp_service.get_all_tools_with_sinks().await {
-                    Ok(tools) if !tools.is_empty() => {
-                        info!(count = tools.len(), "MCP tools loaded (background)");
-                        Some(tools)
-                    }
-                    Ok(_) => None,
-                    Err(e) => {
-                        warn!(error = ?e, "Failed to load MCP tools (background)");
-                        None
-                    }
-                }
-            } else {
-                None
+            let mcp_tools = match mcp_service {
+                Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
+                None => None,
             };
 
             let es = &execution_settings;
@@ -469,7 +447,6 @@ impl ChatEngine {
         });
 
         // Build user content
-        let query_text = message.clone();
         let contents = vec![UserContent::text(message.clone())];
 
         // Add user message to conversation history
@@ -511,37 +488,14 @@ impl ChatEngine {
         let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
-            // Auto-retrieve relevant memories and inject as context
-            let contents = if let Some(ref mem_svc) = memory_service {
-                if !query_text.is_empty() {
-                    let workspace_skills_dir = workspace_dir
-                        .as_deref()
-                        .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
-                    if let Some(context_block) = chatty_core::services::load_auto_context_block(
-                        chatty_core::services::AutoContextRequest {
-                            memory_service: mem_svc,
-                            embedding_service: embedding_service.as_ref(),
-                            skill_service: &skill_service,
-                            query_text: &query_text,
-                            fallback_query_text: None,
-                            workspace_skills_dir: workspace_skills_dir.as_deref(),
-                        },
-                    )
-                    .await
-                    {
-                        let mut augmented = vec![UserContent::text(context_block)];
-                        augmented.extend(contents);
-                        info!("Injected memory context into user message");
-                        augmented
-                    } else {
-                        contents
-                    }
-                } else {
-                    contents
-                }
-            } else {
-                contents
-            };
+            let contents = chatty_core::services::augment_with_memory(
+                contents,
+                memory_service.as_ref(),
+                embedding_service.as_ref(),
+                &skill_service,
+                workspace_dir.as_deref(),
+            )
+            .await;
 
             let result = run_stream(StreamParams {
                 agent,
@@ -1423,6 +1377,113 @@ struct StreamParams {
     invoke_agent_progress_slot: InvokeAgentProgressSlot,
 }
 
+/// Maps [`StreamChunk`] and [`InvokeAgentProgress`] events to [`AppEvent`]s.
+struct TuiStreamHandler {
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+}
+
+impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
+    fn on_stream_started(&mut self) {
+        let _ = self.event_tx.send(AppEvent::StreamStarted);
+    }
+
+    fn on_chunk(
+        &mut self,
+        chunk: anyhow::Result<StreamChunk>,
+    ) -> anyhow::Result<chatty_core::services::ChunkAction> {
+        use chatty_core::services::ChunkAction;
+        match chunk? {
+            StreamChunk::Text(text) => {
+                let _ = self.event_tx.send(AppEvent::TextChunk(text));
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::ToolCallStarted { id, name } => {
+                let _ = self.event_tx.send(AppEvent::ToolCallStarted { id, name });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::ToolCallInput { id, arguments } => {
+                let _ = self
+                    .event_tx
+                    .send(AppEvent::ToolCallInput { id, arguments });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::ToolCallResult { id, result } => {
+                let _ = self.event_tx.send(AppEvent::ToolCallResult { id, result });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::ToolCallError { id, error } => {
+                let _ = self.event_tx.send(AppEvent::ToolCallError { id, error });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            } => {
+                let _ = self.event_tx.send(AppEvent::ApprovalRequested {
+                    id,
+                    command,
+                    is_sandboxed,
+                });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::ApprovalResolved { id, approved } => {
+                let _ = self
+                    .event_tx
+                    .send(AppEvent::ApprovalResolved { id, approved });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::TokenUsage {
+                input_tokens,
+                output_tokens,
+            } => {
+                let _ = self.event_tx.send(AppEvent::TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::Done => Ok(ChunkAction::Break),
+            StreamChunk::Error(e) => {
+                let _ = self.event_tx.send(AppEvent::StreamError(e));
+                Ok(ChunkAction::Break)
+            }
+        }
+    }
+
+    fn on_progress(
+        &mut self,
+        progress: chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+    ) {
+        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+        match progress {
+            InvokeAgentProgress::Started { agent_name, prompt } => {
+                let label = format!("[Agent: {agent_name}] {prompt}");
+                let _ = self.event_tx.send(AppEvent::SubAgentProgress(label));
+            }
+            InvokeAgentProgress::Text(text) => {
+                let _ = self.event_tx.send(AppEvent::SubAgentProgress(text));
+            }
+            InvokeAgentProgress::Finished { success, result } => {
+                let message = if success {
+                    result.unwrap_or_else(|| "Agent completed.".to_string())
+                } else {
+                    result.unwrap_or_else(|| "Agent failed.".to_string())
+                };
+                let _ = self.event_tx.send(AppEvent::SubAgentFinished(message));
+            }
+        }
+    }
+
+    fn on_cancelled(&mut self) {
+        let _ = self.event_tx.send(AppEvent::StreamCancelled);
+    }
+
+    fn on_stream_ended(&mut self) {
+        let _ = self.event_tx.send(AppEvent::StreamCompleted);
+    }
+}
+
 /// Run the LLM stream in a background task, sending AppEvents for each chunk.
 async fn run_stream(params: StreamParams) -> Result<()> {
     let StreamParams {
@@ -1447,103 +1508,17 @@ async fn run_stream(params: StreamParams) -> Result<()> {
     .await
     .context("Failed to start stream")?;
 
-    // Install invoke_agent progress channel
-    let (progress_tx, mut progress_rx) =
-        mpsc::unbounded_channel::<chatty_core::tools::invoke_agent_tool::InvokeAgentProgress>();
-    {
-        let mut slot = invoke_agent_progress_slot.lock().unwrap();
-        *slot = Some(progress_tx);
-    }
+    let mut progress_rx =
+        chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
+    let mut handler = TuiStreamHandler { event_tx };
 
-    let _ = event_tx.send(AppEvent::StreamStarted);
-
-    loop {
-        if cancel_flag.load(Ordering::Relaxed) {
-            let _ = event_tx.send(AppEvent::StreamCancelled);
-            return Ok(());
-        }
-
-        tokio::select! {
-            biased;
-            // Handle invoke_agent progress events (sub-agent visualisation)
-            Some(progress) = progress_rx.recv() => {
-                use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
-                match progress {
-                    InvokeAgentProgress::Started { agent_name, prompt } => {
-                        let label = format!("[Agent: {agent_name}] {prompt}");
-                        let _ = event_tx.send(AppEvent::SubAgentProgress(label));
-                    }
-                    InvokeAgentProgress::Text(text) => {
-                        let _ = event_tx.send(AppEvent::SubAgentProgress(text));
-                    }
-                    InvokeAgentProgress::Finished { success, result } => {
-                        let message = if success {
-                            result.unwrap_or_else(|| "Agent completed.".to_string())
-                        } else {
-                            result.unwrap_or_else(|| "Agent failed.".to_string())
-                        };
-                        let _ = event_tx.send(AppEvent::SubAgentFinished(message));
-                    }
-                }
-            }
-            // Process LLM stream chunks
-            chunk_result = stream.next() => {
-                let chunk_result = match chunk_result {
-                    Some(r) => r,
-                    None => break,
-                };
-
-                match chunk_result? {
-                    StreamChunk::Text(text) => {
-                        let _ = event_tx.send(AppEvent::TextChunk(text));
-                    }
-                    StreamChunk::ToolCallStarted { id, name } => {
-                        let _ = event_tx.send(AppEvent::ToolCallStarted { id, name });
-                    }
-                    StreamChunk::ToolCallInput { id, arguments } => {
-                        let _ = event_tx.send(AppEvent::ToolCallInput { id, arguments });
-                    }
-                    StreamChunk::ToolCallResult { id, result } => {
-                        let _ = event_tx.send(AppEvent::ToolCallResult { id, result });
-                    }
-                    StreamChunk::ToolCallError { id, error } => {
-                        let _ = event_tx.send(AppEvent::ToolCallError { id, error });
-                    }
-                    StreamChunk::ApprovalRequested {
-                        id,
-                        command,
-                        is_sandboxed,
-                    } => {
-                        let _ = event_tx.send(AppEvent::ApprovalRequested {
-                            id,
-                            command,
-                            is_sandboxed,
-                        });
-                    }
-                    StreamChunk::ApprovalResolved { id, approved } => {
-                        let _ = event_tx.send(AppEvent::ApprovalResolved { id, approved });
-                    }
-                    StreamChunk::TokenUsage {
-                        input_tokens,
-                        output_tokens,
-                    } => {
-                        let _ = event_tx.send(AppEvent::TokenUsage {
-                            input_tokens,
-                            output_tokens,
-                        });
-                    }
-                    StreamChunk::Done => break,
-                    StreamChunk::Error(e) => {
-                        let _ = event_tx.send(AppEvent::StreamError(e));
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    let _ = event_tx.send(AppEvent::StreamCompleted);
-    Ok(())
+    chatty_core::services::run_stream_loop(
+        &mut stream,
+        &mut progress_rx,
+        &cancel_flag,
+        &mut handler,
+    )
+    .await
 }
 
 fn common_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
