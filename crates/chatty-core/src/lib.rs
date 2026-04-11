@@ -37,33 +37,24 @@ pub static MCP_SERVICE: OnceLock<services::McpService> = OnceLock::new();
 // ── Repository singletons ────────────────────────────────────────────────────
 // Initialized via `init_repositories()` at startup. Access via accessor functions below.
 
-static PROVIDER_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ProviderRepository>> =
-    OnceLock::new();
-static GENERAL_SETTINGS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::GeneralSettingsRepository>,
-> = OnceLock::new();
-static MODELS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ModelsRepository>> =
-    OnceLock::new();
-static MCP_REPOSITORY: OnceLock<Arc<dyn settings::repositories::McpRepository>> = OnceLock::new();
-static A2A_REPOSITORY: OnceLock<Arc<dyn settings::repositories::A2aRepository>> = OnceLock::new();
-static EXECUTION_SETTINGS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::ExecutionSettingsRepository>,
-> = OnceLock::new();
-static SEARCH_SETTINGS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::SearchSettingsRepository>,
-> = OnceLock::new();
-static TRAINING_SETTINGS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::TrainingSettingsRepository>,
-> = OnceLock::new();
-static USER_SECRETS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::UserSecretsRepository>> =
-    OnceLock::new();
-static MODULE_SETTINGS_REPOSITORY: OnceLock<
-    Arc<dyn settings::repositories::ModuleSettingsRepository>,
-> = OnceLock::new();
-static HIVE_SETTINGS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::HiveSettingsRepository>> =
-    OnceLock::new();
-static EXTENSIONS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::ExtensionsRepository>> =
-    OnceLock::new();
+/// Consolidated registry for all repository singletons.
+/// Initialized once at startup via `init_repositories()`.
+pub struct RepositoryRegistry {
+    pub providers: Arc<dyn settings::repositories::ProviderRepository>,
+    pub general_settings: Arc<dyn settings::repositories::GeneralSettingsRepository>,
+    pub models: Arc<dyn settings::repositories::ModelsRepository>,
+    pub mcp: Arc<dyn settings::repositories::McpRepository>,
+    pub a2a: Arc<dyn settings::repositories::A2aRepository>,
+    pub execution_settings: Arc<dyn settings::repositories::ExecutionSettingsRepository>,
+    pub search_settings: Arc<dyn settings::repositories::SearchSettingsRepository>,
+    pub training_settings: Arc<dyn settings::repositories::TrainingSettingsRepository>,
+    pub user_secrets: Arc<dyn settings::repositories::UserSecretsRepository>,
+    pub module_settings: Arc<dyn settings::repositories::ModuleSettingsRepository>,
+    pub hive_settings: Arc<dyn settings::repositories::HiveSettingsRepository>,
+    pub extensions: Arc<dyn settings::repositories::ExtensionsRepository>,
+}
+
+static REPOSITORY_REGISTRY: OnceLock<RepositoryRegistry> = OnceLock::new();
 
 /// Initialize all repository singletons. Must be called once at startup before
 /// any repository is accessed. Returns an error if the config directory cannot
@@ -72,137 +63,90 @@ static EXTENSIONS_REPOSITORY: OnceLock<Arc<dyn settings::repositories::Extension
 pub fn init_repositories() -> anyhow::Result<()> {
     use settings::repositories::*;
 
-    PROVIDER_REPOSITORY
-        .set(Arc::new(JsonFileRepository::new()?))
-        .ok();
-    GENERAL_SETTINGS_REPOSITORY
-        .set(Arc::new(GeneralSettingsJsonRepository::new()?))
-        .ok();
-    MODELS_REPOSITORY
-        .set(Arc::new(JsonModelsRepository::new()?))
-        .ok();
-    MCP_REPOSITORY.set(Arc::new(JsonMcpRepository::new()?)).ok();
-    A2A_REPOSITORY.set(Arc::new(A2aJsonRepository::new()?)).ok();
-    EXECUTION_SETTINGS_REPOSITORY
-        .set(Arc::new(ExecutionSettingsJsonRepository::new()?))
-        .ok();
-    SEARCH_SETTINGS_REPOSITORY
-        .set(Arc::new(SearchSettingsJsonRepository::new()?))
-        .ok();
-    TRAINING_SETTINGS_REPOSITORY
-        .set(Arc::new(TrainingSettingsJsonRepository::new()?))
-        .ok();
-    USER_SECRETS_REPOSITORY
-        .set(Arc::new(UserSecretsJsonRepository::new()?))
-        .ok();
-    MODULE_SETTINGS_REPOSITORY
-        .set(Arc::new(ModuleSettingsJsonRepository::new()?))
-        .ok();
-    HIVE_SETTINGS_REPOSITORY
-        .set(Arc::new(HiveSettingsJsonRepository::new()?))
-        .ok();
-    EXTENSIONS_REPOSITORY
-        .set(Arc::new(ExtensionsJsonRepository::new()?))
-        .ok();
+    let registry = RepositoryRegistry {
+        providers: Arc::new(JsonFileRepository::new()?),
+        general_settings: Arc::new(GeneralSettingsJsonRepository::new()?),
+        models: Arc::new(JsonModelsRepository::new()?),
+        mcp: Arc::new(JsonMcpRepository::new()?),
+        a2a: Arc::new(A2aJsonRepository::new()?),
+        execution_settings: Arc::new(ExecutionSettingsJsonRepository::new()?),
+        search_settings: Arc::new(SearchSettingsJsonRepository::new()?),
+        training_settings: Arc::new(TrainingSettingsJsonRepository::new()?),
+        user_secrets: Arc::new(UserSecretsJsonRepository::new()?),
+        module_settings: Arc::new(ModuleSettingsJsonRepository::new()?),
+        hive_settings: Arc::new(HiveSettingsJsonRepository::new()?),
+        extensions: Arc::new(ExtensionsJsonRepository::new()?),
+    };
+    REPOSITORY_REGISTRY.set(registry).ok();
 
     Ok(())
+}
+
+fn registry() -> &'static RepositoryRegistry {
+    REPOSITORY_REGISTRY
+        .get()
+        .expect("init_repositories() not called")
 }
 
 /// Returns a cloned Arc to the provider repository.
 /// Panics if `init_repositories()` was not called — this is a programming error.
 pub fn provider_repository() -> Arc<dyn settings::repositories::ProviderRepository> {
-    PROVIDER_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().providers.clone()
 }
 
 /// Returns a cloned Arc to the general settings repository.
 pub fn general_settings_repository() -> Arc<dyn settings::repositories::GeneralSettingsRepository> {
-    GENERAL_SETTINGS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().general_settings.clone()
 }
 
 /// Returns a cloned Arc to the models repository.
 pub fn models_repository() -> Arc<dyn settings::repositories::ModelsRepository> {
-    MODELS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().models.clone()
 }
 
 /// Returns a cloned Arc to the MCP repository.
 pub fn mcp_repository() -> Arc<dyn settings::repositories::McpRepository> {
-    MCP_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().mcp.clone()
 }
 
 /// Returns a cloned Arc to the A2A agents repository.
 pub fn a2a_repository() -> Arc<dyn settings::repositories::A2aRepository> {
-    A2A_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().a2a.clone()
 }
 
 /// Returns a cloned Arc to the execution settings repository.
 pub fn execution_settings_repository()
 -> Arc<dyn settings::repositories::ExecutionSettingsRepository> {
-    EXECUTION_SETTINGS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().execution_settings.clone()
 }
 
 /// Returns a cloned Arc to the search settings repository.
 pub fn search_settings_repository() -> Arc<dyn settings::repositories::SearchSettingsRepository> {
-    SEARCH_SETTINGS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().search_settings.clone()
 }
 
 /// Returns a cloned Arc to the training settings repository.
 pub fn training_settings_repository() -> Arc<dyn settings::repositories::TrainingSettingsRepository>
 {
-    TRAINING_SETTINGS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().training_settings.clone()
 }
 
 /// Returns a cloned Arc to the user secrets repository.
 pub fn user_secrets_repository() -> Arc<dyn settings::repositories::UserSecretsRepository> {
-    USER_SECRETS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().user_secrets.clone()
 }
 
 /// Returns a cloned Arc to the module settings repository.
 pub fn module_settings_repository() -> Arc<dyn settings::repositories::ModuleSettingsRepository> {
-    MODULE_SETTINGS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().module_settings.clone()
 }
 
 /// Returns a cloned Arc to the Hive settings repository.
 pub fn hive_settings_repository() -> Arc<dyn settings::repositories::HiveSettingsRepository> {
-    HIVE_SETTINGS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().hive_settings.clone()
 }
 
 /// Returns a cloned Arc to the extensions repository.
 pub fn extensions_repository() -> Arc<dyn settings::repositories::ExtensionsRepository> {
-    EXTENSIONS_REPOSITORY
-        .get()
-        .expect("init_repositories() not called")
-        .clone()
+    registry().extensions.clone()
 }

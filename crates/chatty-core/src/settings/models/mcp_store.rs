@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-lazy_static::lazy_static! {
-    /// Shared write lock for all MCP tool operations (add, delete, edit).
-    ///
-    /// Serialises concurrent MCP tool calls so the load → modify → save
-    /// sequence is atomic, preventing TOCTOU races across different tools.
-    pub static ref MCP_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
-}
+/// Shared write lock for all MCP tool operations (add, delete, edit).
+///
+/// Serialises concurrent MCP tool calls so the load → modify → save
+/// sequence is atomic, preventing TOCTOU races across different tools.
+pub static MCP_WRITE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Sentinel value used to represent a masked (hidden) API key value.
 ///

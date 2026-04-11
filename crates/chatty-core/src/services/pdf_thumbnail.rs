@@ -6,10 +6,9 @@ use super::pdfium_utils::create_pdfium;
 
 const THUMBNAIL_SIZE: u32 = 64;
 
-lazy_static::lazy_static! {
-    /// Session-scoped temp directory for PDF thumbnails
-    static ref THUMBNAIL_DIR: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
-}
+/// Session-scoped temp directory for PDF thumbnails
+static THUMBNAIL_DIR: std::sync::LazyLock<Arc<Mutex<Option<PathBuf>>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 #[derive(Debug)]
 pub enum PdfThumbnailError {

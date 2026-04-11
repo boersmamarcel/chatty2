@@ -26,7 +26,6 @@ serde_json.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 dirs.workspace = true
-lazy_static.workspace = true
 uuid.workspace = true
 bollard.workspace = true
 async-trait.workspace = true

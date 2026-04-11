@@ -30,8 +30,8 @@ pub enum MessageRole {
     Assistant,
 }
 
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// Represents a segment of content - either text or a code block
 #[derive(Clone, Debug)]
@@ -48,14 +48,15 @@ enum MarkdownSegment {
     },
 }
 
-lazy_static! {
-    // Regex to match fenced code blocks: ```language\ncode\n```
-    static ref CODE_BLOCK_REGEX: Regex = Regex::new(
+// Regex to match fenced code blocks: ```language\ncode\n```
+static CODE_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?s)```([a-zA-Z0-9_+-]*)
 (.*?)
-```"
-    ).expect("CODE_BLOCK_REGEX pattern is valid");
-}
+```",
+    )
+    .expect("CODE_BLOCK_REGEX pattern is valid")
+});
 
 /// Parse markdown content into segments of text and code blocks.
 ///
