@@ -109,11 +109,7 @@ pub struct SearchWebTool {
 impl SearchWebTool {
     /// Create a search tool backed by a configured API provider (Tavily or Brave).
     pub fn new(provider: SearchProvider, api_key: String, default_max_results: usize) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(SEARCH_TIMEOUT_SECS))
-            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS);
         Self {
             client,
             provider: Some(provider),
@@ -125,6 +121,7 @@ impl SearchWebTool {
     /// Create a search tool in fallback mode: uses DuckDuckGo lite HTML scraping.
     /// This requires no API key and provides basic web search capability.
     pub fn new_fallback(default_max_results: usize) -> Self {
+        // Use a browser-like user-agent for DuckDuckGo scraping.
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(SEARCH_TIMEOUT_SECS))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")

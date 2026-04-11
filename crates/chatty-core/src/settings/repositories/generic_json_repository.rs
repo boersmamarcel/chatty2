@@ -70,7 +70,10 @@ where
     }
 
     /// Save the settings to disk atomically (temp file + rename).
-    pub fn save(&self, value: T) -> super::provider_repository::BoxFuture<'static, RepositoryResult<()>> {
+    pub fn save(
+        &self,
+        value: T,
+    ) -> super::provider_repository::BoxFuture<'static, RepositoryResult<()>> {
         let path = self.file_path.clone();
 
         Box::pin(async move {
@@ -121,7 +124,9 @@ where
     }
 
     /// Load all items from disk, returning an empty `Vec` if the file is missing.
-    pub fn load_all(&self) -> super::provider_repository::BoxFuture<'static, RepositoryResult<Vec<T>>> {
+    pub fn load_all(
+        &self,
+    ) -> super::provider_repository::BoxFuture<'static, RepositoryResult<Vec<T>>> {
         let path = self.file_path.clone();
 
         Box::pin(async move {
@@ -141,7 +146,10 @@ where
     }
 
     /// Save all items to disk atomically (temp file + rename).
-    pub fn save_all(&self, items: Vec<T>) -> super::provider_repository::BoxFuture<'static, RepositoryResult<()>> {
+    pub fn save_all(
+        &self,
+        items: Vec<T>,
+    ) -> super::provider_repository::BoxFuture<'static, RepositoryResult<()>> {
         let path = self.file_path.clone();
 
         Box::pin(async move {

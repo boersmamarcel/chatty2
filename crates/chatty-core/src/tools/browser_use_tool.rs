@@ -72,11 +72,7 @@ pub struct BrowserUseTool {
 impl BrowserUseTool {
     /// Create a new BrowserUseTool with the given API key.
     pub fn new(api_key: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = crate::services::http_client::default_client(30);
         Self { client, api_key }
     }
 

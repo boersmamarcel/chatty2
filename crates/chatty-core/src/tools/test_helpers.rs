@@ -5,7 +5,9 @@
 /// - `MockA2aRepository` — in-memory [`A2aRepository`] for A2A tool tests.
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::mcp_store::McpServerConfig;
-use crate::settings::repositories::provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
+use crate::settings::repositories::provider_repository::{
+    BoxFuture, RepositoryError, RepositoryResult,
+};
 use crate::settings::repositories::{A2aRepository, McpRepository};
 use std::sync::Mutex;
 
@@ -131,10 +133,7 @@ impl A2aRepository for MockA2aRepository {
         })
     }
 
-    fn save_all(
-        &self,
-        _agents: Vec<A2aAgentConfig>,
-    ) -> BoxFuture<'static, RepositoryResult<()>> {
+    fn save_all(&self, _agents: Vec<A2aAgentConfig>) -> BoxFuture<'static, RepositoryResult<()>> {
         Box::pin(async move { Ok(()) })
     }
 }
