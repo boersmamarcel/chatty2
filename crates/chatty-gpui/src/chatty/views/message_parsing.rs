@@ -40,6 +40,11 @@ pub(super) enum MarkdownSegment {
         language: Option<String>,
         code: String,
     },
+    /// Unclosed code block after streaming has ended.
+    UnclosedCodeBlock {
+        language: Option<String>,
+        code: String,
+    },
 }
 
 /// Represents a parsed segment of message content
@@ -65,10 +70,10 @@ static CODE_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Parse markdown content into segments of text and code blocks.
 ///
-/// When `streaming` is true, also detects trailing incomplete code blocks
-/// (opening ``` without closing ```) and emits them as `IncompleteCodeBlock`
-/// segments so they can be rendered during streaming without waiting for
-/// the closing delimiter.
+/// Also detects trailing unclosed code blocks (opening ``` without closing ```).
+/// During streaming they are emitted as `IncompleteCodeBlock` segments so they can
+/// render in a provisional state; once streaming has ended they are emitted as
+/// `UnclosedCodeBlock` segments so they finalize as plain code.
 pub(super) fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<MarkdownSegment> {
     let mut segments = Vec::new();
     let mut last_end = 0;
@@ -106,25 +111,28 @@ pub(super) fn parse_markdown_segments(content: &str, streaming: bool) -> Vec<Mar
         last_end = match_end;
     }
 
-    // Check remaining text for incomplete code blocks (streaming only)
+    // Check remaining text for trailing unclosed code blocks.
     if last_end < content.len() {
         let remaining = &content[last_end..];
 
-        if streaming {
-            if let Some(incomplete) = detect_incomplete_code_block(remaining) {
-                // Add text before the incomplete code block.
-                // Trim trailing whitespace to prevent extra paragraph breaks.
-                let text_before = remaining[..incomplete.0].trim_end();
-                if !text_before.is_empty() {
-                    segments.push(MarkdownSegment::Text(text_before.to_string()));
-                }
-                // Add the incomplete code block
+        if let Some(incomplete) = detect_incomplete_code_block(remaining) {
+            // Add text before the incomplete code block.
+            // Trim trailing whitespace to prevent extra paragraph breaks.
+            let text_before = remaining[..incomplete.0].trim_end();
+            if !text_before.is_empty() {
+                segments.push(MarkdownSegment::Text(text_before.to_string()));
+            }
+
+            if streaming {
                 segments.push(MarkdownSegment::IncompleteCodeBlock {
                     language: incomplete.1,
                     code: incomplete.2,
                 });
-            } else if !remaining.trim().is_empty() {
-                segments.push(MarkdownSegment::Text(remaining.to_string()));
+            } else {
+                segments.push(MarkdownSegment::UnclosedCodeBlock {
+                    language: incomplete.1,
+                    code: incomplete.2,
+                });
             }
         } else if !remaining.trim().is_empty() {
             segments.push(MarkdownSegment::Text(remaining.to_string()));
@@ -291,6 +299,9 @@ pub(super) fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseR
                             unreachable!(
                                 "IncompleteCodeBlock should not appear in non-streaming parse"
                             )
+                        }
+                        MarkdownSegment::UnclosedCodeBlock { language, code } => {
+                            CachedMarkdownSegment::UnclosedCodeBlock { language, code }
                         }
                     })
                     .collect();
@@ -506,6 +517,9 @@ fn parse_markdown_segment_streaming(
         MarkdownSegment::IncompleteCodeBlock { language, code } => {
             CachedMarkdownSegment::IncompleteCodeBlock { language, code }
         }
+        MarkdownSegment::UnclosedCodeBlock { language, code } => {
+            CachedMarkdownSegment::UnclosedCodeBlock { language, code }
+        }
         MarkdownSegment::Text(t) => {
             let math_segs = parse_math_segments(&t);
             CachedMarkdownSegment::TextWithMath(math_segs)
@@ -566,10 +580,16 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_code_block_not_detected_when_not_streaming() {
+    fn unclosed_code_block_detected_when_not_streaming() {
         let input = "text\n```python\nprint('hi')";
         let segs = parse_markdown_segments(input, false);
-        assert!(!segs.iter().any(|s| matches!(s, MarkdownSegment::IncompleteCodeBlock { .. })));
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, MarkdownSegment::UnclosedCodeBlock { .. }))
+        );
+        assert!(!segs
+            .iter()
+            .any(|s| matches!(s, MarkdownSegment::IncompleteCodeBlock { .. })));
     }
 
     #[test]

@@ -122,11 +122,18 @@ fn render_cached_markdown_segments(
                 elements.extend(math_elements);
             }
             CachedMarkdownSegment::IncompleteCodeBlock { language, code } => {
-                // Render as a code block with no syntax highlighting (empty styles)
-                let block = CodeBlockComponent::with_highlighted_styles(
+                let block = CodeBlockComponent::provisional(
                     language.clone(),
                     code.clone(),
-                    vec![],
+                    base_index * 100 + code_block_index,
+                );
+                elements.push(block.into_any_element());
+                code_block_index += 1;
+            }
+            CachedMarkdownSegment::UnclosedCodeBlock { language, code } => {
+                let block = CodeBlockComponent::plain(
+                    language.clone(),
+                    code.clone(),
                     base_index * 100 + code_block_index,
                 );
                 elements.push(block.into_any_element());
