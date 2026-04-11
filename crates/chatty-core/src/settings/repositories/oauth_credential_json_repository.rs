@@ -28,7 +28,7 @@ impl JsonOAuthCredentialRepository {
         Self { dir }
     }
 
-    fn credential_path(dir: &PathBuf, server_name: &str) -> PathBuf {
+    fn credential_path(dir: &std::path::Path, server_name: &str) -> PathBuf {
         let sanitized = server_name
             .chars()
             .map(|c| {
@@ -184,10 +184,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = test_repo(&dir);
 
-        let path = JsonOAuthCredentialRepository::credential_path(
-            &dir.path().to_path_buf(),
-            "test",
-        );
+        let path =
+            JsonOAuthCredentialRepository::credential_path(&dir.path().to_path_buf(), "test");
         tokio::fs::write(&path, "not valid json").await.unwrap();
         assert!(repo.has_credentials("test"));
 

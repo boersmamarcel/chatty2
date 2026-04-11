@@ -6,8 +6,10 @@ use super::provider_repository::{BoxFuture, RepositoryResult};
 /// keeping this trait free of rmcp-specific types.
 pub trait OAuthCredentialRepository: Send + Sync + 'static {
     /// Load stored OAuth credentials for a server.
-    fn load(&self, server_name: &str)
-        -> BoxFuture<'static, RepositoryResult<Option<serde_json::Value>>>;
+    fn load(
+        &self,
+        server_name: &str,
+    ) -> BoxFuture<'static, RepositoryResult<Option<serde_json::Value>>>;
 
     /// Persist OAuth credentials for a server.
     fn save(
