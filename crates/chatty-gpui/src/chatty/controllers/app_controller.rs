@@ -40,6 +40,7 @@ use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use chatty_core::factories::agent_factory::AgentBuildContext;
 
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
 /// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
@@ -313,22 +314,24 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         AgentClient::from_model_config_with_tools(
             &model_config,
             &provider_config,
-            mcp_tools,
-            exec_settings,
-            pending_approvals,
-            pending_write_approvals,
-            pending_artifacts,
-            shell_session,
-            user_secrets,
-            theme_colors,
-            memory_service,
-            search_settings,
-            embedding_service,
-            true, // interactive agent: sub-agent tool is allowed
-            module_agents,
-            gateway_port,
-            remote_agents,
-            available_model_ids,
+            AgentBuildContext {
+                mcp_tools,
+                exec_settings,
+                pending_approvals,
+                pending_write_approvals,
+                pending_artifacts,
+                shell_session,
+                user_secrets,
+                theme_colors,
+                memory_service,
+                search_settings,
+                embedding_service,
+                allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
+                module_agents,
+                gateway_port,
+                remote_agents,
+                available_model_ids,
+            },
         )
         .await?;
 
@@ -764,28 +767,17 @@ impl ChattyApp {
     /// Restore a single conversation from persisted data
     ///
     /// Looks up the model and provider configs, then calls Conversation::from_data()
-    #[allow(clippy::too_many_arguments)]
     async fn restore_conversation_from_data(
         data: ConversationData,
         models: &ModelsModel,
         providers: &ProviderModel,
         mcp_service: &crate::chatty::services::McpService,
-        exec_settings: &crate::settings::models::ExecutionSettingsModel,
-        pending_approvals: crate::chatty::models::execution_approval_store::PendingApprovals,
-        pending_write_approvals: crate::chatty::models::write_approval_store::PendingWriteApprovals,
-        user_secrets: Vec<(String, String)>,
-        theme_colors: Option<[String; 5]>,
-        memory_service: Option<crate::chatty::services::MemoryService>,
-        search_settings: Option<crate::settings::models::SearchSettingsModel>,
-        embedding_service: Option<chatty_core::services::EmbeddingService>,
-        module_agents: Vec<LocalModuleAgentSummary>,
-        gateway_port: Option<u16>,
-        remote_agents: Vec<chatty_core::settings::models::a2a_store::A2aAgentConfig>,
-        available_model_ids: Vec<String>,
+        mut ctx: AgentBuildContext,
     ) -> anyhow::Result<Conversation> {
-        let mut effective_exec_settings = exec_settings.clone();
-        if let Some(working_dir) = data.working_dir.as_ref() {
-            effective_exec_settings.workspace_dir = Some(normalize_workspace_string(working_dir));
+        if let Some(working_dir) = data.working_dir.as_ref()
+            && let Some(ref mut exec) = ctx.exec_settings
+        {
+            exec.workspace_dir = Some(normalize_workspace_string(working_dir));
         }
 
         // Look up model config by ID
@@ -814,28 +806,10 @@ impl ChattyApp {
         // point, the existing conversation will retain its original tool set. Open a new
         // conversation to pick up updated tool registrations.
         let mcp_tools = chatty_core::services::gather_mcp_tools(mcp_service).await;
+        ctx.mcp_tools = mcp_tools;
 
         // Restore conversation using factory method (bash tool will be created in agent_factory if enabled)
-        Conversation::from_data(
-            data,
-            model_config,
-            provider_config,
-            mcp_tools,
-            Some(effective_exec_settings),
-            Some(pending_approvals),
-            Some(pending_write_approvals),
-            user_secrets,
-            theme_colors,
-            memory_service,
-            search_settings,
-            embedding_service,
-            true, // interactive agent: sub-agent tool is allowed
-            module_agents,
-            gateway_port,
-            remote_agents,
-            available_model_ids,
-        )
-        .await
+        Conversation::from_data(data, model_config, provider_config, ctx).await
     }
 
     /// Load conversation metadata at startup (fast — no message deserialization).
@@ -1132,20 +1106,24 @@ impl ChattyApp {
                         title.clone(),
                         &model_config,
                         &provider_config,
-                        mcp_tools,
-                        exec_settings,
-                        pending_approvals,
-                        pending_write_approvals,
-                        user_secrets,
-                        theme_colors,
-                        memory_service,
-                        search_settings,
-                        embedding_service,
-                        true, // interactive agent: sub-agent tool is allowed
-                        module_agents,
-                        gateway_port,
-                        remote_agents,
-                        available_model_ids,
+                        AgentBuildContext {
+                            mcp_tools,
+                            exec_settings,
+                            pending_approvals,
+                            pending_write_approvals,
+                            pending_artifacts: None, // set inside Conversation::new
+                            shell_session: None,
+                            user_secrets,
+                            theme_colors,
+                            memory_service,
+                            search_settings,
+                            embedding_service,
+                            allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
+                            module_agents,
+                            gateway_port,
+                            remote_agents,
+                            available_model_ids,
+                        },
                     )
                     .await?;
                     conversation.set_working_dir(selected_working_dir.clone());
@@ -1274,10 +1252,25 @@ impl ChattyApp {
                     Ok(Some(data)) => {
                         let embedding_service = get_embedding_service(cx);
                         match Self::restore_conversation_from_data(
-                            data, &models, &providers, &mcp_service, &exec_settings,
-                            pending_approvals, pending_write_approvals, user_secrets,
-                            theme_colors, memory_service, search_settings, embedding_service,
-                            module_agents, gateway_port, remote_agents, available_model_ids,
+                            data, &models, &providers, &mcp_service,
+                            AgentBuildContext {
+                                mcp_tools: None,
+                                exec_settings: Some(exec_settings.clone()),
+                                pending_approvals: Some(pending_approvals),
+                                pending_write_approvals: Some(pending_write_approvals),
+                                pending_artifacts: None,
+                                shell_session: None,
+                                user_secrets,
+                                theme_colors,
+                                memory_service,
+                                search_settings,
+                                embedding_service,
+                                allow_sub_agent: true,
+                                module_agents,
+                                gateway_port,
+                                remote_agents,
+                                available_model_ids,
+                            },
                         )
                         .await
                         {
@@ -1666,22 +1659,24 @@ impl ChattyApp {
                             AgentClient::from_model_config_with_tools(
                                 &model_config,
                                 &provider_config,
-                                mcp_tools,
-                                exec_settings,
-                                pending_approvals,
-                                pending_write_approvals,
-                                pending_artifacts,
-                                shell_session,
-                                user_secrets,
-                                theme_colors,
-                                memory_service,
-                                search_settings,
-                                embedding_service,
-                                true, // interactive agent: sub-agent tool is allowed
-                                module_agents,
-                                gateway_port,
-                                remote_agents,
-                                available_model_ids,
+                                AgentBuildContext {
+                                    mcp_tools,
+                                    exec_settings,
+                                    pending_approvals,
+                                    pending_write_approvals,
+                                    pending_artifacts,
+                                    shell_session,
+                                    user_secrets,
+                                    theme_colors,
+                                    memory_service,
+                                    search_settings,
+                                    embedding_service,
+                                    allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
+                                    module_agents,
+                                    gateway_port,
+                                    remote_agents,
+                                    available_model_ids,
+                                },
                             )
                             .await?;
 
@@ -2199,16 +2194,18 @@ impl ChattyApp {
 
                 // PHASE 4: Run shared LLM stream (approval setup, streaming, finalization)
                 run_llm_stream(
-                    conv_id,
-                    agent,
-                    history,
-                    contents,
-                    true, // add user message to conversation model
-                    attachments,
-                    chat_view,
-                    stream_manager,
-                    cancel_flag_for_loop,
-                    invoke_agent_progress_slot,
+                    LlmStreamParams {
+                        conv_id,
+                        agent,
+                        history,
+                        user_contents: contents,
+                        add_user_message_to_model: true,
+                        attachment_paths: attachments,
+                        chat_view,
+                        stream_manager,
+                        cancel_flag: cancel_flag_for_loop,
+                        invoke_agent_progress_slot,
+                    },
                     cx,
                 )
                 .await
@@ -3885,16 +3882,18 @@ impl ChattyApp {
 
             // Run shared LLM stream (do NOT add user message — it's already in history)
             run_llm_stream(
-                conv_id,
-                agent,
-                history_context,
-                user_contents,
-                false, // user message already in model
-                vec![],
-                chat_view,
-                stream_manager,
-                cancel_flag_for_loop,
-                invoke_agent_progress_slot,
+                LlmStreamParams {
+                    conv_id,
+                    agent,
+                    history: history_context,
+                    user_contents,
+                    add_user_message_to_model: false,
+                    attachment_paths: vec![],
+                    chat_view,
+                    stream_manager,
+                    cancel_flag: cancel_flag_for_loop,
+                    invoke_agent_progress_slot,
+                },
                 cx,
             )
             .await
@@ -4226,6 +4225,20 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
     })
 }
 
+/// Parameters for the shared LLM stream processing.
+struct LlmStreamParams {
+    conv_id: String,
+    agent: AgentClient,
+    history: Vec<rig::completion::Message>,
+    user_contents: Vec<rig::message::UserContent>,
+    add_user_message_to_model: bool,
+    attachment_paths: Vec<PathBuf>,
+    chat_view: Entity<ChatView>,
+    stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
+    cancel_flag: Arc<AtomicBool>,
+    invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
+}
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:
@@ -4237,20 +4250,19 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
 ///
 /// Callers are responsible for their own preamble (conversation creation, UI message
 /// addition, DPO recording, etc.) and for registering the returned task with StreamManager.
-#[allow(clippy::too_many_arguments)]
-async fn run_llm_stream(
-    conv_id: String,
-    agent: AgentClient,
-    history: Vec<rig::completion::Message>,
-    user_contents: Vec<rig::message::UserContent>,
-    add_user_message_to_model: bool,
-    attachment_paths: Vec<PathBuf>,
-    chat_view: Entity<ChatView>,
-    stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
-    cancel_flag: Arc<AtomicBool>,
-    invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
-    cx: &mut AsyncApp,
-) -> anyhow::Result<()> {
+async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let LlmStreamParams {
+        conv_id,
+        agent,
+        history,
+        user_contents,
+        add_user_message_to_model,
+        attachment_paths,
+        chat_view,
+        stream_manager,
+        cancel_flag,
+        invoke_agent_progress_slot,
+    } = params;
     // 1. Create approval notification channels
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();

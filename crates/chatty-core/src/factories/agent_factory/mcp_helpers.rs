@@ -166,11 +166,10 @@ macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr, $reserved_tool_names:expr) => {{
         match $mcp_tools {
             Some(tools_list) => {
-                let deduped =
-                    $crate::factories::agent_factory::mcp_helpers::deduplicate_mcp_tools(
-                        tools_list,
-                        $reserved_tool_names,
-                    );
+                let deduped = $crate::factories::agent_factory::mcp_helpers::deduplicate_mcp_tools(
+                    tools_list,
+                    $reserved_tool_names,
+                );
                 let mut iter = deduped
                     .into_iter()
                     .filter(|(_name, t, _sink)| !t.is_empty());

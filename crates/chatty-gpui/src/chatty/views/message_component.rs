@@ -1103,36 +1103,40 @@ fn extract_daytona_downloaded_files(
     Some(paths).filter(|v| !v.is_empty())
 }
 
+/// Mutable render caches passed through message rendering functions.
+pub struct MessageRenderCaches<'a> {
+    pub parsed: &'a mut ParsedContentCache,
+    pub streaming: &'a mut Option<StreamingParseState>,
+}
+
 /// Render a text segment using the cache, handling embedded `<thinking>` blocks.
 ///
 /// For finalized markdown content, uses the persistent cache to avoid re-parsing.
 /// For streaming markdown, uses `build_streaming_parse_result` which reuses
 /// code block highlighting from the previous render to avoid O(n²) re-highlighting.
-#[allow(clippy::too_many_arguments)]
 fn render_text_segment_cached(
     text_segment: &str,
     base_index: usize,
     is_markdown: bool,
     is_streaming: bool,
     is_dark: bool,
-    parsed_cache: &mut ParsedContentCache,
-    streaming_cache: &mut Option<StreamingParseState>,
+    caches: &mut MessageRenderCaches<'_>,
     cx: &App,
 ) -> Vec<AnyElement> {
     if is_markdown && !is_streaming {
         // Finalized: use cache to avoid re-parsing on every render
         let cache_key = ContentCacheKey::new(text_segment, is_dark);
-        if parsed_cache.get(&cache_key).is_none() {
+        if caches.parsed.get(&cache_key).is_none() {
             let result = build_cached_parse_result(text_segment, cx);
-            parsed_cache.insert(cache_key, result);
+            caches.parsed.insert(cache_key, result);
         }
-        let cached = parsed_cache.get(&cache_key).unwrap();
+        let cached = caches.parsed.get(&cache_key).unwrap();
         render_from_cached(cached, base_index, cx)
     } else if is_markdown {
         // Streaming: incremental parse with stable prefix reuse
-        let state = build_streaming_parse_result(text_segment, streaming_cache.as_ref(), cx);
+        let state = build_streaming_parse_result(text_segment, caches.streaming.as_ref(), cx);
         let elements = render_from_cached(&state.result, base_index, cx);
-        *streaming_cache = Some(state);
+        *caches.streaming = Some(state);
         elements
     } else {
         vec![div().child(text_segment.to_string()).into_any_element()]
@@ -1140,15 +1144,14 @@ fn render_text_segment_cached(
 }
 
 /// Render interleaved content: text segments mixed with tool calls
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // Rendering function with generic callbacks
 fn render_interleaved_content<F, D>(
     msg: &DisplayMessage,
     index: usize,
     mut container: Div,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     diff_expanded: &std::collections::HashMap<(usize, usize), bool>,
-    parsed_cache: &mut ParsedContentCache,
-    streaming_cache: &mut Option<StreamingParseState>,
+    caches: &mut MessageRenderCaches<'_>,
     on_toggle_tool: F,
     on_toggle_diff: D,
     cx: &App,
@@ -1176,8 +1179,7 @@ where
             msg.is_markdown,
             msg.is_streaming,
             is_dark,
-            parsed_cache,
-            streaming_cache,
+            caches,
             cx,
         );
         return container.children(elements);
@@ -1216,8 +1218,10 @@ where
                         msg.is_markdown,
                         false, // frozen content — use persistent cache
                         is_dark,
-                        parsed_cache,
-                        &mut None, // don't pollute the streaming cache
+                        &mut MessageRenderCaches {
+                            parsed: caches.parsed,
+                            streaming: &mut None, // don't pollute the streaming cache
+                        },
                         cx,
                     );
                     container = container.children(elements);
@@ -1300,7 +1304,9 @@ where
                 )
                 && let Some(chart_spec) = super::chart_renderer::extract_chart_spec(tool_call)
             {
-                container = container.child(super::chart_renderer::render_chart(chart_spec, index, tool_idx, cx));
+                container = container.child(super::chart_renderer::render_chart(
+                    chart_spec, index, tool_idx, cx,
+                ));
             }
 
             // If this is a successful daytona_run call with downloaded files, render them inline
@@ -1331,8 +1337,7 @@ where
                 msg.is_markdown,
                 msg.is_streaming,
                 is_dark,
-                parsed_cache,
-                streaming_cache,
+                caches,
                 cx,
             );
             container = container.children(elements);
@@ -1444,15 +1449,14 @@ where
         )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // Rendering function with 4 generic callbacks
 pub fn render_message<F, D, G, R>(
     msg: &DisplayMessage,
     index: usize,
     is_last_message: bool,
     collapsed_tool_calls: &std::collections::HashMap<(usize, usize), bool>,
     diff_expanded: &std::collections::HashMap<(usize, usize), bool>,
-    parsed_cache: &mut ParsedContentCache,
-    streaming_cache: &mut Option<StreamingParseState>,
+    caches: &mut MessageRenderCaches<'_>,
     on_toggle_tool: F,
     on_toggle_diff: D,
     on_feedback: G,
@@ -1502,17 +1506,17 @@ where
         let children = if !msg.is_streaming {
             // Finalized: use cached parse result
             let cache_key = ContentCacheKey::new(&msg.content, is_dark);
-            if parsed_cache.get(&cache_key).is_none() {
+            if caches.parsed.get(&cache_key).is_none() {
                 let result = build_cached_parse_result(&msg.content, cx);
-                parsed_cache.insert(cache_key, result);
+                caches.parsed.insert(cache_key, result);
             }
-            let cached = parsed_cache.get(&cache_key).unwrap();
+            let cached = caches.parsed.get(&cache_key).unwrap();
             render_from_cached(cached, index, cx)
         } else {
             // Streaming: incremental parse with stable prefix reuse
-            let state = build_streaming_parse_result(&msg.content, streaming_cache.as_ref(), cx);
+            let state = build_streaming_parse_result(&msg.content, caches.streaming.as_ref(), cx);
             let elements = render_from_cached(&state.result, index, cx);
-            *streaming_cache = Some(state);
+            *caches.streaming = Some(state);
             elements
         };
 
@@ -1558,8 +1562,7 @@ where
             container,
             collapsed_tool_calls,
             diff_expanded,
-            parsed_cache,
-            streaming_cache,
+            caches,
             on_toggle_tool,
             on_toggle_diff,
             cx,
@@ -1572,8 +1575,7 @@ where
             msg.is_markdown,
             msg.is_streaming,
             is_dark,
-            parsed_cache,
-            streaming_cache,
+            caches,
             cx,
         );
         container.children(content_elements)

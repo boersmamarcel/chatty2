@@ -9,14 +9,14 @@ use rig::completion::Message;
 use rig::completion::message::{AssistantContent, Text};
 
 use crate::factories::AgentClient;
+use crate::factories::agent_factory::AgentBuildContext;
 use crate::models::message_types::SystemTrace;
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
-use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
-use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
+use crate::tools::PendingArtifacts;
 
 /// User feedback signal for an individual assistant message
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -80,26 +80,12 @@ pub struct Conversation {
 
 impl Conversation {
     /// Create a new conversation from model and provider config
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         id: String,
         title: String,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
-        mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
-        pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
-        user_secrets: Vec<(String, String)>,
-        theme_colors: Option<[String; 5]>,
-        memory_service: Option<MemoryService>,
-        search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
-        embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
-        allow_sub_agent: bool,
-        module_agents: Vec<LocalModuleAgentSummary>,
-        gateway_port: Option<u16>,
-        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
-        available_model_ids: Vec<String>,
+        ctx: AgentBuildContext,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -114,7 +100,8 @@ impl Conversation {
 
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let agent_workspace_dir = exec_settings
+        let agent_workspace_dir = ctx
+            .exec_settings
             .as_ref()
             .and_then(|settings| settings.workspace_dir.as_ref())
             .map(PathBuf::from);
@@ -122,29 +109,15 @@ impl Conversation {
         // Shell session is created inside the factory when execution is enabled.
         // The factory returns it so we can store it on the Conversation for reuse
         // across agent rebuilds (MCP changes, model switches).
+        let ctx = AgentBuildContext {
+            pending_artifacts: Some(pending_artifacts.clone()),
+            shell_session: None, // Factory creates session on-demand when execution is enabled
+            ..ctx
+        };
         let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(
-                model_config,
-                provider_config,
-                mcp_tools,
-                exec_settings,
-                pending_approvals,
-                pending_write_approvals,
-                Some(pending_artifacts.clone()),
-                None, // Factory creates session on-demand when execution is enabled
-                user_secrets,
-                theme_colors,
-                memory_service,
-                search_settings,
-                embedding_service,
-                allow_sub_agent,
-                module_agents,
-                gateway_port,
-                remote_agents,
-                available_model_ids,
-            )
-            .await
-            .context("Failed to create agent from config")?;
+            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+                .await
+                .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -173,25 +146,11 @@ impl Conversation {
     }
 
     /// Restore a conversation from persisted data
-    #[allow(clippy::too_many_arguments)]
     pub async fn from_data(
         data: ConversationData,
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
-        mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
-        pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
-        user_secrets: Vec<(String, String)>,
-        theme_colors: Option<[String; 5]>,
-        memory_service: Option<MemoryService>,
-        search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
-        embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
-        allow_sub_agent: bool,
-        module_agents: Vec<LocalModuleAgentSummary>,
-        gateway_port: Option<u16>,
-        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
-        available_model_ids: Vec<String>,
+        ctx: AgentBuildContext,
     ) -> Result<Self> {
         // Log URL information
         let url_info = provider_config
@@ -206,35 +165,22 @@ impl Conversation {
 
         let pending_artifacts: PendingArtifacts =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let agent_workspace_dir = exec_settings
+        let agent_workspace_dir = ctx
+            .exec_settings
             .as_ref()
             .and_then(|settings| settings.workspace_dir.as_ref())
             .map(PathBuf::from);
 
         // Reconstruct agent; factory creates shell session on-demand when execution is enabled
+        let ctx = AgentBuildContext {
+            pending_artifacts: Some(pending_artifacts.clone()),
+            shell_session: None, // Factory creates session on-demand
+            ..ctx
+        };
         let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(
-                model_config,
-                provider_config,
-                mcp_tools,
-                exec_settings,
-                pending_approvals,
-                pending_write_approvals,
-                Some(pending_artifacts.clone()),
-                None, // Factory creates session on-demand
-                user_secrets,
-                theme_colors,
-                memory_service,
-                search_settings,
-                embedding_service,
-                allow_sub_agent,
-                module_agents,
-                gateway_port,
-                remote_agents,
-                available_model_ids,
-            )
-            .await
-            .context("Failed to create agent from config")?;
+            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+                .await
+                .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)

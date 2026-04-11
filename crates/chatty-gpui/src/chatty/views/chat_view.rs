@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
 use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_with_skills};
-use super::message_component::{DisplayMessage, MessageRole, render_message};
+use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
     ToolCallState, TraceItem, UserMessage, friendly_tool_name, is_denial_result,
@@ -1575,8 +1575,10 @@ impl Render for ChatView {
                                                     is_last_message,
                                                     &collapsed_tool_calls,
                                                     &diff_expanded,
-                                                    &mut parsed_cache,
-                                                    sc,
+                                                    &mut MessageRenderCaches {
+                                                        parsed: &mut parsed_cache,
+                                                        streaming: sc,
+                                                    },
                                                     move |msg_idx, tool_idx, cx| {
                                                         entity_clone.update(cx, |chat_view, cx| {
                                                             let key = (msg_idx, tool_idx);

@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chatty_core::factories::AgentClient;
+use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::models::Conversation;
 use chatty_core::models::execution_approval_store::{
     ApprovalDecision, ApprovalNotification, ApprovalResolution, ExecutionApprovalStore,
@@ -210,43 +211,44 @@ pub struct ChatEngine {
     init_generation: u64,
 }
 
+/// Configuration for constructing a new `ChatEngine`.
+pub struct ChatEngineConfig {
+    pub model_config: ModelConfig,
+    pub provider_config: ProviderConfig,
+    pub execution_settings: ExecutionSettingsModel,
+    pub models: ModelsModel,
+    pub providers: Vec<ProviderConfig>,
+    pub mcp_service: Option<McpService>,
+    pub memory_service: Option<MemoryService>,
+    pub search_settings:
+        Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
+    pub embedding_service: Option<chatty_core::services::EmbeddingService>,
+    pub user_secrets: Vec<(String, String)>,
+    pub remote_agents: Vec<A2aAgentConfig>,
+    pub is_sub_agent: bool,
+}
+
 impl ChatEngine {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        model_config: ModelConfig,
-        provider_config: ProviderConfig,
-        execution_settings: ExecutionSettingsModel,
-        models: ModelsModel,
-        providers: Vec<ProviderConfig>,
-        mcp_service: Option<McpService>,
-        memory_service: Option<MemoryService>,
-        search_settings: Option<
-            chatty_core::settings::models::search_settings::SearchSettingsModel,
-        >,
-        embedding_service: Option<chatty_core::services::EmbeddingService>,
-        user_secrets: Vec<(String, String)>,
-        remote_agents: Vec<A2aAgentConfig>,
-        event_tx: mpsc::UnboundedSender<AppEvent>,
-        is_sub_agent: bool,
-    ) -> Self {
-        let skill_service = chatty_core::services::SkillService::new(embedding_service.clone());
+    pub fn new(config: ChatEngineConfig, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+        let skill_service =
+            chatty_core::services::SkillService::new(config.embedding_service.clone());
         Self {
             conversation: None,
-            model_config,
-            provider_config,
-            execution_settings,
-            models,
-            providers,
-            mcp_service,
-            memory_service,
-            search_settings,
-            embedding_service,
+            model_config: config.model_config,
+            provider_config: config.provider_config,
+            execution_settings: config.execution_settings,
+            models: config.models,
+            providers: config.providers,
+            mcp_service: config.mcp_service,
+            memory_service: config.memory_service,
+            search_settings: config.search_settings,
+            embedding_service: config.embedding_service,
             skill_service,
             execution_approval_store: ExecutionApprovalStore::new(),
             write_approval_store: WriteApprovalStore::new(),
-            user_secrets,
-            remote_agents,
-            is_sub_agent,
+            user_secrets: config.user_secrets,
+            remote_agents: config.remote_agents,
+            is_sub_agent: config.is_sub_agent,
             messages: Vec::new(),
             is_streaming: false,
             cancel_flag: None,
@@ -304,20 +306,24 @@ impl ChatEngine {
             "New Chat".to_string(),
             &self.model_config,
             &self.provider_config,
-            mcp_tools,
-            exec_settings,
-            Some(pending_approvals),
-            Some(pending_write_approvals),
-            self.user_secrets.clone(),
-            None, // no theme colors in TUI
-            self.memory_service.clone(),
-            self.search_settings.clone(),
-            self.embedding_service.clone(),
-            !self.is_sub_agent,
-            Vec::new(), // no WASM module discovery in TUI
-            None,       // no gateway port in TUI
-            self.remote_agents.clone(),
-            self.available_model_ids(),
+            AgentBuildContext {
+                mcp_tools,
+                exec_settings,
+                pending_approvals: Some(pending_approvals),
+                pending_write_approvals: Some(pending_write_approvals),
+                pending_artifacts: None,
+                shell_session: None,
+                user_secrets: self.user_secrets.clone(),
+                theme_colors: None, // no theme colors in TUI
+                memory_service: self.memory_service.clone(),
+                search_settings: self.search_settings.clone(),
+                embedding_service: self.embedding_service.clone(),
+                allow_sub_agent: !self.is_sub_agent,
+                module_agents: Vec::new(), // no WASM module discovery in TUI
+                gateway_port: None,        // no gateway port in TUI
+                remote_agents: self.remote_agents.clone(),
+                available_model_ids: self.available_model_ids(),
+            },
         )
         .await
         .context("Failed to create conversation")?;
@@ -380,20 +386,24 @@ impl ChatEngine {
                 "New Chat".to_string(),
                 &model_config,
                 &provider_config,
-                mcp_tools,
-                exec_settings,
-                Some(pending_approvals),
-                Some(pending_write_approvals),
-                user_secrets,
-                None, // no theme colors in TUI
-                memory_service,
-                search_settings,
-                embedding_service,
-                !is_sub_agent,
-                Vec::new(), // no WASM module discovery in TUI
-                None,       // no gateway port in TUI
-                remote_agents,
-                available_model_ids,
+                AgentBuildContext {
+                    mcp_tools,
+                    exec_settings,
+                    pending_approvals: Some(pending_approvals),
+                    pending_write_approvals: Some(pending_write_approvals),
+                    pending_artifacts: None,
+                    shell_session: None,
+                    user_secrets,
+                    theme_colors: None, // no theme colors in TUI
+                    memory_service,
+                    search_settings,
+                    embedding_service,
+                    allow_sub_agent: !is_sub_agent,
+                    module_agents: Vec::new(), // no WASM module discovery in TUI
+                    gateway_port: None,        // no gateway port in TUI
+                    remote_agents,
+                    available_model_ids,
+                },
             )
             .await;
 

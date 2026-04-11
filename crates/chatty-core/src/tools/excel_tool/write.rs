@@ -98,7 +98,10 @@ impl WriteExcelTool {
 }
 
 /// Write one `SheetSpec` to a workbook. Returns the number of data rows written.
-pub(super) fn write_sheet(workbook: &mut Workbook, spec: &SheetSpec) -> Result<usize, ExcelToolError> {
+pub(super) fn write_sheet(
+    workbook: &mut Workbook,
+    spec: &SheetSpec,
+) -> Result<usize, ExcelToolError> {
     let sheet = workbook
         .add_worksheet()
         .set_name(&spec.name)

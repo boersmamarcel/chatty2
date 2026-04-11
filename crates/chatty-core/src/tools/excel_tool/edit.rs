@@ -11,7 +11,9 @@ use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation}
 use crate::services::filesystem_service::FileSystemService;
 
 use super::ExcelToolError;
-use super::parsing::{build_format, calamine_to_json, parse_cell_ref, parse_range, write_cell_value};
+use super::parsing::{
+    build_format, calamine_to_json, parse_cell_ref, parse_range, write_cell_value,
+};
 use super::write::CellFormatSpec;
 
 // Re-use the write approval helper from filesystem_write_tool

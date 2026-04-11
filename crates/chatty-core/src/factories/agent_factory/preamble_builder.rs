@@ -1,43 +1,22 @@
 use crate::settings::models::search_settings::SearchSettingsModel;
 
 use super::mcp_helpers::McpTools;
-use super::tool_collector::*;
+use super::tool_registry::ToolAvailability;
 
 /// Build the augmented preamble with tool summary, formatting guide,
 /// memory instructions, and secret key names.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_preamble(
     base_preamble: &str,
-    fetch_tool_present: bool,
-    search_web_present: bool,
+    tools: &ToolAvailability,
     search_settings: &Option<SearchSettingsModel>,
-    shell_tools: &Option<ShellTools>,
-    fs_read_tools: &Option<FsReadTools>,
-    fs_write_tools: &Option<FsWriteTools>,
-    search_tools: &Option<SearchTools>,
-    git_tools: &Option<GitTools>,
-    add_attachment_present: bool,
-    typst_tool_present: bool,
-    excel_read_present: bool,
-    excel_write_present: bool,
-    pdf_to_image_present: bool,
-    pdf_info_present: bool,
-    pdf_extract_text_present: bool,
-    data_query_present: bool,
     mcp_mgmt_tools: &McpTools,
     mcp_tool_info: &[(String, String, String)],
-    execute_code_present: bool,
-    memory_present: bool,
-    sub_agent_present: bool,
-    browser_use_present: bool,
-    daytona_present: bool,
-    publish_module_present: bool,
     secret_key_names: &[String],
 ) -> String {
     let mut tool_sections: Vec<String> = Vec::new();
 
-    if fetch_tool_present || search_web_present {
-        let has_search_api = search_web_present
+    if tools.fetch || tools.search_web {
+        let has_search_api = tools.search_web
             && search_settings.as_ref().is_some_and(|s| {
                 use crate::settings::models::search_settings::SearchProvider;
                 let key = match s.active_provider {
@@ -58,7 +37,7 @@ pub(super) fn build_preamble(
              Use this to read specific pages, documentation, or articles."
         ));
     }
-    if shell_tools.is_some() {
+    if tools.shell {
         tool_sections.push(
             "- **shell_execute / shell_cd / shell_set_env / shell_status**: \
              Run any shell/terminal command in a persistent session that preserves \
@@ -67,14 +46,14 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if fs_read_tools.is_some() {
+    if tools.fs_read {
         tool_sections.push(
             "- **read_file / read_binary / list_directory / glob_search**: \
              Read files and explore the workspace directory."
                 .to_string(),
         );
     }
-    if fs_write_tools.is_some() {
+    if tools.fs_write {
         tool_sections.push(
             "- **write_file / apply_diff / create_directory / delete_file / move_file**: \
              Create, edit, and manage files in the workspace. \
@@ -82,14 +61,14 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if search_tools.is_some() {
+    if tools.search {
         tool_sections.push(
             "- **search_code / find_files / find_definition**: \
              Search for patterns, files, and symbol definitions in the workspace."
                 .to_string(),
         );
     }
-    if git_tools.is_some() {
+    if tools.git {
         tool_sections.push(
             "- **git_status / git_diff / git_log / git_add / git_commit / \
              git_create_branch / git_switch_branch**: \
@@ -97,7 +76,7 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if add_attachment_present {
+    if tools.add_attachment {
         tool_sections.push(
             "- **add_attachment**: Display an image or PDF inline in the chat response. \
              Useful for showing generated plots, screenshots, or documents."
@@ -111,7 +90,7 @@ pub(super) fn build_preamble(
          Use this to visualize data for the user."
             .to_string(),
     );
-    if typst_tool_present {
+    if tools.compile_typst {
         tool_sections.push(
             "- **compile_typst**: Compile Typst markup into a PDF file saved to disk. \
              Use for generating formatted documents: reports, papers, documents with math, \
@@ -120,12 +99,12 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if excel_read_present || excel_write_present {
+    if tools.excel_read || tools.excel_write {
         let mut excel_desc = Vec::new();
-        if excel_read_present {
+        if tools.excel_read {
             excel_desc.push("**read_excel**");
         }
-        if excel_write_present {
+        if tools.excel_write {
             excel_desc.push("**write_excel** / **edit_excel**");
         }
         tool_sections.push(format!(
@@ -134,18 +113,17 @@ pub(super) fn build_preamble(
             excel_desc.join(" / ")
         ));
     }
-    if pdf_to_image_present || pdf_info_present || pdf_extract_text_present {
+    if tools.pdf_to_image || tools.pdf_info || tools.pdf_extract_text {
         let mut pdf_desc = String::from("- **PDF tools**:");
-        if pdf_info_present {
+        if tools.pdf_info {
             pdf_desc.push_str(" `pdf_info` (page count, dimensions, metadata),");
         }
-        if pdf_extract_text_present {
+        if tools.pdf_extract_text {
             pdf_desc.push_str(" `pdf_extract_text` (extract text from pages),");
         }
-        if pdf_to_image_present {
-            pdf_desc.push_str(
-                " `pdf_to_image` (render pages as PNG images for visual inspection),",
-            );
+        if tools.pdf_to_image {
+            pdf_desc
+                .push_str(" `pdf_to_image` (render pages as PNG images for visual inspection),");
         }
         if pdf_desc.ends_with(',') {
             pdf_desc.pop();
@@ -153,7 +131,7 @@ pub(super) fn build_preamble(
         pdf_desc.push('.');
         tool_sections.push(pdf_desc);
     }
-    if data_query_present {
+    if tools.data_query {
         tool_sections.push(
             "- **query_data / describe_data**: Run SQL queries against local Parquet, CSV, \
              and JSON files using DuckDB. Use `describe_data` to inspect schema first, \
@@ -180,7 +158,7 @@ pub(super) fn build_preamble(
          prompt. The agent runs autonomously and returns its response."
             .to_string(),
     );
-    if execute_code_present {
+    if tools.execute_code {
         tool_sections.push(
             "- **execute_code**: Execute code in an isolated Docker sandbox. \
              Supports python, javascript, typescript, rust, and bash. \
@@ -190,7 +168,7 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if memory_present {
+    if tools.memory {
         tool_sections.push(
             "- **remember**: Store important information in persistent cross-conversation memory.\n\
              - **save_skill**: Save a reusable multi-step procedure to persistent memory for \
@@ -199,7 +177,7 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if sub_agent_present {
+    if tools.sub_agent {
         tool_sections.push(
             "- **sub_agent**: Delegate a task to an independent sub-agent that has access to \
              the same tools. The sub-agent runs autonomously and returns the result. \
@@ -210,7 +188,7 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if browser_use_present {
+    if tools.browser_use {
         tool_sections.push(
             "- **browser_use**: Automate browser tasks using the browser-use cloud service. \
              Describe what you want the browser agent to do in natural language and it will \
@@ -218,7 +196,7 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if daytona_present {
+    if tools.daytona {
         tool_sections.push(
             "- **daytona_run**: Execute code in an isolated Daytona cloud sandbox. \
              Creates a secure, ephemeral environment, runs the code, returns output, \
@@ -227,7 +205,7 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if publish_module_present {
+    if tools.publish_module {
         tool_sections.push(
             "- **publish_wasm_module**: Publish a WASM module to the hive registry. \
              Provide the path to the .wasm file and a TOML manifest string. The tool \
@@ -254,9 +232,7 @@ pub(super) fn build_preamble(
     if !mcp_tool_info.is_empty() {
         let mut mcp_section = String::from("- **MCP tools** (from connected servers):\n");
         for (server_name, tool_name, tool_desc) in mcp_tool_info {
-            mcp_section.push_str(&format!(
-                "  - `{tool_name}` ({server_name}): {tool_desc}\n"
-            ));
+            mcp_section.push_str(&format!("  - `{tool_name}` ({server_name}): {tool_desc}\n"));
         }
         tool_sections.push(mcp_section);
     }
@@ -296,7 +272,7 @@ pub(super) fn build_preamble(
          before giving a final answer.";
 
     // Memory recall instructions — only if memory tools are available.
-    let memory_instructions = if memory_present {
+    let memory_instructions = if tools.memory {
         "\n\n## Memory\n\
              You have persistent memory that survives across conversations and app restarts. \
              Relevant memories are automatically injected as context before each of your responses — \

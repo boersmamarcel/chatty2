@@ -1,29 +1,36 @@
 use std::collections::HashSet;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn active_native_tool_names(
-    has_fs_read: bool,
-    has_fs_write: bool,
-    has_add_mcp: bool,
-    has_fetch: bool,
-    has_shell: bool,
-    has_git: bool,
-    has_search: bool,
-    has_add_attachment: bool,
-    has_excel_read: bool,
-    has_excel_write: bool,
-    has_pdf_to_image: bool,
-    has_pdf_info: bool,
-    has_pdf_extract_text: bool,
-    has_data_query: bool,
-    has_compile_typst: bool,
-    has_execute_code: bool,
-    has_memory: bool,
-    has_search_web: bool,
-    has_sub_agent: bool,
-    has_browser_use: bool,
-    has_daytona: bool,
-) -> HashSet<String> {
+/// Boolean flags indicating which native tools are available.
+///
+/// Used to register tool names, generate the tool listing for the LLM,
+/// and build the system prompt tool summary.
+#[derive(Clone, Debug, Default)]
+pub struct ToolAvailability {
+    pub fs_read: bool,
+    pub fs_write: bool,
+    pub add_mcp: bool,
+    pub fetch: bool,
+    pub shell: bool,
+    pub git: bool,
+    pub search: bool,
+    pub add_attachment: bool,
+    pub excel_read: bool,
+    pub excel_write: bool,
+    pub pdf_to_image: bool,
+    pub pdf_info: bool,
+    pub pdf_extract_text: bool,
+    pub data_query: bool,
+    pub compile_typst: bool,
+    pub execute_code: bool,
+    pub memory: bool,
+    pub search_web: bool,
+    pub sub_agent: bool,
+    pub browser_use: bool,
+    pub daytona: bool,
+    pub publish_module: bool,
+}
+
+pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<String> {
     let mut names = HashSet::from([
         String::from("list_tools"),
         String::from("read_skill"),
@@ -31,7 +38,7 @@ pub(super) fn active_native_tool_names(
         String::from("invoke_agent"),
     ]);
 
-    if has_add_mcp {
+    if tools.add_mcp {
         names.extend(
             [
                 "list_mcp_services",
@@ -43,17 +50,17 @@ pub(super) fn active_native_tool_names(
             .map(String::from),
         );
     }
-    if has_fetch {
+    if tools.fetch {
         names.insert(String::from("fetch"));
     }
-    if has_fs_read {
+    if tools.fs_read {
         names.extend(
             ["read_file", "read_binary", "list_directory", "glob_search"]
                 .into_iter()
                 .map(String::from),
         );
     }
-    if has_fs_write {
+    if tools.fs_write {
         names.extend(
             [
                 "write_file",
@@ -66,14 +73,14 @@ pub(super) fn active_native_tool_names(
             .map(String::from),
         );
     }
-    if has_shell {
+    if tools.shell {
         names.extend(
             ["shell_execute", "shell_set_env", "shell_cd", "shell_status"]
                 .into_iter()
                 .map(String::from),
         );
     }
-    if has_git {
+    if tools.git {
         names.extend(
             [
                 "git_status",
@@ -88,62 +95,65 @@ pub(super) fn active_native_tool_names(
             .map(String::from),
         );
     }
-    if has_search {
+    if tools.search {
         names.extend(
             ["search_code", "find_files", "find_definition"]
                 .into_iter()
                 .map(String::from),
         );
     }
-    if has_add_attachment {
+    if tools.add_attachment {
         names.insert(String::from("add_attachment"));
     }
-    if has_excel_read {
+    if tools.excel_read {
         names.insert(String::from("read_excel"));
     }
-    if has_excel_write {
+    if tools.excel_write {
         names.extend(["write_excel", "edit_excel"].into_iter().map(String::from));
     }
-    if has_pdf_to_image {
+    if tools.pdf_to_image {
         names.insert(String::from("pdf_to_image"));
     }
-    if has_pdf_info {
+    if tools.pdf_info {
         names.insert(String::from("pdf_info"));
     }
-    if has_pdf_extract_text {
+    if tools.pdf_extract_text {
         names.insert(String::from("pdf_extract_text"));
     }
-    if has_data_query {
+    if tools.data_query {
         names.extend(
             ["query_data", "describe_data"]
                 .into_iter()
                 .map(String::from),
         );
     }
-    if has_compile_typst {
+    if tools.compile_typst {
         names.insert(String::from("compile_typst"));
     }
-    if has_execute_code {
+    if tools.execute_code {
         names.insert(String::from("execute_code"));
     }
-    if has_memory {
+    if tools.memory {
         names.extend(
             ["remember", "save_skill", "search_memory"]
                 .into_iter()
                 .map(String::from),
         );
     }
-    if has_search_web {
+    if tools.search_web {
         names.insert(String::from("search_web"));
     }
-    if has_sub_agent {
+    if tools.sub_agent {
         names.insert(String::from("sub_agent"));
     }
-    if has_browser_use {
+    if tools.browser_use {
         names.insert(String::from("browser_use"));
     }
-    if has_daytona {
+    if tools.daytona {
         names.insert(String::from("daytona_run"));
+    }
+    if tools.publish_module {
+        names.insert(String::from("publish_wasm_module"));
     }
 
     names
@@ -155,10 +165,7 @@ mod tests {
 
     #[test]
     fn always_includes_read_skill() {
-        let names = active_native_tool_names(
-            false, false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false, false, false, false,
-        );
+        let names = active_native_tool_names(&ToolAvailability::default());
         assert!(
             names.contains("read_skill"),
             "read_skill must always be reserved to prevent MCP conflicts"
@@ -169,10 +176,10 @@ mod tests {
 
     #[test]
     fn includes_search_tools() {
-        let names = active_native_tool_names(
-            false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false, false, false, false,
-        );
+        let names = active_native_tool_names(&ToolAvailability {
+            search: true,
+            ..Default::default()
+        });
 
         assert!(names.contains("list_tools"));
         assert!(names.contains("search_code"));

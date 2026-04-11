@@ -1,9 +1,9 @@
 pub mod app_view;
 pub mod approval_prompt_bar;
 pub use chatty_core::models::attachment_validation;
+mod chart_renderer;
 pub mod chat_input;
 pub mod chat_view;
-mod chart_renderer;
 pub mod code_block_component;
 pub mod conversation_item;
 pub mod diff_view_component;

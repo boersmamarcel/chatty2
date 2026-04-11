@@ -1,3 +1,4 @@
+use crate::factories::agent_factory::ToolAvailability;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -41,29 +42,8 @@ impl ListToolsTool {
     ///
     /// `mcp_tool_info` is a list of (server_name, tool_name, tool_description) tuples
     /// extracted from the MCP service so the model can discover them via `list_tools`.
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_config(
-        has_fs_read: bool,
-        has_fs_write: bool,
-        has_add_mcp: bool,
-        has_fetch: bool,
-        has_shell: bool,
-        has_git: bool,
-        has_search: bool,
-        has_add_attachment: bool,
-        has_excel_read: bool,
-        has_excel_write: bool,
-        has_pdf_to_image: bool,
-        has_pdf_info: bool,
-        has_pdf_extract_text: bool,
-        has_data_query: bool,
-        has_compile_typst: bool,
-        has_execute_code: bool,
-        has_memory: bool,
-        has_search_web: bool,
-        has_sub_agent: bool,
-        has_browser_use: bool,
-        has_daytona: bool,
+        tools: &ToolAvailability,
         mcp_tool_info: Vec<(String, String, String)>,
     ) -> Self {
         let mut native_tools = vec![ToolInfo {
@@ -72,7 +52,7 @@ impl ListToolsTool {
             source: "native".to_string(),
         }];
 
-        if has_add_mcp {
+        if tools.add_mcp {
             native_tools.push(ToolInfo {
                 name: "list_mcp_services".to_string(),
                 description: "List all configured MCP servers (names, commands, args, enabled state, masked env vars). Call this FIRST before editing or deleting to confirm the exact server name.".to_string(),
@@ -98,7 +78,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_fetch {
+        if tools.fetch {
             native_tools.push(ToolInfo {
                 name: "fetch".to_string(),
                 description: "Fetch a URL and return its content as readable text. HTML pages are converted to plain text. Use for documentation lookups, web pages, or API responses.".to_string(),
@@ -106,7 +86,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_fs_read {
+        if tools.fs_read {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "read_file".to_string(),
@@ -134,7 +114,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_fs_write {
+        if tools.fs_write {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "write_file".to_string(),
@@ -165,7 +145,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_shell {
+        if tools.shell {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "shell_execute".to_string(),
@@ -190,7 +170,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_git {
+        if tools.git {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "git_status".to_string(),
@@ -230,7 +210,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_search {
+        if tools.search {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "search_code".to_string(),
@@ -250,7 +230,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_add_attachment {
+        if tools.add_attachment {
             native_tools.push(ToolInfo {
                 name: "add_attachment".to_string(),
                 description: "Display an image or PDF file inline in the chat response. Use this to show generated plots, charts, screenshots, or documents. Supported formats: PNG, JPG, JPEG, GIF, WebP, SVG, BMP (images), PDF (documents). Maximum file size: 5MB.".to_string(),
@@ -258,7 +238,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_excel_read {
+        if tools.excel_read {
             native_tools.push(ToolInfo {
                 name: "read_excel".to_string(),
                 description: "Read an Excel spreadsheet and return structured data as JSON with a markdown table preview. Supports .xlsx, .xls, .xlsm, .xlsb, .ods formats.".to_string(),
@@ -266,7 +246,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_excel_write {
+        if tools.excel_write {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "write_excel".to_string(),
@@ -281,7 +261,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_pdf_to_image {
+        if tools.pdf_to_image {
             native_tools.push(ToolInfo {
                 name: "pdf_to_image".to_string(),
                 description: "Convert PDF pages to PNG images and display them inline in chat. Use when you need to visually inspect PDF content or the model lacks native PDF support. Maximum 20 pages per call, configurable DPI (72-300).".to_string(),
@@ -289,7 +269,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_pdf_info {
+        if tools.pdf_info {
             native_tools.push(ToolInfo {
                 name: "pdf_info".to_string(),
                 description: "Get metadata and structural information about a PDF file: page count, page dimensions, title, author, creation date, etc.".to_string(),
@@ -297,7 +277,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_pdf_extract_text {
+        if tools.pdf_extract_text {
             native_tools.push(ToolInfo {
                 name: "pdf_extract_text".to_string(),
                 description: "Extract text content from PDF pages. Returns raw text from specified pages or all pages. Maximum 50 pages per call.".to_string(),
@@ -305,7 +285,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_data_query {
+        if tools.data_query {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "query_data".to_string(),
@@ -320,7 +300,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_compile_typst {
+        if tools.compile_typst {
             native_tools.push(ToolInfo {
                 name: "compile_typst".to_string(),
                 description: "Compile Typst markup into a PDF file and save it to disk. Supports headings, paragraphs, tables, math expressions, code blocks, lists, and multi-page documents.".to_string(),
@@ -328,7 +308,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_execute_code {
+        if tools.execute_code {
             native_tools.push(ToolInfo {
                 name: "execute_code".to_string(),
                 description: "Execute code in an isolated Docker sandbox. Supports python, javascript, typescript, rust, and bash. State persists throughout the conversation. No network access.".to_string(),
@@ -336,7 +316,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_memory {
+        if tools.memory {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "remember".to_string(),
@@ -356,7 +336,7 @@ impl ListToolsTool {
             ]);
         }
 
-        if has_search_web {
+        if tools.search_web {
             native_tools.push(ToolInfo {
                 name: "search_web".to_string(),
                 description: "Search the web for up-to-date information. Use this first when you need current information, recent events, or anything not in your training data.".to_string(),
@@ -364,7 +344,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_sub_agent {
+        if tools.sub_agent {
             native_tools.push(ToolInfo {
                 name: "sub_agent".to_string(),
                 description: "Delegate a task to an independent sub-agent that has access to the same tools. The sub-agent runs autonomously in its own process, executes the task (including any tool calls it needs), and returns the result. Use this to parallelize work or isolate complex sub-tasks. Supports an optional `model` parameter to run the sub-agent with a different model.".to_string(),
@@ -372,7 +352,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_browser_use {
+        if tools.browser_use {
             native_tools.push(ToolInfo {
                 name: "browser_use".to_string(),
                 description: "Automate browser tasks using the browser-use cloud service. Describe what you want the browser agent to do in natural language. The agent controls a real browser and returns the result.".to_string(),
@@ -380,7 +360,7 @@ impl ListToolsTool {
             });
         }
 
-        if has_daytona {
+        if tools.daytona {
             native_tools.push(ToolInfo {
                 name: "daytona_run".to_string(),
                 description: "Execute code in an isolated Daytona cloud sandbox. Creates a secure, ephemeral environment, runs your code, returns the output, and cleans up automatically.".to_string(),
@@ -416,30 +396,7 @@ impl ListToolsTool {
 
     /// Create a new ListToolsTool (for backward compatibility)
     pub fn new() -> Self {
-        Self::new_with_config(
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            Vec::new(),
-        )
+        Self::new_with_config(&ToolAvailability::default(), Vec::new())
     }
 }
 

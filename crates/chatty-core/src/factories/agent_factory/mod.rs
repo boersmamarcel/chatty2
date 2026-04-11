@@ -30,12 +30,39 @@ use crate::tools::{
     ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
 };
 
-use mcp_helpers::{McpTools, build_with_mcp_tools, filter_mcp_tool_info, sanitize_mcp_tools_for_openai};
+use mcp_helpers::{
+    McpTools, build_with_mcp_tools, filter_mcp_tool_info, sanitize_mcp_tools_for_openai,
+};
 use preamble_builder::build_preamble;
 use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
+pub use tool_registry::ToolAvailability;
+
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
+
+/// Contextual dependencies for building an agent.
+///
+/// Groups the many optional services and settings needed by
+/// `AgentClient::from_model_config_with_tools()` and `Conversation::new/from_data()`.
+pub struct AgentBuildContext {
+    pub mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
+    pub exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
+    pub pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
+    pub pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
+    pub pending_artifacts: Option<PendingArtifacts>,
+    pub shell_session: Option<std::sync::Arc<ShellSession>>,
+    pub user_secrets: Vec<(String, String)>,
+    pub theme_colors: Option<[String; 5]>,
+    pub memory_service: Option<MemoryService>,
+    pub search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
+    pub embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
+    pub allow_sub_agent: bool,
+    pub module_agents: Vec<LocalModuleAgentSummary>,
+    pub gateway_port: Option<u16>,
+    pub remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
+    pub available_model_ids: Vec<String>,
+}
 
 /// Enum-based agent wrapper for multi-provider support
 #[derive(Clone)]
@@ -49,27 +76,11 @@ pub enum AgentClient {
 }
 
 impl AgentClient {
-    /// Create AgentClient from ModelConfig and ProviderConfig with optional MCP tools, shell execution, and filesystem tools
-    #[allow(clippy::too_many_arguments)]
+    /// Create AgentClient from ModelConfig, ProviderConfig and build context
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
-        mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-        exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-        pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
-        pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
-        pending_artifacts: Option<PendingArtifacts>,
-        shell_session: Option<std::sync::Arc<ShellSession>>,
-        user_secrets: Vec<(String, String)>,
-        theme_colors: Option<[String; 5]>,
-        memory_service: Option<MemoryService>,
-        search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
-        embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
-        allow_sub_agent: bool,
-        module_agents: Vec<LocalModuleAgentSummary>,
-        gateway_port: Option<u16>,
-        remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
-        available_model_ids: Vec<String>,
+        ctx: AgentBuildContext,
     ) -> Result<(
         Self,
         Option<std::sync::Arc<ShellSession>>,
@@ -77,6 +88,26 @@ impl AgentClient {
     )> {
         let api_key = provider_config.api_key.clone();
         let base_url = provider_config.base_url.clone();
+
+        // Destructure context for local use
+        let AgentBuildContext {
+            mcp_tools,
+            exec_settings,
+            pending_approvals,
+            pending_write_approvals,
+            pending_artifacts,
+            shell_session,
+            user_secrets,
+            theme_colors,
+            memory_service,
+            search_settings,
+            embedding_service,
+            allow_sub_agent,
+            module_agents,
+            gateway_port,
+            remote_agents,
+            available_model_ids,
+        } = ctx;
 
         // Extract secret key names before user_secrets is moved into ShellSession.
         let secret_key_names: Vec<String> = user_secrets.iter().map(|(k, _)| k.clone()).collect();
@@ -652,56 +683,36 @@ impl AgentClient {
                 None
             };
 
-        let native_tool_names = active_native_tool_names(
-            fs_read_tools.is_some(),
-            fs_write_tools.is_some(),
-            mcp_mgmt_tools.is_enabled(),
-            fetch_tool.is_some(),
-            shell_tools.is_some(),
-            git_tools.is_some(),
-            search_tools.is_some(),
-            add_attachment_tool.is_some(),
-            excel_read_tool.is_some(),
-            excel_write_tools.is_some(),
-            pdf_to_image_tool.is_some(),
-            pdf_info_tool.is_some(),
-            pdf_extract_text_tool.is_some(),
-            data_query_tools.is_some(),
-            typst_tool.is_some(),
-            execute_code_tool.is_some(),
-            remember_tool.is_some(),
-            search_web_tool.is_some(),
-            sub_agent_tool.is_some(),
-            browser_use_tool.is_some(),
-            daytona_tool.is_some(),
-        );
+        let tool_availability = ToolAvailability {
+            fs_read: fs_read_tools.is_some(),
+            fs_write: fs_write_tools.is_some(),
+            add_mcp: mcp_mgmt_tools.is_enabled(),
+            fetch: fetch_tool.is_some(),
+            shell: shell_tools.is_some(),
+            git: git_tools.is_some(),
+            search: search_tools.is_some(),
+            add_attachment: add_attachment_tool.is_some(),
+            excel_read: excel_read_tool.is_some(),
+            excel_write: excel_write_tools.is_some(),
+            pdf_to_image: pdf_to_image_tool.is_some(),
+            pdf_info: pdf_info_tool.is_some(),
+            pdf_extract_text: pdf_extract_text_tool.is_some(),
+            data_query: data_query_tools.is_some(),
+            compile_typst: typst_tool.is_some(),
+            execute_code: execute_code_tool.is_some(),
+            memory: remember_tool.is_some(),
+            search_web: search_web_tool.is_some(),
+            sub_agent: sub_agent_tool.is_some(),
+            browser_use: browser_use_tool.is_some(),
+            daytona: daytona_tool.is_some(),
+            publish_module: false, // set below after publish_module_tool is created
+        };
+
+        let native_tool_names = active_native_tool_names(&tool_availability);
         let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
 
         // Create list_tools tool (always available)
-        let list_tools = ListToolsTool::new_with_config(
-            fs_read_tools.is_some(),
-            fs_write_tools.is_some(),
-            mcp_mgmt_tools.is_enabled(),
-            fetch_tool.is_some(),
-            shell_tools.is_some(),
-            git_tools.is_some(),
-            search_tools.is_some(),
-            add_attachment_tool.is_some(),
-            excel_read_tool.is_some(),
-            excel_write_tools.is_some(),
-            pdf_to_image_tool.is_some(),
-            pdf_info_tool.is_some(),
-            pdf_extract_text_tool.is_some(),
-            data_query_tools.is_some(),
-            typst_tool.is_some(),
-            execute_code_tool.is_some(),
-            remember_tool.is_some(),
-            search_web_tool.is_some(),
-            sub_agent_tool.is_some(),
-            browser_use_tool.is_some(),
-            daytona_tool.is_some(),
-            mcp_tool_info.clone(),
-        );
+        let list_tools = ListToolsTool::new_with_config(&tool_availability, mcp_tool_info.clone());
 
         // Create list_agents tool (always available)
         let list_agents_tool =
@@ -728,33 +739,19 @@ impl AgentClient {
             None
         });
 
+        // Update publish_module availability now that we know
+        let tool_availability = ToolAvailability {
+            publish_module: publish_module_tool.is_some(),
+            ..tool_availability
+        };
+
         // Build the augmented preamble
         let preamble = build_preamble(
             &model_config.preamble,
-            fetch_tool.is_some(),
-            search_web_tool.is_some(),
+            &tool_availability,
             &search_settings,
-            &shell_tools,
-            &fs_read_tools,
-            &fs_write_tools,
-            &search_tools,
-            &git_tools,
-            add_attachment_tool.is_some(),
-            typst_tool.is_some(),
-            excel_read_tool.is_some(),
-            excel_write_tools.is_some(),
-            pdf_to_image_tool.is_some(),
-            pdf_info_tool.is_some(),
-            pdf_extract_text_tool.is_some(),
-            data_query_tools.is_some(),
             &mcp_mgmt_tools,
             &mcp_tool_info,
-            execute_code_tool.is_some(),
-            remember_tool.is_some(),
-            sub_agent_tool.is_some(),
-            browser_use_tool.is_some(),
-            daytona_tool.is_some(),
-            publish_module_tool.is_some(),
             &secret_key_names,
         );
 
@@ -773,37 +770,38 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let tool_vec = collect_tools(
+                let tool_vec = NativeTools {
                     list_tools,
-                    fs_read_tools,
-                    fs_write_tools,
-                    add_attachment_tool.clone(),
-                    pdf_to_image_tool.clone(),
-                    pdf_info_tool.clone(),
-                    pdf_extract_text_tool.clone(),
-                    mcp_mgmt_tools,
-                    fetch_tool.clone(),
+                    fs_read: fs_read_tools,
+                    fs_write: fs_write_tools,
+                    add_attachment: add_attachment_tool.clone(),
+                    pdf_to_image: pdf_to_image_tool.clone(),
+                    pdf_info: pdf_info_tool.clone(),
+                    pdf_extract_text: pdf_extract_text_tool.clone(),
+                    mcp_mgmt: mcp_mgmt_tools,
+                    fetch_tool: fetch_tool.clone(),
                     shell_tools,
                     git_tools,
                     search_tools,
-                    excel_read_tool.clone(),
-                    excel_write_tools.clone(),
-                    data_query_tools.clone(),
-                    chart_tool.clone(),
-                    typst_tool.clone(),
-                    execute_code_tool.clone(),
-                    remember_tool.clone(),
-                    save_skill_tool.clone(),
-                    search_memory_tool.clone(),
-                    read_skill_tool.clone(),
-                    search_web_tool.clone(),
-                    sub_agent_tool.clone(),
-                    browser_use_tool.clone(),
-                    daytona_tool.clone(),
-                    list_agents_tool.clone(),
-                    invoke_agent_tool.clone(),
-                    publish_module_tool.clone(),
-                );
+                    excel_read: excel_read_tool.clone(),
+                    excel_write: excel_write_tools.clone(),
+                    data_query: data_query_tools.clone(),
+                    chart_tool: chart_tool.clone(),
+                    typst_tool: typst_tool.clone(),
+                    execute_code_tool: execute_code_tool.clone(),
+                    remember_tool: remember_tool.clone(),
+                    save_skill_tool: save_skill_tool.clone(),
+                    search_memory_tool: search_memory_tool.clone(),
+                    read_skill_tool: read_skill_tool.clone(),
+                    search_web_tool: search_web_tool.clone(),
+                    sub_agent_tool: sub_agent_tool.clone(),
+                    browser_use_tool: browser_use_tool.clone(),
+                    daytona_tool: daytona_tool.clone(),
+                    list_agents_tool: list_agents_tool.clone(),
+                    invoke_agent_tool: invoke_agent_tool.clone(),
+                    publish_module_tool: publish_module_tool.clone(),
+                }
+                .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
@@ -845,37 +843,38 @@ impl AgentClient {
                     }));
                 }
 
-                let tool_vec = collect_tools(
+                let tool_vec = NativeTools {
                     list_tools,
-                    fs_read_tools,
-                    fs_write_tools,
-                    add_attachment_tool.clone(),
-                    pdf_to_image_tool.clone(),
-                    pdf_info_tool.clone(),
-                    pdf_extract_text_tool.clone(),
-                    mcp_mgmt_tools,
-                    fetch_tool.clone(),
+                    fs_read: fs_read_tools,
+                    fs_write: fs_write_tools,
+                    add_attachment: add_attachment_tool.clone(),
+                    pdf_to_image: pdf_to_image_tool.clone(),
+                    pdf_info: pdf_info_tool.clone(),
+                    pdf_extract_text: pdf_extract_text_tool.clone(),
+                    mcp_mgmt: mcp_mgmt_tools,
+                    fetch_tool: fetch_tool.clone(),
                     shell_tools,
                     git_tools,
                     search_tools,
-                    excel_read_tool.clone(),
-                    excel_write_tools.clone(),
-                    data_query_tools.clone(),
-                    chart_tool.clone(),
-                    typst_tool.clone(),
-                    execute_code_tool.clone(),
-                    remember_tool.clone(),
-                    save_skill_tool.clone(),
-                    search_memory_tool.clone(),
-                    read_skill_tool.clone(),
-                    search_web_tool.clone(),
-                    sub_agent_tool.clone(),
-                    browser_use_tool.clone(),
-                    daytona_tool.clone(),
-                    list_agents_tool.clone(),
-                    invoke_agent_tool.clone(),
-                    publish_module_tool.clone(),
-                );
+                    excel_read: excel_read_tool.clone(),
+                    excel_write: excel_write_tools.clone(),
+                    data_query: data_query_tools.clone(),
+                    chart_tool: chart_tool.clone(),
+                    typst_tool: typst_tool.clone(),
+                    execute_code_tool: execute_code_tool.clone(),
+                    remember_tool: remember_tool.clone(),
+                    save_skill_tool: save_skill_tool.clone(),
+                    search_memory_tool: search_memory_tool.clone(),
+                    read_skill_tool: read_skill_tool.clone(),
+                    search_web_tool: search_web_tool.clone(),
+                    sub_agent_tool: sub_agent_tool.clone(),
+                    browser_use_tool: browser_use_tool.clone(),
+                    daytona_tool: daytona_tool.clone(),
+                    list_agents_tool: list_agents_tool.clone(),
+                    invoke_agent_tool: invoke_agent_tool.clone(),
+                    publish_module_tool: publish_module_tool.clone(),
+                }
+                .into_tool_vec();
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -896,37 +895,38 @@ impl AgentClient {
                     .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
-                let tool_vec = collect_tools(
+                let tool_vec = NativeTools {
                     list_tools,
-                    fs_read_tools,
-                    fs_write_tools,
-                    add_attachment_tool.clone(),
-                    pdf_to_image_tool.clone(),
-                    pdf_info_tool.clone(),
-                    pdf_extract_text_tool.clone(),
-                    mcp_mgmt_tools,
-                    fetch_tool.clone(),
+                    fs_read: fs_read_tools,
+                    fs_write: fs_write_tools,
+                    add_attachment: add_attachment_tool.clone(),
+                    pdf_to_image: pdf_to_image_tool.clone(),
+                    pdf_info: pdf_info_tool.clone(),
+                    pdf_extract_text: pdf_extract_text_tool.clone(),
+                    mcp_mgmt: mcp_mgmt_tools,
+                    fetch_tool: fetch_tool.clone(),
                     shell_tools,
                     git_tools,
                     search_tools,
-                    excel_read_tool.clone(),
-                    excel_write_tools.clone(),
-                    data_query_tools.clone(),
-                    chart_tool.clone(),
-                    typst_tool.clone(),
-                    execute_code_tool.clone(),
-                    remember_tool.clone(),
-                    save_skill_tool.clone(),
-                    search_memory_tool.clone(),
-                    read_skill_tool.clone(),
-                    search_web_tool.clone(),
-                    sub_agent_tool.clone(),
-                    browser_use_tool.clone(),
-                    daytona_tool.clone(),
-                    list_agents_tool.clone(),
-                    invoke_agent_tool.clone(),
-                    publish_module_tool.clone(),
-                );
+                    excel_read: excel_read_tool.clone(),
+                    excel_write: excel_write_tools.clone(),
+                    data_query: data_query_tools.clone(),
+                    chart_tool: chart_tool.clone(),
+                    typst_tool: typst_tool.clone(),
+                    execute_code_tool: execute_code_tool.clone(),
+                    remember_tool: remember_tool.clone(),
+                    save_skill_tool: save_skill_tool.clone(),
+                    search_memory_tool: search_memory_tool.clone(),
+                    read_skill_tool: read_skill_tool.clone(),
+                    search_web_tool: search_web_tool.clone(),
+                    sub_agent_tool: sub_agent_tool.clone(),
+                    browser_use_tool: browser_use_tool.clone(),
+                    daytona_tool: daytona_tool.clone(),
+                    list_agents_tool: list_agents_tool.clone(),
+                    invoke_agent_tool: invoke_agent_tool.clone(),
+                    publish_module_tool: publish_module_tool.clone(),
+                }
+                .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
@@ -950,37 +950,38 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let tool_vec = collect_tools(
+                let tool_vec = NativeTools {
                     list_tools,
-                    fs_read_tools,
-                    fs_write_tools,
-                    add_attachment_tool.clone(),
-                    pdf_to_image_tool.clone(),
-                    pdf_info_tool.clone(),
-                    pdf_extract_text_tool.clone(),
-                    mcp_mgmt_tools,
-                    fetch_tool.clone(),
+                    fs_read: fs_read_tools,
+                    fs_write: fs_write_tools,
+                    add_attachment: add_attachment_tool.clone(),
+                    pdf_to_image: pdf_to_image_tool.clone(),
+                    pdf_info: pdf_info_tool.clone(),
+                    pdf_extract_text: pdf_extract_text_tool.clone(),
+                    mcp_mgmt: mcp_mgmt_tools,
+                    fetch_tool: fetch_tool.clone(),
                     shell_tools,
                     git_tools,
                     search_tools,
-                    excel_read_tool.clone(),
-                    excel_write_tools.clone(),
-                    data_query_tools.clone(),
-                    chart_tool.clone(),
-                    typst_tool.clone(),
-                    execute_code_tool.clone(),
-                    remember_tool.clone(),
-                    save_skill_tool.clone(),
-                    search_memory_tool.clone(),
-                    read_skill_tool.clone(),
-                    search_web_tool.clone(),
-                    sub_agent_tool.clone(),
-                    browser_use_tool.clone(),
-                    daytona_tool.clone(),
-                    list_agents_tool.clone(),
-                    invoke_agent_tool.clone(),
-                    publish_module_tool.clone(),
-                );
+                    excel_read: excel_read_tool.clone(),
+                    excel_write: excel_write_tools.clone(),
+                    data_query: data_query_tools.clone(),
+                    chart_tool: chart_tool.clone(),
+                    typst_tool: typst_tool.clone(),
+                    execute_code_tool: execute_code_tool.clone(),
+                    remember_tool: remember_tool.clone(),
+                    save_skill_tool: save_skill_tool.clone(),
+                    search_memory_tool: search_memory_tool.clone(),
+                    read_skill_tool: read_skill_tool.clone(),
+                    search_web_tool: search_web_tool.clone(),
+                    sub_agent_tool: sub_agent_tool.clone(),
+                    browser_use_tool: browser_use_tool.clone(),
+                    daytona_tool: daytona_tool.clone(),
+                    list_agents_tool: list_agents_tool.clone(),
+                    invoke_agent_tool: invoke_agent_tool.clone(),
+                    publish_module_tool: publish_module_tool.clone(),
+                }
+                .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
@@ -1003,37 +1004,38 @@ impl AgentClient {
                     .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
-                let tool_vec = collect_tools(
+                let tool_vec = NativeTools {
                     list_tools,
-                    fs_read_tools,
-                    fs_write_tools,
-                    add_attachment_tool.clone(),
-                    pdf_to_image_tool.clone(),
-                    pdf_info_tool.clone(),
-                    pdf_extract_text_tool.clone(),
-                    mcp_mgmt_tools,
-                    fetch_tool.clone(),
+                    fs_read: fs_read_tools,
+                    fs_write: fs_write_tools,
+                    add_attachment: add_attachment_tool.clone(),
+                    pdf_to_image: pdf_to_image_tool.clone(),
+                    pdf_info: pdf_info_tool.clone(),
+                    pdf_extract_text: pdf_extract_text_tool.clone(),
+                    mcp_mgmt: mcp_mgmt_tools,
+                    fetch_tool: fetch_tool.clone(),
                     shell_tools,
                     git_tools,
                     search_tools,
-                    excel_read_tool.clone(),
-                    excel_write_tools.clone(),
-                    data_query_tools.clone(),
-                    chart_tool.clone(),
-                    typst_tool.clone(),
-                    execute_code_tool.clone(),
-                    remember_tool.clone(),
-                    save_skill_tool.clone(),
-                    search_memory_tool.clone(),
-                    read_skill_tool.clone(),
-                    search_web_tool.clone(),
-                    sub_agent_tool.clone(),
-                    browser_use_tool.clone(),
-                    daytona_tool.clone(),
-                    list_agents_tool.clone(),
-                    invoke_agent_tool.clone(),
-                    publish_module_tool.clone(),
-                );
+                    excel_read: excel_read_tool.clone(),
+                    excel_write: excel_write_tools.clone(),
+                    data_query: data_query_tools.clone(),
+                    chart_tool: chart_tool.clone(),
+                    typst_tool: typst_tool.clone(),
+                    execute_code_tool: execute_code_tool.clone(),
+                    remember_tool: remember_tool.clone(),
+                    save_skill_tool: save_skill_tool.clone(),
+                    search_memory_tool: search_memory_tool.clone(),
+                    read_skill_tool: read_skill_tool.clone(),
+                    search_web_tool: search_web_tool.clone(),
+                    sub_agent_tool: sub_agent_tool.clone(),
+                    browser_use_tool: browser_use_tool.clone(),
+                    daytona_tool: daytona_tool.clone(),
+                    list_agents_tool: list_agents_tool.clone(),
+                    invoke_agent_tool: invoke_agent_tool.clone(),
+                    publish_module_tool: publish_module_tool.clone(),
+                }
+                .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
 
@@ -1152,37 +1154,38 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let tool_vec = collect_tools(
+                let tool_vec = NativeTools {
                     list_tools,
-                    fs_read_tools,
-                    fs_write_tools,
-                    add_attachment_tool.clone(),
-                    pdf_to_image_tool.clone(),
-                    pdf_info_tool.clone(),
-                    pdf_extract_text_tool.clone(),
-                    mcp_mgmt_tools,
-                    fetch_tool.clone(),
+                    fs_read: fs_read_tools,
+                    fs_write: fs_write_tools,
+                    add_attachment: add_attachment_tool.clone(),
+                    pdf_to_image: pdf_to_image_tool.clone(),
+                    pdf_info: pdf_info_tool.clone(),
+                    pdf_extract_text: pdf_extract_text_tool.clone(),
+                    mcp_mgmt: mcp_mgmt_tools,
+                    fetch_tool: fetch_tool.clone(),
                     shell_tools,
                     git_tools,
                     search_tools,
-                    excel_read_tool.clone(),
-                    excel_write_tools.clone(),
-                    data_query_tools.clone(),
-                    chart_tool.clone(),
-                    typst_tool.clone(),
-                    execute_code_tool.clone(),
-                    remember_tool.clone(),
-                    save_skill_tool.clone(),
-                    search_memory_tool.clone(),
-                    read_skill_tool.clone(),
-                    search_web_tool.clone(),
-                    sub_agent_tool.clone(),
-                    browser_use_tool.clone(),
-                    daytona_tool.clone(),
-                    list_agents_tool.clone(),
-                    invoke_agent_tool.clone(),
-                    publish_module_tool.clone(),
-                );
+                    excel_read: excel_read_tool.clone(),
+                    excel_write: excel_write_tools.clone(),
+                    data_query: data_query_tools.clone(),
+                    chart_tool: chart_tool.clone(),
+                    typst_tool: typst_tool.clone(),
+                    execute_code_tool: execute_code_tool.clone(),
+                    remember_tool: remember_tool.clone(),
+                    save_skill_tool: save_skill_tool.clone(),
+                    search_memory_tool: search_memory_tool.clone(),
+                    read_skill_tool: read_skill_tool.clone(),
+                    search_web_tool: search_web_tool.clone(),
+                    sub_agent_tool: sub_agent_tool.clone(),
+                    browser_use_tool: browser_use_tool.clone(),
+                    daytona_tool: daytona_tool.clone(),
+                    list_agents_tool: list_agents_tool.clone(),
+                    invoke_agent_tool: invoke_agent_tool.clone(),
+                    publish_module_tool: publish_module_tool.clone(),
+                }
+                .into_tool_vec();
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1216,13 +1219,12 @@ impl AgentClient {
 /// 3. Extract base URL if user provided full path (e.g., .../openai/deployments/...)
 fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
     let raw_endpoint = raw_endpoint.trim_end_matches('/').to_string();
-    let mut endpoint = if raw_endpoint.starts_with("http://")
-        || raw_endpoint.starts_with("https://")
-    {
-        raw_endpoint
-    } else {
-        format!("https://{}", raw_endpoint)
-    };
+    let mut endpoint =
+        if raw_endpoint.starts_with("http://") || raw_endpoint.starts_with("https://") {
+            raw_endpoint
+        } else {
+            format!("https://{}", raw_endpoint)
+        };
 
     let hostname_end = endpoint.find("://").and_then(|scheme_pos| {
         endpoint[scheme_pos + 3..]
@@ -1241,9 +1243,9 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::tool_registry::active_native_tool_names;
     use super::mcp_helpers::filter_mcp_tool_info;
     use super::normalize_azure_endpoint;
+    use super::tool_registry::{ToolAvailability, active_native_tool_names};
 
     #[test]
     fn test_azure_url_normalization_basic() {
@@ -1303,10 +1305,7 @@ mod tests {
 
     #[test]
     fn active_native_tool_names_always_includes_read_skill() {
-        let names = active_native_tool_names(
-            false, false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false, false, false, false,
-        );
+        let names = active_native_tool_names(&ToolAvailability::default());
         assert!(
             names.contains("read_skill"),
             "read_skill must always be reserved to prevent MCP conflicts"
@@ -1317,10 +1316,10 @@ mod tests {
 
     #[test]
     fn active_native_tool_names_includes_search_tools() {
-        let names = active_native_tool_names(
-            false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false, false, false, false,
-        );
+        let names = active_native_tool_names(&ToolAvailability {
+            search: true,
+            ..Default::default()
+        });
 
         assert!(names.contains("list_tools"));
         assert!(names.contains("search_code"));
@@ -1330,10 +1329,10 @@ mod tests {
 
     #[test]
     fn filter_mcp_tool_info_skips_native_and_mcp_duplicates() {
-        let reserved = active_native_tool_names(
-            false, false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false, false, false, false, false, false, false,
-        );
+        let reserved = active_native_tool_names(&ToolAvailability {
+            search: true,
+            ..Default::default()
+        });
 
         let filtered = filter_mcp_tool_info(
             vec![

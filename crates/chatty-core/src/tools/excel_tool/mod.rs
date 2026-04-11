@@ -24,7 +24,7 @@ pub enum ExcelToolError {
 #[cfg(test)]
 mod tests {
     use super::parsing::*;
-    use super::write::{write_sheet, CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec};
+    use super::write::{CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, write_sheet};
     use super::*;
     use calamine::{Data, Reader, open_workbook_auto};
     use rust_xlsxwriter::Workbook;

@@ -13,7 +13,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use engine::ChatEngine;
+use engine::{ChatEngine, ChatEngineConfig};
 use events::AppEvent;
 
 #[derive(Parser)]
@@ -338,19 +338,21 @@ async fn main() -> Result<()> {
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
     let mut engine = ChatEngine::new(
-        model_config,
-        provider_config,
-        execution_settings,
-        models,
-        providers,
-        mcp_service,
-        memory_service,
-        search_settings,
-        embedding_service,
-        user_secrets,
-        remote_agents,
+        ChatEngineConfig {
+            model_config,
+            provider_config,
+            execution_settings,
+            models,
+            providers,
+            mcp_service,
+            memory_service,
+            search_settings,
+            embedding_service,
+            user_secrets,
+            remote_agents,
+            is_sub_agent: cli.headless, // headless mode means we are running as a sub-agent
+        },
         event_tx,
-        cli.headless, // headless mode means we are running as a sub-agent
     );
 
     // Route based on mode

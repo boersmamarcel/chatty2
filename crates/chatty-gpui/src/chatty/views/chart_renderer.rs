@@ -162,8 +162,7 @@ pub(super) fn render_chart(
     };
 
     // Build copy button before we move spec.data into indexed_data
-    let copy_png_button =
-        build_chart_copy_png_button(&spec, msg_idx, tool_idx, theme_chart_colors);
+    let copy_png_button = build_chart_copy_png_button(&spec, msg_idx, tool_idx, theme_chart_colors);
 
     let mut chart_container = div()
         .id(element_id)
