@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use super::oauth_credential_repository::{BoxFuture, OAuthCredentialRepository};
-use super::provider_repository::{RepositoryError, RepositoryResult};
+use super::oauth_credential_repository::OAuthCredentialRepository;
+use super::provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
 
 /// JSON-file-backed implementation of [`OAuthCredentialRepository`].
 ///

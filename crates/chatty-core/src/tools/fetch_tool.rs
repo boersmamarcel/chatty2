@@ -63,12 +63,7 @@ pub struct FetchTool {
 
 impl FetchTool {
     pub fn new(workspace_dir: Option<PathBuf>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = crate::services::http_client::no_redirect_client(REQUEST_TIMEOUT_SECS);
         Self {
             client,
             workspace_dir,

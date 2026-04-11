@@ -353,16 +353,8 @@ impl DaytonaTool {
 
     /// Create a DaytonaTool with a custom API base URL (useful for self-hosted Daytona).
     pub fn new_with_base(api_key: String, api_base: String, workspace_dir: Option<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(DAYTONA_TIMEOUT_SECS))
-            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-            .build()
-            .expect("Failed to build HTTP client");
-        let exec_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(DAYTONA_EXEC_TIMEOUT_SECS))
-            .user_agent("Chatty/1.0 (Desktop AI Assistant)")
-            .build()
-            .expect("Failed to build HTTP exec client");
+        let client = crate::services::http_client::default_client(DAYTONA_TIMEOUT_SECS);
+        let exec_client = crate::services::http_client::default_client(DAYTONA_EXEC_TIMEOUT_SECS);
         Self {
             client,
             exec_client,

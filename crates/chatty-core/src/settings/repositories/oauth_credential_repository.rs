@@ -1,9 +1,4 @@
-use std::future::Future;
-use std::pin::Pin;
-
-use super::provider_repository::RepositoryResult;
-
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+use super::provider_repository::{BoxFuture, RepositoryResult};
 
 /// Repository for per-server OAuth credentials (tokens, client IDs, scopes).
 ///

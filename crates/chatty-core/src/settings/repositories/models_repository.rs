@@ -1,10 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-
-use super::provider_repository::RepositoryResult;
+use super::provider_repository::{BoxFuture, RepositoryResult};
 use crate::settings::models::models_store::ModelConfig;
-
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait ModelsRepository: Send + Sync + 'static {
     /// Load all model configurations from storage

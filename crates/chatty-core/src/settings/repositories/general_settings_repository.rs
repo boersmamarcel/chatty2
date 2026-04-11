@@ -1,10 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-
-use super::provider_repository::RepositoryResult;
+use super::provider_repository::{BoxFuture, RepositoryResult};
 use crate::settings::models::general_model::GeneralSettingsModel;
-
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait GeneralSettingsRepository: Send + Sync + 'static {
     /// Load general settings from storage

@@ -1,10 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-
-use super::provider_repository::RepositoryResult;
+use super::provider_repository::{BoxFuture, RepositoryResult};
 use crate::settings::models::training_settings::TrainingSettingsModel;
-
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait TrainingSettingsRepository: Send + Sync + 'static {
     /// Load training settings from storage

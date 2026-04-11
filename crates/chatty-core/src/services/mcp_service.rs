@@ -148,10 +148,7 @@ impl McpConnection {
         };
 
         let metadata_url = format!("{origin}/.well-known/oauth-protected-resource");
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .ok()?;
+        let client = super::http_client::probe_client(5);
 
         let resp = client.get(&metadata_url).send().await.ok()?;
         if !resp.status().is_success() {
@@ -181,10 +178,7 @@ impl McpConnection {
     async fn discover_auth_metadata_manually(
         auth_servers: &[String],
     ) -> Option<rmcp::transport::auth::AuthorizationMetadata> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .ok()?;
+        let client = super::http_client::probe_client(10);
 
         for server in auth_servers {
             let server = server.trim_end_matches('/');
@@ -283,11 +277,7 @@ impl McpConnection {
         // Use a no-redirect HTTP client for metadata discovery.
         // Some servers (e.g. Homey) redirect their root URL to a marketing page,
         // and rmcp's discovery incorrectly treats the 200 HTML as resource metadata.
-        let no_redirect_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .context("Failed to build HTTP client")?;
+        let no_redirect_client = super::http_client::no_redirect_client(30);
         auth_manager
             .with_client(no_redirect_client)
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -441,11 +431,7 @@ impl McpConnection {
             .with_context(|| format!("Failed to create OAuth manager for {name}"))?;
 
         // No-redirect client (same rationale as connect_with_oauth)
-        let no_redirect_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .context("Failed to build HTTP client")?;
+        let no_redirect_client = super::http_client::no_redirect_client(30);
         auth_manager
             .with_client(no_redirect_client)
             .map_err(|e| anyhow::anyhow!(e))?;

@@ -6,6 +6,7 @@ pub mod extensions_json_repository;
 pub mod extensions_repository;
 pub mod general_settings_json_repository;
 pub mod general_settings_repository;
+pub mod generic_json_repository;
 pub mod hive_settings_json_repository;
 pub mod hive_settings_repository;
 pub mod json_file_repository;
