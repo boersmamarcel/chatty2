@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
-use super::module_settings_repository::{BoxFuture, ModuleSettingsRepository};
-use super::provider_repository::{RepositoryError, RepositoryResult};
+use super::generic_json_repository::GenericJsonRepository;
+use super::module_settings_repository::ModuleSettingsRepository;
+use super::provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
 use crate::settings::models::module_settings::{ModuleSettingsModel, normalize_module_dir};
-use tracing::warn;
 
 pub struct ModuleSettingsJsonRepository {
+    inner: GenericJsonRepository<ModuleSettingsModel>,
     file_path: PathBuf,
 }
 
@@ -15,11 +16,12 @@ impl ModuleSettingsJsonRepository {
         let config_dir = dirs::config_dir().ok_or_else(|| {
             RepositoryError::PathError("Cannot determine config directory".into())
         })?;
+        let file_path = config_dir.join("chatty").join("module_settings.json");
 
-        let app_dir = config_dir.join("chatty");
-        let file_path = app_dir.join("module_settings.json");
-
-        Ok(Self { file_path })
+        Ok(Self {
+            inner: GenericJsonRepository::new("module_settings.json")?,
+            file_path,
+        })
     }
 }
 
@@ -28,12 +30,7 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
         let path = self.file_path.clone();
 
         Box::pin(async move {
-            let exists = tokio::fs::try_exists(&path).await.unwrap_or_else(|e| {
-                warn!(error = ?e, path = %path.display(), "Failed to check if module settings file exists at {}", path.display());
-                false
-            });
-
-            if !exists {
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 return Ok(ModuleSettingsModel::default());
             }
 
@@ -44,6 +41,7 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
             let mut settings: ModuleSettingsModel = serde_json::from_str(&contents)
                 .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
+            // Normalize the module directory path after loading.
             let normalized_dir = normalize_module_dir(settings.module_dir.clone());
             if normalized_dir != settings.module_dir {
                 settings.module_dir = normalized_dir;
@@ -54,28 +52,6 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
     }
 
     fn save(&self, settings: ModuleSettingsModel) -> BoxFuture<'static, RepositoryResult<()>> {
-        let path = self.file_path.clone();
-
-        Box::pin(async move {
-            let json = serde_json::to_string_pretty(&settings)
-                .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
-
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-            }
-
-            let temp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
-            tokio::fs::write(&temp_path, &json)
-                .await
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-            tokio::fs::rename(&temp_path, &path)
-                .await
-                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-            Ok(())
-        })
+        self.inner.save(settings)
     }
 }

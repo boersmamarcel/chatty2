@@ -1,10 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-
-use super::provider_repository::RepositoryResult;
+use super::provider_repository::{BoxFuture, RepositoryResult};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
-
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait ExecutionSettingsRepository: Send + Sync + 'static {
     /// Load execution settings from storage

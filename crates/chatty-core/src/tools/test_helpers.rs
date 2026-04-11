@@ -5,9 +5,7 @@
 /// - `MockA2aRepository` — in-memory [`A2aRepository`] for A2A tool tests.
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::mcp_store::McpServerConfig;
-use crate::settings::repositories::a2a_repository::BoxFuture as A2aBoxFuture;
-use crate::settings::repositories::mcp_repository::BoxFuture;
-use crate::settings::repositories::provider_repository::{RepositoryError, RepositoryResult};
+use crate::settings::repositories::provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
 use crate::settings::repositories::{A2aRepository, McpRepository};
 use std::sync::Mutex;
 
@@ -121,7 +119,7 @@ impl MockA2aRepository {
 }
 
 impl A2aRepository for MockA2aRepository {
-    fn load_all(&self) -> A2aBoxFuture<'static, RepositoryResult<Vec<A2aAgentConfig>>> {
+    fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<A2aAgentConfig>>> {
         let agents = self.agents.lock().unwrap().clone();
         let error = self.load_error.lock().unwrap().clone();
         Box::pin(async move {
@@ -136,7 +134,7 @@ impl A2aRepository for MockA2aRepository {
     fn save_all(
         &self,
         _agents: Vec<A2aAgentConfig>,
-    ) -> A2aBoxFuture<'static, RepositoryResult<()>> {
+    ) -> BoxFuture<'static, RepositoryResult<()>> {
         Box::pin(async move { Ok(()) })
     }
 }
