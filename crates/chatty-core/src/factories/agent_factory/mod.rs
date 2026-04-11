@@ -17,18 +17,24 @@ use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
+#[cfg(feature = "math-render")]
+use crate::tools::CompileTypstTool;
 use crate::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BrowserUseTool, CompileTypstTool,
-    CreateChartTool, CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool,
-    DescribeDataTool, EditExcelTool, EditMcpTool, ExecuteCodeTool, FetchTool, FindDefinitionTool,
-    FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool,
-    GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool,
-    ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool,
-    PdfExtractTextTool, PdfInfoTool, PdfToImageTool, PendingArtifacts, PublishModuleTool,
-    QueryDataTool, ReadBinaryTool, ReadExcelTool, ReadFileTool, ReadSkillTool, RememberTool,
-    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteExcelTool, WriteFileTool,
+    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BrowserUseTool, CreateChartTool,
+    CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool, EditMcpTool, ExecuteCodeTool,
+    FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool,
+    GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
+    ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
+    MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
+    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
 };
+#[cfg(feature = "duckdb")]
+use crate::tools::{DescribeDataTool, QueryDataTool};
+#[cfg(feature = "excel")]
+use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "pdf")]
+use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 
 use mcp_helpers::{
     McpTools, build_with_mcp_tools, filter_mcp_tool_info, sanitize_mcp_tools_for_openai,
@@ -190,18 +196,20 @@ impl AgentClient {
 
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
+        #[cfg(feature = "pdf")]
         let mut pdf_to_image_tool: Option<PdfToImageTool> = None;
+        #[cfg(feature = "pdf")]
         let mut pdf_info_tool: Option<PdfInfoTool> = None;
+        #[cfg(feature = "pdf")]
         let mut pdf_extract_text_tool: Option<PdfExtractTextTool> = None;
         let mut search_tools: Option<SearchTools> = None;
-        #[allow(clippy::type_complexity)]
-        let (fs_read_tools, fs_write_tools, excel_read_tool, excel_write_tools, data_query_tools): (
-            Option<FsReadTools>,
-            Option<FsWriteTools>,
-            Option<ReadExcelTool>,
-            Option<ExcelWriteTools>,
-            Option<DataQueryTools>,
-        ) = match exec_settings
+        #[cfg(feature = "excel")]
+        let mut excel_read_tool: Option<ReadExcelTool> = None;
+        #[cfg(feature = "excel")]
+        let mut excel_write_tools: Option<ExcelWriteTools> = None;
+        #[cfg(feature = "duckdb")]
+        let mut data_query_tools: Option<DataQueryTools> = None;
+        let (fs_read_tools, fs_write_tools) = match exec_settings
             .as_ref()
             .and_then(|s| s.workspace_dir.as_ref())
         {
@@ -220,12 +228,18 @@ impl AgentClient {
                         if let Some(ref artifacts) = pending_artifacts {
                             add_attachment_tool =
                                 Some(AddAttachmentTool::new(service.clone(), artifacts.clone()));
-                            pdf_to_image_tool =
-                                Some(PdfToImageTool::new(service.clone(), artifacts.clone()));
+                            #[cfg(feature = "pdf")]
+                            {
+                                pdf_to_image_tool =
+                                    Some(PdfToImageTool::new(service.clone(), artifacts.clone()));
+                            }
                         }
 
-                        pdf_info_tool = Some(PdfInfoTool::new(service.clone()));
-                        pdf_extract_text_tool = Some(PdfExtractTextTool::new(service.clone()));
+                        #[cfg(feature = "pdf")]
+                        {
+                            pdf_info_tool = Some(PdfInfoTool::new(service.clone()));
+                            pdf_extract_text_tool = Some(PdfExtractTextTool::new(service.clone()));
+                        }
 
                         // Create code search tools alongside filesystem read tools
                         match CodeSearchService::new(workspace_dir) {
@@ -276,45 +290,42 @@ impl AgentClient {
                     };
 
                     // Excel read tool
-                    let excel_read_tool = if read_tools.is_some() {
+                    #[cfg(feature = "excel")]
+                    if read_tools.is_some() {
                         tracing::info!(workspace = %workspace_dir, "Excel read tool enabled");
-                        Some(ReadExcelTool::new(service.clone()))
-                    } else {
-                        None
-                    };
+                        excel_read_tool = Some(ReadExcelTool::new(service.clone()));
+                    }
 
                     // Excel write tools
-                    let excel_write_tools = if write_tools.is_some() {
-                        pending_write_approvals.as_ref().map(|approvals| {
+                    #[cfg(feature = "excel")]
+                    if write_tools.is_some() {
+                        excel_write_tools = pending_write_approvals.as_ref().map(|approvals| {
                             tracing::info!(workspace = %workspace_dir, "Excel write tools enabled");
                             (
                                 WriteExcelTool::new(service.clone(), approvals.clone()),
                                 EditExcelTool::new(service.clone(), approvals.clone()),
                             )
-                        })
-                    } else {
-                        None
-                    };
+                        });
+                    }
 
                     // Data query tools
-                    let data_query_tools = if read_tools.is_some() {
+                    #[cfg(feature = "duckdb")]
+                    if read_tools.is_some() {
                         tracing::info!(workspace = %workspace_dir, "Data query tools enabled");
-                        Some((
+                        data_query_tools = Some((
                             QueryDataTool::new(service.clone()),
                             DescribeDataTool::new(service.clone()),
-                        ))
-                    } else {
-                        None
-                    };
+                        ));
+                    }
 
-                    (read_tools, write_tools, excel_read_tool, excel_write_tools, data_query_tools)
+                    (read_tools, write_tools)
                 }
                 Err(e) => {
                     tracing::warn!(error = ?e, workspace = %workspace_dir, "Failed to initialize filesystem tools");
-                    (None, None, None, None, None)
+                    (None, None)
                 }
             },
-            None => (None, None, None, None, None),
+            None => (None, None),
         };
 
         // Extract MCP tool metadata so list_tools can report them to the model
@@ -615,6 +626,7 @@ impl AgentClient {
         ));
 
         // Typst compile tool
+        #[cfg(feature = "math-render")]
         let typst_tool: Option<CompileTypstTool> = if exec_settings
             .as_ref()
             .map(|s| s.filesystem_write_enabled)
@@ -692,13 +704,76 @@ impl AgentClient {
             git: git_tools.is_some(),
             search: search_tools.is_some(),
             add_attachment: add_attachment_tool.is_some(),
-            excel_read: excel_read_tool.is_some(),
-            excel_write: excel_write_tools.is_some(),
-            pdf_to_image: pdf_to_image_tool.is_some(),
-            pdf_info: pdf_info_tool.is_some(),
-            pdf_extract_text: pdf_extract_text_tool.is_some(),
-            data_query: data_query_tools.is_some(),
-            compile_typst: typst_tool.is_some(),
+            excel_read: {
+                #[cfg(feature = "excel")]
+                {
+                    excel_read_tool.is_some()
+                }
+                #[cfg(not(feature = "excel"))]
+                {
+                    false
+                }
+            },
+            excel_write: {
+                #[cfg(feature = "excel")]
+                {
+                    excel_write_tools.is_some()
+                }
+                #[cfg(not(feature = "excel"))]
+                {
+                    false
+                }
+            },
+            pdf_to_image: {
+                #[cfg(feature = "pdf")]
+                {
+                    pdf_to_image_tool.is_some()
+                }
+                #[cfg(not(feature = "pdf"))]
+                {
+                    false
+                }
+            },
+            pdf_info: {
+                #[cfg(feature = "pdf")]
+                {
+                    pdf_info_tool.is_some()
+                }
+                #[cfg(not(feature = "pdf"))]
+                {
+                    false
+                }
+            },
+            pdf_extract_text: {
+                #[cfg(feature = "pdf")]
+                {
+                    pdf_extract_text_tool.is_some()
+                }
+                #[cfg(not(feature = "pdf"))]
+                {
+                    false
+                }
+            },
+            data_query: {
+                #[cfg(feature = "duckdb")]
+                {
+                    data_query_tools.is_some()
+                }
+                #[cfg(not(feature = "duckdb"))]
+                {
+                    false
+                }
+            },
+            compile_typst: {
+                #[cfg(feature = "math-render")]
+                {
+                    typst_tool.is_some()
+                }
+                #[cfg(not(feature = "math-render"))]
+                {
+                    false
+                }
+            },
             execute_code: execute_code_tool.is_some(),
             memory: remember_tool.is_some(),
             search_web: search_web_tool.is_some(),
@@ -770,8 +845,8 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let tool_vec = NativeTools {
-                    list_tools,
+                let tool_vec = native_tools!(
+                    list_tools: list_tools,
                     fs_read: fs_read_tools,
                     fs_write: fs_write_tools,
                     add_attachment: add_attachment_tool.clone(),
@@ -780,9 +855,9 @@ impl AgentClient {
                     pdf_extract_text: pdf_extract_text_tool.clone(),
                     mcp_mgmt: mcp_mgmt_tools,
                     fetch_tool: fetch_tool.clone(),
-                    shell_tools,
-                    git_tools,
-                    search_tools,
+                    shell_tools: shell_tools,
+                    git_tools: git_tools,
+                    search_tools: search_tools,
                     excel_read: excel_read_tool.clone(),
                     excel_write: excel_write_tools.clone(),
                     data_query: data_query_tools.clone(),
@@ -800,7 +875,7 @@ impl AgentClient {
                     list_agents_tool: list_agents_tool.clone(),
                     invoke_agent_tool: invoke_agent_tool.clone(),
                     publish_module_tool: publish_module_tool.clone(),
-                }
+                )
                 .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -843,8 +918,8 @@ impl AgentClient {
                     }));
                 }
 
-                let tool_vec = NativeTools {
-                    list_tools,
+                let tool_vec = native_tools!(
+                    list_tools: list_tools,
                     fs_read: fs_read_tools,
                     fs_write: fs_write_tools,
                     add_attachment: add_attachment_tool.clone(),
@@ -853,9 +928,9 @@ impl AgentClient {
                     pdf_extract_text: pdf_extract_text_tool.clone(),
                     mcp_mgmt: mcp_mgmt_tools,
                     fetch_tool: fetch_tool.clone(),
-                    shell_tools,
-                    git_tools,
-                    search_tools,
+                    shell_tools: shell_tools,
+                    git_tools: git_tools,
+                    search_tools: search_tools,
                     excel_read: excel_read_tool.clone(),
                     excel_write: excel_write_tools.clone(),
                     data_query: data_query_tools.clone(),
@@ -873,7 +948,7 @@ impl AgentClient {
                     list_agents_tool: list_agents_tool.clone(),
                     invoke_agent_tool: invoke_agent_tool.clone(),
                     publish_module_tool: publish_module_tool.clone(),
-                }
+                )
                 .into_tool_vec();
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =
@@ -895,8 +970,8 @@ impl AgentClient {
                     .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
-                let tool_vec = NativeTools {
-                    list_tools,
+                let tool_vec = native_tools!(
+                    list_tools: list_tools,
                     fs_read: fs_read_tools,
                     fs_write: fs_write_tools,
                     add_attachment: add_attachment_tool.clone(),
@@ -905,9 +980,9 @@ impl AgentClient {
                     pdf_extract_text: pdf_extract_text_tool.clone(),
                     mcp_mgmt: mcp_mgmt_tools,
                     fetch_tool: fetch_tool.clone(),
-                    shell_tools,
-                    git_tools,
-                    search_tools,
+                    shell_tools: shell_tools,
+                    git_tools: git_tools,
+                    search_tools: search_tools,
                     excel_read: excel_read_tool.clone(),
                     excel_write: excel_write_tools.clone(),
                     data_query: data_query_tools.clone(),
@@ -925,7 +1000,7 @@ impl AgentClient {
                     list_agents_tool: list_agents_tool.clone(),
                     invoke_agent_tool: invoke_agent_tool.clone(),
                     publish_module_tool: publish_module_tool.clone(),
-                }
+                )
                 .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -950,8 +1025,8 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let tool_vec = NativeTools {
-                    list_tools,
+                let tool_vec = native_tools!(
+                    list_tools: list_tools,
                     fs_read: fs_read_tools,
                     fs_write: fs_write_tools,
                     add_attachment: add_attachment_tool.clone(),
@@ -960,9 +1035,9 @@ impl AgentClient {
                     pdf_extract_text: pdf_extract_text_tool.clone(),
                     mcp_mgmt: mcp_mgmt_tools,
                     fetch_tool: fetch_tool.clone(),
-                    shell_tools,
-                    git_tools,
-                    search_tools,
+                    shell_tools: shell_tools,
+                    git_tools: git_tools,
+                    search_tools: search_tools,
                     excel_read: excel_read_tool.clone(),
                     excel_write: excel_write_tools.clone(),
                     data_query: data_query_tools.clone(),
@@ -980,7 +1055,7 @@ impl AgentClient {
                     list_agents_tool: list_agents_tool.clone(),
                     invoke_agent_tool: invoke_agent_tool.clone(),
                     publish_module_tool: publish_module_tool.clone(),
-                }
+                )
                 .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1004,8 +1079,8 @@ impl AgentClient {
                     .preamble(&preamble)
                     .temperature(model_config.temperature as f64);
 
-                let tool_vec = NativeTools {
-                    list_tools,
+                let tool_vec = native_tools!(
+                    list_tools: list_tools,
                     fs_read: fs_read_tools,
                     fs_write: fs_write_tools,
                     add_attachment: add_attachment_tool.clone(),
@@ -1014,9 +1089,9 @@ impl AgentClient {
                     pdf_extract_text: pdf_extract_text_tool.clone(),
                     mcp_mgmt: mcp_mgmt_tools,
                     fetch_tool: fetch_tool.clone(),
-                    shell_tools,
-                    git_tools,
-                    search_tools,
+                    shell_tools: shell_tools,
+                    git_tools: git_tools,
+                    search_tools: search_tools,
                     excel_read: excel_read_tool.clone(),
                     excel_write: excel_write_tools.clone(),
                     data_query: data_query_tools.clone(),
@@ -1034,7 +1109,7 @@ impl AgentClient {
                     list_agents_tool: list_agents_tool.clone(),
                     invoke_agent_tool: invoke_agent_tool.clone(),
                     publish_module_tool: publish_module_tool.clone(),
-                }
+                )
                 .into_tool_vec();
                 let agent =
                     build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, &native_tool_names);
@@ -1154,8 +1229,8 @@ impl AgentClient {
                     builder = builder.max_tokens(max_tokens as u64);
                 }
 
-                let tool_vec = NativeTools {
-                    list_tools,
+                let tool_vec = native_tools!(
+                    list_tools: list_tools,
                     fs_read: fs_read_tools,
                     fs_write: fs_write_tools,
                     add_attachment: add_attachment_tool.clone(),
@@ -1164,9 +1239,9 @@ impl AgentClient {
                     pdf_extract_text: pdf_extract_text_tool.clone(),
                     mcp_mgmt: mcp_mgmt_tools,
                     fetch_tool: fetch_tool.clone(),
-                    shell_tools,
-                    git_tools,
-                    search_tools,
+                    shell_tools: shell_tools,
+                    git_tools: git_tools,
+                    search_tools: search_tools,
                     excel_read: excel_read_tool.clone(),
                     excel_write: excel_write_tools.clone(),
                     data_query: data_query_tools.clone(),
@@ -1184,7 +1259,7 @@ impl AgentClient {
                     list_agents_tool: list_agents_tool.clone(),
                     invoke_agent_tool: invoke_agent_tool.clone(),
                     publish_module_tool: publish_module_tool.clone(),
-                }
+                )
                 .into_tool_vec();
                 let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
                 let agent =

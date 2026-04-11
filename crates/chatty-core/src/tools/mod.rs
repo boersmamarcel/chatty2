@@ -2,10 +2,12 @@ pub mod add_attachment_tool;
 pub mod add_mcp_tool;
 pub mod browser_use_tool;
 pub mod chart_tool;
+#[cfg(feature = "duckdb")]
 pub mod data_query_tool;
 pub mod daytona_tool;
 pub mod delete_mcp_tool;
 pub mod edit_mcp_tool;
+#[cfg(feature = "excel")]
 pub mod excel_tool;
 pub mod execute_code_tool;
 pub mod fetch_tool;
@@ -17,8 +19,11 @@ pub mod list_agents_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
 mod path_utils;
+#[cfg(feature = "pdf")]
 pub mod pdf_extract_text_tool;
+#[cfg(feature = "pdf")]
 pub mod pdf_info_tool;
+#[cfg(feature = "pdf")]
 pub mod pdf_to_image_tool;
 pub mod publish_module_tool;
 pub mod read_skill_tool;
@@ -31,16 +36,19 @@ pub mod shell_tool;
 pub mod sub_agent_tool;
 #[cfg(test)]
 pub mod test_helpers;
+#[cfg(feature = "math-render")]
 pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use add_mcp_tool::AddMcpTool;
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
+#[cfg(feature = "duckdb")]
 pub use data_query_tool::{DescribeDataTool, QueryDataTool};
 pub use daytona_tool::DaytonaTool;
 pub use delete_mcp_tool::DeleteMcpTool;
 pub use edit_mcp_tool::EditMcpTool;
+#[cfg(feature = "excel")]
 pub use excel_tool::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 pub use execute_code_tool::ExecuteCodeTool;
 pub use fetch_tool::FetchTool;
@@ -56,8 +64,11 @@ pub use invoke_agent_tool::InvokeAgentTool;
 pub use list_agents_tool::{ListAgentsTool, LocalModuleAgentSummary};
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
+#[cfg(feature = "pdf")]
 pub use pdf_extract_text_tool::PdfExtractTextTool;
+#[cfg(feature = "pdf")]
 pub use pdf_info_tool::PdfInfoTool;
+#[cfg(feature = "pdf")]
 pub use pdf_to_image_tool::PdfToImageTool;
 pub use publish_module_tool::PublishModuleTool;
 pub use read_skill_tool::ReadSkillTool;
@@ -70,4 +81,5 @@ pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
 pub use sub_agent_tool::SubAgentTool;
+#[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;

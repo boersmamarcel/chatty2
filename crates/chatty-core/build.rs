@@ -5,7 +5,10 @@ use std::path::PathBuf;
 const PDFIUM_VERSION: &str = "7543";
 
 fn main() {
-    setup_pdfium();
+    // Only download pdfium when the "pdf" feature is enabled
+    if std::env::var("CARGO_FEATURE_PDF").is_ok() {
+        setup_pdfium();
+    }
 }
 
 fn setup_pdfium() {

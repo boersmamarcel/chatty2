@@ -46,29 +46,29 @@ sha2.workspace = true
 azure_identity.workspace = true
 azure_core.workspace = true
 
-# PDF and image
-pdfium-render.workspace = true
-image.workspace = true
+# PDF and image (optional — enable with "pdf" feature)
+pdfium-render = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 
-# Excel
-calamine.workspace = true
-rust_xlsxwriter.workspace = true
+# Excel (optional — enable with "excel" feature)
+calamine = { workspace = true, optional = true }
+rust_xlsxwriter = { workspace = true, optional = true }
 
-# DuckDB
-duckdb.workspace = true
+# DuckDB (optional — enable with "duckdb" feature)
+duckdb = { workspace = true, optional = true }
 
-# Math rendering
-typst.workspace = true
-typst-svg.workspace = true
-typst-pdf.workspace = true
-mitex.workspace = true
-typst-assets.workspace = true
-comemo.workspace = true
+# Math rendering (optional — enable with "math-render" feature)
+typst = { workspace = true, optional = true }
+typst-svg = { workspace = true, optional = true }
+typst-pdf = { workspace = true, optional = true }
+mitex = { workspace = true, optional = true }
+typst-assets = { workspace = true, optional = true }
+comemo = { workspace = true, optional = true }
 
-# Mermaid / SVG
-mermaid-rs-renderer.workspace = true
-resvg.workspace = true
-usvg.workspace = true
+# Mermaid / SVG (optional — enable with "mermaid" feature)
+mermaid-rs-renderer = { workspace = true, optional = true }
+resvg = { workspace = true, optional = true }
+usvg = { workspace = true, optional = true }
 
 # Token counting
 tiktoken-rs.workspace = true
@@ -95,8 +95,16 @@ flate2 = "1.0"
 tar = "0.4"
 
 [features]
-default = ["mcp"]
+default = ["mcp", "all-tools"]
 mcp = ["rig-core/rmcp"]
 # Enable this feature to get `impl gpui::Global` on core types.
 # A future TUI crate would NOT enable this feature.
 gpui-globals = ["dep:gpui"]
+# Optional tool/service feature groups
+excel = ["dep:calamine", "dep:rust_xlsxwriter"]
+pdf = ["dep:pdfium-render", "dep:image"]
+math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:mitex", "dep:typst-assets", "dep:comemo"]
+mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
+duckdb = ["dep:duckdb"]
+# Convenience: enable all optional tool dependencies
+all-tools = ["excel", "pdf", "math-render", "mermaid", "duckdb"]

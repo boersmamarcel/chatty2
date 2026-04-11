@@ -27,8 +27,10 @@ impl Global for crate::models::ExecutionApprovalStore {}
 impl Global for crate::models::WriteApprovalStore {}
 
 // ── Services ─────────────────────────────────────────────────────────────────
+#[cfg(feature = "math-render")]
 impl Global for crate::services::MathRendererService {}
 impl Global for crate::services::McpService {}
+#[cfg(feature = "mermaid")]
 impl Global for crate::services::MermaidRendererService {}
 
 // ── Memory ───────────────────────────────────────────────────────────────────

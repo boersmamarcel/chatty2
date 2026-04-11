@@ -8,7 +8,7 @@ name = "chatty-tui"
 path = "src/main.rs"
 
 [dependencies]
-chatty-core = { path = "../chatty-core" }
+chatty-core = { path = "../chatty-core", features = ["excel", "pdf", "duckdb"] }
 
 # LLM framework (needed for rig types used in chatty-core's API)
 rig-core.workspace = true
