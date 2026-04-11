@@ -49,6 +49,11 @@ where
         }
     }
 
+    /// Returns a reference to the underlying file path.
+    pub fn file_path(&self) -> &std::path::Path {
+        &self.file_path
+    }
+
     /// Load the settings from disk, returning `T::default()` if the file is missing.
     pub fn load(&self) -> super::provider_repository::BoxFuture<'static, RepositoryResult<T>> {
         let path = self.file_path.clone();

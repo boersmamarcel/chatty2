@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use super::generic_json_repository::GenericJsonRepository;
 use super::module_settings_repository::ModuleSettingsRepository;
 use super::provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
@@ -7,27 +5,20 @@ use crate::settings::models::module_settings::{ModuleSettingsModel, normalize_mo
 
 pub struct ModuleSettingsJsonRepository {
     inner: GenericJsonRepository<ModuleSettingsModel>,
-    file_path: PathBuf,
 }
 
 impl ModuleSettingsJsonRepository {
     /// Create repository with XDG-compliant path.
     pub fn new() -> RepositoryResult<Self> {
-        let config_dir = dirs::config_dir().ok_or_else(|| {
-            RepositoryError::PathError("Cannot determine config directory".into())
-        })?;
-        let file_path = config_dir.join("chatty").join("module_settings.json");
-
         Ok(Self {
             inner: GenericJsonRepository::new("module_settings.json")?,
-            file_path,
         })
     }
 }
 
 impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
     fn load(&self) -> BoxFuture<'static, RepositoryResult<ModuleSettingsModel>> {
-        let path = self.file_path.clone();
+        let path = self.inner.file_path().to_path_buf();
 
         Box::pin(async move {
             if !tokio::fs::try_exists(&path).await.unwrap_or(false) {

@@ -16,7 +16,7 @@ pub fn default_client(timeout_secs: u64) -> reqwest::Client {
         .timeout(Duration::from_secs(timeout_secs))
         .user_agent(USER_AGENT)
         .build()
-        .expect("Failed to build HTTP client")
+        .expect("Failed to initialize HTTP client (TLS backend error)")
 }
 
 /// Build an HTTP client that does **not** follow redirects.
@@ -29,7 +29,7 @@ pub fn no_redirect_client(timeout_secs: u64) -> reqwest::Client {
         .user_agent(USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("Failed to build HTTP client")
+        .expect("Failed to initialize HTTP client (TLS backend error)")
 }
 
 /// Build a minimal HTTP client (no custom user-agent) for probing endpoints.
@@ -40,5 +40,5 @@ pub fn probe_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .expect("Failed to build HTTP client")
+        .expect("Failed to initialize HTTP client (TLS backend error)")
 }
