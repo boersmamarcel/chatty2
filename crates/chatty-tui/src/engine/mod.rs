@@ -42,7 +42,7 @@ pub struct ToolCallInfo {
 pub enum ToolCallState {
     Running,
     Success,
-    Error(#[allow(dead_code)] String),
+    Error,
 }
 
 /// Pending approval waiting for user decision
@@ -72,7 +72,6 @@ pub struct DisplayMessage {
 /// Shared navigation behaviour for picker lists.
 pub trait NavigableList {
     fn item_count(&self) -> usize;
-    fn selected(&self) -> usize;
     fn selected_mut(&mut self) -> &mut usize;
 
     fn move_up(&mut self) {
@@ -108,9 +107,6 @@ impl NavigableList for ModelPicker {
     fn item_count(&self) -> usize {
         self.items.len()
     }
-    fn selected(&self) -> usize {
-        self.selected
-    }
     fn selected_mut(&mut self) -> &mut usize {
         &mut self.selected
     }
@@ -138,9 +134,6 @@ impl NavigableList for ToolPicker {
     fn item_count(&self) -> usize {
         self.items.len()
     }
-    fn selected(&self) -> usize {
-        self.selected
-    }
     fn selected_mut(&mut self) -> &mut usize {
         &mut self.selected
     }
@@ -155,11 +148,9 @@ impl ToolPicker {
 }
 
 /// The result of handling an event — tells the main loop what to do next.
-#[allow(dead_code)] // Quit reserved for future use
 pub enum EngineAction {
     None,
     Redraw,
-    Quit,
 }
 
 /// UI-agnostic chat engine that manages a single conversation.
@@ -587,7 +578,7 @@ impl ChatEngine {
                     && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
                 {
                     tc.output = Some(error.clone());
-                    tc.state = ToolCallState::Error(error);
+                    tc.state = ToolCallState::Error;
                 }
                 EngineAction::Redraw
             }

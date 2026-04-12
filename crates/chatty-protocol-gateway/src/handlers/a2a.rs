@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 use super::jsonrpc::{
-    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, JsonRpcRequest,
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
 };
 

@@ -1,8 +1,8 @@
 use crate::settings::controllers::user_secrets_controller;
 use crate::settings::models::user_secrets_store::UserSecretsModel;
 use gpui::{
-    App, Context, FocusHandle, Focusable, FontWeight, IntoElement, Render,
-    SharedString, Styled, Window, div, prelude::*, px,
+    App, Context, FocusHandle, Focusable, FontWeight, IntoElement, Render, SharedString, Styled,
+    Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Sizable, WindowExt as _,

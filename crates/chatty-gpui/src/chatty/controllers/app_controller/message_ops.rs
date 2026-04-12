@@ -12,7 +12,12 @@ impl ChattyApp {
     ///
     /// UI updates, finalization, title generation, token usage, and persistence
     /// are handled by `handle_stream_manager_event()` reacting to StreamManager events.
-    pub(super) fn send_message(&mut self, message: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn send_message(
+        &mut self,
+        message: String,
+        attachments: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
         // Block message sending until app is ready (initial conversation created/loaded)
@@ -52,9 +57,7 @@ impl ChattyApp {
         let cancel_flag_for_loop = cancel_flag.clone();
 
         // Get StreamManager entity for dual-write
-        let stream_manager = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get());
+        let stream_manager = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get());
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
@@ -263,10 +266,7 @@ impl ChattyApp {
             });
 
         // Register stream with StreamManager (owns task + cancel flag)
-        if let Some(manager) = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get())
-        {
+        if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             if let Some(ref conv_id) = conv_id_for_task {
                 manager.update(cx, |mgr, cx| {
                     mgr.register_stream(
@@ -292,7 +292,11 @@ impl ChattyApp {
     }
 
     /// Handle events from StreamManager for decoupled UI updates
-    pub(super) fn handle_stream_manager_event(&mut self, event: &StreamManagerEvent, cx: &mut Context<Self>) {
+    pub(super) fn handle_stream_manager_event(
+        &mut self,
+        event: &StreamManagerEvent,
+        cx: &mut Context<Self>,
+    ) {
         let chat_view = self.chat_view.clone();
 
         match event {
@@ -674,10 +678,7 @@ impl ChattyApp {
         });
 
         // Set trace on StreamManager so it's included in the StreamEnded event
-        if let Some(manager) = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get())
-        {
+        if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             manager.update(cx, |mgr, _cx| {
                 mgr.set_trace(&conv_id, trace_json);
             });
@@ -1064,7 +1065,6 @@ impl ChattyApp {
     /// assistant message from both model and UI, then re-streams using the existing
     /// conversation history (the user message is already in history, so it is NOT
     /// re-added). Uses the shared `run_llm_stream` helper for the streaming phase.
-
     pub(super) fn handle_regeneration(&mut self, history_index: usize, cx: &mut Context<Self>) {
         let conv_id = match cx.global::<ConversationsStore>().active_id().cloned() {
             Some(id) => id,
@@ -1114,9 +1114,7 @@ impl ChattyApp {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_flag_for_loop = cancel_flag.clone();
 
-        let stream_manager = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get());
+        let stream_manager = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get());
 
         let conv_id_for_task = conv_id.clone();
         let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
@@ -1185,10 +1183,7 @@ impl ChattyApp {
         });
 
         // Register stream with StreamManager
-        if let Some(manager) = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get())
-        {
+        if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             manager.update(cx, |mgr, cx| {
                 mgr.register_stream(conv_id_for_task, task, cancel_flag, pending_artifacts, cx);
             });
@@ -1196,7 +1191,6 @@ impl ChattyApp {
             error!("StreamManager not available for regeneration stream");
         }
     }
-
 }
 
 /// Parameters for the shared LLM stream processing.
@@ -1831,4 +1825,3 @@ mod tests {
         assert_eq!(result, vec![PathBuf::from("/tmp/report.PDF")]);
     }
 }
-

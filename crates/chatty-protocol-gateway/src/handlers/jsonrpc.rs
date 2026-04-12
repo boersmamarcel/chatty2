@@ -59,7 +59,7 @@ impl JsonRpcResponse {
     }
 
     /// Serialize into a JSON value, falling back to `Value::Null` on failure.
-    fn to_json(self) -> Json<Value> {
+    fn into_json(self) -> Json<Value> {
         Json(serde_json::to_value(self).unwrap_or_default())
     }
 }
@@ -71,12 +71,12 @@ pub(crate) fn json_rpc_error(
     code: i32,
     msg: impl Into<String>,
 ) -> axum::response::Response {
-    (status, JsonRpcResponse::err(id, code, msg).to_json()).into_response()
+    (status, JsonRpcResponse::err(id, code, msg).into_json()).into_response()
 }
 
 /// Build a complete JSON-RPC success response (HTTP 200).
 pub(crate) fn json_rpc_ok(id: Option<Value>, result: Value) -> axum::response::Response {
-    (StatusCode::OK, JsonRpcResponse::ok(id, result).to_json()).into_response()
+    (StatusCode::OK, JsonRpcResponse::ok(id, result).into_json()).into_response()
 }
 
 /// Build a "module not found" JSON-RPC error response (HTTP 404).

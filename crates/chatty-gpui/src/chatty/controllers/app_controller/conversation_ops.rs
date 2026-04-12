@@ -551,7 +551,6 @@ impl ChattyApp {
     }
 
     /// Display a conversation that is already loaded in the ConversationsStore.
-
     fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         // Clear stale invoke_agent IDs from the previous conversation to
         // prevent suppressing ToolCallBlocks that happen to share an ID.
@@ -657,7 +656,6 @@ impl ChattyApp {
     /// `direction`: -1 for previous (up in sidebar), +1 for next (down in sidebar).
     /// The sidebar list is sorted by updated_at descending, so "up" means older
     /// and "down" means newer relative to the current position.
-
     pub fn navigate_conversation(&mut self, direction: i32, cx: &mut Context<Self>) {
         let store = cx.global::<ConversationsStore>();
         let current_id = store.active_id().cloned();
@@ -709,10 +707,7 @@ impl ChattyApp {
             return;
         }
         // Cancel any pending stream before creating a new conversation
-        if let Some(manager) = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get())
-        {
+        if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             manager.update(cx, |mgr, cx| {
                 mgr.cancel_pending(cx);
             });
@@ -729,7 +724,6 @@ impl ChattyApp {
         }));
     }
 
-
     pub fn delete_active_conversation(&mut self, cx: &mut Context<Self>) {
         let active_id = cx.global::<ConversationsStore>().active_id().cloned();
 
@@ -741,7 +735,6 @@ impl ChattyApp {
     /// Change the model for the active conversation
     /// Rebuild the active conversation's agent with fresh MCP tools, keeping the same model.
     /// Called after an MCP server is enabled or disabled so the agent's tool set stays current.
-
     pub(super) fn rebuild_active_agent(&mut self, cx: &mut Context<Self>) {
         let conv_id = cx
             .global::<ConversationsStore>()
@@ -755,7 +748,6 @@ impl ChattyApp {
         })
         .detach();
     }
-
 
     pub(super) fn change_conversation_model(&mut self, model_id: String, cx: &mut Context<Self>) {
         debug!(model_id = %model_id, "Changing to model");
@@ -1004,7 +996,6 @@ impl ChattyApp {
     }
 
     /// Change the working directory for the active conversation
-
     pub(super) fn change_conversation_working_dir(
         &mut self,
         dir: Option<std::path::PathBuf>,
@@ -1035,7 +1026,6 @@ impl ChattyApp {
         // Refresh skills for the new working directory
         self.refresh_chat_input_skills(dir.as_deref(), cx);
     }
-
 
     /// Delete a conversation
     pub(super) fn delete_conversation(&mut self, id: &str, cx: &mut Context<Self>) {

@@ -6,8 +6,9 @@ use tokio::sync::{mpsc, oneshot};
 use parking_lot::Mutex;
 
 // Global notification senders (set once per message send, cleared between messages)
-static GLOBAL_APPROVAL_NOTIFIER: OnceLock<Mutex<Option<mpsc::UnboundedSender<ApprovalNotification>>>> =
-    OnceLock::new();
+static GLOBAL_APPROVAL_NOTIFIER: OnceLock<
+    Mutex<Option<mpsc::UnboundedSender<ApprovalNotification>>>,
+> = OnceLock::new();
 
 /// Set the global approval notifier for the current message
 pub fn set_global_approval_notifier(tx: mpsc::UnboundedSender<ApprovalNotification>) {

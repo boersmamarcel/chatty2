@@ -210,7 +210,11 @@ impl ChattyApp {
 
     /// Returns `true` when the message was handled as an arg-based slash command
     /// (so the caller should NOT forward it to the LLM).
-    pub(super) fn try_handle_arg_slash_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    pub(super) fn try_handle_arg_slash_command(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(rest) = text.strip_prefix("/agent ") {
             let rest = rest.trim().to_string();
             if rest.is_empty() {
