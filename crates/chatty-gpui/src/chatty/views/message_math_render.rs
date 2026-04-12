@@ -7,8 +7,8 @@
 
 use crate::chatty::services::MathRendererService;
 use gpui::*;
-use gpui_component::text::TextView;
 use gpui_component::ActiveTheme;
+use gpui_component::text::TextView;
 use tracing::warn;
 
 use super::math_parser::MathSegment;

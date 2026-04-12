@@ -6,10 +6,7 @@ use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use tracing::{info, warn};
 
-use super::{
-    ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker,
-    ToolPickerItem,
-};
+use super::{ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker, ToolPickerItem};
 use crate::events::AppEvent;
 
 /// Parsed slash command.
@@ -362,24 +359,23 @@ impl ChatEngine {
         self.sub_agent_msg_idx = Some(self.messages.len() - 1);
 
         tokio::task::spawn_blocking(move || {
-            let message =
-                match super::helpers::run_sub_agent_process(
-                    executable,
-                    model_id,
-                    prompt_owned,
-                    auto_approve,
-                    event_tx.clone(),
-                ) {
-                    Ok(stdout) => {
-                        let stdout = stdout.trim().to_string();
-                        if stdout.is_empty() {
-                            "Sub-agent completed with no output.".to_string()
-                        } else {
-                            format!("Sub-agent response:\n{}", stdout)
-                        }
+            let message = match super::helpers::run_sub_agent_process(
+                executable,
+                model_id,
+                prompt_owned,
+                auto_approve,
+                event_tx.clone(),
+            ) {
+                Ok(stdout) => {
+                    let stdout = stdout.trim().to_string();
+                    if stdout.is_empty() {
+                        "Sub-agent completed with no output.".to_string()
+                    } else {
+                        format!("Sub-agent response:\n{}", stdout)
                     }
-                    Err(e) => format!("Sub-agent failed: {}", e),
-                };
+                }
+                Err(e) => format!("Sub-agent failed: {}", e),
+            };
 
             if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
                 warn!(error = ?e, "Failed to deliver sub-agent completion event");

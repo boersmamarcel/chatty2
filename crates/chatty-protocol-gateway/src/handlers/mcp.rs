@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 use chatty_module_registry::ModuleRegistry;
 
 use super::jsonrpc::{
-    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, JsonRpcRequest,
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
 };
 
@@ -44,9 +44,7 @@ pub(crate) async fn mcp_jsonrpc(
     match body.method.as_str() {
         // MCP lifecycle
         "initialize" => handle_initialize(&module_name, body.id, registry).await,
-        "notifications/initialized" | "initialized" => {
-            (StatusCode::ACCEPTED, "").into_response()
-        }
+        "notifications/initialized" | "initialized" => (StatusCode::ACCEPTED, "").into_response(),
         method if method.starts_with("notifications/") => {
             (StatusCode::ACCEPTED, "").into_response()
         }

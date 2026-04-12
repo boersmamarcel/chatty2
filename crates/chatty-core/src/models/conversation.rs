@@ -281,12 +281,12 @@ impl Conversation {
     ///
     /// Returns `true` if a user message was removed, `false` otherwise.
     pub fn remove_last_user_message(&mut self) -> bool {
-        if let Some(last) = self.entries.last() {
-            if matches!(last.message, Message::User { .. }) {
-                self.entries.pop();
-                self.updated_at = SystemTime::now();
-                return true;
-            }
+        if let Some(last) = self.entries.last()
+            && matches!(last.message, Message::User { .. })
+        {
+            self.entries.pop();
+            self.updated_at = SystemTime::now();
+            return true;
         }
         false
     }
@@ -382,8 +382,11 @@ impl Conversation {
 
     /// Serialize system traces to JSON string
     pub fn serialize_traces(&self) -> Result<String> {
-        let traces: Vec<Option<&serde_json::Value>> =
-            self.entries.iter().map(|e| e.system_trace.as_ref()).collect();
+        let traces: Vec<Option<&serde_json::Value>> = self
+            .entries
+            .iter()
+            .map(|e| e.system_trace.as_ref())
+            .collect();
         serde_json::to_string(&traces).context("Failed to serialize system traces")
     }
 

@@ -1,5 +1,5 @@
-use gpui::EventEmitter;
 use crate::global_entity::GlobalWeakEntity;
+use gpui::EventEmitter;
 
 /// Events that signal the active agent needs to be rebuilt.
 ///

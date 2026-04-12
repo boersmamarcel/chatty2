@@ -1480,11 +1480,8 @@ impl ChatView {
                     move |msg_idx, tool_idx, cx| {
                         entity_for_diff.update(cx, |chat_view, cx| {
                             let key = (msg_idx, tool_idx);
-                            let current = chat_view
-                                .diff_expanded
-                                .get(&key)
-                                .copied()
-                                .unwrap_or(false);
+                            let current =
+                                chat_view.diff_expanded.get(&key).copied().unwrap_or(false);
                             chat_view.diff_expanded.insert(key, !current);
                             cx.notify();
                         });

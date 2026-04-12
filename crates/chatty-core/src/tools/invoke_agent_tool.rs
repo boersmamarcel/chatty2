@@ -1,8 +1,8 @@
+use parking_lot::Mutex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 

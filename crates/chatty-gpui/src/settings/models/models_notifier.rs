@@ -1,5 +1,5 @@
-use gpui::EventEmitter;
 use crate::global_entity::GlobalWeakEntity;
+use gpui::EventEmitter;
 
 /// Events related to model loading
 #[derive(Clone, Debug)]

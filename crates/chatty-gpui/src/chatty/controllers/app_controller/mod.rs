@@ -568,10 +568,7 @@ impl ChattyApp {
         }
 
         // SUBSCRIPTION 4: StreamManager events — decoupled UI updates
-        if let Some(manager) = cx
-            .try_global::<GlobalStreamManager>()
-            .and_then(|g| g.get())
-        {
+        if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
                 app.handle_stream_manager_event(event, cx);
             })
@@ -681,7 +678,6 @@ impl ChattyApp {
         self.chat_view.read(cx).chat_input_state().clone()
     }
 }
-
 
 /// Serialize a `Conversation` into a `ConversationData` snapshot suitable for persistence
 /// or export. Returns `None` if history or traces cannot be serialized.

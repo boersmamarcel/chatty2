@@ -194,14 +194,8 @@ mod tests {
             ChatEngine::parse_command("/agent summarize this"),
             Some(Command::Agent(Some("summarize this".to_string())))
         );
-        assert_eq!(
-            ChatEngine::parse_command("/clear"),
-            Some(Command::Clear)
-        );
-        assert_eq!(
-            ChatEngine::parse_command("/new"),
-            Some(Command::Clear)
-        );
+        assert_eq!(ChatEngine::parse_command("/clear"), Some(Command::Clear));
+        assert_eq!(ChatEngine::parse_command("/new"), Some(Command::Clear));
         assert_eq!(
             ChatEngine::parse_command("/compact"),
             Some(Command::Compact)
@@ -210,14 +204,8 @@ mod tests {
             ChatEngine::parse_command("/context"),
             Some(Command::Context)
         );
-        assert_eq!(
-            ChatEngine::parse_command("/copy"),
-            Some(Command::Copy)
-        );
-        assert_eq!(
-            ChatEngine::parse_command("/cwd"),
-            Some(Command::Cwd(None))
-        );
+        assert_eq!(ChatEngine::parse_command("/copy"), Some(Command::Copy));
+        assert_eq!(ChatEngine::parse_command("/cwd"), Some(Command::Cwd(None)));
         assert_eq!(
             ChatEngine::parse_command("/cd ../workspace"),
             Some(Command::Cwd(Some("../workspace".to_string())))

@@ -72,6 +72,7 @@ pub struct DisplayMessage {
 /// Shared navigation behaviour for picker lists.
 pub trait NavigableList {
     fn item_count(&self) -> usize;
+    #[allow(dead_code)]
     fn selected(&self) -> usize;
     fn selected_mut(&mut self) -> &mut usize;
 

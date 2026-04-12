@@ -1,5 +1,6 @@
 use super::syntax_highlighter;
 use crate::assets::CustomIcon;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};

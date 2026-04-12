@@ -15,8 +15,8 @@ use crate::auth::{AzureTokenCache, azure_auth};
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
-use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::AgentClient;
+use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -132,13 +132,24 @@ pub(super) async fn build_provider_agent(
             Ok(AgentClient::Ollama(agent))
         }
         ProviderType::AzureOpenAI => {
-            build_azure_agent(model_config, provider_config, preamble, tool_vec, mcp_tools, native_tool_names, api_key, base_url).await
+            build_azure_agent(
+                model_config,
+                provider_config,
+                preamble,
+                tool_vec,
+                mcp_tools,
+                native_tool_names,
+                api_key,
+                base_url,
+            )
+            .await
         }
     }
 }
 
 /// Azure OpenAI has more complex setup (endpoint normalization, Entra ID auth),
 /// so it gets its own function.
+#[allow(clippy::too_many_arguments)]
 async fn build_azure_agent(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
@@ -149,9 +160,8 @@ async fn build_azure_agent(
     api_key: Option<String>,
     base_url: Option<String>,
 ) -> Result<AgentClient> {
-    let raw_endpoint = base_url.ok_or_else(|| {
-        anyhow!("Endpoint URL not configured for Azure OpenAI provider")
-    })?;
+    let raw_endpoint =
+        base_url.ok_or_else(|| anyhow!("Endpoint URL not configured for Azure OpenAI provider"))?;
 
     let endpoint = normalize_azure_endpoint(&raw_endpoint);
 
@@ -172,16 +182,14 @@ async fn build_azure_agent(
         AzureAuthMethod::EntraId => {
             tracing::info!("Using Entra ID authentication with token cache");
 
-            let cache = AZURE_TOKEN_CACHE.get_or_init(|| {
-                match AzureTokenCache::new() {
-                    Ok(cache) => Some(cache),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = ?e,
-                            "Failed to create Azure token cache, will fetch tokens directly each time"
-                        );
-                        None
-                    }
+            let cache = AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
+                Ok(cache) => Some(cache),
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "Failed to create Azure token cache, will fetch tokens directly each time"
+                    );
+                    None
                 }
             });
 
@@ -201,9 +209,8 @@ async fn build_azure_agent(
         }
         AzureAuthMethod::ApiKey => {
             tracing::info!("Using API Key authentication for Azure OpenAI");
-            let key = api_key.ok_or_else(|| {
-                anyhow!("API key not configured for Azure OpenAI provider")
-            })?;
+            let key = api_key
+                .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
             rig::providers::azure::AzureOpenAIAuth::ApiKey(key)
         }
     };
@@ -250,8 +257,7 @@ async fn build_azure_agent(
     }
 
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-    let agent =
-        build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
+    let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
     Ok(AgentClient::AzureOpenAI(agent))
 }
 

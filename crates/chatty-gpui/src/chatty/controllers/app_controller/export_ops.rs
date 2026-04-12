@@ -274,7 +274,6 @@ impl ChattyApp {
     /// Export a conversation as JSONL (SFT + DPO) to the exports directory.
     ///
     /// Builds ConversationData from the store, converts to SFT and DPO JSONL lines,
-
     /// and appends to sft.jsonl and dpo.jsonl with deduplication by _conversation_id.
     pub(super) fn export_conversation_jsonl(&self, conv_id: &str, cx: &mut Context<Self>) {
         let conv_id = conv_id.to_string();
@@ -370,4 +369,3 @@ impl ChattyApp {
         .detach();
     }
 }
-
