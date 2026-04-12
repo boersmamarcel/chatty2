@@ -6,7 +6,6 @@ use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, IconName, Sizable};
 use std::path::PathBuf;
-use std::time::Duration;
 use tracing::debug;
 
 use super::code_block_component::CodeBlockComponent;
@@ -122,48 +121,12 @@ fn render_cached_markdown_segments(
                 elements.extend(math_elements);
             }
             CachedMarkdownSegment::IncompleteCodeBlock { language, code } => {
-                // Show raw code text as inline monospace during streaming so the
-                // user sees content arriving in real-time. A pulsing "Writing code..."
-                // label indicates the block is still in progress.
-                let idx = base_index * 100 + code_block_index;
-                let lang_label = language
-                    .as_ref()
-                    .map(|l| format!("Writing {}...", l))
-                    .unwrap_or_else(|| "Writing code...".to_string());
-                let muted_text = cx.theme().muted_foreground;
-                elements.push(
-                    div()
-                        .mb_3()
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("writing-code-hint-{}", idx).into()))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .mb_1()
-                                .child(
-                                    Icon::new(CustomIcon::Refresh)
-                                        .size(px(12.0))
-                                        .text_color(muted_text),
-                                )
-                                .child(div().text_xs().text_color(muted_text).child(lang_label))
-                                .with_animation(
-                                    ElementId::Name(format!("writing-code-pulse-{}", idx).into()),
-                                    Animation::new(Duration::from_secs(2))
-                                        .repeat()
-                                        .with_easing(pulsating_between(0.4, 1.0)),
-                                    |el, delta| el.opacity(delta),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .font_family("monospace")
-                                .text_size(px(13.0))
-                                .line_height(relative(1.5))
-                                .child(code.clone()),
-                        )
-                        .into_any_element(),
+                let block = CodeBlockComponent::streaming(
+                    language.clone(),
+                    code.clone(),
+                    base_index * 100 + code_block_index,
                 );
+                elements.push(block.into_any_element());
                 code_block_index += 1;
             }
             CachedMarkdownSegment::UnclosedCodeBlock { language, code } => {
