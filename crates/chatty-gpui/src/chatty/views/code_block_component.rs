@@ -6,18 +6,13 @@ use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, Sizable};
 use std::ops::Range;
-use std::time::Duration;
 
-const PROVISIONAL_BG_OPACITY: f32 = 0.75;
-const PROVISIONAL_BORDER_OPACITY: f32 = 0.75;
-const PROVISIONAL_TEXT_OPACITY: f32 = 0.95;
 const LANGUAGE_BADGE_BG_OPACITY: f32 = 0.35;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CodeBlockRenderMode {
     Highlighted,
     Plain,
-    Provisional,
 }
 
 /// A code block component with syntax highlighting and a copy button
@@ -68,16 +63,6 @@ impl CodeBlockComponent {
             render_mode: CodeBlockRenderMode::Plain,
         }
     }
-
-    pub fn provisional(language: Option<String>, code: String, block_index: usize) -> Self {
-        Self {
-            language,
-            code,
-            block_index,
-            pre_highlighted: Some(vec![]),
-            render_mode: CodeBlockRenderMode::Provisional,
-        }
-    }
 }
 
 impl RenderOnce for CodeBlockComponent {
@@ -102,22 +87,8 @@ impl RenderOnce for CodeBlockComponent {
         };
 
         let styled_text = StyledText::new(code.clone()).with_highlights(styles);
-        let is_provisional = render_mode == CodeBlockRenderMode::Provisional;
-        let bg_color = if is_provisional {
-            theme.muted.opacity(PROVISIONAL_BG_OPACITY)
-        } else {
-            theme.muted
-        };
-        let border_color = if is_provisional {
-            theme.border.opacity(PROVISIONAL_BORDER_OPACITY)
-        } else {
-            theme.border
-        };
-        let code_text_color = if is_provisional {
-            theme.muted_foreground.opacity(PROVISIONAL_TEXT_OPACITY)
-        } else {
-            theme.foreground
-        };
+        let bg_color = theme.muted;
+        let border_color = theme.border;
         let header_text_color = theme.muted_foreground;
         div()
             .bg(bg_color)
@@ -149,28 +120,7 @@ impl RenderOnce for CodeBlockComponent {
                                     .text_color(header_text_color)
                                     .child(lang)
                                     .into_any_element()
-                            }))
-                            .when(is_provisional, |this| {
-                                this.child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("streaming-code-hint-{}", block_index).into(),
-                                        ))
-                                        .text_xs()
-                                        .text_color(header_text_color)
-                                        .child("Streaming code... rendering when complete")
-                                        .with_animation(
-                                            ElementId::Name(
-                                                format!("streaming-code-hint-anim-{}", block_index)
-                                                    .into(),
-                                            ),
-                                            Animation::new(Duration::from_secs(2))
-                                                .repeat()
-                                                .with_easing(pulsating_between(0.5, 1.0)),
-                                            |el, delta| el.opacity(delta),
-                                        ),
-                                )
-                            }),
+                            })),
                     )
                     .child(
                         Button::new(ElementId::Name(
@@ -193,7 +143,7 @@ impl RenderOnce for CodeBlockComponent {
                     .font_family("monospace")
                     .text_size(px(13.0))
                     .line_height(relative(1.5))
-                    .text_color(code_text_color)
+                    .text_color(theme.foreground)
                     .child(styled_text),
             )
     }
