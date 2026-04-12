@@ -160,11 +160,11 @@ impl RenderOnce for CodeBlockComponent {
                                     .with_easing(pulsating_between(0.4, 1.0)),
                                 |el, delta| el.opacity(delta),
                             )
+                            .into_any_element()
                         } else {
-                            this
+                            this.into_any_element()
                         }
-                    })
-                    .into_any_element(),
+                    }),
             );
         }
 
