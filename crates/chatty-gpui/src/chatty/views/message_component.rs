@@ -335,7 +335,16 @@ fn render_text_segment_cached(
         let state = build_streaming_parse_result(text_segment, caches.streaming.as_ref(), cx);
         let elements = render_from_cached(&state.result, base_index, cx);
         *caches.streaming = Some(state);
-        elements
+        // Wrap in single container — same blank-space-during-streaming fix
+        // as the main assistant rendering path.
+        vec![
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .children(elements)
+                .into_any_element(),
+        ]
     } else {
         vec![div().child(text_segment.to_string()).into_any_element()]
     }
@@ -715,7 +724,20 @@ where
             let state = build_streaming_parse_result(&msg.content, caches.streaming.as_ref(), cx);
             let elements = render_from_cached(&state.result, index, cx);
             *caches.streaming = Some(state);
-            elements
+            // Wrap all streaming elements in a single container to prevent the
+            // blank-space-during-streaming layout bug.  When multiple top-level
+            // elements (code blocks, math, mermaid, text) are added/resized
+            // rapidly, GPUI's layout engine produces incorrect intermediate
+            // sizes.  A single wrapper means the parent always sees one child
+            // whose internal layout changes are resolved in a single pass.
+            vec![
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .children(elements)
+                    .into_any_element(),
+            ]
         };
 
         let message_with_content = container.children(children);

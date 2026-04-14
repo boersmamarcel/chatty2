@@ -147,25 +147,20 @@ impl RenderOnce for CodeBlockComponent {
                 )
                 .child(status);
 
-            header_left_children.push(
-                status_badge
-                    .map(|this| {
-                        if render_mode == CodeBlockRenderMode::Streaming {
-                            this.with_animation(
-                                ElementId::Name(
-                                    format!("code-block-status-pulse-{}", block_index).into(),
-                                ),
-                                Animation::new(Duration::from_secs(2))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 1.0)),
-                                |el, delta| el.opacity(delta),
-                            )
-                            .into_any_element()
-                        } else {
-                            this.into_any_element()
-                        }
-                    }),
-            );
+            header_left_children.push(status_badge.map(|this| {
+                if render_mode == CodeBlockRenderMode::Streaming {
+                    this.with_animation(
+                        ElementId::Name(format!("code-block-status-pulse-{}", block_index).into()),
+                        Animation::new(Duration::from_secs(2))
+                            .repeat()
+                            .with_easing(pulsating_between(0.4, 1.0)),
+                        |el, delta| el.opacity(delta),
+                    )
+                    .into_any_element()
+                } else {
+                    this.into_any_element()
+                }
+            }));
         }
 
         div()

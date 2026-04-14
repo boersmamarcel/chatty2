@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use gpui::{EventEmitter, Task};
 use tracing::{debug, warn};
 
-/// Minimum interval between batched TextChunk events (~250fps).
-/// Keeps text visually smooth while reducing per-token event overhead.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(4);
+/// Minimum interval between batched TextChunk events (~30fps).
+/// At 33ms each flush triggers one re-render cycle (markdown parse, syntax
+/// highlight, layout) — smooth enough for streaming text while avoiding the
+/// layout thrashing that a 4ms interval caused.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
 
 use crate::chatty::services::StreamChunk;
 use crate::chatty::tools::PendingArtifacts;
@@ -299,7 +301,7 @@ impl StreamManager {
     /// Process a stream chunk: update internal state and emit the corresponding event.
     ///
     /// Text chunks are batched: text is accumulated in `pending_text` and emitted as a
-    /// single `TextChunk` event only when `FLUSH_INTERVAL` (4ms, ~250fps) has elapsed.
+    /// single `TextChunk` event only when `FLUSH_INTERVAL` (33ms, ~30fps) has elapsed.
     /// All other chunk types are forwarded immediately without delay.
     pub fn handle_chunk(
         &mut self,
