@@ -466,3 +466,215 @@ impl Default for ListToolsTool {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig::tool::Tool;
+
+    fn no_tools() -> ToolAvailability {
+        ToolAvailability {
+            fs_read: false,
+            fs_write: false,
+            add_mcp: false,
+            fetch: false,
+            shell: false,
+            git: false,
+            search: false,
+            add_attachment: false,
+            excel_read: false,
+            excel_write: false,
+            pdf_to_image: false,
+            pdf_info: false,
+            pdf_extract_text: false,
+            data_query: false,
+            compile_typst: false,
+            execute_code: false,
+            memory: false,
+            search_web: false,
+            sub_agent: false,
+            browser_use: false,
+            daytona: false,
+            publish_module: false,
+        }
+    }
+
+    fn all_tools() -> ToolAvailability {
+        ToolAvailability {
+            fs_read: true,
+            fs_write: true,
+            add_mcp: true,
+            fetch: true,
+            shell: true,
+            git: true,
+            search: true,
+            add_attachment: true,
+            excel_read: true,
+            excel_write: true,
+            pdf_to_image: true,
+            pdf_info: true,
+            pdf_extract_text: true,
+            data_query: true,
+            compile_typst: true,
+            execute_code: true,
+            memory: true,
+            search_web: true,
+            sub_agent: true,
+            browser_use: true,
+            daytona: true,
+            publish_module: true,
+        }
+    }
+
+    fn tool_names(output: &ListToolsOutput) -> Vec<String> {
+        output.tools.iter().map(|t| t.name.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn test_default_has_list_tools_and_read_skill() {
+        let tool = ListToolsTool::new();
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let names = tool_names(&output);
+        assert!(names.contains(&"list_tools".to_string()));
+        assert!(names.contains(&"read_skill".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_no_tools_returns_minimal_set() {
+        let tool = ListToolsTool::new_with_config(&no_tools(), Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let names = tool_names(&output);
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"list_tools".to_string()));
+        assert!(names.contains(&"read_skill".to_string()));
+        assert_eq!(output.note, "These are the native tools available.");
+    }
+
+    #[tokio::test]
+    async fn test_fs_read_adds_four_tools() {
+        let mut avail = no_tools();
+        avail.fs_read = true;
+        let tool = ListToolsTool::new_with_config(&avail, Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let names = tool_names(&output);
+        for expected in &["read_file", "read_binary", "list_directory", "glob_search"] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+        // 2 always-present + 4 fs_read
+        assert_eq!(names.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_shell_adds_four_tools() {
+        let mut avail = no_tools();
+        avail.shell = true;
+        let tool = ListToolsTool::new_with_config(&avail, Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let names = tool_names(&output);
+        for expected in &["shell_execute", "shell_set_env", "shell_cd", "shell_status"] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+        // 2 always-present + 4 shell
+        assert_eq!(names.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_all_tools_includes_everything() {
+        let tool = ListToolsTool::new_with_config(&all_tools(), Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let names = tool_names(&output);
+        let expected = vec![
+            "list_tools",
+            "read_skill",
+            "list_mcp_services",
+            "add_mcp_service",
+            "delete_mcp_service",
+            "edit_mcp_service",
+            "fetch",
+            "read_file",
+            "read_binary",
+            "list_directory",
+            "glob_search",
+            "write_file",
+            "create_directory",
+            "delete_file",
+            "move_file",
+            "apply_diff",
+            "shell_execute",
+            "shell_set_env",
+            "shell_cd",
+            "shell_status",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_add",
+            "git_create_branch",
+            "git_switch_branch",
+            "git_commit",
+            "search_code",
+            "find_files",
+            "find_definition",
+            "add_attachment",
+            "read_excel",
+            "write_excel",
+            "edit_excel",
+            "pdf_to_image",
+            "pdf_info",
+            "pdf_extract_text",
+            "query_data",
+            "describe_data",
+            "compile_typst",
+            "execute_code",
+            "remember",
+            "save_skill",
+            "search_memory",
+            "search_web",
+            "sub_agent",
+            "browser_use",
+            "daytona_run",
+        ];
+        for name in &expected {
+            assert!(names.contains(&name.to_string()), "missing {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tools_have_correct_source() {
+        let mcp = vec![(
+            "my-server".to_string(),
+            "my_tool".to_string(),
+            "desc".to_string(),
+        )];
+        let tool = ListToolsTool::new_with_config(&no_tools(), mcp);
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let mcp_tool = output.tools.iter().find(|t| t.name == "my_tool").unwrap();
+        assert_eq!(mcp_tool.source, "mcp:my-server");
+    }
+
+    #[tokio::test]
+    async fn test_note_with_shell_and_mcp() {
+        let mut avail = no_tools();
+        avail.shell = true;
+        let mcp = vec![("srv".into(), "t".into(), "d".into())];
+        let tool = ListToolsTool::new_with_config(&avail, mcp);
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        assert!(output.note.contains("shell_execute"));
+        assert!(output.note.contains("MCP"));
+    }
+
+    #[tokio::test]
+    async fn test_note_without_shell_or_mcp() {
+        let tool = ListToolsTool::new_with_config(&no_tools(), Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        assert_eq!(output.note, "These are the native tools available.");
+    }
+
+    #[tokio::test]
+    async fn test_all_native_tools_have_native_source() {
+        let tool = ListToolsTool::new_with_config(&all_tools(), Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        for t in &output.tools {
+            assert_eq!(t.source, "native", "{} has source {}", t.name, t.source);
+        }
+    }
+}

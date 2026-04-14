@@ -1,6 +1,8 @@
 use pdfium_render::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use super::pdfium_utils::create_pdfium;
 
@@ -47,7 +49,7 @@ impl From<image::ImageError> for PdfThumbnailError {
 
 /// Get or create the session temp directory for PDF thumbnails
 pub(crate) fn get_thumbnail_dir() -> Result<PathBuf, PdfThumbnailError> {
-    let mut dir = THUMBNAIL_DIR.lock().unwrap();
+    let mut dir = THUMBNAIL_DIR.lock();
 
     if let Some(ref path) = *dir {
         return Ok(path.clone());
@@ -57,7 +59,7 @@ pub(crate) fn get_thumbnail_dir() -> Result<PathBuf, PdfThumbnailError> {
     let session_id = std::process::id();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     let mut temp_dir = std::env::temp_dir();
@@ -71,7 +73,7 @@ pub(crate) fn get_thumbnail_dir() -> Result<PathBuf, PdfThumbnailError> {
 
 /// Clean up the session temp directory and all thumbnails
 pub fn cleanup_thumbnails() {
-    let mut dir = THUMBNAIL_DIR.lock().unwrap();
+    let mut dir = THUMBNAIL_DIR.lock();
 
     if let Some(ref path) = *dir {
         if path.exists() {

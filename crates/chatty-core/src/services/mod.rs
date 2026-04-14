@@ -1,3 +1,28 @@
+//! Application service layer.
+//!
+//! Services encapsulate domain logic that doesn't belong in models (data) or
+//! repositories (persistence). Use this module for:
+//!
+//! - **External integrations**: LLM streaming (`llm_service`), MCP connections
+//!   (`mcp_service`), A2A protocol (`a2a_client`), search engines (`search_service`).
+//! - **Orchestration**: Multi-step flows like message augmentation (`message_orchestrator`),
+//!   stream lifecycle (`stream_processor`), and title generation (`title_generator`).
+//! - **System operations**: Shell execution (`shell_service`), filesystem access
+//!   (`filesystem_service`), path validation (`path_validator`), git operations (`git_service`).
+//! - **Rendering**: Math/LaTeX (`math_renderer_service`), Mermaid diagrams
+//!   (`mermaid_renderer_service`), chart SVGs (`chart_svg_renderer`), PDF thumbnails
+//!   (`pdf_thumbnail`).
+//! - **Memory & context**: Agent memory (`memory_service`), auto-context enrichment
+//!   (`auto_context`), skill persistence (`skill_service`).
+//!
+//! ## When to use services vs tools vs repositories
+//!
+//! | Layer | Purpose | Example |
+//! |-------|---------|---------|
+//! | **Service** | Reusable domain logic callable from any crate | `shell_service::execute_command()` |
+//! | **Tool** | LLM-callable function with JSON schema | `ShellTool` (wraps `shell_service`) |
+//! | **Repository** | Data persistence (load/save to disk) | `ConversationRepository` |
+
 pub mod a2a_client;
 pub mod auto_context;
 pub mod chart_svg_renderer;

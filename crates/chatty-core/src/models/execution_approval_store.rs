@@ -1,7 +1,9 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, oneshot};
+
+use parking_lot::Mutex;
 
 // Global notification senders (set once per message send, cleared between messages)
 static GLOBAL_APPROVAL_NOTIFIER: OnceLock<
@@ -13,7 +15,6 @@ pub fn set_global_approval_notifier(tx: mpsc::UnboundedSender<ApprovalNotificati
     GLOBAL_APPROVAL_NOTIFIER
         .get_or_init(|| Mutex::new(None))
         .lock()
-        .unwrap()
         .replace(tx);
 }
 
@@ -22,7 +23,7 @@ pub fn notify_approval_via_global(id: String, command: String, is_sandboxed: boo
     use tracing::{debug, warn};
 
     if let Some(guard) = GLOBAL_APPROVAL_NOTIFIER.get() {
-        if let Some(tx) = guard.lock().unwrap().as_ref() {
+        if let Some(tx) = guard.lock().as_ref() {
             match tx.send(ApprovalNotification {
                 id: id.clone(),
                 command,
@@ -120,7 +121,7 @@ pub async fn request_execution_approval(
     };
 
     {
-        let mut store = pending.lock().unwrap();
+        let mut store = pending.lock();
         store.insert(request_id.clone(), request);
     }
 
@@ -131,7 +132,7 @@ pub async fn request_execution_approval(
         Ok(Ok(ApprovalDecision::Denied)) => Ok(false),
         Ok(Err(_)) => Err(anyhow::anyhow!("Approval channel closed")),
         Err(_) => {
-            let mut store = pending.lock().unwrap();
+            let mut store = pending.lock();
             store.remove(&request_id);
             Err(anyhow::anyhow!("Approval timeout (5 minutes)"))
         }
@@ -175,7 +176,7 @@ impl ExecutionApprovalStore {
     /// Resolve an approval request by ID, returning whether it existed
     /// This is called from GPUI context when user clicks approve/deny button
     pub fn resolve(&self, id: &str, decision: ApprovalDecision) -> bool {
-        let mut pending = self.pending_requests.lock().unwrap();
+        let mut pending = self.pending_requests.lock();
         if let Some(request) = pending.remove(id) {
             let approved = matches!(decision, ApprovalDecision::Approved);
             let _ = request.responder.send(decision);

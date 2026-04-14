@@ -233,3 +233,77 @@ fn run_sub_agent(
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig::tool::Tool;
+
+    #[tokio::test]
+    async fn test_empty_task_rejected() {
+        let tool = SubAgentTool::new("model-1".into(), false, Vec::new());
+        let result = tool
+            .call(SubAgentArgs {
+                task: "   ".to_string(),
+                model: None,
+            })
+            .await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_model_validation_rejects_unknown() {
+        let tool = SubAgentTool::new(
+            "default-model".into(),
+            false,
+            vec!["model-a".into(), "model-b".into()],
+        );
+        let result = tool
+            .call(SubAgentArgs {
+                task: "do something".to_string(),
+                model: Some("nonexistent".to_string()),
+            })
+            .await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown model"),
+            "unexpected error: {err}"
+        );
+        assert!(err.to_string().contains("model-a"));
+        assert!(err.to_string().contains("model-b"));
+    }
+
+    #[tokio::test]
+    async fn test_model_validation_accepts_known() {
+        let tool = SubAgentTool::new(
+            "default-model".into(),
+            false,
+            vec!["model-a".into(), "model-b".into()],
+        );
+        // The model validation passes, but the call will fail later when
+        // trying to spawn the chatty-tui binary (which doesn't exist in tests).
+        // We verify it does NOT fail with "Unknown model".
+        let result = tool
+            .call(SubAgentArgs {
+                task: "do something".to_string(),
+                model: Some("model-a".to_string()),
+            })
+            .await;
+        match result {
+            Err(e) => assert!(
+                !e.to_string().contains("Unknown model"),
+                "should not reject known model, got: {e}"
+            ),
+            Ok(output) => {
+                // If it somehow succeeds or returns a SubAgentOutput with
+                // success=false (binary not found), that's also fine — model
+                // validation passed.
+                assert!(!output.success || !output.response.is_empty());
+            }
+        }
+    }
+}

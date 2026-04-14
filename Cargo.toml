@@ -54,6 +54,9 @@ percent-encoding = "2"
 # Date/time formatting
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
+# Mutex without poisoning
+parking_lot = "0.12"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

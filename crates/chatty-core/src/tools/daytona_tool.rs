@@ -305,6 +305,7 @@ fn extract_python_imports(code: &str) -> Vec<String> {
 fn extract_output_paths(code: &str) -> Vec<String> {
     let mut paths = Vec::new();
     // Match common save patterns: savefig('...'), write_html('...'), to_csv('...'), save('...'), etc.
+    // SAFETY: Regex pattern is a compile-time constant
     let re = regex::Regex::new(
         r#"(?:savefig|write_html|write_image|to_csv|to_excel|to_parquet|to_json|\.save)\s*\(\s*['"]([^'"]+)['"]"#
     ).unwrap();
@@ -314,6 +315,7 @@ fn extract_output_paths(code: &str) -> Vec<String> {
         }
     }
     // Also match: open('file', 'w') / open("file", "w")
+    // SAFETY: Regex pattern is a compile-time constant
     let open_re = regex::Regex::new(r#"open\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]"#).unwrap();
     for cap in open_re.captures_iter(code) {
         if let Some(m) = cap.get(1) {

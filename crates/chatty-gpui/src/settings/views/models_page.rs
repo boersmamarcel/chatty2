@@ -2,7 +2,7 @@ use crate::settings::controllers::models_controller;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::{ProviderModel, ProviderType};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Global, IntoElement, Render, Styled, Window, div,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled, Window, div,
     prelude::*, px,
 };
 use gpui_component::{
@@ -19,12 +19,7 @@ use gpui_component::{
 use tracing::trace;
 
 // Global state to store the models list view
-#[derive(Default)]
-pub struct GlobalModelsListView {
-    pub view: Option<Entity<ModelsListView>>,
-}
-
-impl Global for GlobalModelsListView {}
+pub type GlobalModelsListView = crate::global_entity::GlobalStrongEntity<ModelsListView>;
 
 // Helper function to convert provider display name to ProviderType
 fn string_to_provider_type(s: &str) -> ProviderType {
@@ -1107,7 +1102,7 @@ impl ListDelegate for ModelsListDelegate {
                                                     // Access global view and show edit dialog
                                                     let view_entity = cx
                                                         .try_global::<GlobalModelsListView>()
-                                                        .and_then(|g| g.view.clone());
+                                                        .and_then(|g| g.get());
 
                                                     if let Some(view) = view_entity {
                                                         view.update(cx, |view, inner_cx| {
@@ -1132,10 +1127,9 @@ impl ListDelegate for ModelsListDelegate {
                                                         cx,
                                                     );
 
-                                                    // Refresh the list view
                                                     let view_entity = cx
                                                         .try_global::<GlobalModelsListView>()
-                                                        .and_then(|g| g.view.clone());
+                                                        .and_then(|g| g.get());
 
                                                     if let Some(view) = view_entity {
                                                         view.update(cx, |view, cx| {

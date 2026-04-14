@@ -18,7 +18,10 @@ use tokio::sync::RwLock;
 
 use chatty_module_registry::ModuleRegistry;
 
-use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use super::jsonrpc::{
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
+    json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
+};
 
 // ---------------------------------------------------------------------------
 // Handler: POST /mcp/{module}
@@ -30,52 +33,31 @@ pub(crate) async fn mcp_jsonrpc(
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if body.jsonrpc != "2.0" {
-        return (
+        return json_rpc_error(
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(
-                    body.id,
-                    -32600,
-                    "Invalid Request: jsonrpc must be \"2.0\"",
-                ))
-                .unwrap_or_default(),
-            ),
-        )
-            .into_response();
+            body.id,
+            INVALID_REQUEST,
+            "Invalid Request: jsonrpc must be \"2.0\"",
+        );
     }
 
     match body.method.as_str() {
         // MCP lifecycle
         "initialize" => handle_initialize(&module_name, body.id, registry).await,
-        "notifications/initialized" | "initialized" => {
-            // Notification — no JSON-RPC response needed. Return 202 Accepted
-            // per the MCP Streamable HTTP spec (rmcp expects 202/204 for notifications).
-            (StatusCode::ACCEPTED, "").into_response()
-        }
+        "notifications/initialized" | "initialized" => (StatusCode::ACCEPTED, "").into_response(),
         method if method.starts_with("notifications/") => {
-            // Handle any other MCP notifications (cancelled, progress, etc.)
             (StatusCode::ACCEPTED, "").into_response()
         }
-        "ping" => (
-            StatusCode::OK,
-            Json(serde_json::to_value(JsonRpcResponse::ok(body.id, json!({}))).unwrap_or_default()),
-        )
-            .into_response(),
+        "ping" => json_rpc_ok(body.id, json!({})),
         // MCP tool methods
         "tools/list" => handle_tools_list(&module_name, body.id, registry).await,
         "tools/call" => handle_tools_call(&module_name, body.id, body.params, registry).await,
-        method => (
+        method => json_rpc_error(
             StatusCode::OK,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(
-                    body.id,
-                    -32601,
-                    format!("Method not found: {}", method),
-                ))
-                .unwrap_or_default(),
-            ),
-        )
-            .into_response(),
+            body.id,
+            METHOD_NOT_FOUND,
+            format!("Method not found: {}", method),
+        ),
     }
 }
 
@@ -84,44 +66,25 @@ async fn handle_initialize(
     id: Option<Value>,
     registry: Arc<RwLock<ModuleRegistry>>,
 ) -> axum::response::Response {
-    // Verify the module exists
     let reg = registry.read().await;
     if reg.get(module_name).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(
-                    id,
-                    -32602,
-                    format!("module '{}' not found", module_name),
-                ))
-                .unwrap_or_default(),
-            ),
-        )
-            .into_response();
+        return module_not_found(id, module_name);
     }
     drop(reg);
 
-    (
-        StatusCode::OK,
-        Json(
-            serde_json::to_value(JsonRpcResponse::ok(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {
-                        "name": module_name,
-                        "version": "0.1.0"
-                    },
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    }
-                }),
-            ))
-            .unwrap_or_default(),
-        ),
+    json_rpc_ok(
+        id,
+        json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": module_name,
+                "version": "0.1.0"
+            },
+            "capabilities": {
+                "tools": { "listChanged": false }
+            }
+        }),
     )
-        .into_response()
 }
 
 async fn handle_tools_list(
@@ -133,41 +96,21 @@ async fn handle_tools_list(
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        format!("module '{}' not found", module_name),
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+            return module_not_found(id, module_name);
         }
     };
 
     match module.list_tools() {
         Ok(tools) => {
             let tool_list: Vec<Value> = tools.iter().map(tool_to_json).collect();
-            (
-                StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::ok(id, json!({ "tools": tool_list })))
-                        .unwrap_or_default(),
-                ),
-            )
-                .into_response()
+            json_rpc_ok(id, json!({ "tools": tool_list }))
         }
-        Err(e) => (
+        Err(e) => json_rpc_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(id, -32603, e.to_string()))
-                    .unwrap_or_default(),
-            ),
-        )
-            .into_response(),
+            id,
+            INTERNAL_ERROR,
+            e.to_string(),
+        ),
     }
 }
 
@@ -180,36 +123,24 @@ async fn handle_tools_call(
     let params = match params {
         Some(p) => p,
         None => {
-            return (
+            return json_rpc_error(
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        "params are required for tools/call",
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+                id,
+                INVALID_PARAMS,
+                "params are required for tools/call",
+            );
         }
     };
 
     let tool_name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => {
-            return (
+            return json_rpc_error(
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        "params.name is required for tools/call",
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+                id,
+                INVALID_PARAMS,
+                "params.name is required for tools/call",
+            );
         }
     };
 
@@ -222,45 +153,21 @@ async fn handle_tools_call(
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        format!("module '{}' not found", module_name),
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response();
+            return module_not_found(id, module_name);
         }
     };
 
     match module.invoke_tool(&tool_name, &args).await {
-        Ok(result) => {
-            // MCP TextContent requires `text` to be a string.
-            // The tool result is already a string (possibly JSON-encoded).
-            (
-                StatusCode::OK,
-                Json(
-                    serde_json::to_value(JsonRpcResponse::ok(
-                        id,
-                        json!({ "content": [{ "type": "text", "text": result }] }),
-                    ))
-                    .unwrap_or_default(),
-                ),
-            )
-                .into_response()
-        }
-        Err(e) => (
+        Ok(result) => json_rpc_ok(
+            id,
+            json!({ "content": [{ "type": "text", "text": result }] }),
+        ),
+        Err(e) => json_rpc_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(JsonRpcResponse::err(id, -32603, e.to_string()))
-                    .unwrap_or_default(),
-            ),
-        )
-            .into_response(),
+            id,
+            INTERNAL_ERROR,
+            e.to_string(),
+        ),
     }
 }
 
@@ -276,11 +183,7 @@ pub(crate) async fn mcp_sse(
     {
         let reg = registry.read().await;
         if reg.get(&module_name).is_none() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": format!("module '{}' not found", module_name) })),
-            )
-                .into_response();
+            return module_not_found_json(&module_name);
         }
     }
 

@@ -1,4 +1,5 @@
-use gpui::{EventEmitter, Global, WeakEntity};
+use crate::global_entity::GlobalWeakEntity;
+use gpui::EventEmitter;
 
 /// Events related to model loading
 #[derive(Clone, Debug)]
@@ -19,9 +20,4 @@ impl ModelsNotifier {
 }
 
 /// Global wrapper for the notifier entity
-#[derive(Default)]
-pub struct GlobalModelsNotifier {
-    pub entity: Option<WeakEntity<ModelsNotifier>>,
-}
-
-impl Global for GlobalModelsNotifier {}
+pub type GlobalModelsNotifier = GlobalWeakEntity<ModelsNotifier>;

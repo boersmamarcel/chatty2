@@ -78,7 +78,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
         let (icon, tc_color) = match &tc.state {
             ToolCallState::Running => ("⟳", Color::Yellow),
             ToolCallState::Success => ("✓", Color::Green),
-            ToolCallState::Error(_) => ("✗", Color::Red),
+            ToolCallState::Error => ("✗", Color::Red),
         };
 
         lines.push(Line::from(vec![
@@ -97,7 +97,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
         if let Some(ref output) = tc.output {
             let preview = truncate(output, 80);
             let out_color = match &tc.state {
-                ToolCallState::Error(_) => Color::Red,
+                ToolCallState::Error => Color::Red,
                 _ => Color::DarkGray,
             };
             lines.push(Line::from(Span::styled(

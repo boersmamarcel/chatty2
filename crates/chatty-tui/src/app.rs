@@ -6,7 +6,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatEngine, Command, EngineAction};
+use crate::engine::{ChatEngine, Command, NavigableList};
 use crate::events::AppEvent;
 use crate::ui::{self, InputState};
 
@@ -157,9 +157,7 @@ async fn run_loop(
             }
             // Async app events (streaming, lifecycle)
             Some(event) = event_rx.recv() => {
-                if matches!(engine.handle_event(event), EngineAction::Quit) {
-                    return Ok(());
-                }
+                engine.handle_event(event);
             }
             // Tick for animations (streaming cursor blink)
             _ = tick_interval.tick() => {

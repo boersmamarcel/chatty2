@@ -44,6 +44,12 @@ pub enum CachedMarkdownSegment {
         language: Option<String>,
         code: String,
     },
+    /// Unclosed code block after streaming has ended.
+    /// Rendered as finalized plain code without syntax highlighting.
+    UnclosedCodeBlock {
+        language: Option<String>,
+        code: String,
+    },
     /// Rendered Mermaid diagram with pre-computed SVG path.
     /// `svg_path` is None if rendering failed (falls back to raw source display).
     MermaidDiagram {

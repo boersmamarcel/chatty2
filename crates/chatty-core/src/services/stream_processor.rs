@@ -46,7 +46,7 @@ pub fn install_progress_channel(
     slot: &InvokeAgentProgressSlot,
 ) -> mpsc::UnboundedReceiver<InvokeAgentProgress> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mut guard = slot.lock().unwrap();
+    let mut guard = slot.lock();
     *guard = Some(tx);
     rx
 }
@@ -102,7 +102,7 @@ pub async fn run_stream_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
     use std::sync::atomic::AtomicBool;
 
     struct TestHandler {
@@ -201,9 +201,9 @@ mod tests {
     #[tokio::test]
     async fn install_progress_channel_replaces_sender() {
         let slot: InvokeAgentProgressSlot = Arc::new(Mutex::new(None));
-        assert!(slot.lock().unwrap().is_none());
+        assert!(slot.lock().is_none());
 
         let _rx = install_progress_channel(&slot);
-        assert!(slot.lock().unwrap().is_some());
+        assert!(slot.lock().is_some());
     }
 }

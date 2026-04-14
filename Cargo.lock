@@ -1700,6 +1700,7 @@ dependencies = [
  "mermaid-rs-renderer",
  "mitex",
  "nix 0.29.0",
+ "parking_lot",
  "pdfium-render",
  "regex",
  "reqwest 0.13.2",

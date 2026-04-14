@@ -1,4 +1,5 @@
-use gpui::{EventEmitter, Global, WeakEntity};
+use crate::global_entity::GlobalWeakEntity;
+use gpui::EventEmitter;
 
 pub struct ErrorNotifier;
 
@@ -15,9 +16,4 @@ pub enum ErrorNotifierEvent {
 
 impl EventEmitter<ErrorNotifierEvent> for ErrorNotifier {}
 
-#[derive(Default)]
-pub struct GlobalErrorNotifier {
-    pub entity: Option<WeakEntity<ErrorNotifier>>,
-}
-
-impl Global for GlobalErrorNotifier {}
+pub type GlobalErrorNotifier = GlobalWeakEntity<ErrorNotifier>;

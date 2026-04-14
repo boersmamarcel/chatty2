@@ -233,6 +233,7 @@ pub(super) fn render_chart(
             let is_multi = line_series.as_ref().is_some_and(|s| s.len() > 1);
             if is_multi {
                 // Multi-series: use AreaChart with transparent fill (renders as pure lines)
+                // SAFETY: is_multi guarantees line_series is Some
                 let series = line_series.unwrap();
                 let series_meta: Vec<(String, usize)> = series
                     .iter()
@@ -399,6 +400,7 @@ pub(super) fn render_chart(
             let is_multi = area_series.as_ref().is_some_and(|s| s.len() > 1);
             if is_multi {
                 // Multi-series area chart
+                // SAFETY: is_multi guarantees area_series is Some
                 let series = area_series.unwrap();
                 let series_meta: Vec<(String, usize)> = series
                     .iter()
