@@ -303,21 +303,24 @@ fn extract_python_imports(code: &str) -> Vec<String> {
 ///
 /// Returns paths as written in the code — may be absolute or relative.
 fn extract_output_paths(code: &str) -> Vec<String> {
+    use std::sync::LazyLock;
+
+    static RE_SAVE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?:savefig|write_html|write_image|to_csv|to_excel|to_parquet|to_json|\.save)\s*\(\s*['"]([^'"]+)['"]"#
+        ).unwrap()
+    });
+    static RE_OPEN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"open\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]"#).unwrap()
+    });
+
     let mut paths = Vec::new();
-    // Match common save patterns: savefig('...'), write_html('...'), to_csv('...'), save('...'), etc.
-    // SAFETY: Regex pattern is a compile-time constant
-    let re = regex::Regex::new(
-        r#"(?:savefig|write_html|write_image|to_csv|to_excel|to_parquet|to_json|\.save)\s*\(\s*['"]([^'"]+)['"]"#
-    ).unwrap();
-    for cap in re.captures_iter(code) {
+    for cap in RE_SAVE.captures_iter(code) {
         if let Some(m) = cap.get(1) {
             paths.push(m.as_str().to_string());
         }
     }
-    // Also match: open('file', 'w') / open("file", "w")
-    // SAFETY: Regex pattern is a compile-time constant
-    let open_re = regex::Regex::new(r#"open\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]"#).unwrap();
-    for cap in open_re.captures_iter(code) {
+    for cap in RE_OPEN.captures_iter(code) {
         if let Some(m) = cap.get(1) {
             let path = m.as_str();
             if has_downloadable_extension(path) {

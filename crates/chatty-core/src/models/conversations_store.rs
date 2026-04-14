@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::repositories::ConversationMetadata;
 
@@ -26,7 +26,7 @@ pub struct ConversationsStore {
     active_conversation_id: Option<String>,
     /// IDs of conversations that have an active LLM stream. These are protected from eviction
     /// to avoid losing in-flight streaming state.
-    streaming_ids: Vec<String>,
+    streaming_ids: HashSet<String>,
 }
 
 impl ConversationsStore {
@@ -36,7 +36,7 @@ impl ConversationsStore {
             conversations: HashMap::new(),
             access_order: VecDeque::new(),
             active_conversation_id: None,
-            streaming_ids: Vec::new(),
+            streaming_ids: HashSet::new(),
         }
     }
 
@@ -137,21 +137,19 @@ impl ConversationsStore {
                 // Don't evict the active conversation
                 self.active_conversation_id.as_deref() != Some(id.as_str())
                     // Don't evict conversations with active streams
-                    && !self.streaming_ids.contains(id)
+                    && !self.streaming_ids.contains(id.as_str())
             })
             .cloned()
     }
 
     /// Mark a conversation as having an active stream (protects it from eviction).
     pub fn mark_streaming(&mut self, id: &str) {
-        if !self.streaming_ids.contains(&id.to_string()) {
-            self.streaming_ids.push(id.to_string());
-        }
+        self.streaming_ids.insert(id.to_string());
     }
 
     /// Remove the streaming mark from a conversation (allows eviction again).
     pub fn unmark_streaming(&mut self, id: &str) {
-        self.streaming_ids.retain(|s| s != id);
+        self.streaming_ids.remove(id);
     }
 
     /// Number of full conversations currently cached in memory.
@@ -176,7 +174,7 @@ impl ConversationsStore {
         let in_metadata = self.metadata.iter().any(|m| m.id == id);
         self.remove_metadata(id);
         self.access_order.retain(|s| s != id);
-        self.streaming_ids.retain(|s| s != id);
+        self.streaming_ids.remove(id);
 
         if self.active_conversation_id.as_deref() == Some(id) {
             self.active_conversation_id = self.metadata.first().map(|m| m.id.clone());

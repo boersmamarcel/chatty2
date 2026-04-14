@@ -1,8 +1,17 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use tracing::{debug, info, warn};
+
+// Pre-compiled regexes for operatorname fixing and SVG color injection.
+static RE_OPERATORNAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\\?operatorname\{([^}]+)\}").unwrap());
+static RE_FILL_BLACK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r##"fill="#000000?""##).unwrap());
+static RE_STROKE_BLACK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r##"stroke="#000000?""##).unwrap());
 
 /// Simple RGB color representation for theme colors (avoids gpui dependency).
 /// Each component is a float in the range [0.0, 1.0].
@@ -100,9 +109,9 @@ impl World for MathWorld {
 }
 
 // Maximum number of in-memory SVG cache entries. Prevents unbounded memory growth
-// in long sessions with many unique math expressions. At ~10-50KB per SVG, 500
-// entries ≈ 5-25MB worst case.
-const MAX_MATH_CACHE_ENTRIES: usize = 500;
+// in long sessions with many unique math expressions. At ~10-50KB per SVG, 200
+// entries ≈ 2-10MB worst case. Disk cache provides persistence for evicted entries.
+const MAX_MATH_CACHE_ENTRIES: usize = 200;
 
 /// Math renderer service that converts LaTeX to SVG using Typst
 pub struct MathRendererService {
@@ -120,13 +129,10 @@ impl Default for MathRendererService {
 impl MathRendererService {
     /// Fix \operatorname{...} by converting to op("...") for Typst
     fn fix_operatorname(code: &str) -> String {
-        use regex::Regex;
-
         let mut result = code.to_string();
 
         // Pattern 1: \operatorname{name} or operatorname{name}
-        let re1 = Regex::new(r"\\?operatorname\{([^}]+)\}").unwrap();
-        result = re1
+        result = RE_OPERATORNAME
             .replace_all(&result, |caps: &regex::Captures| {
                 let name = &caps[1];
                 format!(r#"op("{}")"#, name)
@@ -349,9 +355,6 @@ $ {typst_code} $")
     /// - Avoids CSS selector warnings from the SVG rendering library
     /// - Works for all math elements including fraction lines
     fn inject_svg_color(&self, svg_content: &str, color: RgbColor) -> String {
-        use regex::Regex;
-
-        // Convert RgbColor to hex color
         let hex_color = format!(
             "#{:02x}{:02x}{:02x}",
             (color.r * 255.0) as u8,
@@ -359,23 +362,14 @@ $ {typst_code} $")
             (color.b * 255.0) as u8
         );
 
-        // Replace black colors (#000000, #000) with theme color in inline attributes
-        let mut themed_svg = svg_content.to_string();
+        let fill_replacement = format!(r#"fill="{}""#, hex_color);
+        let stroke_replacement = format!(r#"stroke="{}""#, hex_color);
 
-        // Replace fill="#000000" or fill="#000" with theme color
-        let fill_black_regex = Regex::new(r##"fill="#000000?""##).unwrap();
-        themed_svg = fill_black_regex
-            .replace_all(&themed_svg, format!(r#"fill="{}""#, hex_color).as_str())
-            .to_string();
-
-        // Replace stroke="#000000" or stroke="#000" with theme color
-        let stroke_black_regex = Regex::new(r##"stroke="#000000?""##).unwrap();
-        themed_svg = stroke_black_regex
-            .replace_all(&themed_svg, format!(r#"stroke="{}""#, hex_color).as_str())
-            .to_string();
-
-        // Return the themed SVG with replaced colors
-        themed_svg
+        // Use Cow chaining to avoid intermediate String allocations when
+        // no replacements are made (common for already-themed SVGs).
+        let after_fill = RE_FILL_BLACK.replace_all(svg_content, fill_replacement.as_str());
+        let after_stroke = RE_STROKE_BLACK.replace_all(&after_fill, stroke_replacement.as_str());
+        after_stroke.into_owned()
     }
 
     fn make_cache_key(&self, latex: &str, is_inline: bool) -> String {

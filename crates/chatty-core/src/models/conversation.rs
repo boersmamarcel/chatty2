@@ -346,6 +346,12 @@ impl Conversation {
         &self.entries
     }
 
+    /// Iterate over rig `Message` references without cloning.
+    /// Use this for read-only access (token counting, display, etc.).
+    pub fn message_refs(&self) -> impl Iterator<Item = &Message> {
+        self.entries.iter().map(|e| &e.message)
+    }
+
     /// Collect just the rig `Message`s (for LLM API calls).
     /// Callers that need messages alongside their metadata should use `entries()`.
     pub fn messages(&self) -> Vec<Message> {
@@ -670,7 +676,7 @@ impl Conversation {
         if let Some(ref mut content) = self.streaming_message {
             content.push_str(text);
         } else {
-            let mut s = String::with_capacity(4096);
+            let mut s = String::with_capacity(32_768);
             s.push_str(text);
             self.streaming_message = Some(s);
         }

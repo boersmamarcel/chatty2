@@ -563,6 +563,14 @@ fn main() {
         // Initialize the token budget watch channel global used by the context bar
         cx.set_global(chatty::token_budget::GlobalTokenBudget::new());
 
+        // Pre-warm expensive lazy statics in background to avoid first-use stutter.
+        // BPE tokenizers (~50ms each) would otherwise stutter on the first message;
+        // the mermaid font database (~200-500ms) would stutter on the first diagram.
+        cx.spawn(async move |_cx: &mut AsyncApp| {
+            chatty_core::prewarm_statics();
+        })
+        .detach();
+
         // Spawn background task to watch the token budget channel and trigger window refreshes.
         // This is necessary because token counting runs asynchronously in parallel with the LLM
         // call, and the snapshot arrives after the initial render. The watch channel update needs

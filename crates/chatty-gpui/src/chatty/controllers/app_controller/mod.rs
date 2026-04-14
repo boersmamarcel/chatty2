@@ -53,7 +53,7 @@ mod slash_commands;
 /// Only modules with `agent = true`, a `Loaded` status, and enabled in `ExtensionsModel`
 /// are included.
 fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
-    let enabled_ids: std::collections::HashSet<String> = cx
+    let enabled_ids: std::collections::HashSet<&str> = cx
         .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
         .map(|ext| {
             ext.wasm_module_ids()
@@ -70,7 +70,7 @@ fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
                 .filter(|m| {
                     m.agent
                         && matches!(m.status, ModuleLoadStatus::Loaded)
-                        && enabled_ids.contains(&m.name)
+                        && enabled_ids.contains(m.name.as_str())
                 })
                 .map(|m| LocalModuleAgentSummary {
                     name: m.name.clone(),

@@ -485,7 +485,7 @@ async fn start_mcp_servers() -> Option<McpService> {
     // Merge enabled MCP servers from extensions into the server list
     for ext_server in extensions.mcp_servers() {
         if !servers.iter().any(|s| s.name == ext_server.name) {
-            servers.push(ext_server);
+            servers.push(ext_server.clone());
         }
     }
 

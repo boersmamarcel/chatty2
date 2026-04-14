@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,31 +36,31 @@ pub struct ErrorEntry {
 }
 
 pub struct ErrorStore {
-    entries: Arc<Mutex<Vec<ErrorEntry>>>,
+    entries: Arc<Mutex<VecDeque<ErrorEntry>>>,
     max_entries: usize,
 }
 
 impl ErrorStore {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(Vec::new())),
+            entries: Arc::new(Mutex::new(VecDeque::new())),
             max_entries,
         }
     }
 
     pub fn add_entry(&self, entry: ErrorEntry) {
         let mut entries = self.entries.lock();
-        entries.push(entry);
+        entries.push_back(entry);
 
         // FIFO eviction when exceeding max
         if entries.len() > self.max_entries {
-            entries.remove(0);
+            entries.pop_front();
         }
     }
 
     pub fn get_all_entries(&self) -> Vec<ErrorEntry> {
         let entries = self.entries.lock();
-        entries.clone()
+        entries.iter().cloned().collect()
     }
 
     pub fn error_count(&self) -> usize {
