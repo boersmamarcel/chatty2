@@ -173,7 +173,7 @@ async fn build_azure_agent(
 
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
         return Err(anyhow!(
-            "Invalid Azure endpoint URL (must start with https://): '{}'",
+            "Invalid Azure endpoint URL (must start with http:// or https://): '{}'",
             endpoint
         ));
     }
