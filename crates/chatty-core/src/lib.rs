@@ -193,11 +193,8 @@ pub fn extensions_repository() -> Arc<dyn settings::repositories::ExtensionsRepo
 /// - BPE tokenizer tables (cl100k_base + o200k_base, ~50ms each)
 /// - Mermaid/SVG font database (system font scan, ~200-500ms)
 pub fn prewarm_statics() {
-    // Run BPE tokenizer init and font DB loading in parallel.
-    // Each is CPU-bound (~50ms for BPE, ~200-500ms for font DB),
-    // so wall-clock time = max(bpe, fontdb) instead of sum.
-    std::thread::scope(|s| {
-        s.spawn(token_budget::counter::prewarm);
-        s.spawn(services::mermaid_renderer_service::prewarm_font_db);
-    });
+    // Fire-and-forget: each prewarm runs on its own OS thread so we don't
+    // block the GPUI async executor that calls us.
+    std::thread::spawn(token_budget::counter::prewarm);
+    std::thread::spawn(services::mermaid_renderer_service::prewarm_font_db);
 }
