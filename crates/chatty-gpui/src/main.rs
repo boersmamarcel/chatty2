@@ -744,24 +744,30 @@ fn main() {
         cx.set_global(math_renderer);
         info!("Math renderer service initialized");
 
-        // Clean up old styled SVG files from previous sessions
-        if let Err(e) = chatty::services::MathRendererService::cleanup_old_styled_svgs() {
-            warn!(error = ?e, "Failed to cleanup old math SVG files");
-        }
-
         // Initialize mermaid renderer service for diagram rendering
         let mermaid_renderer = chatty::services::MermaidRendererService::new();
         cx.set_global(mermaid_renderer);
         info!("Mermaid renderer service initialized");
 
-        // Clean up old mermaid SVG files from previous sessions
-        if let Err(e) = chatty::services::MermaidRendererService::cleanup_old_svgs() {
-            warn!(error = ?e, "Failed to cleanup old mermaid SVG files");
-        }
+        // Clean up old SVG cache files from previous sessions in a background thread.
+        // This is pure filesystem I/O with no dependencies — safe to run off the main thread.
+        std::thread::spawn(|| {
+            if let Err(e) = chatty::services::MathRendererService::cleanup_old_styled_svgs() {
+                warn!(error = ?e, "Failed to cleanup old math SVG files");
+            }
+            if let Err(e) = chatty::services::MermaidRendererService::cleanup_old_svgs() {
+                warn!(error = ?e, "Failed to cleanup old mermaid SVG files");
+            }
+        });
 
-        // Augment PATH for GUI app launch — macOS/Linux .app bundles don't inherit the
-        // shell PATH, so executables like npx, uvx, az, etc. won't be found otherwise.
-        chatty::auth::azure_auth::augment_gui_app_path();
+        // Augment PATH for GUI app launch in background — macOS/Linux .app bundles don't
+        // inherit the shell PATH, so executables like npx, uvx, az, etc. won't be found
+        // otherwise. This spawns a login shell subprocess which can take 100-500ms.
+        // Safe to background because MCP connections (the first PATH consumers) don't
+        // start until providers are loaded asynchronously, which takes longer.
+        std::thread::spawn(|| {
+            chatty::auth::azure_auth::augment_gui_app_path();
+        });
 
         // Initialize MCP service for managing MCP server connections
         let mcp_service = chatty::services::McpService::new();
