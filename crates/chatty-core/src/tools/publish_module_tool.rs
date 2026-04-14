@@ -176,7 +176,7 @@ impl Tool for PublishModuleTool {
             .content
             .iter()
             .filter_map(|c| match c.raw {
-                rmcp::model::RawContent::Text(ref t) => Some(t.text.as_ref()),
+                rmcp::model::RawContent::Text(ref t) => Some(t.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
