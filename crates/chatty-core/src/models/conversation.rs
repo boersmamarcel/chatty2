@@ -670,7 +670,7 @@ impl Conversation {
         if let Some(ref mut content) = self.streaming_message {
             content.push_str(text);
         } else {
-            let mut s = String::with_capacity(4096);
+            let mut s = String::with_capacity(32_768);
             s.push_str(text);
             self.streaming_message = Some(s);
         }

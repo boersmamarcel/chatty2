@@ -2,8 +2,34 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use tracing::{debug, info, warn};
+
+// Pre-compiled regexes for SVG sanitization and dimension capping.
+static RE_STYLE_BLOCK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<style[^>]*>[\s\S]*?</style>").unwrap());
+static RE_CLASS_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\s+class="[^"]*""#).unwrap());
+static RE_DATA_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\s+data-[a-z\-]+="[^"]*""#).unwrap());
+static RE_BLEND_STYLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\s+style="[^"]*mix-blend-mode[^"]*""#).unwrap());
+static RE_SVG_DIM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\b(width|height)="([0-9.]+)(?:px)?""#).unwrap());
+
+// Lazily load system fonts once (same pattern as GPUI's SvgRenderer).
+// Placed at module level so it can be pre-warmed at startup.
+static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
+    let mut db = usvg::fontdb::Database::new();
+    db.load_system_fonts();
+    Arc::new(db)
+});
+
+/// Force-initialize the system font database. Call from a background task
+/// at startup so the first mermaid render doesn't stutter (~200-500ms).
+pub fn prewarm_font_db() {
+    let _ = &*FONT_DB;
+}
 
 // Maximum number of in-memory SVG cache entries. Prevents unbounded memory growth
 // in long sessions with many unique diagrams. At ~20-100KB per SVG, 200
@@ -156,20 +182,16 @@ impl MermaidRendererService {
     /// arrowhead references (`url(#marker-id)`).
     fn sanitize_svg(svg: &str) -> String {
         // Remove <style>...</style> blocks entirely
-        let style_re = Regex::new(r"<style[^>]*>[\s\S]*?</style>").unwrap();
-        let result = style_re.replace_all(svg, "");
+        let result = RE_STYLE_BLOCK.replace_all(svg, "");
 
         // Remove class="..." attributes
-        let class_re = Regex::new(r#"\s+class="[^"]*""#).unwrap();
-        let result = class_re.replace_all(&result, "");
+        let result = RE_CLASS_ATTR.replace_all(&result, "");
 
         // Remove data-*="..." attributes
-        let data_re = Regex::new(r#"\s+data-[a-z\-]+="[^"]*""#).unwrap();
-        let result = data_re.replace_all(&result, "");
+        let result = RE_DATA_ATTR.replace_all(&result, "");
 
         // Remove style="mix-blend-mode: multiply;" (unsupported by resvg)
-        let blend_re = Regex::new(r#"\s+style="[^"]*mix-blend-mode[^"]*""#).unwrap();
-        let result = blend_re.replace_all(&result, "");
+        let result = RE_BLEND_STYLE.replace_all(&result, "");
 
         Self::cap_svg_dimensions(&result)
     }
@@ -194,11 +216,9 @@ impl MermaidRendererService {
         let svg_tag = &svg[..tag_end];
 
         // Match width/height attributes with optional "px" suffix (e.g. width="1234" or width="1234px")
-        let dim_re = Regex::new(r#"\b(width|height)="([0-9.]+)(?:px)?""#).unwrap();
-
         let mut width = 0.0f64;
         let mut height = 0.0f64;
-        for cap in dim_re.captures_iter(svg_tag) {
+        for cap in RE_SVG_DIM.captures_iter(svg_tag) {
             match &cap[1] {
                 "width" => width = cap[2].parse().unwrap_or(0.0),
                 "height" => height = cap[2].parse().unwrap_or(0.0),
@@ -223,7 +243,7 @@ impl MermaidRendererService {
         );
 
         // Replace only within the opening <svg> tag using the same regex.
-        let new_tag = dim_re.replace_all(svg_tag, |caps: &regex::Captures| match &caps[1] {
+        let new_tag = RE_SVG_DIM.replace_all(svg_tag, |caps: &regex::Captures| match &caps[1] {
             "width" => format!(r#"width="{}""#, new_w),
             "height" => format!(r#"height="{}""#, new_h),
             _ => caps[0].to_string(),
@@ -237,15 +257,6 @@ impl MermaidRendererService {
     /// Uses resvg (same renderer GPUI uses) so the output matches what the user sees.
     /// Loads system fonts so that text elements render correctly.
     pub fn render_svg_to_png(svg_path: &std::path::Path) -> Result<Vec<u8>> {
-        use std::sync::{Arc, LazyLock};
-
-        // Lazily load system fonts once (same pattern as GPUI's SvgRenderer)
-        static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
-            let mut db = usvg::fontdb::Database::new();
-            db.load_system_fonts();
-            Arc::new(db)
-        });
-
         let svg_data = std::fs::read(svg_path).context("Failed to read SVG file")?;
 
         let default_font_resolver = usvg::FontResolver::default_font_selector();

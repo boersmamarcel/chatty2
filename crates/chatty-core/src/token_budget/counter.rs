@@ -32,6 +32,13 @@ impl Encoding {
     }
 }
 
+/// Force-initialize both BPE tokenizer tables. Call from a background task
+/// at startup so the first real token count doesn't stutter.
+pub fn prewarm() {
+    let _ = &*CL100K;
+    let _ = &*O200K;
+}
+
 // ── TokenCounter ─────────────────────────────────────────────────────────────
 
 /// A lightweight, thread-safe token counter wrapping a tiktoken-rs BPE encoder.

@@ -81,36 +81,36 @@ pub struct ExtensionsModel {
 }
 
 impl ExtensionsModel {
-    /// Return all enabled MCP server configs.
-    pub fn mcp_servers(&self) -> Vec<McpServerConfig> {
+    /// Return all enabled MCP server configs (borrowed).
+    pub fn mcp_servers(&self) -> Vec<&McpServerConfig> {
         self.extensions
             .iter()
             .filter(|e| e.enabled)
             .filter_map(|e| match &e.kind {
-                ExtensionKind::McpServer(cfg) => Some(cfg.clone()),
+                ExtensionKind::McpServer(cfg) => Some(cfg),
                 _ => None,
             })
             .collect()
     }
 
-    /// Return all enabled A2A agent configs.
-    pub fn a2a_agents(&self) -> Vec<A2aAgentConfig> {
+    /// Return all enabled A2A agent configs (borrowed).
+    pub fn a2a_agents(&self) -> Vec<&A2aAgentConfig> {
         self.extensions
             .iter()
             .filter(|e| e.enabled)
             .filter_map(|e| match &e.kind {
-                ExtensionKind::A2aAgent(cfg) => Some(cfg.clone()),
+                ExtensionKind::A2aAgent(cfg) => Some(cfg),
                 _ => None,
             })
             .collect()
     }
 
     /// Return IDs of all enabled WASM module extensions.
-    pub fn wasm_module_ids(&self) -> Vec<String> {
+    pub fn wasm_module_ids(&self) -> Vec<&str> {
         self.extensions
             .iter()
             .filter(|e| e.enabled && matches!(e.kind, ExtensionKind::WasmModule))
-            .map(|e| e.id.clone())
+            .map(|e| e.id.as_str())
             .collect()
     }
 

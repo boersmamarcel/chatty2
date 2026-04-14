@@ -183,3 +183,18 @@ pub fn hive_settings_repository() -> Arc<dyn settings::repositories::HiveSetting
 pub fn extensions_repository() -> Arc<dyn settings::repositories::ExtensionsRepository> {
     registry().extensions.clone()
 }
+
+// ── Pre-warming ──────────────────────────────────────────────────────────────
+
+/// Force-initialize expensive lazy statics so the cost is paid in the background
+/// rather than causing UI stutter on first use.
+///
+/// Currently pre-warms:
+/// - BPE tokenizer tables (cl100k_base + o200k_base, ~50ms each)
+/// - Mermaid/SVG font database (system font scan, ~200-500ms)
+pub fn prewarm_statics() {
+    // Fire-and-forget: each prewarm runs on its own OS thread so we don't
+    // block the GPUI async executor that calls us.
+    std::thread::spawn(token_budget::counter::prewarm);
+    std::thread::spawn(services::mermaid_renderer_service::prewarm_font_db);
+}
