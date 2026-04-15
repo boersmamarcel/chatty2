@@ -668,13 +668,12 @@ impl ChatEngine {
                 if rest.is_empty() {
                     bail!("Usage: /modules port <1-65535>");
                 }
-                let port: u16 = rest
+                let port = rest
                     .parse()
                     .context("Port must be a number between 1 and 65535")?;
-                if port == 0 {
-                    bail!("Port must be between 1 and 65535");
-                }
-                self.module_settings.gateway_port = port;
+                let port =
+                    std::num::NonZeroU16::new(port).context("Port must be between 1 and 65535")?;
+                self.module_settings.gateway_port = port.get();
                 changed = true;
             }
             _ => {
@@ -711,7 +710,7 @@ impl ChatEngine {
 
     pub fn module_settings_summary(&self) -> String {
         format!(
-            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n\nCommands:\n/modules show\n/modules enable|disable\n/modules dir <directory>\n/modules port <1-65535>",
+            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
             self.module_settings.enabled,
             self.module_settings.module_dir,
             self.module_settings.gateway_port
