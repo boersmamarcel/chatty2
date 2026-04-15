@@ -237,7 +237,7 @@ impl Tool for WriteExcelTool {
                                     "items": {
                                         "type": "array",
                                         "items": {
-                                            "oneOf": [
+                                            "anyOf": [
                                                 { "type": "string" },
                                                 { "type": "number" },
                                                 { "type": "boolean" },

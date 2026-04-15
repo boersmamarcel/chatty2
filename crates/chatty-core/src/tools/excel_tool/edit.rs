@@ -19,6 +19,116 @@ use super::write::CellFormatSpec;
 // Re-use the write approval helper from filesystem_write_tool
 use super::super::filesystem_write_tool::request_write_approval;
 
+fn excel_cell_value_schema() -> Value {
+    serde_json::json!({
+        "anyOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "boolean" },
+            { "type": "null" }
+        ]
+    })
+}
+
+fn excel_cell_matrix_schema() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "array",
+            "items": excel_cell_value_schema()
+        }
+    })
+}
+
+fn edit_excel_parameters_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the existing Excel file"
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional output path. Defaults to overwriting the input file."
+            },
+            "operations": {
+                "type": "array",
+                "description": "Array of edit operations to apply in order",
+                "items": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "set_cell" },
+                                "sheet": { "type": "string" },
+                                "cell": { "type": "string", "description": "Cell reference, e.g. 'B2'" },
+                                "value": excel_cell_value_schema()
+                            },
+                            "required": ["type", "sheet", "cell", "value"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "set_range" },
+                                "sheet": { "type": "string" },
+                                "start_cell": { "type": "string", "description": "Top-left cell, e.g. 'A1'" },
+                                "data": excel_cell_matrix_schema()
+                            },
+                            "required": ["type", "sheet", "start_cell", "data"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "add_sheet" },
+                                "name": { "type": "string" },
+                                "data": excel_cell_matrix_schema()
+                            },
+                            "required": ["type", "name"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "delete_rows" },
+                                "sheet": { "type": "string" },
+                                "start_row": { "type": "integer", "description": "1-based row index" },
+                                "count": { "type": "integer" }
+                            },
+                            "required": ["type", "sheet", "start_row", "count"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "set_formula" },
+                                "sheet": { "type": "string" },
+                                "cell": { "type": "string" },
+                                "formula": { "type": "string" }
+                            },
+                            "required": ["type", "sheet", "cell", "formula"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "format_range" },
+                                "sheet": { "type": "string" },
+                                "range": { "type": "string" },
+                                "bold": { "type": "boolean" },
+                                "italic": { "type": "boolean" },
+                                "font_color": { "type": "string" },
+                                "bg_color": { "type": "string" },
+                                "number_format": { "type": "string" },
+                                "border": { "type": "string" }
+                            },
+                            "required": ["type", "sheet", "range"]
+                        }
+                    ]
+                }
+            }
+        },
+        "required": ["path", "operations"]
+    })
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct EditExcelArgs {
     pub path: String,
@@ -128,92 +238,7 @@ impl Tool for EditExcelTool {
                          - Add a sheet: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"add_sheet\", \"name\": \"NewSheet\", \"data\": [[\"A\",\"B\"],[1,2]]}]}\n\
                          - Delete rows: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"delete_rows\", \"sheet\": \"Sheet1\", \"start_row\": 5, \"count\": 3}]}"
                 .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the existing Excel file"
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "Optional output path. Defaults to overwriting the input file."
-                    },
-                    "operations": {
-                        "type": "array",
-                        "description": "Array of edit operations to apply in order",
-                        "items": {
-                            "oneOf": [
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "set_cell" },
-                                        "sheet": { "type": "string" },
-                                        "cell": { "type": "string", "description": "Cell reference, e.g. 'B2'" },
-                                        "value": { "description": "New cell value" }
-                                    },
-                                    "required": ["type", "sheet", "cell", "value"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "set_range" },
-                                        "sheet": { "type": "string" },
-                                        "start_cell": { "type": "string", "description": "Top-left cell, e.g. 'A1'" },
-                                        "data": { "type": "array", "items": { "type": "array" } }
-                                    },
-                                    "required": ["type", "sheet", "start_cell", "data"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "add_sheet" },
-                                        "name": { "type": "string" },
-                                        "data": { "type": "array", "items": { "type": "array" } }
-                                    },
-                                    "required": ["type", "name"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "delete_rows" },
-                                        "sheet": { "type": "string" },
-                                        "start_row": { "type": "integer", "description": "1-based row index" },
-                                        "count": { "type": "integer" }
-                                    },
-                                    "required": ["type", "sheet", "start_row", "count"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "set_formula" },
-                                        "sheet": { "type": "string" },
-                                        "cell": { "type": "string" },
-                                        "formula": { "type": "string" }
-                                    },
-                                    "required": ["type", "sheet", "cell", "formula"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "format_range" },
-                                        "sheet": { "type": "string" },
-                                        "range": { "type": "string" },
-                                        "bold": { "type": "boolean" },
-                                        "italic": { "type": "boolean" },
-                                        "font_color": { "type": "string" },
-                                        "bg_color": { "type": "string" },
-                                        "number_format": { "type": "string" },
-                                        "border": { "type": "string" }
-                                    },
-                                    "required": ["type", "sheet", "range"]
-                                }
-                            ]
-                        }
-                    }
-                },
-                "required": ["path", "operations"]
-            }),
+            parameters: edit_excel_parameters_schema(),
         }
     }
 
@@ -520,5 +545,46 @@ impl Tool for EditExcelTool {
                     .to_string(),
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edit_excel_parameters_schema;
+
+    #[test]
+    fn edit_excel_schema_defines_nested_array_items() {
+        let schema = edit_excel_parameters_schema();
+        let variants = schema["properties"]["operations"]["items"]["anyOf"]
+            .as_array()
+            .expect("operations.anyOf should be an array");
+
+        let set_range_data = &variants[1]["properties"]["data"];
+        assert_eq!(set_range_data["type"], "array");
+        assert_eq!(set_range_data["items"]["type"], "array");
+        assert!(set_range_data["items"].get("items").is_some());
+
+        let add_sheet_data = &variants[2]["properties"]["data"];
+        assert_eq!(add_sheet_data["type"], "array");
+        assert_eq!(add_sheet_data["items"]["type"], "array");
+        assert!(add_sheet_data["items"].get("items").is_some());
+    }
+
+    #[test]
+    fn edit_excel_schema_uses_anyof_not_oneof() {
+        let schema = edit_excel_parameters_schema();
+        // Operations should use anyOf (OpenAI-compatible), not oneOf
+        assert!(
+            schema["properties"]["operations"]["items"]
+                .get("anyOf")
+                .is_some(),
+            "operations.items should use anyOf"
+        );
+        assert!(
+            schema["properties"]["operations"]["items"]
+                .get("oneOf")
+                .is_none(),
+            "operations.items should NOT use oneOf"
+        );
     }
 }
