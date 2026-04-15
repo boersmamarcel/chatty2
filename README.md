@@ -140,7 +140,7 @@ With tools enabled, an agent can autonomously:
 - **Query your data** — run SQL over Parquet, CSV, and JSON files using DuckDB; read and write Excel spreadsheets
 - **Browse the web** — search via Tavily or Brave (API key required, configure in Settings > Search); falls back to DuckDuckGo lite automatically when no API key is configured; fetch and parse any URL
 - **Generate and display outputs** — create charts (bar, line, pie, donut, area, candlestick), compile Typst documents to PDF, render diagrams, and display images inline in chat
-- **Manage its own tools** — list available tools, add or configure MCP servers, discover new capabilities at runtime
+- **Manage its own tools** — list available tools and configured MCP servers, discover new capabilities at runtime
 - **Remember and learn** — store facts and reusable procedures across conversations via the built-in memory system
 - **Delegate to sub-agents** — spawn independent headless agents with their own tool access to parallelize work
 
@@ -272,7 +272,7 @@ Chatty has a unified **Extensions** page (**Settings > Extensions**) that consol
 3. Click **Add MCP Server**
 4. Enter the server **URL** and an optional **API key** (sent as `Authorization: Bearer <key>`)
 
-The agent can also manage its own MCP servers at runtime — add, edit, list, and delete servers via tool calls — with API key masking so your secrets are never exposed to the agent.
+The agent can also list configured MCP servers at runtime via the `list_mcp_services` tool call — API keys are masked so your secrets are never exposed to the agent.
 
 <details>
 <summary><strong>Recommended MCP Servers</strong></summary>
@@ -337,6 +337,7 @@ Memory is stored per-platform:
 | Windows | `%APPDATA%\chatty\memory.mv2` |
 
 Memory is enabled by default and can be toggled in **Settings > Code Execution**. You can also:
+- **Memory Browser** — browse, search, and inspect all stored memories in **Settings > Memory**; expand an entry to see its full content, or delete individual entries with the delete button
 - **Purge All Memory** — permanently delete all stored memories
 - **Semantic Search** — enable vector similarity search so the agent finds memories by meaning, not just keywords (requires a configured embedding provider)
 
