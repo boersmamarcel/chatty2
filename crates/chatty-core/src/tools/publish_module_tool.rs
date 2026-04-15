@@ -3,7 +3,6 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use rmcp::model::CallToolRequestParams;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::tools::ToolError;
@@ -157,12 +156,7 @@ impl Tool for PublishModuleTool {
             serde_json::Value::String(wasm_b64),
         );
 
-        let params = CallToolRequestParams {
-            meta: None,
-            name: Cow::Borrowed("publish_module"),
-            arguments: Some(arguments),
-            task: None,
-        };
+        let params = CallToolRequestParams::new("publish_module").with_arguments(arguments);
 
         // Call publish_module via MCP ServerSink
         let result = self

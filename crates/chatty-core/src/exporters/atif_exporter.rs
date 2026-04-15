@@ -77,6 +77,7 @@ pub fn conversation_to_atif(
                     assistant_turn_idx += 1;
                     build_agent_step(step_id, content, timestamp, trace_json, metrics)
                 }
+                Message::System { .. } => continue,
             };
         steps.push(step);
     }

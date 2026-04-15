@@ -153,6 +153,14 @@ pub fn conversation_to_sft_jsonl(
                     }
                 }
             }
+            Message::System { content } => {
+                if !content.is_empty() {
+                    messages.push(serde_json::json!({
+                        "role": "system",
+                        "content": content
+                    }));
+                }
+            }
         }
     }
 
@@ -200,6 +208,7 @@ pub fn conversation_to_dpo_jsonl(
             .map(|msg| match msg {
                 Message::Assistant { content, .. } => extract_assistant_text(content),
                 Message::User { content } => extract_user_text(content),
+                Message::System { content } => content.clone(),
             })
             .unwrap_or_default();
 
@@ -276,6 +285,14 @@ fn messages_to_chatml_prefix(
                     messages.push(serde_json::json!({
                         "role": "assistant",
                         "content": text
+                    }));
+                }
+            }
+            Message::System { content } => {
+                if !content.is_empty() {
+                    messages.push(serde_json::json!({
+                        "role": "system",
+                        "content": content
                     }));
                 }
             }

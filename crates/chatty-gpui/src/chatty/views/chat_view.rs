@@ -1233,6 +1233,9 @@ impl ChatView {
                         });
                     }
                 }
+                Message::System { .. } => {
+                    // System messages are not rendered in the chat view
+                }
             }
         }
 

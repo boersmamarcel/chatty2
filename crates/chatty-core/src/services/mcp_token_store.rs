@@ -146,11 +146,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = test_store(&dir, "test");
 
-        let creds = StoredCredentials {
-            client_id: "test-client".to_string(),
-            token_response: None,
-            granted_scopes: vec!["read".to_string()],
-        };
+        let creds = StoredCredentials::new(
+            "test-client".to_string(),
+            None,
+            vec!["read".to_string()],
+            None,
+        );
 
         store.save(creds.clone()).await.unwrap();
         let loaded = store.load().await.unwrap().unwrap();
@@ -163,11 +164,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = test_store(&dir, "test");
 
-        let creds = StoredCredentials {
-            client_id: "test-client".to_string(),
-            token_response: None,
-            granted_scopes: vec![],
-        };
+        let creds = StoredCredentials::new("test-client".to_string(), None, vec![], None);
 
         store.save(creds).await.unwrap();
         assert!(store.path.exists());

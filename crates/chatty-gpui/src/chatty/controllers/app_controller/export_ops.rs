@@ -153,6 +153,9 @@ impl ChattyApp {
                         }
                     }
                 }
+                rig::completion::Message::System { .. } => {
+                    // System messages are not included in markdown export
+                }
             }
         }
 

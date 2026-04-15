@@ -313,7 +313,10 @@ fn render_stats_bar(
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     let count_text = if displayed_count < stats.entry_count {
-        format!("Showing {} of {} memories", displayed_count, stats.entry_count)
+        format!(
+            "Showing {} of {} memories",
+            displayed_count, stats.entry_count
+        )
     } else {
         format!("{} memories", stats.entry_count)
     };
