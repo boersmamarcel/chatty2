@@ -85,3 +85,33 @@ pub fn toggle_entry(index: usize, cx: &mut App) {
     cx.global_mut::<MemoryBrowserState>().toggle_expanded(index);
     cx.refresh_windows();
 }
+
+/// Delete a single memory entry by frame ID, then refresh the list.
+pub fn delete_entry(frame_id: u64, cx: &mut App) {
+    let memory_service = cx.try_global::<MemoryService>().cloned();
+    let Some(service) = memory_service else {
+        return;
+    };
+
+    // Capture the current query so we can reload after deletion
+    let query = cx
+        .try_global::<MemoryBrowserState>()
+        .map(|s| s.query.clone())
+        .unwrap_or_default();
+
+    cx.spawn(async move |cx| {
+        if let Err(e) = service.delete(frame_id).await {
+            error!(error = ?e, frame_id = frame_id, "Failed to delete memory entry");
+            return;
+        }
+
+        // Reload the list and stats after successful deletion
+        cx.update(|cx| {
+            load_memories(query, cx);
+            load_stats(cx);
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to refresh after memory deletion"))
+        .ok();
+    })
+    .detach();
+}

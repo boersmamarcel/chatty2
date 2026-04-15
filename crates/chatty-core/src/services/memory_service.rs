@@ -28,6 +28,9 @@ pub struct MemoryHit {
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<MemoryHitSource>,
+    /// Frame ID in the memvid store (used for deletion). Not serialized to LLM output.
+    #[serde(skip)]
+    pub frame_id: Option<u64>,
 }
 
 /// Statistics about the memory store
@@ -79,6 +82,10 @@ enum MemoryCommand {
     },
     Stats {
         reply: oneshot::Sender<Result<MemoryStats>>,
+    },
+    Delete {
+        frame_id: u64,
+        reply: oneshot::Sender<Result<()>>,
     },
 }
 
@@ -197,6 +204,22 @@ impl MemoryService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(MemoryCommand::Clear { reply: reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
+
+        reply_rx
+            .await
+            .context("Memory thread dropped reply channel")?
+    }
+
+    /// Delete a single memory entry by frame ID.
+    pub async fn delete(&self, frame_id: u64) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MemoryCommand::Delete {
+                frame_id,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
 
@@ -406,7 +429,15 @@ fn run_memory_thread(
                 limit,
                 reply,
             } => {
-                let result = handle_search(&mut memvid, &query, limit);
+                let result = if query.is_empty() {
+                    handle_list_all(&mut memvid, limit)
+                } else {
+                    handle_search(&mut memvid, &query, limit)
+                };
+                let _ = reply.send(result);
+            }
+            MemoryCommand::Delete { frame_id, reply } => {
+                let result = handle_delete(&mut memvid, frame_id);
                 let _ = reply.send(result);
             }
         }
@@ -492,6 +523,7 @@ fn handle_search(memvid: &mut Memvid, query: &str, top_k: usize) -> Result<Vec<M
             title: hit.title,
             score: hit.score.unwrap_or(0.0),
             source: Some(MemoryHitSource::Memory),
+            frame_id: Some(hit.frame_id),
         })
         .collect();
 
@@ -501,6 +533,55 @@ fn handle_search(memvid: &mut Memvid, query: &str, top_k: usize) -> Result<Vec<M
         hit_count = hits.len(),
         total_hits = response.total_hits,
         "Memory search completed"
+    );
+
+    Ok(hits)
+}
+
+/// List all memory entries without a search query by iterating frames directly.
+///
+/// Returns up to `limit` entries in reverse order (newest first).
+/// Uses `frame_by_id` + `frame_text_by_id` to read title and content,
+/// avoiding the Tantivy search path which rejects empty queries.
+fn handle_list_all(memvid: &mut Memvid, limit: usize) -> Result<Vec<MemoryHit>> {
+    let count = memvid.frame_count();
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut hits = Vec::with_capacity(limit.min(count));
+
+    // Iterate newest-first (highest frame ID first)
+    for frame_id in (0..count as u64).rev().take(limit) {
+        let frame = match memvid.frame_by_id(frame_id) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+
+        // Prefer search_text (set explicitly by handle_remember), fall back to
+        // frame_text_by_id which runs the extraction pipeline on the blob.
+        let text = if let Some(ref st) = frame.search_text {
+            st.clone()
+        } else {
+            match memvid.frame_text_by_id(frame_id) {
+                Ok(t) => t,
+                Err(_) => continue,
+            }
+        };
+
+        hits.push(MemoryHit {
+            text,
+            title: frame.title.clone(),
+            score: 0.0,
+            source: Some(MemoryHitSource::Memory),
+            frame_id: Some(frame_id),
+        });
+    }
+
+    info!(
+        total_frames = count,
+        returned = hits.len(),
+        "Listed all memories"
     );
 
     Ok(hits)
@@ -611,6 +692,7 @@ fn handle_search_vec(
             title,
             score,
             source: Some(MemoryHitSource::Memory),
+            frame_id: Some(hit.frame_id),
         });
     }
 
@@ -631,10 +713,19 @@ fn handle_clear(memvid: &mut Memvid, path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn handle_delete(memvid: &mut Memvid, frame_id: u64) -> Result<()> {
+    memvid
+        .delete_frame(frame_id)
+        .context("Failed to delete memory frame")?;
+    memvid.commit().context("Failed to commit after delete")?;
+
+    info!(frame_id = frame_id, "Deleted memory entry");
+    Ok(())
+}
+
 fn handle_stats(memvid: &mut Memvid, path: &Path) -> Result<MemoryStats> {
     let file_size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let request = make_search_request("", 0, 0);
-    let entry_count = memvid.search(request).map(|r| r.total_hits).unwrap_or(0);
+    let entry_count = memvid.frame_count();
 
     Ok(MemoryStats {
         entry_count,

@@ -362,15 +362,13 @@ fn render_memory_entry(
         .title
         .clone()
         .unwrap_or_else(|| truncate_str(&entry.text, 80).to_string());
-    let preview = truncate_str(&entry.text, 140).to_string();
     let full_text = entry.text.clone();
     let title_display = title.clone();
-    let entry_title = entry.title.clone();
+    let frame_id = entry.frame_id;
 
-    // Capture theme colors before any closures
     let foreground = cx.theme().foreground;
     let muted_fg = cx.theme().muted_foreground;
-    let _muted_bg = cx.theme().muted;
+    let muted_bg = cx.theme().muted;
     let border = cx.theme().border;
     let background = cx.theme().background;
 
@@ -389,60 +387,56 @@ fn render_memory_entry(
                 .px_3()
                 .py_2()
                 .gap_2()
+                .cursor_pointer()
+                .when(is_expanded, |this| this.bg(muted_bg))
                 .on_click(move |_, _window, cx| {
                     memory_browser_controller::toggle_entry(idx, cx);
                 })
+                .child(div().text_xs().text_color(muted_fg).child(if is_expanded {
+                    "▾"
+                } else {
+                    "▸"
+                }))
                 .child(
                     div()
                         .flex_1()
                         .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
                         .text_color(foreground)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .child(SharedString::from(title_display)),
-                )
-                .child(div().text_xs().text_color(muted_fg).child(if is_expanded {
-                    "▲"
-                } else {
-                    "▼"
-                })),
+                ),
         )
-        // Preview (collapsed) or full content (expanded)
-        .when(!is_expanded, |this| {
-            this.child(
-                div()
-                    .px_3()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(muted_fg)
-                    .child(SharedString::from(preview)),
-            )
-        })
+        // Expanded: full content + delete button
         .when(is_expanded, |this| {
             this.child(
                 v_flex()
                     .px_3()
-                    .pb_3()
+                    .py_2()
                     .gap_2()
+                    .border_color(border)
+                    .border_t_1()
                     .child(
                         div()
                             .text_sm()
                             .text_color(foreground)
                             .child(SharedString::from(full_text)),
                     )
-                    .when_some(entry_title, |this, t: String| {
-                        this.child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(div().text_xs().text_color(muted_fg).child("Title:"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(foreground)
-                                        .child(SharedString::from(t)),
-                                ),
-                        )
-                    }),
+                    .child(
+                        h_flex().w_full().justify_end().child(
+                            Button::new(("delete-memory", idx))
+                                .small()
+                                .danger()
+                                .icon(Icon::new(IconName::Delete))
+                                .label("Delete")
+                                .when(frame_id.is_none(), |btn| btn.disabled(true))
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(fid) = frame_id {
+                                        memory_browser_controller::delete_entry(fid, cx);
+                                    }
+                                }),
+                        ),
+                    ),
             )
         })
         .into_any_element()
