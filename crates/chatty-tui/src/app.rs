@@ -415,6 +415,17 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Model(None) => Some(KeyAction::OpenModelPicker),
         Command::Tools(Some(name)) => Some(KeyAction::ToggleTool(name)),
         Command::Tools(None) => Some(KeyAction::OpenToolPicker),
+        Command::Modules(arg) => {
+            match engine.handle_modules_command(arg.as_deref()) {
+                Ok(changed) => {
+                    if changed {
+                        engine.spawn_init_conversation();
+                    }
+                }
+                Err(e) => engine.add_system_message(e.to_string()),
+            }
+            None
+        }
         Command::AddDir(Some(directory)) => Some(KeyAction::AddDirectory(directory)),
         Command::AddDir(None) => {
             engine.add_system_message("Usage: /add-dir <directory>".to_string());

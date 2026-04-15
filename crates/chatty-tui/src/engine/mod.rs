@@ -12,6 +12,7 @@ use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteAppr
 use chatty_core::services::{McpService, MemoryService};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
+use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
 
@@ -160,6 +161,7 @@ pub struct ChatEngine {
     pub model_config: ModelConfig,
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
+    pub module_settings: ModuleSettingsModel,
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
@@ -205,6 +207,7 @@ pub struct ChatEngineConfig {
     pub model_config: ModelConfig,
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
+    pub module_settings: ModuleSettingsModel,
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
@@ -226,6 +229,7 @@ impl ChatEngine {
             model_config: config.model_config,
             provider_config: config.provider_config,
             execution_settings: config.execution_settings,
+            module_settings: config.module_settings,
             models: config.models,
             providers: config.providers,
             mcp_service: config.mcp_service,
@@ -308,7 +312,10 @@ impl ChatEngine {
                 embedding_service: self.embedding_service.clone(),
                 allow_sub_agent: !self.is_sub_agent,
                 module_agents: Vec::new(), // no WASM module discovery in TUI
-                gateway_port: None,        // no gateway port in TUI
+                gateway_port: self
+                    .module_settings
+                    .enabled
+                    .then_some(self.module_settings.gateway_port),
                 remote_agents: self.remote_agents.clone(),
                 available_model_ids: self.available_model_ids(),
             },
@@ -342,6 +349,7 @@ impl ChatEngine {
         let user_secrets = self.user_secrets.clone();
         let remote_agents = self.remote_agents.clone();
         let available_model_ids = self.available_model_ids();
+        let module_settings = self.module_settings.clone();
         let memory_service = self.memory_service.clone();
         let search_settings = self.search_settings.clone();
         let embedding_service = self.embedding_service.clone();
@@ -387,7 +395,9 @@ impl ChatEngine {
                     embedding_service,
                     allow_sub_agent: !is_sub_agent,
                     module_agents: Vec::new(), // no WASM module discovery in TUI
-                    gateway_port: None,        // no gateway port in TUI
+                    gateway_port: module_settings
+                        .enabled
+                        .then_some(module_settings.gateway_port),
                     remote_agents,
                     available_model_ids,
                 },
