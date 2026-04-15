@@ -184,6 +184,11 @@ fn build_transcript(messages: &[Message]) -> String {
                     parts.push("Assistant: [tool calls / non-text response]".to_string());
                 }
             }
+            Message::System { content } => {
+                if !content.is_empty() {
+                    parts.push(format!("System: {}", truncate(content, 4_000)));
+                }
+            }
         }
     }
 
@@ -219,6 +224,7 @@ fn message_char_len(message: &Message) -> usize {
     match message {
         Message::User { content } => extract_user_text(content).len(),
         Message::Assistant { content, .. } => extract_assistant_text(content).len(),
+        Message::System { content } => content.len(),
     }
 }
 

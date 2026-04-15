@@ -58,11 +58,10 @@ impl McpConnection {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
-        let transport_config = StreamableHttpClientTransportConfig {
-            uri: url.as_str().into(),
-            auth_header: config.api_key.filter(|k| !k.is_empty()),
-            ..Default::default()
-        };
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+        if let Some(key) = config.api_key.filter(|k| !k.is_empty()) {
+            transport_config = transport_config.auth_header(key);
+        }
 
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..=MAX_RETRIES {
@@ -333,7 +332,10 @@ impl McpConnection {
         let scopes = auth_manager.select_scopes(None, &[]);
         let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
 
-        let oauth_config = match auth_manager.register_client("Chatty", &redirect_uri).await {
+        let oauth_config = match auth_manager
+            .register_client("Chatty", &redirect_uri, &scope_refs)
+            .await
+        {
             Ok(config) => config,
             Err(e) => {
                 let err_str = format!("{e:?}");
@@ -389,10 +391,7 @@ impl McpConnection {
 
         let transport = StreamableHttpClientTransport::with_client(
             auth_client,
-            StreamableHttpClientTransportConfig {
-                uri: url.into(),
-                ..Default::default()
-            },
+            StreamableHttpClientTransportConfig::with_uri(url),
         );
 
         let service = ()
@@ -460,10 +459,7 @@ impl McpConnection {
 
         let transport = StreamableHttpClientTransport::with_client(
             auth_client,
-            StreamableHttpClientTransportConfig {
-                uri: url.into(),
-                ..Default::default()
-            },
+            StreamableHttpClientTransportConfig::with_uri(url),
         );
 
         let service = ()
