@@ -8,7 +8,7 @@ use chatty_core::settings::models::providers_store::ProviderType;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _,
+    ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
@@ -238,33 +238,26 @@ fn memory_browser_group() -> SettingGroup {
                                 .disabled(!has_memory)
                                 .on_click(|_, _window, cx| {
                                     memory_browser_controller::load_stats(cx);
-                                    memory_browser_controller::load_memories(
-                                        String::new(),
-                                        cx,
-                                    );
+                                    memory_browser_controller::load_memories(String::new(), cx);
                                 }),
                         ),
                 )
                 // Load button when memory service exists but entries not yet loaded
                 .when(
-                    has_memory && state.entries.is_empty() && !state.loading && state.error.is_none(),
+                    has_memory
+                        && state.entries.is_empty()
+                        && !state.loading
+                        && state.error.is_none(),
                     |this| {
                         this.child(
-                            h_flex()
-                                .w_full()
-                                .justify_center()
-                                .py_4()
-                                .child(
-                                    Button::new("memory-browser-load-btn")
-                                        .label("Load Memories")
-                                        .on_click(|_, _window, cx| {
-                                            memory_browser_controller::load_stats(cx);
-                                            memory_browser_controller::load_memories(
-                                                String::new(),
-                                                cx,
-                                            );
-                                        }),
-                                ),
+                            h_flex().w_full().justify_center().py_4().child(
+                                Button::new("memory-browser-load-btn")
+                                    .label("Load Memories")
+                                    .on_click(|_, _window, cx| {
+                                        memory_browser_controller::load_stats(cx);
+                                        memory_browser_controller::load_memories(String::new(), cx);
+                                    }),
+                            ),
                         )
                     },
                 )
@@ -377,7 +370,7 @@ fn render_memory_entry(
     // Capture theme colors before any closures
     let foreground = cx.theme().foreground;
     let muted_fg = cx.theme().muted_foreground;
-    let muted_bg = cx.theme().muted;
+    let _muted_bg = cx.theme().muted;
     let border = cx.theme().border;
     let background = cx.theme().background;
 
@@ -391,6 +384,7 @@ fn render_memory_entry(
         // Header row (always visible, clickable to toggle)
         .child(
             h_flex()
+                .id(("memory-entry-header", idx))
                 .w_full()
                 .px_3()
                 .py_2()
@@ -406,12 +400,11 @@ fn render_memory_entry(
                         .text_color(foreground)
                         .child(SharedString::from(title_display)),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_fg)
-                        .child(if is_expanded { "▲" } else { "▼" }),
-                ),
+                .child(div().text_xs().text_color(muted_fg).child(if is_expanded {
+                    "▲"
+                } else {
+                    "▼"
+                })),
         )
         // Preview (collapsed) or full content (expanded)
         .when(!is_expanded, |this| {
@@ -441,12 +434,7 @@ fn render_memory_entry(
                             h_flex()
                                 .gap_1()
                                 .items_center()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted_fg)
-                                        .child("Title:"),
-                                )
+                                .child(div().text_xs().text_color(muted_fg).child("Title:"))
                                 .child(
                                     div()
                                         .text_xs()
@@ -480,4 +468,3 @@ fn format_file_size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
-

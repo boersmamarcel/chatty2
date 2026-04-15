@@ -1,6 +1,6 @@
 use crate::settings::models::MemoryBrowserState;
 use chatty_core::services::MemoryService;
-use gpui::{App, AsyncApp};
+use gpui::App;
 use tracing::{error, warn};
 
 /// Maximum number of entries to load when listing all memories (no query).
@@ -31,14 +31,15 @@ pub fn load_memories(query: String, cx: &mut App) {
         SEARCH_LIMIT
     };
 
-    cx.spawn(|cx: &mut AsyncApp| async move {
+    cx.spawn(async move |cx| {
         let result = service.list_memories(&query, limit).await;
         cx.update(|cx| {
             match result {
                 Ok(entries) => cx.global_mut::<MemoryBrowserState>().set_entries(entries),
                 Err(e) => {
                     warn!(error = ?e, "Failed to load memories for browser");
-                    cx.global_mut::<MemoryBrowserState>().set_error(e.to_string());
+                    cx.global_mut::<MemoryBrowserState>()
+                        .set_error(e.to_string());
                 }
             }
             cx.refresh_windows();
@@ -60,19 +61,17 @@ pub fn load_stats(cx: &mut App) {
         cx.set_global(MemoryBrowserState::default());
     }
 
-    cx.spawn(|cx: &mut AsyncApp| async move {
-        match service.stats().await {
-            Ok(stats) => {
-                cx.update(|cx| {
-                    cx.global_mut::<MemoryBrowserState>().set_stats(stats);
-                    cx.refresh_windows();
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update stats in MemoryBrowserState"))
-                .ok();
-            }
-            Err(e) => {
-                error!(error = ?e, "Failed to fetch memory stats");
-            }
+    cx.spawn(async move |cx| match service.stats().await {
+        Ok(stats) => {
+            cx.update(|cx| {
+                cx.global_mut::<MemoryBrowserState>().set_stats(stats);
+                cx.refresh_windows();
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to update stats in MemoryBrowserState"))
+            .ok();
+        }
+        Err(e) => {
+            error!(error = ?e, "Failed to fetch memory stats");
         }
     })
     .detach();

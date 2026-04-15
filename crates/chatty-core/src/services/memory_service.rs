@@ -401,7 +401,11 @@ fn run_memory_thread(
                 let result = handle_stats(&mut memvid, &path);
                 let _ = reply.send(result);
             }
-            MemoryCommand::List { query, limit, reply } => {
+            MemoryCommand::List {
+                query,
+                limit,
+                reply,
+            } => {
                 let result = handle_search(&mut memvid, &query, limit);
                 let _ = reply.send(result);
             }
