@@ -279,7 +279,6 @@ impl ChatEngine {
             || es.filesystem_write_enabled
             || es.fetch_enabled
             || es.git_enabled
-            || es.mcp_service_tool_enabled
             || es.docker_code_execution_enabled;
         let exec_settings = if any_tool_enabled {
             Some(self.execution_settings.clone())
@@ -362,7 +361,6 @@ impl ChatEngine {
                 || es.filesystem_write_enabled
                 || es.fetch_enabled
                 || es.git_enabled
-                || es.mcp_service_tool_enabled
                 || es.docker_code_execution_enabled;
             let exec_settings = if any_tool_enabled {
                 Some(execution_settings.clone())

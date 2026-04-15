@@ -390,6 +390,7 @@ impl SkillService {
                 title: Some(format!("{}{}", SKILL_TITLE_PREFIX, skill_name)),
                 score,
                 source: Some(source),
+                frame_id: None,
             });
         }
 

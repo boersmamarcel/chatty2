@@ -121,15 +121,6 @@ impl NativeTools {
         if let Some(t) = self.mcp_mgmt.list {
             tools.push(Box::new(t));
         }
-        if let Some(t) = self.mcp_mgmt.add {
-            tools.push(Box::new(t));
-        }
-        if let Some(t) = self.mcp_mgmt.delete {
-            tools.push(Box::new(t));
-        }
-        if let Some(t) = self.mcp_mgmt.edit {
-            tools.push(Box::new(t));
-        }
         if let Some((rf, rb, ld, gs)) = self.fs_read {
             tools.push(Box::new(rf));
             tools.push(Box::new(rb));

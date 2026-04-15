@@ -324,6 +324,7 @@ mod tests {
             title: Some(title.to_string()),
             score,
             source: Some(MemoryHitSource::Memory),
+            frame_id: None,
         }
     }
 
@@ -333,6 +334,7 @@ mod tests {
             title: Some(format!("{SKILL_TITLE_PREFIX}{name}")),
             score,
             source: Some(MemoryHitSource::Memory),
+            frame_id: None,
         }
     }
 
@@ -342,6 +344,7 @@ mod tests {
             title: Some(format!("{SKILL_TITLE_PREFIX}{name}")),
             score,
             source: Some(MemoryHitSource::WorkspaceSkillFile),
+            frame_id: None,
         }
     }
 

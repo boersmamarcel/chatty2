@@ -28,11 +28,6 @@ pub struct ExecutionSettingsModel {
     /// Enable filesystem write tools (requires workspace_dir to be set)
     #[serde(default = "default_true")]
     pub filesystem_write_enabled: bool,
-    /// Enable the add_mcp_service tool, which allows the LLM to register new MCP servers.
-    /// Opt-in: disabled by default to prevent the AI from adding new command-line integrations
-    /// without explicit user action.
-    #[serde(default)]
-    pub mcp_service_tool_enabled: bool,
     /// Enable the built-in fetch tool, which allows the LLM to make read-only HTTP GET requests.
     /// Zero-configuration web access without requiring an MCP fetch server.
     #[serde(default = "default_true")]
@@ -92,9 +87,8 @@ impl Default for ExecutionSettingsModel {
             workspace_dir: None,
             filesystem_read_enabled: true, // Enabled by default when workspace is set
             filesystem_write_enabled: true, // Enabled by default when workspace is set
-            mcp_service_tool_enabled: false,
-            fetch_enabled: true, // Enabled by default for zero-config web access
-            git_enabled: false,  // Opt-in: requires workspace with git repo
+            fetch_enabled: true,           // Enabled by default for zero-config web access
+            git_enabled: false,            // Opt-in: requires workspace with git repo
             docker_code_execution_enabled: false, // Opt-in: requires Docker
             docker_host: None,
             timeout_seconds: 30,

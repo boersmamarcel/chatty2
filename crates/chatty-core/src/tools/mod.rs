@@ -13,14 +13,11 @@ impl From<anyhow::Error> for ToolError {
 }
 
 pub mod add_attachment_tool;
-pub mod add_mcp_tool;
 pub mod browser_use_tool;
 pub mod chart_tool;
 #[cfg(feature = "duckdb")]
 pub mod data_query_tool;
 pub mod daytona_tool;
-pub mod delete_mcp_tool;
-pub mod edit_mcp_tool;
 #[cfg(feature = "excel")]
 pub mod excel_tool;
 pub mod execute_code_tool;
@@ -54,14 +51,11 @@ pub mod test_helpers;
 pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
-pub use add_mcp_tool::AddMcpTool;
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
 #[cfg(feature = "duckdb")]
 pub use data_query_tool::{DescribeDataTool, QueryDataTool};
 pub use daytona_tool::DaytonaTool;
-pub use delete_mcp_tool::DeleteMcpTool;
-pub use edit_mcp_tool::EditMcpTool;
 #[cfg(feature = "excel")]
 pub use excel_tool::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 pub use execute_code_tool::ExecuteCodeTool;

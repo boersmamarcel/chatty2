@@ -527,11 +527,6 @@ impl ChatEngine {
                 enabled: es.git_enabled,
             },
             ToolPickerItem {
-                key: "mcp-manage".to_string(),
-                label: "MCP Management".to_string(),
-                enabled: es.mcp_service_tool_enabled,
-            },
-            ToolPickerItem {
                 key: "docker-exec".to_string(),
                 label: "Docker Execution".to_string(),
                 enabled: es.docker_code_execution_enabled,
@@ -560,7 +555,6 @@ impl ChatEngine {
                 "fs-write" => self.execution_settings.filesystem_write_enabled = item.enabled,
                 "fetch" => self.execution_settings.fetch_enabled = item.enabled,
                 "git" => self.execution_settings.git_enabled = item.enabled,
-                "mcp-manage" => self.execution_settings.mcp_service_tool_enabled = item.enabled,
                 "docker-exec" => {
                     self.execution_settings.docker_code_execution_enabled = item.enabled
                 }
@@ -591,17 +585,13 @@ impl ChatEngine {
                 self.execution_settings.fetch_enabled = !self.execution_settings.fetch_enabled
             }
             "git" => self.execution_settings.git_enabled = !self.execution_settings.git_enabled,
-            "mcp-manage" => {
-                self.execution_settings.mcp_service_tool_enabled =
-                    !self.execution_settings.mcp_service_tool_enabled
-            }
             "docker-exec" => {
                 self.execution_settings.docker_code_execution_enabled =
                     !self.execution_settings.docker_code_execution_enabled
             }
             _ => {
                 self.add_system_message(format!(
-                    "Unknown tool '{}'. Valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec",
+                    "Unknown tool '{}'. Valid: shell, fs-read, fs-write, fetch, git, docker-exec",
                     name
                 ));
                 return false;
@@ -614,7 +604,6 @@ impl ChatEngine {
             "fs-write" => self.execution_settings.filesystem_write_enabled,
             "fetch" => self.execution_settings.fetch_enabled,
             "git" => self.execution_settings.git_enabled,
-            "mcp-manage" => self.execution_settings.mcp_service_tool_enabled,
             "docker-exec" => self.execution_settings.docker_code_execution_enabled,
             _ => false,
         };

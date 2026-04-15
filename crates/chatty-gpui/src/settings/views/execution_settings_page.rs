@@ -32,21 +32,6 @@ pub fn execution_settings_page() -> SettingPage {
                     )
                     .description("Master toggle for bash shell command execution"),
                     SettingItem::new(
-                        "Allow LLM to Manage MCP Servers",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<ExecutionSettingsModel>().mcp_service_tool_enabled,
-                            |_val: bool, cx: &mut App| {
-                                execution_settings_controller::toggle_mcp_service_tool(cx);
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(
-                        "When enabled, the AI can add, edit, and delete MCP servers via the \
-                         add_mcp_service, edit_mcp_service, and delete_mcp_service tools. \
-                         Disable to prevent the AI from modifying MCP server configurations.",
-                    ),
-                    SettingItem::new(
                         "Enable Git Integration",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().git_enabled,

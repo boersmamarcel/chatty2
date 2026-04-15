@@ -141,8 +141,8 @@ pub(super) fn build_preamble(
     }
     if mcp_mgmt_tools.is_enabled() {
         tool_sections.push(
-            "- **list_mcp_services / add_mcp_service / edit_mcp_service / delete_mcp_service**: \
-             Manage MCP server configurations."
+            "- **list_mcp_services**: \
+             List configured MCP server integrations."
                 .to_string(),
         );
     }

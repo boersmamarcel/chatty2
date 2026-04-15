@@ -426,6 +426,7 @@ fn main() {
         cx.set_global(settings::models::HiveSettingsModel::default());
         cx.set_global(settings::models::ExtensionsModel::default());
         cx.set_global(settings::models::MarketplaceState::default());
+        cx.set_global(settings::models::MemoryBrowserState::default());
 
         settings::controllers::module_settings_controller::refresh_runtime(cx);
 

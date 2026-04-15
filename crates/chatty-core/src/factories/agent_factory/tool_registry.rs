@@ -8,7 +8,7 @@ use std::collections::HashSet;
 pub struct ToolAvailability {
     pub fs_read: bool,
     pub fs_write: bool,
-    pub add_mcp: bool,
+    pub list_mcp: bool,
     pub fetch: bool,
     pub shell: bool,
     pub git: bool,
@@ -38,17 +38,8 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
         String::from("invoke_agent"),
     ]);
 
-    if tools.add_mcp {
-        names.extend(
-            [
-                "list_mcp_services",
-                "add_mcp_service",
-                "delete_mcp_service",
-                "edit_mcp_service",
-            ]
-            .into_iter()
-            .map(String::from),
-        );
+    if tools.list_mcp {
+        names.insert(String::from("list_mcp_services"));
     }
     if tools.fetch {
         names.insert(String::from("fetch"));
@@ -243,19 +234,19 @@ mod tests {
     }
 
     #[test]
-    fn includes_mcp_management_tools() {
+    fn includes_list_mcp_tool() {
         let names = active_native_tool_names(&ToolAvailability {
-            add_mcp: true,
+            list_mcp: true,
             ..Default::default()
         });
-        for tool in [
-            "list_mcp_services",
-            "add_mcp_service",
-            "delete_mcp_service",
-            "edit_mcp_service",
-        ] {
-            assert!(names.contains(tool), "{tool} missing for add_mcp");
-        }
+        assert!(
+            names.contains("list_mcp_services"),
+            "list_mcp_services missing for list_mcp"
+        );
+        // Mutation tools should NOT be present
+        assert!(!names.contains("add_mcp_service"));
+        assert!(!names.contains("delete_mcp_service"));
+        assert!(!names.contains("edit_mcp_service"));
     }
 
     #[test]
@@ -347,7 +338,7 @@ mod tests {
         let all = ToolAvailability {
             fs_read: true,
             fs_write: true,
-            add_mcp: true,
+            list_mcp: true,
             fetch: true,
             shell: true,
             git: true,

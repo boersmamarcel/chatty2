@@ -12,9 +12,11 @@ pub use chatty_core::settings::models::{
 pub mod agent_config_notifier;
 pub mod discovered_modules;
 pub mod marketplace_state;
+pub mod memory_browser_state;
 pub mod models_notifier;
 
 pub use agent_config_notifier::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
 pub use discovered_modules::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 pub use marketplace_state::MarketplaceState;
+pub use memory_browser_state::MemoryBrowserState;
 pub use models_notifier::{GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent};
