@@ -206,7 +206,7 @@ fn memory_browser_group() -> SettingGroup {
                 .gap_3()
                 // Stats bar
                 .when_some(state.stats.as_ref(), |this, stats| {
-                    this.child(render_stats_bar(stats, cx))
+                    this.child(render_stats_bar(stats, state.entries.len(), cx))
                 })
                 // Search + Refresh controls
                 .child(
@@ -309,8 +309,15 @@ fn memory_browser_group() -> SettingGroup {
 /// Render a compact stats bar with entry count and file size.
 fn render_stats_bar(
     stats: &chatty_core::services::memory_service::MemoryStats,
+    displayed_count: usize,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
+    let count_text = if displayed_count < stats.entry_count {
+        format!("Showing {} of {} memories", displayed_count, stats.entry_count)
+    } else {
+        format!("{} memories", stats.entry_count)
+    };
+
     h_flex()
         .w_full()
         .gap_3()
@@ -333,7 +340,7 @@ fn render_stats_bar(
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(cx.theme().foreground)
-                        .child(format!("{} memories", stats.entry_count)),
+                        .child(count_text),
                 ),
         )
         .child(

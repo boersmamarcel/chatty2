@@ -18,10 +18,6 @@ pub fn load_memories(query: String, cx: &mut App) {
         return;
     };
 
-    if !cx.has_global::<MemoryBrowserState>() {
-        cx.set_global(MemoryBrowserState::default());
-    }
-
     cx.global_mut::<MemoryBrowserState>().set_loading(&query);
     cx.refresh_windows();
 
@@ -57,10 +53,6 @@ pub fn load_stats(cx: &mut App) {
         return;
     };
 
-    if !cx.has_global::<MemoryBrowserState>() {
-        cx.set_global(MemoryBrowserState::default());
-    }
-
     cx.spawn(async move |cx| match service.stats().await {
         Ok(stats) => {
             cx.update(|cx| {
@@ -79,9 +71,6 @@ pub fn load_stats(cx: &mut App) {
 
 /// Toggle expansion of a memory entry by index.
 pub fn toggle_entry(index: usize, cx: &mut App) {
-    if !cx.has_global::<MemoryBrowserState>() {
-        return;
-    }
     cx.global_mut::<MemoryBrowserState>().toggle_expanded(index);
     cx.refresh_windows();
 }
