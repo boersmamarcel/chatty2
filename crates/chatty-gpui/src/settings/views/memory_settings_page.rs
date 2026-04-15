@@ -1,14 +1,20 @@
 use crate::settings::controllers::execution_settings_controller;
+use crate::settings::controllers::memory_browser_controller;
+use crate::settings::models::MemoryBrowserState;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use chatty_core::services::MemoryService;
 use chatty_core::services::embedding_service::EmbeddingService;
 use chatty_core::settings::models::providers_store::ProviderType;
-use gpui::{App, IntoElement, SharedString, Styled};
+use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_component::{
-    Disableable,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _,
     button::{Button, ButtonVariants},
+    h_flex,
+    input::{Input, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     setting::{SettingField, SettingGroup, SettingItem, SettingPage},
+    v_flex,
 };
 
 pub fn memory_settings_page() -> SettingPage {
@@ -20,6 +26,7 @@ pub fn memory_settings_page() -> SettingPage {
         )
         .resettable(false)
         .groups(vec![
+            memory_browser_group(),
             SettingGroup::new()
                 .title("Agent Memory")
                 .description(
@@ -177,3 +184,300 @@ pub fn memory_settings_page() -> SettingPage {
                 ]),
         ])
 }
+
+fn memory_browser_group() -> SettingGroup {
+    SettingGroup::new()
+        .title("Memory Browser")
+        .description(
+            "Browse and inspect all memories stored by the agent. \
+             Search for specific memories or expand an entry to see full details.",
+        )
+        .items(vec![SettingItem::render(|_options, window, cx| {
+            let has_memory = cx.try_global::<MemoryService>().is_some();
+            let state = cx.global::<MemoryBrowserState>().clone();
+
+            // Persist the search input across frames
+            let search_input = window.use_keyed_state("memory-browser-search", cx, |window, cx| {
+                InputState::new(window, cx).placeholder("Search memories...")
+            });
+
+            v_flex()
+                .w_full()
+                .gap_3()
+                // Stats bar
+                .when_some(state.stats.as_ref(), |this, stats| {
+                    this.child(render_stats_bar(stats, cx))
+                })
+                // Search + Refresh controls
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&search_input)))
+                        .child(
+                            Button::new("memory-browser-search-btn")
+                                .small()
+                                .icon(Icon::new(IconName::Search))
+                                .label("Search")
+                                .loading(state.loading)
+                                .disabled(!has_memory)
+                                .on_click({
+                                    let search_input = search_input.clone();
+                                    move |_, _window, cx| {
+                                        let query =
+                                            search_input.read(cx).value().trim().to_string();
+                                        memory_browser_controller::load_memories(query, cx);
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("memory-browser-refresh-btn")
+                                .small()
+                                .ghost()
+                                .label("Refresh")
+                                .disabled(!has_memory)
+                                .on_click(|_, _window, cx| {
+                                    memory_browser_controller::load_stats(cx);
+                                    memory_browser_controller::load_memories(
+                                        String::new(),
+                                        cx,
+                                    );
+                                }),
+                        ),
+                )
+                // Load button when memory service exists but entries not yet loaded
+                .when(
+                    has_memory && state.entries.is_empty() && !state.loading && state.error.is_none(),
+                    |this| {
+                        this.child(
+                            h_flex()
+                                .w_full()
+                                .justify_center()
+                                .py_4()
+                                .child(
+                                    Button::new("memory-browser-load-btn")
+                                        .label("Load Memories")
+                                        .on_click(|_, _window, cx| {
+                                            memory_browser_controller::load_stats(cx);
+                                            memory_browser_controller::load_memories(
+                                                String::new(),
+                                                cx,
+                                            );
+                                        }),
+                                ),
+                        )
+                    },
+                )
+                // No memory service message
+                .when(!has_memory, |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Enable Agent Memory above to use the Memory Browser."),
+                    )
+                })
+                // Error message
+                .when_some(state.error.as_ref(), |this, error| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().ring)
+                            .child(format!("Error: {error}")),
+                    )
+                })
+                // Loading indicator
+                .when(state.loading, |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Loading memories…"),
+                    )
+                })
+                // Memory list
+                .when(!state.entries.is_empty(), |this| {
+                    this.children(
+                        state
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, entry)| {
+                                let is_expanded = state.expanded_index == Some(idx);
+                                render_memory_entry(idx, entry, is_expanded, cx)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .into_any_element()
+        })])
+}
+
+/// Render a compact stats bar with entry count and file size.
+fn render_stats_bar(
+    stats: &chatty_core::services::memory_service::MemoryStats,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    h_flex()
+        .w_full()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(cx.theme().muted)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("🧠"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(cx.theme().foreground)
+                        .child(format!("{} memories", stats.entry_count)),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("·"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format_file_size(stats.file_size_bytes)),
+        )
+        .into_any_element()
+}
+
+/// Render a single memory entry card (collapsed or expanded).
+fn render_memory_entry(
+    idx: usize,
+    entry: &chatty_core::services::memory_service::MemoryHit,
+    is_expanded: bool,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    let title = entry
+        .title
+        .clone()
+        .unwrap_or_else(|| truncate_str(&entry.text, 80).to_string());
+    let preview = truncate_str(&entry.text, 140).to_string();
+    let full_text = entry.text.clone();
+    let title_display = title.clone();
+    let entry_title = entry.title.clone();
+
+    // Capture theme colors before any closures
+    let foreground = cx.theme().foreground;
+    let muted_fg = cx.theme().muted_foreground;
+    let muted_bg = cx.theme().muted;
+    let border = cx.theme().border;
+    let background = cx.theme().background;
+
+    v_flex()
+        .w_full()
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .bg(background)
+        .overflow_hidden()
+        // Header row (always visible, clickable to toggle)
+        .child(
+            h_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_2()
+                .on_click(move |_, _window, cx| {
+                    memory_browser_controller::toggle_entry(idx, cx);
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(foreground)
+                        .child(SharedString::from(title_display)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_fg)
+                        .child(if is_expanded { "▲" } else { "▼" }),
+                ),
+        )
+        // Preview (collapsed) or full content (expanded)
+        .when(!is_expanded, |this| {
+            this.child(
+                div()
+                    .px_3()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(SharedString::from(preview)),
+            )
+        })
+        .when(is_expanded, |this| {
+            this.child(
+                v_flex()
+                    .px_3()
+                    .pb_3()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(foreground)
+                            .child(SharedString::from(full_text)),
+                    )
+                    .when_some(entry_title, |this, t: String| {
+                        this.child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted_fg)
+                                        .child("Title:"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(foreground)
+                                        .child(SharedString::from(t)),
+                                ),
+                        )
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+/// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
+fn truncate_str(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max_chars {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        std::borrow::Cow::Owned(format!("{truncated}…"))
+    }
+}
+
+/// Format a byte count as a human-readable string (e.g. "1.4 MB").
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+

@@ -69,6 +69,11 @@ enum MemoryCommand {
         limit: usize,
         reply: oneshot::Sender<Result<Vec<MemoryHit>>>,
     },
+    List {
+        query: String,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<MemoryHit>>>,
+    },
     Clear {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -192,6 +197,26 @@ impl MemoryService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(MemoryCommand::Clear { reply: reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
+
+        reply_rx
+            .await
+            .context("Memory thread dropped reply channel")?
+    }
+
+    /// List stored memories, optionally filtered by a search query.
+    ///
+    /// If `query` is empty, returns up to `limit` recent entries from the store.
+    /// If `query` is non-empty, performs a full-text search and returns ranked results.
+    pub async fn list_memories(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MemoryCommand::List {
+                query: query.to_string(),
+                limit,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("Memory thread stopped"))?;
 
@@ -374,6 +399,10 @@ fn run_memory_thread(
             }
             MemoryCommand::Stats { reply } => {
                 let result = handle_stats(&mut memvid, &path);
+                let _ = reply.send(result);
+            }
+            MemoryCommand::List { query, limit, reply } => {
+                let result = handle_search(&mut memvid, &query, limit);
                 let _ = reply.send(result);
             }
         }
