@@ -1,28 +1,18 @@
 use std::collections::HashSet;
 
-/// All four MCP management tools bundled together.
-///
-/// All four are gated on the same `mcp_service_tool_enabled` setting, so they
-/// are always constructed (or not) as a unit.
+/// MCP listing tool, always enabled when MCP servers are configured.
 pub(super) struct McpTools {
-    pub add: Option<crate::tools::AddMcpTool>,
-    pub delete: Option<crate::tools::DeleteMcpTool>,
-    pub edit: Option<crate::tools::EditMcpTool>,
     pub list: Option<crate::tools::ListMcpTool>,
 }
 
 impl McpTools {
+    #[cfg(test)]
     pub fn none() -> Self {
-        Self {
-            add: None,
-            delete: None,
-            edit: None,
-            list: None,
-        }
+        Self { list: None }
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.add.is_some()
+        self.list.is_some()
     }
 }
 

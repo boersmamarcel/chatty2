@@ -18,14 +18,14 @@ use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
 use crate::tools::{
-    AddAttachmentTool, AddMcpTool, ApplyDiffTool, BrowserUseTool, CreateChartTool,
-    CreateDirectoryTool, DaytonaTool, DeleteFileTool, DeleteMcpTool, EditMcpTool, ExecuteCodeTool,
-    FetchTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool,
-    GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
-    ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
-    MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
-    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
+    AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
+    DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool,
+    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
+    GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool,
+    ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool, PendingArtifacts,
+    PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
+    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, QueryDataTool};
@@ -361,52 +361,9 @@ impl AgentClient {
             "Total MCP tools registered with list_tools"
         );
 
-        // Create MCP management tools (all four are gated on the same setting)
-        let mcp_mgmt_tools = {
-            let enabled = exec_settings
-                .as_ref()
-                .map(|s| s.mcp_service_tool_enabled)
-                .unwrap_or(false);
-            if enabled {
-                let (add, delete, edit) = match (
-                    crate::MCP_UPDATE_SENDER.get().cloned(),
-                    crate::MCP_SERVICE.get().cloned(),
-                ) {
-                    (Some(sender), Some(service)) => (
-                        AddMcpTool::new_with_services(
-                            crate::mcp_repository(),
-                            sender.clone(),
-                            service.clone(),
-                        ),
-                        DeleteMcpTool::new_with_services(
-                            crate::mcp_repository(),
-                            sender.clone(),
-                            service.clone(),
-                        ),
-                        EditMcpTool::new_with_services(crate::mcp_repository(), sender, service),
-                    ),
-                    _ => {
-                        tracing::warn!(
-                            "MCP_UPDATE_SENDER or MCP_SERVICE not initialized; \
-                             MCP tools created without live services"
-                        );
-                        (
-                            AddMcpTool::new(crate::mcp_repository()),
-                            DeleteMcpTool::new(crate::mcp_repository()),
-                            EditMcpTool::new(crate::mcp_repository()),
-                        )
-                    }
-                };
-                McpTools {
-                    add: Some(add),
-                    delete: Some(delete),
-                    edit: Some(edit),
-                    list: Some(ListMcpTool::new(crate::mcp_repository())),
-                }
-            } else {
-                tracing::info!("MCP management tools disabled by execution settings");
-                McpTools::none()
-            }
+        // Create MCP listing tool (always available; mutation tools removed)
+        let mcp_mgmt_tools = McpTools {
+            list: Some(ListMcpTool::new(crate::mcp_repository())),
         };
 
         // Create fetch tool if enabled in settings
@@ -689,7 +646,7 @@ impl AgentClient {
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
             fs_write: fs_write_tools.is_some(),
-            add_mcp: mcp_mgmt_tools.is_enabled(),
+            list_mcp: mcp_mgmt_tools.is_enabled(),
             fetch: fetch_tool.is_some(),
             shell: shell_tools.is_some(),
             git: git_tools.is_some(),

@@ -87,7 +87,8 @@ impl Tool for ListMcpTool {
 
         let total = summaries.len();
         let note = if total == 0 {
-            "No MCP servers are configured. Use add_mcp_service to add one.".to_string()
+            "No MCP servers are configured. Ask the user to add one in Settings → Extensions."
+                .to_string()
         } else {
             "Servers must already be running at the configured URL before they can be enabled."
                 .to_string()

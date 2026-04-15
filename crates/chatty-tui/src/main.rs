@@ -57,7 +57,6 @@ TOOL GROUPS:
     fs-write     Write, delete, move files, apply diffs, Excel writing
     fetch        HTTP GET requests (zero-config web access)
     git          Git operations (status, diff, log, add, branch, commit)
-    mcp-manage   Add/edit/delete/list MCP server configurations
     docker-exec  Run code in a Docker sandbox (requires Docker)
 
   Defaults come from the persisted Chatty execution settings. CLI flags override
@@ -109,7 +108,7 @@ struct Cli {
     ///
     /// Overrides the persisted Chatty execution settings. Multiple groups
     /// can be specified as a comma-separated list. Valid tool group names:
-    ///   shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec
+    ///   shell, fs-read, fs-write, fetch, git, docker-exec
     ///
     /// Example: --enable shell,git,fetch
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
@@ -429,12 +428,11 @@ fn apply_tool_overrides(
             "fs-write" => settings.filesystem_write_enabled = true,
             "fetch" => settings.fetch_enabled = true,
             "git" => settings.git_enabled = true,
-            "mcp-manage" => settings.mcp_service_tool_enabled = true,
             "docker-exec" => settings.docker_code_execution_enabled = true,
             other => {
                 tracing::warn!(
                     name = other,
-                    "Unknown tool group in --enable (valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec)"
+                    "Unknown tool group in --enable (valid: shell, fs-read, fs-write, fetch, git, docker-exec)"
                 );
             }
         }
@@ -446,12 +444,11 @@ fn apply_tool_overrides(
             "fs-write" => settings.filesystem_write_enabled = false,
             "fetch" => settings.fetch_enabled = false,
             "git" => settings.git_enabled = false,
-            "mcp-manage" => settings.mcp_service_tool_enabled = false,
             "docker-exec" => settings.docker_code_execution_enabled = false,
             other => {
                 tracing::warn!(
                     name = other,
-                    "Unknown tool group in --disable (valid: shell, fs-read, fs-write, fetch, git, mcp-manage, docker-exec)"
+                    "Unknown tool group in --disable (valid: shell, fs-read, fs-write, fetch, git, docker-exec)"
                 );
             }
         }

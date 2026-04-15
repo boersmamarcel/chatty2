@@ -51,7 +51,7 @@ mod gpui_globals;
 // These are initialized once at startup by the host application (GPUI, TUI, etc.)
 
 /// Sender half of the MCP update channel. Initialized once at startup.
-/// AddMcpTool sends the updated server list here after a successful save.
+/// Used by MCP management operations to notify the host of configuration changes.
 pub static MCP_UPDATE_SENDER: OnceLock<
     tokio::sync::mpsc::Sender<Vec<settings::models::mcp_store::McpServerConfig>>,
 > = OnceLock::new();
