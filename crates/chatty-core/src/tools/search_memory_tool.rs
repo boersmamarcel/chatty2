@@ -85,9 +85,7 @@ impl Tool for SearchMemoryTool {
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "Maximum number of results to return. Defaults to 5.",
-                        "minimum": 1,
-                        "maximum": 20
+                        "description": "Maximum number of results to return (1-20). Defaults to 5."
                     }
                 },
                 "required": ["query"]

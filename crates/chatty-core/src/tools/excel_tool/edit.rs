@@ -21,7 +21,7 @@ use super::super::filesystem_write_tool::request_write_approval;
 
 fn excel_cell_value_schema() -> Value {
     serde_json::json!({
-        "oneOf": [
+        "anyOf": [
             { "type": "string" },
             { "type": "number" },
             { "type": "boolean" },
@@ -56,7 +56,7 @@ fn edit_excel_parameters_schema() -> Value {
                 "type": "array",
                 "description": "Array of edit operations to apply in order",
                 "items": {
-                    "oneOf": [
+                    "anyOf": [
                         {
                             "type": "object",
                             "properties": {
@@ -555,9 +555,9 @@ mod tests {
     #[test]
     fn edit_excel_schema_defines_nested_array_items() {
         let schema = edit_excel_parameters_schema();
-        let variants = schema["properties"]["operations"]["items"]["oneOf"]
+        let variants = schema["properties"]["operations"]["items"]["anyOf"]
             .as_array()
-            .expect("operations.oneOf should be an array");
+            .expect("operations.anyOf should be an array");
 
         let set_range_data = &variants[1]["properties"]["data"];
         assert_eq!(set_range_data["type"], "array");
@@ -568,5 +568,23 @@ mod tests {
         assert_eq!(add_sheet_data["type"], "array");
         assert_eq!(add_sheet_data["items"]["type"], "array");
         assert!(add_sheet_data["items"].get("items").is_some());
+    }
+
+    #[test]
+    fn edit_excel_schema_uses_anyof_not_oneof() {
+        let schema = edit_excel_parameters_schema();
+        // Operations should use anyOf (OpenAI-compatible), not oneOf
+        assert!(
+            schema["properties"]["operations"]["items"]
+                .get("anyOf")
+                .is_some(),
+            "operations.items should use anyOf"
+        );
+        assert!(
+            schema["properties"]["operations"]["items"]
+                .get("oneOf")
+                .is_none(),
+            "operations.items should NOT use oneOf"
+        );
     }
 }
