@@ -1747,7 +1747,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.2",
  "rig-core",
- "ropey",
+ "ropey 1.6.1",
  "rust-embed",
  "semver",
  "serde",
@@ -4368,7 +4368,7 @@ dependencies = [
  "once_cell",
  "paste",
  "regex",
- "ropey",
+ "ropey 2.0.0-beta.1",
  "rust-i18n",
  "schemars 1.2.1",
  "serde",
@@ -7600,9 +7600,9 @@ dependencies = [
 
 [[package]]
 name = "pdfium-render"
-version = "0.8.37"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6553f6604a52b3203db7b4e9d51eb4dd193cf455af9e56d40cab6575b547b679"
+checksum = "671afc8522e8f36c5854a8231bdba50c4144be0138521329629b8f102e55f65a"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
@@ -8888,6 +8888,16 @@ name = "roman-numerals-rs"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c85cd47a33a4510b1424fe796498e174c6a9cf94e606460ef022a19f3e4ff85e"
+
+[[package]]
+name = "ropey"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
+dependencies = [
+ "smallvec 1.15.1",
+ "str_indices",
+]
 
 [[package]]
 name = "ropey"
