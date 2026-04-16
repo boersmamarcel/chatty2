@@ -39,7 +39,7 @@ base64 = "0.22"
 async-stream = "0.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "query"] }
 glob = "0.3"
-similar = "2.2"
+similar = "2.7.0"
 
 # Auto-updater
 semver = "1.0"
@@ -74,8 +74,8 @@ pdfium-render = "0.8.37"
 image = "0.25"
 
 # Excel
-calamine = "0.33"
-rust_xlsxwriter = "0.93"
+calamine = "0.34.0"
+rust_xlsxwriter = "0.94.0"
 
 # DuckDB
 duckdb = { version = "1.4", features = ["parquet", "json", "bundled"] }
@@ -84,14 +84,14 @@ duckdb = { version = "1.4", features = ["parquet", "json", "bundled"] }
 typst = "0.14.2"
 typst-svg = "0.14.2"
 typst-pdf = "0.14.2"
-mitex = "0.2"
+mitex = "0.2.4"
 typst-assets = { version = "0.14.2", features = ["fonts"] }
 comemo = "0.4"
 
 # Mermaid / SVG
 mermaid-rs-renderer = { version = "0.2", default-features = false }
-resvg = "0.45"
-usvg = "0.45"
+resvg = "0.47.0"
+usvg = "0.47.0"
 
 # Syntax highlighting
 ropey = "2.0.0-beta.1"
@@ -100,7 +100,7 @@ ropey = "2.0.0-beta.1"
 tiktoken-rs = "0.9"
 
 # Agent memory
-memvid-core = { version = "2.0", default-features = false, features = ["lex", "vec", "temporal_track"] }
+memvid-core = { version = "2.0.139", default-features = false, features = ["lex", "vec", "temporal_track"] }
 
 # GPUI (UI only)
 gpui = "0.2.2"
@@ -111,7 +111,7 @@ gpui-component-assets = "0.5.1"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 tui-textarea = "0.7"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 
 # Unix-specific
 nix = { version = "0.29", features = ["signal"] }
