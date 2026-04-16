@@ -66,7 +66,7 @@ impl Render for ChattyApp {
                     ),
                 )
                 .child(
-                    div().absolute().top(px(8.)).left(px(124.)).child(
+                    div().absolute().top(px(8.)).left(px(128.)).child(
                         Button::new("search-conversations-floating")
                             .icon(Icon::new(IconName::Search))
                             .label("")
