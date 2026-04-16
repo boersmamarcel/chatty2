@@ -16,6 +16,8 @@ pub enum Command {
     Model(Option<String>),
     /// /tools [name] — open tool picker or toggle by name
     Tools(Option<String>),
+    /// /modules [show|enable|disable|dir <path>|port <1-65535>] — manage module runtime settings
+    Modules(Option<String>),
     /// /add-dir <directory> — expand file-access workspace to include a directory
     AddDir(Option<String>),
     /// /agent [prompt] — launch a sub-agent in headless mode
@@ -51,6 +53,7 @@ impl ChatEngine {
         match parts[0] {
             "/model" => Some(Command::Model(arg)),
             "/tools" => Some(Command::Tools(arg)),
+            "/modules" => Some(Command::Modules(arg)),
             "/add-dir" => Some(Command::AddDir(arg)),
             "/agent" => Some(Command::Agent(arg)),
             "/clear" | "/new" => Some(Command::Clear),
@@ -612,5 +615,126 @@ impl ChatEngine {
         self.conversation = None;
         self.is_ready = false;
         true
+    }
+
+    /// Handle `/modules` command variants and persist changes asynchronously.
+    ///
+    /// Returns `Ok(true)` when settings changed and the conversation should be
+    /// reinitialized, `Ok(false)` for read-only actions, or an error for invalid
+    /// input.
+    pub fn handle_modules_command(&mut self, arg: Option<&str>) -> Result<bool> {
+        let Some(raw) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.add_system_message(self.module_settings_summary());
+            return Ok(false);
+        };
+
+        let mut changed = false;
+        let mut parts = raw.splitn(2, char::is_whitespace);
+        let cmd = parts.next().unwrap_or_default().to_ascii_lowercase();
+        let rest = parts.next().map(str::trim).unwrap_or_default();
+
+        match cmd.as_str() {
+            "show" => {
+                self.add_system_message(self.module_settings_summary());
+            }
+            "enable" | "on" => {
+                if !self.module_settings.enabled {
+                    self.module_settings.enabled = true;
+                    changed = true;
+                }
+            }
+            "disable" | "off" => {
+                if self.module_settings.enabled {
+                    self.module_settings.enabled = false;
+                    changed = true;
+                }
+            }
+            "dir" => {
+                if rest.is_empty() {
+                    bail!("Usage: /modules dir <directory>");
+                }
+                let path = Path::new(rest);
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(path)
+                };
+                self.module_settings.module_dir = resolved.to_string_lossy().to_string();
+                changed = true;
+            }
+            "port" => {
+                if rest.is_empty() {
+                    bail!("Usage: /modules port <1-65535>");
+                }
+                let port = rest
+                    .parse()
+                    .context("Port must be a number between 1 and 65535")?;
+                let port =
+                    std::num::NonZeroU16::new(port).context("Port must be between 1 and 65535")?;
+                self.module_settings.gateway_port = port.get();
+                changed = true;
+            }
+            _ => {
+                bail!(
+                    "Unknown /modules command '{}'. Valid: show, enable, disable, dir, port",
+                    cmd
+                );
+            }
+        }
+
+        if changed {
+            let settings = self.module_settings.clone();
+            tokio::spawn(async move {
+                if let Err(e) = chatty_core::module_settings_repository()
+                    .save(settings)
+                    .await
+                {
+                    warn!(error = ?e, "Failed to persist module settings");
+                }
+            });
+
+            self.conversation = None;
+            self.is_ready = false;
+            self.add_system_message(format!(
+                "Modules settings updated: enabled={}, dir={}, port={}. Conversation context was reset.",
+                self.module_settings.enabled,
+                self.module_settings.module_dir,
+                self.module_settings.gateway_port
+            ));
+        }
+
+        Ok(changed)
+    }
+
+    pub fn module_settings_summary(&self) -> String {
+        format!(
+            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
+            self.module_settings.enabled,
+            self.module_settings.module_dir,
+            self.module_settings.gateway_port
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatEngine, Command};
+
+    #[test]
+    fn parse_modules_command_variants() {
+        assert_eq!(
+            ChatEngine::parse_command("/modules"),
+            Some(Command::Modules(None))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/modules show"),
+            Some(Command::Modules(Some("show".to_string())))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/modules port 8421"),
+            Some(Command::Modules(Some("port 8421".to_string())))
+        );
     }
 }

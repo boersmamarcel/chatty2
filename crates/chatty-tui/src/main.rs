@@ -30,7 +30,7 @@ chatty-tui provides three operating modes:
                           tool approval prompts, and inline model/tool switching.
                           Keybindings: Enter=send, Ctrl+C=stop/quit, Ctrl+Q=quit,
                           y/n=approve/deny tool calls. Slash commands: /model,
-                          /tools, /add-dir, /agent, /clear(/new), /compact,
+                          /tools, /modules, /add-dir, /agent, /clear(/new), /compact,
                           /context, /copy, /cwd(/cd).
 
   HEADLESS (--headless):  Send a single message via --message, print the full
@@ -165,17 +165,25 @@ async fn main() -> Result<()> {
     chatty_core::init_repositories()
         .context("Failed to initialize settings repositories (is HOME set?)")?;
 
-    // Load providers, models, execution settings, and A2A agents
-    let (providers_result, models_result, exec_settings_result, a2a_agents_result) = tokio::join!(
+    // Load providers, models, execution settings, module settings, and A2A agents
+    let (
+        providers_result,
+        models_result,
+        exec_settings_result,
+        module_settings_result,
+        a2a_agents_result,
+    ) = tokio::join!(
         chatty_core::provider_repository().load_all(),
         chatty_core::models_repository().load_all(),
         chatty_core::execution_settings_repository().load(),
+        chatty_core::module_settings_repository().load(),
         chatty_core::a2a_repository().load_all(),
     );
 
     let providers = providers_result.context("Failed to load providers")?;
     let models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
+    let module_settings = module_settings_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
 
     // Default workspace_dir to CWD at launch so tools have an explicit root
@@ -341,6 +349,7 @@ async fn main() -> Result<()> {
             model_config,
             provider_config,
             execution_settings,
+            module_settings,
             models,
             providers,
             mcp_service,

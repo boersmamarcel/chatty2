@@ -110,6 +110,12 @@ const SLASH_COMMANDS: &[SlashCommandEntry] = &[
         execute_immediately: true,
     },
     SlashCommandEntry {
+        command: "/modules",
+        description: "Show or update module runtime settings",
+        insert_text: "/modules",
+        execute_immediately: true,
+    },
+    SlashCommandEntry {
         command: "/add-dir",
         description: "Add a directory to allowed workspace access",
         insert_text: "/add-dir ",
@@ -501,6 +507,7 @@ mod tests {
         let all = input.slash_menu_items();
         assert!(!all.is_empty());
         assert!(has_command(&all, "/compact"));
+        assert!(has_command(&all, "/modules"));
 
         input.set_input_text("/com");
         let filtered = input.slash_menu_items();
