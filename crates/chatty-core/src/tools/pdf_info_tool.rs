@@ -152,7 +152,7 @@ fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, ToolError> 
     let mut pages = Vec::new();
 
     for i in 0..page_count.min(MAX_INFO_PAGES) {
-        if let Ok(page) = document.pages().get(i as u16) {
+        if let Ok(page) = document.pages().get(i as i32) {
             let width_pt = page.width().value;
             let height_pt = page.height().value;
             pages.push(PageInfo {

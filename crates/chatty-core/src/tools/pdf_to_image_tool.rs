@@ -234,7 +234,7 @@ fn render_pdf_pages(
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(pdf_path.to_string_lossy().as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     };
 
     // Scale factor: pdfium renders at 72 DPI by default, so scale = dpi / 72
@@ -243,7 +243,7 @@ fn render_pdf_pages(
     let mut image_paths = Vec::new();
 
     for &page_idx in &page_indices {
-        let page = document.pages().get(page_idx as u16).map_err(|e| {
+        let page = document.pages().get(page_idx as i32).map_err(|e| {
             ToolError::OperationFailed(format!("Failed to get page {}: {:?}", page_idx, e))
         })?;
 
@@ -258,7 +258,12 @@ fn render_pdf_pages(
             ToolError::OperationFailed(format!("Failed to render page {}: {:?}", page_idx, e))
         })?;
 
-        let image = bitmap.as_image();
+        let image = bitmap.as_image().map_err(|e| {
+            ToolError::OperationFailed(format!(
+                "Failed to decode rendered page {}: {:?}",
+                page_idx, e
+            ))
+        })?;
         let output_path = output_dir.join(format!("pdf2img_{}_{}.png", &path_hash[..12], page_idx));
 
         image

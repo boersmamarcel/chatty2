@@ -100,7 +100,7 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
         .set_maximum_height(THUMBNAIL_SIZE as i32);
 
     let bitmap = page.render_with_config(&render_config)?;
-    let image = bitmap.as_image();
+    let image = bitmap.as_image()?;
 
     // Use session temp directory
     let thumbnail_dir = get_thumbnail_dir()?;
@@ -110,7 +110,7 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(pdf_path.to_string_lossy().as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     };
 
     let temp_path = thumbnail_dir.join(format!("thumb_{}.png", hash));

@@ -65,6 +65,18 @@ impl Render for ChattyApp {
                             }),
                     ),
                 )
+                .child(
+                    div().absolute().top(px(8.)).left(px(124.)).child(
+                        Button::new("search-conversations-floating")
+                            .icon(Icon::new(IconName::Search))
+                            .label("")
+                            .small()
+                            .tooltip("Search conversations")
+                            .on_click(|_event, window, cx| {
+                                crate::chatty::views::SearchConversationsDialog::open(window, cx);
+                            }),
+                    ),
+                )
             })
             .children(dialog_layer)
     }

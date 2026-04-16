@@ -36,6 +36,7 @@ similar.workspace = true
 semver.workspace = true
 tempfile.workspace = true
 sha2.workspace = true
+hex.workspace = true
 
 # Logging
 tracing.workspace = true

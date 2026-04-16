@@ -317,7 +317,7 @@ $ {typst_code} $")
 
         let mut hasher = Sha256::new();
         hasher.update(hex_color.as_bytes());
-        let color_hash = format!("{:x}", hasher.finalize());
+        let color_hash = hex::encode(hasher.finalize());
 
         // 3. Build styled variant path
         let base_name = base_svg_path
@@ -376,7 +376,7 @@ $ {typst_code} $")
         let mut hasher = Sha256::new();
         hasher.update(latex.as_bytes());
         hasher.update(if is_inline { b"inline" } else { b"block " });
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Compile Typst source to SVG

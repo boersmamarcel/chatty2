@@ -308,7 +308,7 @@ impl MermaidRendererService {
         hasher.update(Self::CACHE_VERSION.as_bytes());
         hasher.update(source.as_bytes());
         hasher.update(if is_dark { "dark" } else { "light" }.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Get the cache directory path

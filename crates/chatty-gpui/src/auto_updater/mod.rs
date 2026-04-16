@@ -277,7 +277,7 @@ impl AutoUpdater {
             hasher.update(&buffer[..bytes_read]);
         }
 
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
         let expected_hash_lower = expected_hash.to_lowercase();
 
         Ok(hash == expected_hash_lower)
@@ -1359,7 +1359,7 @@ mod tests {
         tokio::fs::write(&file_path, content).await.unwrap();
 
         // Compute the expected SHA-256
-        let expected = format!("{:x}", Sha256::digest(content));
+        let expected = hex::encode(Sha256::digest(content));
 
         let result = AutoUpdater::verify_checksum(&file_path.to_path_buf(), &expected).await;
         assert!(result.is_ok());
@@ -1388,7 +1388,7 @@ mod tests {
         let content = b"test data";
         tokio::fs::write(&file_path, content).await.unwrap();
 
-        let expected = format!("{:x}", Sha256::digest(content)).to_uppercase();
+        let expected = hex::encode(Sha256::digest(content)).to_uppercase();
 
         let result = AutoUpdater::verify_checksum(&file_path.to_path_buf(), &expected).await;
         assert!(result.is_ok());
@@ -1412,7 +1412,7 @@ mod tests {
         let file_path = temp_dir.path().join("empty.bin");
         tokio::fs::write(&file_path, b"").await.unwrap();
 
-        let expected = format!("{:x}", Sha256::digest(b""));
+        let expected = hex::encode(Sha256::digest(b""));
 
         let result = AutoUpdater::verify_checksum(&file_path.to_path_buf(), &expected).await;
         assert!(result.is_ok());

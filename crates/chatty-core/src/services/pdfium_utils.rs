@@ -97,6 +97,12 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
 /// 1. Executable-relative path (app bundle / AppImage)
 /// 2. Compile-time `PDFIUM_LIB_DIR` (development builds)
 /// 3. System library fallback
+///
+/// In pdfium-render 0.9, the pdfium bindings are stored in a process-global `OnceLock` and
+/// `Pdfium::new()` asserts that the global is unset. If a prior call has already bound the
+/// library (e.g. between tests in the same process), subsequent `bind_to_*` calls return
+/// `PdfiumError::PdfiumLibraryBindingsAlreadyInitialized`; in that case we simply return a
+/// fresh `Pdfium` unit struct that transparently re-uses the existing global bindings.
 pub fn create_pdfium() -> anyhow::Result<Pdfium> {
     let lib_name = Pdfium::pdfium_platform_library_name();
 
@@ -111,6 +117,10 @@ pub fn create_pdfium() -> anyhow::Result<Pdfium> {
                 info!(path = %lib_path.display(), "pdfium: successfully bound library");
                 return Ok(Pdfium::new(bindings));
             }
+            Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => {
+                debug!("pdfium: library already initialized in this process, reusing bindings");
+                return Ok(Pdfium {});
+            }
             Err(e) => {
                 debug!(path = %lib_path.display(), error = ?e, "pdfium: candidate failed");
                 last_err = Some(e);
@@ -120,21 +130,26 @@ pub fn create_pdfium() -> anyhow::Result<Pdfium> {
 
     // Final fallback: system library
     debug!("pdfium: trying system library fallback");
-    Pdfium::bind_to_system_library()
-        .map(|bindings| {
+    match Pdfium::bind_to_system_library() {
+        Ok(bindings) => {
             info!("pdfium: successfully bound system library");
-            Pdfium::new(bindings)
-        })
-        .map_err(|e| {
+            Ok(Pdfium::new(bindings))
+        }
+        Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => {
+            debug!("pdfium: system library already initialized, reusing bindings");
+            Ok(Pdfium {})
+        }
+        Err(e) => {
             warn!(
                 last_candidate_error = ?last_err,
                 system_error = ?e,
                 "pdfium: all binding attempts failed"
             );
-            anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "Failed to bind pdfium (last candidate error: {:?}, system error: {:?})",
                 last_err,
                 e
-            )
-        })
+            ))
+        }
+    }
 }
