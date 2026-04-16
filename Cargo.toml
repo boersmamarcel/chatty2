@@ -28,7 +28,7 @@ dirs = "5.0"
 uuid = { version = "1.0", features = ["v4"] }
 
 # Docker sandbox
-bollard = "0.17"
+bollard = "0.20.2"
 async-trait = "0.1"
 
 # Chat functionality
@@ -78,7 +78,7 @@ calamine = "0.33"
 rust_xlsxwriter = "0.93"
 
 # DuckDB
-duckdb = { version = "1.4", features = ["parquet", "json", "bundled"] }
+duckdb = { version = "1.10500.0", features = ["parquet", "json", "bundled"] }
 
 # Math rendering
 typst = "0.14.2"
