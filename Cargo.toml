@@ -22,10 +22,10 @@ rmcp = { version = "1.4", features = ["client", "macros", "transport-streamable-
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1.50.0", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
 dirs = "5.0"
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.23.0", features = ["v4"] }
 
 # Docker sandbox
 bollard = "0.17"
@@ -34,7 +34,7 @@ async-trait = "0.1"
 # Chat functionality
 futures = "0.3"
 anyhow = "1.0"
-regex = "1.10"
+regex = "1.12.3"
 base64 = "0.22"
 async-stream = "0.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "query"] }
@@ -59,7 +59,7 @@ parking_lot = "0.12"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 thiserror = "1.0"
 
 # Azure authentication
