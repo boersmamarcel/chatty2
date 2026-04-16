@@ -108,9 +108,9 @@ gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
 gpui-component-assets = "0.5.1"
 
 # TUI framework
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = "0.7"
+ratatui = "0.30.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+tui-textarea = { package = "tui-textarea-2", version = "0.10.2" }
 clap = { version = "4.5", features = ["derive"] }
 
 # Unix-specific
