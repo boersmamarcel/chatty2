@@ -70,7 +70,7 @@ azure_core = "0.20"
 rust-embed = "8.0"
 
 # PDF and image
-pdfium-render = "0.8.37"
+pdfium-render = "0.9.0"
 image = "0.25"
 
 # Excel
@@ -94,10 +94,10 @@ resvg = "0.45"
 usvg = "0.45"
 
 # Syntax highlighting
-ropey = "2.0.0-beta.1"
+ropey = "1.6.1"
 
 # Token counting
-tiktoken-rs = "0.9"
+tiktoken-rs = "0.9.1"
 
 # Agent memory
 memvid-core = { version = "2.0", default-features = false, features = ["lex", "vec", "temporal_track"] }
