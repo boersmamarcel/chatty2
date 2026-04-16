@@ -479,6 +479,7 @@ For `apply_diff` tool calls, Chatty renders a **visual diff view** — additions
 
 - Persistent conversations saved locally in a SQLite database — nothing is stored remotely
 - Auto-generated conversation titles
+- **Search conversations** — click the search icon in the title bar to open a live-filter dialog; type to narrow results by title and click any entry to jump straight to it
 - **Export to Markdown** — click the `…` menu on any sidebar conversation and choose **Download** to save it as a `.md` file via your OS file picker
 - **Per-conversation cost tracking** displayed in the sidebar — see running totals at a glance
 - **Per-message token usage** — input and output token counts with cost breakdown
