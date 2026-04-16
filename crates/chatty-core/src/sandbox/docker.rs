@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::Engine as _;
 use bollard::Docker;
-use bollard::container::{
-    Config, CreateContainerOptions, LogOutput, RemoveContainerOptions, StartContainerOptions,
-};
+use bollard::container::LogOutput;
 use bollard::exec::CreateExecOptions;
-use bollard::image::CreateImageOptions;
-use bollard::models::{HostConfig, PortBinding};
+use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
+use bollard::query_parameters::{
+    CreateContainerOptions, CreateImageOptions, RemoveContainerOptions, StartContainerOptions,
+};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::Path;
@@ -188,7 +188,7 @@ impl DockerSandbox {
             ..Default::default()
         };
 
-        let container_config = Config {
+        let container_config = ContainerCreateBody {
             image: Some(config.language.docker_image().to_string()),
             cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             working_dir: Some(working_dir),
@@ -205,8 +205,8 @@ impl DockerSandbox {
         let container = docker
             .create_container(
                 Some(CreateContainerOptions {
-                    name: container_name,
-                    platform: None,
+                    name: Some(container_name),
+                    platform: String::new(),
                 }),
                 container_config,
             )
@@ -214,7 +214,7 @@ impl DockerSandbox {
             .context("Failed to create container")?;
 
         docker
-            .start_container(&container.id, None::<StartContainerOptions<String>>)
+            .start_container(&container.id, None::<StartContainerOptions>)
             .await
             .context("Failed to start container")?;
 

@@ -610,6 +610,7 @@ cargo install --path crates/chatty-tui
 |:--------|:-------|
 | `/model [query]` | Switch model (`/model` opens picker) |
 | `/tools [name]` | Toggle tool groups (`/tools` opens picker) |
+| `/modules [show\|enable\|disable\|dir <path>\|port <n>]` | Show or update module runtime settings (enable/disable runtime, set module directory, set gateway port) |
 | `/add-dir <directory>` | Expand agent workspace access to include a directory |
 | `/agent <prompt>` | Launch a headless `chatty-tui` sub-agent with a prompt |
 | `/clear`, `/new` | Clear conversation history and start fresh |
