@@ -94,7 +94,8 @@ resvg = "0.47.0"
 usvg = "0.47.0"
 
 # Syntax highlighting
-ropey = "1.6.1"
+# Pinned to match gpui-component's required version (=2.0.0-beta.1).
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
 
 # Token counting
 tiktoken-rs = "0.9.1"

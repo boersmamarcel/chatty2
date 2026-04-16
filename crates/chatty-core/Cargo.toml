@@ -43,6 +43,7 @@ parking_lot.workspace = true
 
 # Crypto
 sha2.workspace = true
+hex.workspace = true
 
 # Azure authentication
 azure_identity.workspace = true

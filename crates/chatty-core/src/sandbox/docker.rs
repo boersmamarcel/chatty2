@@ -154,18 +154,17 @@ impl DockerSandbox {
             };
 
         // Expose the ports in the container config (required alongside port_bindings).
-        let exposed_ports: Option<HashMap<String, HashMap<(), ()>>> =
-            if config.expose_ports.is_empty() {
-                None
-            } else {
-                Some(
-                    config
-                        .expose_ports
-                        .iter()
-                        .map(|&p| (format!("{}/tcp", p), HashMap::new()))
-                        .collect(),
-                )
-            };
+        let exposed_ports: Option<Vec<String>> = if config.expose_ports.is_empty() {
+            None
+        } else {
+            Some(
+                config
+                    .expose_ports
+                    .iter()
+                    .map(|&p| format!("{}/tcp", p))
+                    .collect(),
+            )
+        };
 
         let host_config = HostConfig {
             network_mode: if needs_network {
@@ -266,7 +265,7 @@ impl DockerSandbox {
 
         let mut stream = docker.create_image(
             Some(CreateImageOptions {
-                from_image: image.to_string(),
+                from_image: Some(image.to_string()),
                 ..Default::default()
             }),
             None,

@@ -1711,6 +1711,7 @@ dependencies = [
  "futures",
  "glob",
  "gpui",
+ "hex",
  "hive-client",
  "image",
  "memvid-core",
@@ -1761,10 +1762,11 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "hex",
  "regex",
  "reqwest 0.13.2",
  "rig-core",
- "ropey 1.6.1",
+ "ropey",
  "rust-embed",
  "semver",
  "serde",
@@ -4515,7 +4517,7 @@ dependencies = [
  "once_cell",
  "paste",
  "regex",
- "ropey 2.0.0-beta.1",
+ "ropey",
  "rust-i18n",
  "schemars",
  "serde",
@@ -9265,16 +9267,6 @@ name = "roman-numerals-rs"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c85cd47a33a4510b1424fe796498e174c6a9cf94e606460ef022a19f3e4ff85e"
-
-[[package]]
-name = "ropey"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
-dependencies = [
- "smallvec 1.15.1",
- "str_indices",
-]
 
 [[package]]
 name = "ropey"

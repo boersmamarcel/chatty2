@@ -51,6 +51,16 @@ impl RenderOnce for AppTitleBar {
                     }),
             )
             .child(
+                Button::new("search-conversations")
+                    .icon(Icon::new(IconName::Search))
+                    .label("")
+                    .small()
+                    .tooltip("Search conversations")
+                    .on_click(|_event, window, cx| {
+                        super::SearchConversationsDialog::open(window, cx);
+                    }),
+            )
+            .child(
                 div()
                     .flex_1()
                     .child(TitleBar::new().on_close_window(|_, window, _cx| {

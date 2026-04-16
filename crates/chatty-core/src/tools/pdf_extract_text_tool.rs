@@ -147,7 +147,7 @@ fn extract_text(
     let mut result_pages = Vec::new();
 
     for &page_idx in &page_indices {
-        let page = document.pages().get(page_idx as u16).map_err(|e| {
+        let page = document.pages().get(page_idx as i32).map_err(|e| {
             ToolError::OperationFailed(format!("Failed to get page {}: {:?}", page_idx, e))
         })?;
 

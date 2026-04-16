@@ -17,6 +17,7 @@ mod message_math_render;
 mod message_parsing;
 pub use chatty_core::models::message_types;
 pub mod parsed_cache;
+pub mod search_conversations_dialog;
 pub mod sidebar_view;
 pub mod syntax_highlighter;
 pub mod titlebar;
@@ -24,5 +25,6 @@ pub mod trace_components;
 
 pub use chat_view::ChatView;
 pub use error_log_dialog::ErrorLogDialog;
+pub use search_conversations_dialog::SearchConversationsDialog;
 pub use sidebar_view::SidebarView;
 pub use titlebar::AppTitleBar;
