@@ -16,6 +16,8 @@ use tracing::{info, warn};
 use engine::{ChatEngine, ChatEngineConfig};
 use events::AppEvent;
 
+pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser)]
 #[command(
     name = "chatty-tui",

@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -188,6 +190,7 @@ pub struct ChatEngine {
     pub total_output_tokens: u32,
     pub title: String,
     pub is_ready: bool,
+    pub git_branch: Option<String>,
     pub model_picker: Option<ModelPicker>,
     pub tool_picker: Option<ToolPicker>,
     pub scroll_offset: u16,
@@ -224,6 +227,7 @@ impl ChatEngine {
     pub fn new(config: ChatEngineConfig, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let skill_service =
             chatty_core::services::SkillService::new(config.embedding_service.clone());
+        let git_branch = detect_git_branch(config.execution_settings.workspace_dir.as_deref());
         Self {
             conversation: None,
             model_config: config.model_config,
@@ -250,6 +254,7 @@ impl ChatEngine {
             total_output_tokens: 0,
             title: "New Chat".to_string(),
             is_ready: false,
+            git_branch,
             model_picker: None,
             tool_picker: None,
             scroll_offset: 0,
@@ -258,6 +263,10 @@ impl ChatEngine {
             event_tx,
             init_generation: 0,
         }
+    }
+
+    pub fn refresh_workspace_context(&mut self) {
+        self.git_branch = detect_git_branch(self.execution_settings.workspace_dir.as_deref());
     }
 
     fn available_model_ids(&self) -> Vec<String> {
@@ -782,4 +791,38 @@ impl ChatEngine {
             }
         }
     }
+}
+
+fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
+    let working_dir = workspace_dir
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+
+    let output = ProcessCommand::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&working_dir)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !branch.is_empty() {
+        return Some(branch);
+    }
+
+    let detached_head = ProcessCommand::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(&working_dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty());
+
+    detached_head
+        .map(|sha| format!("HEAD ({sha})"))
+        .or_else(|| Some("HEAD (detached)".to_string()))
 }

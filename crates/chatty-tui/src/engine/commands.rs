@@ -141,6 +141,7 @@ impl ChatEngine {
         let canonical = self.resolve_directory(directory)?;
         let canonical_str = canonical.to_string_lossy().to_string();
         self.execution_settings.workspace_dir = Some(canonical_str.clone());
+        self.refresh_workspace_context();
         self.conversation = None;
         self.is_ready = false;
         self.add_system_message(format!(
@@ -171,6 +172,7 @@ impl ChatEngine {
 
         let workspace_str = new_workspace.to_string_lossy().to_string();
         self.execution_settings.workspace_dir = Some(workspace_str.clone());
+        self.refresh_workspace_context();
         self.conversation = None;
         self.is_ready = false;
         self.add_system_message(format!(
