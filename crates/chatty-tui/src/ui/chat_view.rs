@@ -15,10 +15,41 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
             Style::default().fg(Color::DarkGray),
         )));
     } else if engine.messages.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Send a message to start chatting.",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.extend([
+            Line::from(Span::styled(
+                " ██████╗██╗  ██╗ █████╗ ████████╗████████╗██╗   ██╗",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "██╔════╝██║  ██║██╔══██╗╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "██║     ███████║███████║   ██║      ██║    ╚████╔╝ ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "██║     ██╔══██║██╔══██║   ██║      ██║     ╚██╔╝  ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "╚██████╗██║  ██║██║  ██║   ██║      ██║      ██║   ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                " ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝      ╚═╝      ╚═╝   ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Terminal AI chat for developers",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "Send a message to start chatting.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]);
     } else {
         for msg in &engine.messages {
             render_message(&mut lines, msg);

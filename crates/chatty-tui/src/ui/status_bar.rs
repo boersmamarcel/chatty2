@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::engine::ChatEngine;
+use crate::APP_VERSION;
 
 pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
     let model_name = &engine.model_config.name;
@@ -15,6 +16,11 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("v{}", APP_VERSION),
+            Style::default().fg(Color::Gray),
         ),
         Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
     ];
