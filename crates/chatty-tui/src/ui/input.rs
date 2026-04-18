@@ -158,6 +158,12 @@ const SLASH_COMMANDS: &[SlashCommandEntry] = &[
         execute_immediately: true,
     },
     SlashCommandEntry {
+        command: "/update",
+        description: "Trigger CLI auto-update (if installed)",
+        insert_text: "/update",
+        execute_immediately: true,
+    },
+    SlashCommandEntry {
         command: "/cwd",
         description: "Show current working directory",
         insert_text: "/cwd",

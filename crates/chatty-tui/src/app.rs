@@ -124,6 +124,9 @@ async fn run_loop(
                                     engine.add_system_message(e.to_string());
                                 }
                             }
+                            KeyAction::UpdateCli => {
+                                engine.update_cli_if_installed().await;
+                            }
                             KeyAction::ShowWorkingDirectory => {
                                 let cwd = engine.current_working_directory();
                                 engine.add_system_message(format!("Working directory: {}", cwd));
@@ -181,6 +184,7 @@ enum KeyAction {
     CompactConversation,
     ShowContext,
     CopyLastResponse,
+    UpdateCli,
     ShowWorkingDirectory,
     ChangeWorkingDirectory(String),
 }
@@ -440,6 +444,7 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Compact => Some(KeyAction::CompactConversation),
         Command::Context => Some(KeyAction::ShowContext),
         Command::Copy => Some(KeyAction::CopyLastResponse),
+        Command::Update => Some(KeyAction::UpdateCli),
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
     }

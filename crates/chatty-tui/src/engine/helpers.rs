@@ -205,6 +205,7 @@ mod tests {
             Some(Command::Context)
         );
         assert_eq!(ChatEngine::parse_command("/copy"), Some(Command::Copy));
+        assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
         assert_eq!(ChatEngine::parse_command("/cwd"), Some(Command::Cwd(None)));
         assert_eq!(
             ChatEngine::parse_command("/cd ../workspace"),
