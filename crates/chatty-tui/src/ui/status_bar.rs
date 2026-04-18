@@ -4,8 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::engine::ChatEngine;
 use crate::APP_VERSION;
+use crate::engine::ChatEngine;
 
 pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
     let model_name = &engine.model_config.name;
