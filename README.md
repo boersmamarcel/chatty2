@@ -58,7 +58,7 @@ After adding a provider, you need to tell Chatty which model(s) to use.
 
 ### 4. Start Chatting
 
-Close Settings and type your first message. You can switch between models using the model selector at the bottom of the chat.
+Close Settings and type your first message. When you open a new conversation, a start screen displays your active capabilities — skills loaded, MCP servers, agents, file access, web tools, memory, and workspace status — so you can see at a glance what the agent can do before you send anything. You can switch between models using the model selector at the bottom of the chat.
 
 Type `/` in the chat input to open the slash-command picker — use arrow keys to navigate and `Enter` to select. Available commands include `/clear`, `/new`, `/compact`, `/context`, `/copy`, `/cwd`, `/cd`, `/add-dir`, and `/agent`. Skills saved in your workspace (`.claude/skills/`) or global skills directory (`~/Library/Application Support/chatty/skills/` on macOS, `~/.local/share/chatty/skills/` on Linux) also appear in the picker with a `[skill]` badge — selecting one inserts `Use the 'skill-name' skill: ` so you can append context before sending.
 
@@ -590,6 +590,10 @@ Background update checks against GitHub releases with one-click install. Downloa
 ```bash
 cargo install --path crates/chatty-tui
 ```
+
+### Welcome Screen & Status Bar
+
+When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace.
 
 ### Interactive Mode Keybindings
 
