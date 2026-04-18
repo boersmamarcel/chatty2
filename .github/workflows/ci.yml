@@ -62,6 +62,8 @@ jobs:
           cp target/wasm32-wasip2/release/echo_agent.wasm .
 
       - name: Run tests
+        # CI has shown intermittent SIGTRAP in `chatty-core` tests when run in
+        # parallel on GitHub-hosted runners; serialize tests for stability.
         run: cargo test --all-features -- --test-threads=1
 
       - name: Check formatting
