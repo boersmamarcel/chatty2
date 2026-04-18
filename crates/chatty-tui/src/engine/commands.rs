@@ -30,6 +30,8 @@ pub enum Command {
     Context,
     /// /copy — copy latest assistant response to clipboard
     Copy,
+    /// /update — trigger CLI auto-update if an installed CLI exists
+    Update,
     /// /cwd, /cd [directory] — show or change working directory
     Cwd(Option<String>),
 }
@@ -60,6 +62,7 @@ impl ChatEngine {
             "/compact" => Some(Command::Compact),
             "/context" => Some(Command::Context),
             "/copy" => Some(Command::Copy),
+            "/update" => Some(Command::Update),
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
             _ => None,
         }
@@ -229,6 +232,17 @@ impl ChatEngine {
         super::helpers::copy_text_to_clipboard(&message.text)?;
         self.add_system_message("Copied latest assistant response to clipboard.".to_string());
         Ok(())
+    }
+
+    /// Trigger CLI auto-update behavior.
+    pub async fn update_cli_if_installed(&mut self) {
+        match do_update_cli_if_installed().await {
+            Ok(Some(message)) => self.add_system_message(message),
+            Ok(None) => self.add_system_message(
+                "CLI auto-update is not required on this platform.".to_string(),
+            ),
+            Err(error) => self.add_system_message(format!("CLI update failed: {}", error)),
+        }
     }
 
     /// Launch a sub-agent. If the first word matches a registered A2A agent,
@@ -739,4 +753,65 @@ mod tests {
             Some(Command::Modules(Some("port 8421".to_string())))
         );
     }
+
+    #[test]
+    fn parse_update_command() {
+        assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn do_update_cli_if_installed() -> Result<Option<String>> {
+    let bin_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
+        .join(".local/bin");
+    let target = bin_dir.join("chatty-tui");
+
+    if !target.exists() {
+        return Ok(Some(format!(
+            "CLI auto-update skipped: '{}' is not installed.",
+            target.display()
+        )));
+    }
+
+    let source = std::fs::canonicalize(
+        std::env::current_exe().context("Failed to resolve current chatty-tui binary")?,
+    )
+    .context("Failed to canonicalize current chatty-tui binary path")?;
+    let target_canonical = std::fs::canonicalize(&target)
+        .with_context(|| format!("Failed to canonicalize '{}'", target.display()))?;
+
+    if source == target_canonical {
+        return Ok(Some(
+            "CLI already points to the current binary.".to_string(),
+        ));
+    }
+
+    tokio::fs::copy(&source, &target).await.with_context(|| {
+        format!(
+            "Failed to copy '{}' to '{}'",
+            source.display(),
+            target.display()
+        )
+    })?;
+
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to set executable permissions on '{}'",
+                target.display()
+            )
+        })?;
+
+    Ok(Some(format!(
+        "CLI at '{}' updated to the current version.",
+        target.display()
+    )))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn do_update_cli_if_installed() -> Result<Option<String>> {
+    Ok(None)
 }

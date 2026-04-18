@@ -98,6 +98,7 @@ Typing `/` in the input opens an inline slash-command menu. Use `↑/↓` to sel
 | `/compact` | Summarize older messages to reduce context usage |
 | `/context` | Show token/context usage and current working directory |
 | `/copy` | Copy the latest assistant response to system clipboard |
+| `/update` | Trigger CLI auto-update when an installed CLI target exists |
 | `/cwd`, `/cd [directory]` | Show or change the working directory |
 
 ## Architecture
