@@ -774,8 +774,14 @@ async fn do_update_cli_if_installed() -> Result<Option<String>> {
         )));
     }
 
-    let source = std::env::current_exe().context("Failed to resolve current chatty-tui binary")?;
-    if source == target {
+    let source = std::fs::canonicalize(
+        std::env::current_exe().context("Failed to resolve current chatty-tui binary")?,
+    )
+    .context("Failed to canonicalize current chatty-tui binary path")?;
+    let target_canonical = std::fs::canonicalize(&target)
+        .with_context(|| format!("Failed to canonicalize '{}'", target.display()))?;
+
+    if source == target_canonical {
         return Ok(Some(
             "CLI already points to the current binary.".to_string(),
         ));
