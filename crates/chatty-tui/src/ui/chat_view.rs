@@ -15,43 +15,21 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
             Style::default().fg(Color::DarkGray),
         )));
     } else if engine.messages.is_empty() {
+        let logo_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        for line in [
+            " ██████╗██╗  ██╗ █████╗ ████████╗████████╗██╗   ██╗",
+            "██╔════╝██║  ██║██╔══██╗╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝",
+            "██║     ███████║███████║   ██║      ██║    ╚████╔╝ ",
+            "██║     ██╔══██║██╔══██║   ██║      ██║     ╚██╔╝  ",
+            "╚██████╗██║  ██║██║  ██║   ██║      ██║      ██║   ",
+            " ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝      ╚═╝      ╚═╝   ",
+        ] {
+            lines.push(Line::from(Span::styled(line, logo_style)));
+        }
+
         lines.extend([
-            Line::from(Span::styled(
-                " ██████╗██╗  ██╗ █████╗ ████████╗████████╗██╗   ██╗",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                "██╔════╝██║  ██║██╔══██╗╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                "██║     ███████║███████║   ██║      ██║    ╚████╔╝ ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                "██║     ██╔══██║██╔══██║   ██║      ██║     ╚██╔╝  ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                "╚██████╗██║  ██║██║  ██║   ██║      ██║      ██║   ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                " ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝      ╚═╝      ╚═╝   ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
             Line::from(""),
             Line::from(Span::styled(
                 "Terminal AI chat for developers",
