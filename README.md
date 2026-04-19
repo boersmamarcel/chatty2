@@ -637,6 +637,7 @@ When you launch `chatty-tui` in interactive mode with an empty conversation, a w
 | `/compact` | Summarize older messages to reduce context usage for longer agent runs |
 | `/context` | Show token/context usage and current working directory |
 | `/copy` | Copy the latest agent response to system clipboard |
+| `/update` | Trigger CLI auto-update (Linux: refreshes `~/.local/bin/chatty-tui` from the running binary) |
 | `/cwd`, `/cd [directory]` | Show or change the agent's working directory |
 
 > **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent. Alternatively, use `--ollama` or `--openai-compat-url` to skip configuration entirely and connect directly to a running server.
