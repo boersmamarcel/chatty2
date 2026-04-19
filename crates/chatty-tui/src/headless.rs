@@ -35,7 +35,7 @@ pub async fn run_headless(
                     .messages
                     .iter()
                     .rev()
-                    .flat_map(|m| &m.tool_calls)
+                    .flat_map(|m| m.tool_calls())
                     .find(|tc| tc.id == id_str)
                     .map(|tc| tc.name.clone())
                 {
@@ -49,7 +49,7 @@ pub async fn run_headless(
                     .messages
                     .iter()
                     .rev()
-                    .flat_map(|m| &m.tool_calls)
+                    .flat_map(|m| m.tool_calls())
                     .find(|tc| tc.id == id_str)
                     .map(|tc| tc.name.clone())
                 {

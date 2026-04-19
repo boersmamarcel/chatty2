@@ -64,12 +64,78 @@ pub enum MessageRole {
     System,
 }
 
+/// A single block within an assistant/user/system message. Blocks appear in
+/// the order they were produced — text arrives, then a tool call fires, then
+/// more text, etc. — so the UI can render the timeline accurately.
+#[derive(Debug, Clone)]
+pub enum MessageBlock {
+    Text(String),
+    ToolCall(ToolCallInfo),
+}
+
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub role: MessageRole,
-    pub text: String,
-    pub tool_calls: Vec<ToolCallInfo>,
+    pub blocks: Vec<MessageBlock>,
     pub is_streaming: bool,
+}
+
+impl DisplayMessage {
+    pub fn new(role: MessageRole, is_streaming: bool) -> Self {
+        Self {
+            role,
+            blocks: Vec::new(),
+            is_streaming,
+        }
+    }
+
+    pub fn with_text(role: MessageRole, text: String) -> Self {
+        let mut msg = Self::new(role, false);
+        if !text.is_empty() {
+            msg.blocks.push(MessageBlock::Text(text));
+        }
+        msg
+    }
+
+    /// Concatenated text across all Text blocks (tool calls excluded).
+    /// Used by `/copy` and headless stdout output.
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for block in &self.blocks {
+            if let MessageBlock::Text(t) = block {
+                out.push_str(t);
+            }
+        }
+        out
+    }
+
+    /// Append to the trailing Text block, or create a new one if the last block
+    /// is a tool call (so the tool's output stays above the subsequent text).
+    pub fn push_text(&mut self, text: &str) {
+        if let Some(MessageBlock::Text(last)) = self.blocks.last_mut() {
+            last.push_str(text);
+        } else {
+            self.blocks.push(MessageBlock::Text(text.to_string()));
+        }
+    }
+
+    pub fn push_tool_call(&mut self, info: ToolCallInfo) {
+        self.blocks.push(MessageBlock::ToolCall(info));
+    }
+
+    pub fn tool_call_mut(&mut self, id: &str) -> Option<&mut ToolCallInfo> {
+        self.blocks.iter_mut().find_map(|b| match b {
+            MessageBlock::ToolCall(tc) if tc.id == id => Some(tc),
+            _ => None,
+        })
+    }
+
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCallInfo> {
+        self.blocks.iter().filter_map(|b| match b {
+            MessageBlock::ToolCall(tc) => Some(tc),
+            _ => None,
+        })
+    }
 }
 
 /// Shared navigation behaviour for picker lists.
@@ -496,12 +562,10 @@ impl ChatEngine {
         };
 
         // Add user message to display
-        self.messages.push(DisplayMessage {
-            role: MessageRole::User,
-            text: message.clone(),
-            tool_calls: Vec::new(),
-            is_streaming: false,
-        });
+        self.messages.push(DisplayMessage::with_text(
+            MessageRole::User,
+            message.clone(),
+        ));
 
         // Build user content
         let contents = vec![UserContent::text(message.clone())];
@@ -513,12 +577,8 @@ impl ChatEngine {
         conversation.add_user_message_with_attachments(user_msg, vec![]);
 
         // Start assistant placeholder
-        self.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            text: String::new(),
-            tool_calls: Vec::new(),
-            is_streaming: true,
-        });
+        self.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, true));
         self.is_streaming = true;
 
         // Set up approval channels
@@ -588,7 +648,7 @@ impl ChatEngine {
                 }
                 // Append to display
                 if let Some(last) = self.messages.last_mut() {
-                    last.text.push_str(&text);
+                    last.push_text(&text);
                 }
                 EngineAction::Redraw
             }
@@ -604,7 +664,7 @@ impl ChatEngine {
                         state: ToolCallState::Running,
                     };
                     if let Some(last) = self.messages.last_mut() {
-                        last.tool_calls.push(info);
+                        last.push_tool_call(info);
                     }
                 }
                 EngineAction::Redraw
@@ -612,7 +672,7 @@ impl ChatEngine {
             AppEvent::ToolCallInput { id, arguments } => {
                 if !self.active_invoke_agent_ids.contains(&id)
                     && let Some(last) = self.messages.last_mut()
-                    && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
+                    && let Some(tc) = last.tool_call_mut(&id)
                 {
                     tc.input.push_str(&arguments);
                 }
@@ -622,7 +682,7 @@ impl ChatEngine {
                 if self.active_invoke_agent_ids.remove(&id) {
                     // invoke_agent result — sub-agent progress already handled
                 } else if let Some(last) = self.messages.last_mut()
-                    && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
+                    && let Some(tc) = last.tool_call_mut(&id)
                 {
                     tc.output = Some(result);
                     tc.state = ToolCallState::Success;
@@ -633,7 +693,7 @@ impl ChatEngine {
                 if self.active_invoke_agent_ids.remove(&id) {
                     // invoke_agent error — sub-agent progress already handled
                 } else if let Some(last) = self.messages.last_mut()
-                    && let Some(tc) = last.tool_calls.iter_mut().find(|t| t.id == id)
+                    && let Some(tc) = last.tool_call_mut(&id)
                 {
                     tc.output = Some(error.clone());
                     tc.state = ToolCallState::Error;
@@ -671,11 +731,8 @@ impl ChatEngine {
             AppEvent::StreamError(error) => {
                 error!(error = %error, "Stream error");
                 if let Some(last) = self.messages.last_mut() {
-                    if last.text.is_empty() {
-                        last.text = format!("[Error: {}]", error);
-                    } else {
-                        last.text.push_str(&format!("\n\n[Error: {}]", error));
-                    }
+                    let prefix = if last.text().is_empty() { "" } else { "\n\n" };
+                    last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
                 }
                 self.is_streaming = false;
@@ -685,7 +742,7 @@ impl ChatEngine {
             }
             AppEvent::StreamCancelled => {
                 if let Some(last) = self.messages.last_mut() {
-                    last.text.push_str("\n\n[Cancelled]");
+                    last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
                 self.is_streaming = false;
@@ -738,8 +795,8 @@ impl ChatEngine {
                 } else if let Some(idx) = self.sub_agent_msg_idx
                     && let Some(msg) = self.messages.get_mut(idx)
                 {
-                    msg.text.push('\n');
-                    msg.text.push_str(&line);
+                    msg.push_text("\n");
+                    msg.push_text(&line);
                 }
                 EngineAction::Redraw
             }
@@ -788,12 +845,8 @@ impl ChatEngine {
 
     /// Add a system message to the display
     pub fn add_system_message(&mut self, text: String) {
-        self.messages.push(DisplayMessage {
-            role: MessageRole::System,
-            text,
-            tool_calls: Vec::new(),
-            is_streaming: false,
-        });
+        self.messages
+            .push(DisplayMessage::with_text(MessageRole::System, text));
     }
 
     fn finalize_stream(&mut self) {

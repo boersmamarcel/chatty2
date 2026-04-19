@@ -6,7 +6,9 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 
-use crate::engine::{ChatEngine, DisplayMessage, MessageRole, ToolCallState};
+use crate::engine::{
+    ChatEngine, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo, ToolCallState,
+};
 use crate::ui::theme;
 
 pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
@@ -230,44 +232,55 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
 
     lines.push(Line::from(Span::styled(format!("[{}]", label), style)));
 
-    // Message text
-    if !msg.text.is_empty() {
-        for line in msg.text.lines() {
-            lines.push(Line::from(line.to_string()));
+    // Render blocks in the order they arrived so text and tool calls interleave.
+    for block in &msg.blocks {
+        match block {
+            MessageBlock::Text(text) => {
+                for line in text.lines() {
+                    lines.push(Line::from(line.to_string()));
+                }
+                // Preserve a trailing empty line when the text ended on a newline.
+                if text.ends_with('\n') {
+                    lines.push(Line::from(""));
+                }
+            }
+            MessageBlock::ToolCall(tc) => {
+                render_tool_call(lines, tc);
+            }
         }
     }
 
-    // Streaming cursor
-    if msg.is_streaming && msg.tool_calls.is_empty() {
+    // Streaming cursor — only when actively streaming text (no trailing tool call).
+    let trailing_tool = matches!(msg.blocks.last(), Some(MessageBlock::ToolCall(_)));
+    if msg.is_streaming && !trailing_tool {
         lines.push(Line::from(Span::styled("▌", theme::warning())));
     }
+}
 
-    // Tool calls
-    for tc in &msg.tool_calls {
-        let (icon, tc_style) = match &tc.state {
-            ToolCallState::Running => ("⟳", theme::warning()),
-            ToolCallState::Success => ("✓", theme::success()),
-            ToolCallState::Error => ("✗", theme::error()),
+fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
+    let (icon, tc_style) = match &tc.state {
+        ToolCallState::Running => ("⟳", theme::warning()),
+        ToolCallState::Success => ("✓", theme::success()),
+        ToolCallState::Error => ("✗", theme::error()),
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(format!("  [tool: {}] ", tc.name), theme::tool()),
+        Span::styled(icon, tc_style),
+        Span::raw(" "),
+        Span::styled(truncate(&tc.input, 60), theme::muted()),
+    ]));
+
+    if let Some(ref output) = tc.output {
+        let preview = truncate(output, 80);
+        let out_style = match &tc.state {
+            ToolCallState::Error => theme::error(),
+            _ => theme::muted(),
         };
-
-        lines.push(Line::from(vec![
-            Span::styled(format!("  [tool: {}] ", tc.name), theme::tool()),
-            Span::styled(icon, tc_style),
-            Span::raw(" "),
-            Span::styled(truncate(&tc.input, 60), theme::muted()),
-        ]));
-
-        if let Some(ref output) = tc.output {
-            let preview = truncate(output, 80);
-            let out_style = match &tc.state {
-                ToolCallState::Error => theme::error(),
-                _ => theme::muted(),
-            };
-            lines.push(Line::from(Span::styled(
-                format!("    → {}", preview),
-                out_style,
-            )));
-        }
+        lines.push(Line::from(Span::styled(
+            format!("    → {}", preview),
+            out_style,
+        )));
     }
 }
 

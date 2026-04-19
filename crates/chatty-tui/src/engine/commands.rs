@@ -221,15 +221,17 @@ impl ChatEngine {
 
     /// Copy the latest assistant message to the system clipboard.
     pub fn copy_last_response_to_clipboard(&mut self) -> Result<()> {
-        let Some(message) = self
+        let text = self
             .messages
             .iter()
             .rev()
-            .find(|m| matches!(m.role, MessageRole::Assistant) && !m.text.trim().is_empty())
-        else {
+            .filter(|m| matches!(m.role, MessageRole::Assistant))
+            .map(|m| m.text())
+            .find(|t| !t.trim().is_empty());
+        let Some(text) = text else {
             bail!("No assistant response available to copy");
         };
-        super::helpers::copy_text_to_clipboard(&message.text)?;
+        super::helpers::copy_text_to_clipboard(&text)?;
         self.add_system_message("Copied latest assistant response to clipboard.".to_string());
         Ok(())
     }
