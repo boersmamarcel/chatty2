@@ -1,19 +1,22 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 
 use crate::engine::{ChatEngine, DisplayMessage, MessageRole, ToolCallState};
+use crate::ui::theme;
 
-pub fn render_messages(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
+pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
+    // Remember the chat area so mouse wheel events can route correctly.
+    engine.last_chat_area = area;
+
     let mut lines: Vec<Line> = Vec::new();
 
     if !engine.is_ready {
-        lines.push(Line::from(Span::styled(
-            "Initializing...",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(Span::styled("Initializing...", theme::muted())));
     } else if engine.messages.is_empty() {
         render_welcome_state(&mut lines, engine);
     } else {
@@ -25,14 +28,36 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(theme::border())
         .title(format!(" {} ", engine.title));
-    let inner_width = block.inner(area).width;
-    let visible_height = area.height.saturating_sub(2); // minus borders
+    let inner = block.inner(area);
+    let inner_width = inner.width;
+    let visible_height = inner.height;
 
-    // Calculate wrapped content height (accounts for word-wrap)
+    // Calculate wrapped content height (accounts for word-wrap).
     let content_height = wrapped_line_count(&lines, inner_width);
     let max_scroll = content_height.saturating_sub(visible_height);
-    let scroll = max_scroll.saturating_sub(engine.scroll_offset);
+
+    // Autoscroll-pause: when unpinned and new content arrived, shift scroll_offset
+    // by the growth so the user's visible window stays locked in place.
+    if !engine.pinned_to_bottom && content_height > engine.last_content_height {
+        let growth = content_height - engine.last_content_height;
+        engine.scroll_offset = engine.scroll_offset.saturating_add(growth);
+    }
+    engine.last_content_height = content_height;
+
+    // Clamp scroll_offset and decide final scroll position from the top.
+    let scroll = if engine.pinned_to_bottom {
+        engine.scroll_offset = 0;
+        max_scroll
+    } else {
+        engine.scroll_offset = engine.scroll_offset.min(max_scroll);
+        // Snap back to pinned when user scrolled all the way down.
+        if engine.scroll_offset == 0 {
+            engine.pinned_to_bottom = true;
+        }
+        max_scroll.saturating_sub(engine.scroll_offset)
+    };
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)
@@ -40,12 +65,23 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
         .scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
+
+    // Scrollbar on the right edge when content overflows.
+    if max_scroll > 0 {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█")
+            .thumb_style(theme::accent())
+            .track_style(theme::muted());
+        let mut state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+        frame.render_stateful_widget(scrollbar, area, &mut state);
+    }
 }
 
 fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
-    let logo_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let logo_style = theme::accent().add_modifier(Modifier::BOLD);
     for line in [
         " ██████╗██╗  ██╗ █████╗ ████████╗████████╗██╗   ██╗",
         "██╔════╝██║  ██║██╔══██╗╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝",
@@ -91,51 +127,38 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
         Line::from(""),
         Line::from(Span::styled(
             "Terminal AI chat for developers",
-            Style::default().fg(Color::DarkGray),
+            theme::muted(),
         )),
         Line::from(Span::styled(
             "Chatty can switch models, reshape tool access live, delegate work, and mix local + remote capabilities in one session.",
-            Style::default().fg(Color::DarkGray),
+            theme::muted(),
         )),
         Line::from(""),
         welcome_line(
             "Model",
             vec![
-                Span::styled(
-                    engine.model_config.name.clone(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(engine.model_config.name.clone(), theme::text_bold()),
                 Span::raw(" via "),
                 Span::styled(
                     engine.model_config.provider_type.display_name().to_string(),
-                    Style::default().fg(Color::Cyan),
+                    theme::accent(),
                 ),
                 Span::raw(" · "),
-                Span::styled(model_context_label(engine), Style::default().fg(Color::DarkGray)),
+                Span::styled(model_context_label(engine), theme::muted()),
             ],
         ),
         welcome_line(
             "Workspace",
             vec![Span::styled(
                 engine.current_working_directory(),
-                Style::default().fg(Color::White),
+                theme::text(),
             )],
         ),
         welcome_line(
             "Git",
             match engine.git_branch.as_deref() {
-                Some(branch) => vec![Span::styled(
-                    branch.to_string(),
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                )],
-                None => vec![Span::styled(
-                    "Not a git workspace".to_string(),
-                    Style::default().fg(Color::DarkGray),
-                )],
+                Some(branch) => vec![Span::styled(branch.to_string(), theme::tool_bold())],
+                None => vec![Span::styled("Not a git workspace".to_string(), theme::muted())],
             },
         ),
         welcome_line(
@@ -192,23 +215,20 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
         ),
         Line::from(Span::styled(
             "Send a message to start chatting.",
-            Style::default().fg(Color::DarkGray),
+            theme::muted(),
         )),
     ]);
 }
 
 fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
     // Role label
-    let (label, color) = match msg.role {
-        MessageRole::User => ("you", Color::Green),
-        MessageRole::Assistant => ("assistant", Color::Cyan),
-        MessageRole::System => ("system", Color::Yellow),
+    let (label, style) = match msg.role {
+        MessageRole::User => ("you", theme::success_bold()),
+        MessageRole::Assistant => ("assistant", theme::accent_bold()),
+        MessageRole::System => ("system", theme::warning().add_modifier(Modifier::BOLD)),
     };
 
-    lines.push(Line::from(Span::styled(
-        format!("[{}]", label),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(Span::styled(format!("[{}]", label), style)));
 
     // Message text
     if !msg.text.is_empty() {
@@ -219,42 +239,33 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
 
     // Streaming cursor
     if msg.is_streaming && msg.tool_calls.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "▌",
-            Style::default().fg(Color::Yellow),
-        )));
+        lines.push(Line::from(Span::styled("▌", theme::warning())));
     }
 
     // Tool calls
     for tc in &msg.tool_calls {
-        let (icon, tc_color) = match &tc.state {
-            ToolCallState::Running => ("⟳", Color::Yellow),
-            ToolCallState::Success => ("✓", Color::Green),
-            ToolCallState::Error => ("✗", Color::Red),
+        let (icon, tc_style) = match &tc.state {
+            ToolCallState::Running => ("⟳", theme::warning()),
+            ToolCallState::Success => ("✓", theme::success()),
+            ToolCallState::Error => ("✗", theme::error()),
         };
 
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  [tool: {}] ", tc.name),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled(icon, Style::default().fg(tc_color)),
+            Span::styled(format!("  [tool: {}] ", tc.name), theme::tool()),
+            Span::styled(icon, tc_style),
             Span::raw(" "),
-            Span::styled(
-                truncate(&tc.input, 60),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(truncate(&tc.input, 60), theme::muted()),
         ]));
 
         if let Some(ref output) = tc.output {
             let preview = truncate(output, 80);
-            let out_color = match &tc.state {
-                ToolCallState::Error => Color::Red,
-                _ => Color::DarkGray,
+            let out_style = match &tc.state {
+                ToolCallState::Error => theme::error(),
+                _ => theme::muted(),
             };
             lines.push(Line::from(Span::styled(
                 format!("    → {}", preview),
-                Style::default().fg(out_color),
+                out_style,
             )));
         }
     }
@@ -289,32 +300,22 @@ fn truncate(s: &str, max_len: usize) -> String {
 }
 
 fn welcome_line(label: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
-    let mut line = vec![Span::styled(
-        format!("{label:<10}"),
-        Style::default().fg(Color::DarkGray),
-    )];
+    let mut line = vec![Span::styled(format!("{label:<10}"), theme::muted())];
     line.append(&mut spans);
     Line::from(line)
 }
 
 fn badge(label: impl Into<String>, enabled: bool) -> Span<'static> {
     let style = if enabled {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
+        theme::success_bold()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::muted()
     };
     Span::styled(format!("[{}]", label.into()), style)
 }
 
 fn command_span(command: &str) -> Span<'static> {
-    Span::styled(
-        command.to_string(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )
+    Span::styled(command.to_string(), theme::accent_bold())
 }
 
 fn join_spans(items: Vec<Span<'static>>) -> Vec<Span<'static>> {

@@ -1,10 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::ui::InputState;
+use crate::ui::theme;
 
 pub fn render_at_menu(frame: &mut Frame, area: Rect, input_state: &mut InputState) {
     let items = input_state.at_menu_items();
@@ -21,8 +22,9 @@ pub fn render_at_menu(frame: &mut Frame, area: Rect, input_state: &mut InputStat
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(theme::border())
         .title(" @ File Mentions (↑↓ Tab/Enter) ")
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(ratatui::style::Color::Black));
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
@@ -32,21 +34,13 @@ pub fn render_at_menu(frame: &mut Frame, area: Rect, input_state: &mut InputStat
     let list_items: Vec<ListItem> = items
         .iter()
         .map(|name| {
-            let line = Line::from(vec![Span::styled(
-                name.to_string(),
-                Style::default().fg(Color::Green),
-            )]);
+            let line = Line::from(vec![Span::styled(name.to_string(), theme::success())]);
             ListItem::new(line)
         })
         .collect();
 
     let list = List::new(list_items)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(theme::highlight_user())
         .highlight_symbol("▸ ");
 
     let selected = input_state
@@ -59,17 +53,14 @@ pub fn render_at_menu(frame: &mut Frame, area: Rect, input_state: &mut InputStat
     input_state.set_at_menu_scroll_offset(state.offset());
 
     let help = Line::from(vec![
-        Span::styled("Type @", Style::default().fg(Color::Green)),
+        Span::styled("Type @", theme::success()),
         Span::raw(" to filter  "),
-        Span::styled("↑↓", Style::default().fg(Color::Green)),
+        Span::styled("↑↓", theme::success()),
         Span::raw(" select  "),
-        Span::styled("Tab/Enter", Style::default().fg(Color::Green)),
+        Span::styled("Tab/Enter", theme::success()),
         Span::raw(" insert"),
     ]);
-    frame.render_widget(
-        Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
-        chunks[1],
-    );
+    frame.render_widget(Paragraph::new(help).style(theme::muted()), chunks[1]);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

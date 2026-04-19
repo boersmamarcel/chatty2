@@ -74,7 +74,7 @@ impl ChatEngine {
         self.title = "New Chat".to_string();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
-        self.scroll_offset = 0;
+        self.pin_to_bottom();
         self.pending_approval = None;
         self.model_picker = None;
         self.tool_picker = None;

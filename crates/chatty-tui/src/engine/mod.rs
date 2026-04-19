@@ -193,7 +193,18 @@ pub struct ChatEngine {
     pub git_branch: Option<String>,
     pub model_picker: Option<ModelPicker>,
     pub tool_picker: Option<ToolPicker>,
+    /// Lines scrolled up from the bottom of the chat transcript.
+    /// `0` + `pinned_to_bottom` means the viewport follows new content.
     pub scroll_offset: u16,
+    /// When true, incoming content keeps the view pinned to the bottom.
+    /// Flipped to `false` whenever the user scrolls up.
+    pub pinned_to_bottom: bool,
+    /// Total wrapped-line count recorded on the last render. Used to preserve
+    /// the user's visible window when new lines are appended while unpinned.
+    pub last_content_height: u16,
+    /// Bounding rectangle of the chat transcript as of the last render.
+    /// Used to route mouse wheel events only when the pointer is over the chat area.
+    pub last_chat_area: ratatui::layout::Rect,
     /// Index into `messages` of the system message showing sub-agent progress.
     /// `None` when no sub-agent is running.
     pub sub_agent_msg_idx: Option<usize>,
@@ -258,6 +269,9 @@ impl ChatEngine {
             model_picker: None,
             tool_picker: None,
             scroll_offset: 0,
+            pinned_to_bottom: true,
+            last_content_height: 0,
+            last_chat_area: ratatui::layout::Rect::default(),
             sub_agent_msg_idx: None,
             active_invoke_agent_ids: HashSet::new(),
             event_tx,
@@ -267,6 +281,33 @@ impl ChatEngine {
 
     pub fn refresh_workspace_context(&mut self) {
         self.git_branch = detect_git_branch(self.execution_settings.workspace_dir.as_deref());
+    }
+
+    /// Pin the chat viewport to the bottom so new content is auto-followed.
+    pub fn pin_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.pinned_to_bottom = true;
+    }
+
+    /// Scroll the chat up by `lines`. Unpins auto-follow so the view stays put
+    /// when new streaming content arrives.
+    pub fn scroll_up(&mut self, lines: u16) {
+        if lines == 0 {
+            return;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        self.pinned_to_bottom = false;
+    }
+
+    /// Scroll the chat down by `lines`. Re-pins to the bottom once we land at 0.
+    pub fn scroll_down(&mut self, lines: u16) {
+        if lines == 0 {
+            return;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        if self.scroll_offset == 0 {
+            self.pinned_to_bottom = true;
+        }
     }
 
     fn available_model_ids(&self) -> Vec<String> {
@@ -447,7 +488,7 @@ impl ChatEngine {
         }
 
         // Reset scroll to bottom when sending
-        self.scroll_offset = 0;
+        self.pin_to_bottom();
 
         let conversation = match self.conversation.as_mut() {
             Some(c) => c,
@@ -537,7 +578,7 @@ impl ChatEngine {
         match event {
             AppEvent::StreamStarted => {
                 self.is_streaming = true;
-                self.scroll_offset = 0;
+                self.pin_to_bottom();
                 EngineAction::Redraw
             }
             AppEvent::TextChunk(text) => {
