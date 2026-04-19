@@ -1,5 +1,5 @@
-use crate::settings::models::search_settings::SearchSettingsModel;
 use crate::settings::models::providers_store::ProviderType;
+use crate::settings::models::search_settings::SearchSettingsModel;
 
 use super::mcp_helpers::McpTools;
 use super::tool_registry::ToolAvailability;
