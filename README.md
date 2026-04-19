@@ -596,7 +596,7 @@ chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key 
 
 ### Installing chatty-tui
 
-**From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
+**From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. On macOS, the menu is in the system menu bar at the top of the screen. On Linux and Windows, it appears as a dropdown in the app's title bar. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
 
 **From releases** — download the same release package as the desktop app; `chatty-tui` is included.
 
