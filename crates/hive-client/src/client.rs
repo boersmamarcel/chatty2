@@ -294,6 +294,38 @@ impl HiveRegistryClient {
         })
     }
 
+    // ── Usage reporting ────────────────────────────────────────────────────
+
+    /// Report a batch of usage events to the registry.
+    pub async fn report_usage(
+        &self,
+        events: Vec<crate::models::UsageEvent>,
+    ) -> Result<crate::models::UsageReportResponse, ClientError> {
+        let url = format!("{}/api/usage/report", self.base_url);
+
+        let body = crate::models::UsageReportRequest { events };
+
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+
+        response
+            .json::<crate::models::UsageReportResponse>()
+            .await
+            .map_err(ClientError::from)
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────────
 
     async fn get_json<T>(&self, path: &str, query: &impl Serialize) -> Result<T, ClientError>

@@ -10,7 +10,7 @@ mod module;
 
 pub use host::{LlmProvider, ModuleManifest};
 pub use limits::ResourceLimits;
-pub use module::WasmModule;
+pub use module::{InvocationMetrics, WasmModule};
 
 /// Host-side WIT types re-exported for callers.
 pub use bindings::chatty::module::types::{

@@ -19,6 +19,15 @@ use crate::limits::ResourceLimits;
 // WasmModule
 // ---------------------------------------------------------------------------
 
+/// Metrics captured from the last module invocation.
+#[derive(Debug, Clone, Default)]
+pub struct InvocationMetrics {
+    pub execution_ms: u32,
+    pub fuel_consumed: u64,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+}
+
 /// A loaded and instantiated WASM component module.
 ///
 /// Wraps a Wasmtime [`Store`] and the generated [`Module`] binding so the
@@ -30,6 +39,8 @@ pub struct WasmModule {
     module: Module,
     /// Resource limits — kept for timeout enforcement.
     limits: ResourceLimits,
+    /// Metrics from the most recent invocation.
+    last_metrics: Option<InvocationMetrics>,
 }
 
 impl WasmModule {
@@ -124,6 +135,7 @@ impl WasmModule {
             store,
             module,
             limits,
+            last_metrics: None,
         })
     }
 
@@ -145,8 +157,11 @@ impl WasmModule {
     ///
     /// Returns the chat response or a descriptive error if the module traps,
     /// runs out of fuel, or exceeds the wall-clock timeout.
+    /// Call [`last_invocation_metrics`] after this to get execution metrics.
     pub async fn chat(&mut self, req: ChatRequest) -> Result<ChatResponse> {
         let timeout = Duration::from_millis(self.limits.max_execution_ms);
+        let start_time = std::time::Instant::now();
+        let initial_fuel = self.store.get_fuel().unwrap_or(0);
 
         let result = {
             let agent = self.module.chatty_module_agent();
@@ -162,6 +177,27 @@ impl WasmModule {
             .context("agent::chat timed out")?
         };
 
+        // Capture metrics
+        let execution_ms = start_time.elapsed().as_millis() as u32;
+        let remaining_fuel = self.store.get_fuel().unwrap_or(0);
+        let fuel_consumed = initial_fuel.saturating_sub(remaining_fuel);
+
+        let (input_tokens, output_tokens) = match &result {
+            Ok(resp) => resp
+                .usage
+                .as_ref()
+                .map(|u| (Some(u.input_tokens), Some(u.output_tokens)))
+                .unwrap_or_default(),
+            Err(_) => (None, None),
+        };
+
+        self.last_metrics = Some(InvocationMetrics {
+            execution_ms,
+            fuel_consumed,
+            input_tokens,
+            output_tokens,
+        });
+
         // Clear progress sender after chat completes
         self.store.data_mut().progress_tx = None;
 
@@ -171,17 +207,34 @@ impl WasmModule {
     /// Call the `agent::invoke-tool` export with a timeout.
     pub async fn invoke_tool(&mut self, name: &str, args: &str) -> Result<String> {
         let timeout = Duration::from_millis(self.limits.max_execution_ms);
+        let start_time = std::time::Instant::now();
+        let initial_fuel = self.store.get_fuel().unwrap_or(0);
+
         let agent = self.module.chatty_module_agent();
         let store = &mut self.store;
 
-        tokio::time::timeout(timeout, async move {
+        let result = tokio::time::timeout(timeout, async move {
             agent
                 .call_invoke_tool(store, name, args)
                 .context("WASM trap in agent::invoke-tool")?
                 .map_err(|e| anyhow::anyhow!("agent::invoke-tool returned error: {e}"))
         })
         .await
-        .context("agent::invoke-tool timed out")?
+        .context("agent::invoke-tool timed out")?;
+
+        // Capture metrics
+        let execution_ms = start_time.elapsed().as_millis() as u32;
+        let remaining_fuel = self.store.get_fuel().unwrap_or(0);
+        let fuel_consumed = initial_fuel.saturating_sub(remaining_fuel);
+
+        self.last_metrics = Some(InvocationMetrics {
+            execution_ms,
+            fuel_consumed,
+            input_tokens: None,
+            output_tokens: None,
+        });
+
+        result
     }
 
     /// Call the `agent::list-tools` export.
@@ -205,6 +258,11 @@ impl WasmModule {
     /// Useful for diagnostics and tests.
     pub fn remaining_fuel(&self) -> u64 {
         self.store.get_fuel().unwrap_or(0)
+    }
+
+    /// Get the metrics from the most recent invocation (chat or invoke_tool).
+    pub fn last_invocation_metrics(&self) -> Option<InvocationMetrics> {
+        self.last_metrics.clone()
     }
 }
 
