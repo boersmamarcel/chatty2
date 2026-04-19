@@ -27,6 +27,7 @@ futures.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 uuid.workspace = true
+serde.workspace = true
 
 # Logging
 tracing.workspace = true

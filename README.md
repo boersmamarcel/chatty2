@@ -580,6 +580,20 @@ Background update checks against GitHub releases with one-click install. Downloa
 | **Headless** | `chatty-tui --headless -m "your question"` | Send a single message; response printed to stdout — ideal for scripts and sub-agents |
 | **Pipe** | `cat file.rs \| chatty-tui --pipe` | Read from stdin, send as a message, print the response — compose with shell pipelines |
 
+### Zero-Config Quick Start
+
+Connect directly to a running model server — no desktop app setup required:
+
+```bash
+# Ollama (auto-discovers models from localhost:11434)
+chatty-tui --ollama
+chatty-tui --ollama --model llama3.2
+
+# vllm / llama.cpp / LM Studio (any OpenAI-compatible server)
+chatty-tui --openai-compat-url http://localhost:8000
+chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key sk-...
+```
+
 ### Installing chatty-tui
 
 **From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
@@ -624,7 +638,7 @@ When you launch `chatty-tui` in interactive mode with an empty conversation, a w
 | `/copy` | Copy the latest agent response to system clipboard |
 | `/cwd`, `/cd [directory]` | Show or change the agent's working directory |
 
-> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent.
+> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent. Alternatively, use `--ollama` or `--openai-compat-url` to skip configuration entirely and connect directly to a running server.
 
 ---
 
