@@ -608,7 +608,7 @@ cargo install --path crates/chatty-tui
 
 ### Welcome Screen & Status Bar
 
-When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace.
+When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace. A hint footer below the input bar shows the most useful shortcuts at a glance and updates to show `Ctrl+C stop` while the agent is streaming. A scrollbar appears on the right side of the chat area when content overflows; scrolling up unpins the viewport from the bottom (new content continues to stream in the background), and pressing `End` or scrolling back down re-pins it.
 
 ### Interactive Mode Keybindings
 
@@ -618,7 +618,8 @@ When you launch `chatty-tui` in interactive mode with an empty conversation, a w
 | `/` | Open slash-command picker (use `↑/↓` to select, `Tab` or `Enter` to apply) |
 | `@` | Open file picker — type to filter, `↑/↓` to navigate, `Enter` to insert file reference |
 | `--enable tool1,tool2` / `--disable tool1,tool2` | Override tool availability at launch |
-| `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` | Scroll chat view |
+| `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` or mouse wheel | Scroll chat view |
+| `End` | Jump to bottom and resume auto-scroll |
 | `y` / `n` | Approve / deny a tool execution prompt |
 | `Ctrl+C` | Stop streaming response (or quit if idle) |
 | `Ctrl+Q` | Quit immediately |
