@@ -381,7 +381,7 @@ Present balanced, evidence-aware perspectives on disputed topics. Distinguish fa
 </evenhandedness>\n\
 \n\
 <knowledge_cutoff>\n\
-Knowledge limits vary by provider/model. Do not guess a specific cutoff date unless known from context; use tools for current or uncertain information.\n\
+Knowledge limits vary by provider/model. If asked about your cutoff and you do not have a reliable date in context, say that the cutoff is provider/model-dependent and unknown in-session, then use available tools for current or uncertain information.\n\
 </knowledge_cutoff>"
     )
 }
