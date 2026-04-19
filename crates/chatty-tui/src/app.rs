@@ -1,7 +1,12 @@
+use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -10,13 +15,36 @@ use crate::engine::{ChatEngine, Command, NavigableList};
 use crate::events::AppEvent;
 use crate::ui::{self, InputState};
 
+/// Lines to scroll per mouse-wheel tick.
+const MOUSE_SCROLL_LINES: u16 = 3;
+
 /// Run the interactive TUI application
 pub async fn run(
     mut engine: ChatEngine,
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
+
+    // Chain a panic hook that disables mouse capture before ratatui's default
+    // hook restores the terminal — otherwise a panic would leave the user's
+    // terminal emulator stuck sending mouse escape sequences.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        previous_hook(info);
+    }));
+
+    // Enable mouse capture so wheel events reach us. This disables the
+    // terminal's native text selection — users can hold Shift to bypass capture
+    // in most modern terminals (iTerm2, Kitty, Alacritty, WezTerm, GNOME).
+    if let Err(e) = execute!(io::stdout(), EnableMouseCapture) {
+        tracing::warn!(error = ?e, "Failed to enable mouse capture; continuing without mouse scroll");
+    }
+
     let result = run_loop(&mut terminal, &mut engine, &mut event_rx).await;
+
+    // Best-effort teardown — ignore errors since we're restoring anyway.
+    let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -196,9 +224,32 @@ fn handle_terminal_event(
 ) -> KeyAction {
     match event {
         Event::Key(key) => handle_key_event(key, engine, input_state),
+        Event::Mouse(mouse) => {
+            handle_mouse_event(mouse, engine);
+            KeyAction::None
+        }
         Event::Resize(_, _) => KeyAction::None,
         _ => KeyAction::None,
     }
+}
+
+/// Route mouse wheel events to chat scroll when the pointer is over the chat area.
+fn handle_mouse_event(mouse: MouseEvent, engine: &mut ChatEngine) {
+    let over_chat = is_point_in_rect(mouse.column, mouse.row, engine.last_chat_area);
+    match mouse.kind {
+        MouseEventKind::ScrollUp if over_chat => engine.scroll_up(MOUSE_SCROLL_LINES),
+        MouseEventKind::ScrollDown if over_chat => engine.scroll_down(MOUSE_SCROLL_LINES),
+        _ => {}
+    }
+}
+
+fn is_point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
 }
 
 fn handle_key_event(
@@ -336,19 +387,24 @@ fn handle_key_event(
 
         // Scroll: PageUp/PageDown, Shift+Up/Down
         KeyCode::PageUp => {
-            engine.scroll_offset = engine.scroll_offset.saturating_add(10);
+            engine.scroll_up(10);
             KeyAction::None
         }
         KeyCode::PageDown => {
-            engine.scroll_offset = engine.scroll_offset.saturating_sub(10);
+            engine.scroll_down(10);
             KeyAction::None
         }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            engine.scroll_offset = engine.scroll_offset.saturating_add(1);
+            engine.scroll_up(1);
             KeyAction::None
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            engine.scroll_offset = engine.scroll_offset.saturating_sub(1);
+            engine.scroll_down(1);
+            KeyAction::None
+        }
+        // End: jump back to bottom and re-pin
+        KeyCode::End => {
+            engine.pin_to_bottom();
             KeyAction::None
         }
 

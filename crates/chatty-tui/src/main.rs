@@ -755,7 +755,7 @@ fn inject_discovered(
                 .display_name()
                 .to_lowercase()
                 .replace(' ', "-"),
-            dm.identifier.replace(':', "-").replace('/', "-")
+            dm.identifier.replace([':', '/'], "-")
         );
         let mut mc = ModelConfig::new(id, dm.display_name, provider_type.clone(), dm.identifier);
         mc.supports_images = dm.supports_vision;
