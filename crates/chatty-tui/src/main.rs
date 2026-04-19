@@ -245,10 +245,15 @@ async fn main() -> Result<()> {
         // OpenAI-compatible servers may not require auth, but rig's OpenAI
         // client always needs an API key string. Use a placeholder when none
         // is provided — most local servers (vllm, llama.cpp) ignore it.
-        let api_key = cli
-            .api_key
-            .clone()
-            .unwrap_or_else(|| "no-key-required".to_string());
+        let api_key = match cli.api_key.clone() {
+            Some(key) => key,
+            None => {
+                info!(
+                    "No --api-key provided; using placeholder (most local servers don't need auth)"
+                );
+                "no-key-required".to_string()
+            }
+        };
         inject_discovered(
             &mut providers,
             &mut models_list,
