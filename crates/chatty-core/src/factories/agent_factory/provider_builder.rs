@@ -60,7 +60,14 @@ pub(super) async fn build_provider_agent(
             let key =
                 api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
 
-            let client = rig::providers::openai::Client::new(&key)?;
+            let client = if let Some(ref url) = base_url {
+                rig::providers::openai::Client::builder()
+                    .api_key(&key)
+                    .base_url(url)
+                    .build()?
+            } else {
+                rig::providers::openai::Client::new(&key)?
+            };
             let mut builder = client
                 .agent(&model_config.model_identifier)
                 .preamble(preamble);

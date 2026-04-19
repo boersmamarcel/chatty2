@@ -1827,6 +1827,7 @@ dependencies = [
  "futures",
  "ratatui",
  "rig-core",
+ "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
