@@ -1,6 +1,18 @@
 use crossterm::event::Event as CrosstermEvent;
 
 use chatty_core::models::Conversation;
+use chatty_core::services::{EmbeddingService, McpService, MemoryService};
+
+/// Heavy services loaded in the background after the TUI is displayed.
+/// Delivered via `AppEvent::ServicesReady` so the engine can patch itself.
+pub struct DeferredServices {
+    pub user_secrets: Vec<(String, String)>,
+    pub mcp_service: Option<McpService>,
+    pub memory_service: Option<MemoryService>,
+    pub search_settings:
+        Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
+    pub embedding_service: Option<EmbeddingService>,
+}
 
 /// Unified event type for the TUI application.
 /// All async tasks (streaming, settings loading) send events through a single channel.
@@ -52,6 +64,10 @@ pub enum AppEvent {
     },
     /// Background conversation initialization failed.
     ConversationInitFailed(String),
+    /// Deferred services (MCP, memory, embedding, etc.) finished loading.
+    ServicesReady(Box<DeferredServices>),
+    /// Git branch detection completed in background.
+    GitBranchDetected(Option<String>),
     TitleGenerated(String),
     SubAgentProgress(String),
     SubAgentFinished(String),
@@ -120,6 +136,8 @@ impl std::fmt::Debug for AppEvent {
             Self::ConversationInitFailed(s) => {
                 f.debug_tuple("ConversationInitFailed").field(s).finish()
             }
+            Self::ServicesReady(_) => write!(f, "ServicesReady"),
+            Self::GitBranchDetected(b) => f.debug_tuple("GitBranchDetected").field(b).finish(),
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
             Self::SubAgentProgress(s) => f.debug_tuple("SubAgentProgress").field(s).finish(),
             Self::SubAgentFinished(s) => f.debug_tuple("SubAgentFinished").field(s).finish(),
