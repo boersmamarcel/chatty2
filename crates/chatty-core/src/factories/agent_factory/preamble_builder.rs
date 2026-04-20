@@ -44,9 +44,8 @@ pub(super) fn build_preamble(
         );
     }
     if tools.fs_read {
-        tool_sections.push(
-            "- **read_file / read_binary / list_directory / glob_search**".to_string(),
-        );
+        tool_sections
+            .push("- **read_file / read_binary / list_directory / glob_search**".to_string());
     }
     if tools.fs_write {
         tool_sections.push(
@@ -56,9 +55,7 @@ pub(super) fn build_preamble(
         );
     }
     if tools.search {
-        tool_sections.push(
-            "- **search_code / find_files / find_definition**".to_string(),
-        );
+        tool_sections.push("- **search_code / find_files / find_definition**".to_string());
     }
     if tools.git {
         tool_sections.push(
@@ -68,17 +65,12 @@ pub(super) fn build_preamble(
         );
     }
     if tools.add_attachment {
-        tool_sections
-            .push("- **add_attachment** (display image or PDF inline)".to_string());
+        tool_sections.push("- **add_attachment** (display image or PDF inline)".to_string());
     }
     // Chart tool is always available (no filesystem/service dependencies)
-    tool_sections.push(
-        "- **create_chart** (bar, line, pie, donut, area, candlestick)".to_string(),
-    );
+    tool_sections.push("- **create_chart** (bar, line, pie, donut, area, candlestick)".to_string());
     if tools.compile_typst {
-        tool_sections.push(
-            "- **compile_typst** (Typst markup → PDF)".to_string(),
-        );
+        tool_sections.push("- **compile_typst** (Typst markup → PDF)".to_string());
     }
     if tools.excel_read || tools.excel_write {
         let mut excel_desc = Vec::new();
@@ -112,13 +104,11 @@ pub(super) fn build_preamble(
         tool_sections.push("- **list_mcp_services**".to_string());
     }
     // list_agents + invoke_agent are always present
-    tool_sections.push(
-        "- **list_agents** / **invoke_agent** (discover and call agents)".to_string(),
-    );
+    tool_sections
+        .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
     if tools.execute_code {
         tool_sections.push(
-            "- **execute_code** (isolated Docker sandbox; Python/JS/TS/Rust/Bash)"
-                .to_string(),
+            "- **execute_code** (isolated Docker sandbox; Python/JS/TS/Rust/Bash)".to_string(),
         );
     }
     if tools.memory {
@@ -134,28 +124,23 @@ pub(super) fn build_preamble(
         );
     }
     if tools.browser_use {
-        tool_sections.push(
-            "- **browser_use** (automate browser tasks via natural language)".to_string(),
-        );
+        tool_sections
+            .push("- **browser_use** (automate browser tasks via natural language)".to_string());
     }
     if tools.daytona {
-        tool_sections.push(
-            "- **daytona_run** (execute code in an isolated cloud sandbox)".to_string(),
-        );
+        tool_sections
+            .push("- **daytona_run** (execute code in an isolated cloud sandbox)".to_string());
     }
     if tools.publish_module {
-        tool_sections.push(
-            "- **publish_wasm_module** (publish WASM module to hive registry)".to_string(),
-        );
+        tool_sections
+            .push("- **publish_wasm_module** (publish WASM module to hive registry)".to_string());
     }
     // read_skill is always present
-    tool_sections.push(
-        "- **read_skill** (load full skill instructions before executing)".to_string(),
-    );
+    tool_sections
+        .push("- **read_skill** (load full skill instructions before executing)".to_string());
     // Always present
-    tool_sections.push(
-        "- **list_tools** (get full tool list with descriptions at any time)".to_string(),
-    );
+    tool_sections
+        .push("- **list_tools** (get full tool list with descriptions at any time)".to_string());
 
     // Add MCP tools to the tool summary
     if !mcp_tool_info.is_empty() {
