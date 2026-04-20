@@ -330,7 +330,7 @@ async fn main() -> Result<()> {
     if cli.pipe || cli.headless {
         // ── Headless / pipe mode: load everything before running ─────────
         let (user_secrets, mcp_service, memory_service, search_settings) =
-            load_deferred_services(&execution_settings, &providers).await;
+            load_deferred_services(&execution_settings).await;
 
         let embedding_service =
             init_embedding_service(&execution_settings, &providers, &memory_service).await;
@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
         let bg_tx = event_tx.clone();
         tokio::spawn(async move {
             let (user_secrets, mcp_service, memory_service, search_settings) =
-                load_deferred_services(&execution_settings, &providers).await;
+                load_deferred_services(&execution_settings).await;
 
             let embedding_service =
                 init_embedding_service(&execution_settings, &providers, &memory_service).await;
@@ -423,7 +423,6 @@ async fn main() -> Result<()> {
 /// Load all deferred services concurrently (MCP, memory, user secrets, search settings).
 async fn load_deferred_services(
     execution_settings: &chatty_core::settings::models::ExecutionSettingsModel,
-    providers: &[ProviderConfig],
 ) -> (
     Vec<(String, String)>,
     Option<McpService>,
@@ -431,7 +430,6 @@ async fn load_deferred_services(
     Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
 ) {
     let memory_enabled = execution_settings.memory_enabled;
-    let _ = providers; // providers not needed here, kept for signature consistency
     tokio::join!(
         async {
             match chatty_core::user_secrets_repository().load().await {

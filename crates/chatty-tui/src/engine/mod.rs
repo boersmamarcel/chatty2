@@ -793,9 +793,9 @@ impl ChatEngine {
                 self.mcp_service = services.mcp_service;
                 self.memory_service = services.memory_service;
                 self.search_settings = services.search_settings;
-                self.embedding_service = services.embedding_service.clone();
                 self.skill_service =
-                    chatty_core::services::SkillService::new(services.embedding_service);
+                    chatty_core::services::SkillService::new(services.embedding_service.clone());
+                self.embedding_service = services.embedding_service;
                 // Re-initialize conversation only if the user hasn't sent any messages yet.
                 // This gives the agent access to MCP tools, memory, etc. without losing context.
                 if self.messages.is_empty() && !self.is_streaming {
