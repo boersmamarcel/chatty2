@@ -53,6 +53,8 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
     // Status indicator
     if !engine.is_ready {
         spans.push(Span::styled("● initializing…", theme::accent()));
+    } else if !engine.services_loaded {
+        spans.push(Span::styled("● loading services…", theme::accent()));
     } else if engine.is_streaming {
         spans.push(Span::styled("● streaming", theme::warning()));
     } else {

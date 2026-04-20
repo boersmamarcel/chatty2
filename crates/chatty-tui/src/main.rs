@@ -350,6 +350,7 @@ async fn main() -> Result<()> {
                 user_secrets,
                 remote_agents,
                 is_sub_agent: true,
+                services_loaded: true,
             },
             event_tx,
         );
@@ -380,6 +381,7 @@ async fn main() -> Result<()> {
                 user_secrets: vec![],
                 remote_agents,
                 is_sub_agent: false,
+                services_loaded: false,
             },
             event_tx.clone(),
         );

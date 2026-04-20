@@ -256,6 +256,10 @@ pub struct ChatEngine {
     pub total_output_tokens: u32,
     pub title: String,
     pub is_ready: bool,
+    /// Whether deferred background services (MCP, memory, embedding, etc.) have
+    /// finished loading. `false` during the brief window after the TUI appears but
+    /// before `ServicesReady` is received.
+    pub services_loaded: bool,
     pub git_branch: Option<String>,
     pub model_picker: Option<ModelPicker>,
     pub tool_picker: Option<ToolPicker>,
@@ -298,6 +302,9 @@ pub struct ChatEngineConfig {
     pub user_secrets: Vec<(String, String)>,
     pub remote_agents: Vec<A2aAgentConfig>,
     pub is_sub_agent: bool,
+    /// Set to `true` when all services were loaded eagerly (headless mode).
+    /// Set to `false` when services are deferred to background (interactive mode).
+    pub services_loaded: bool,
 }
 
 impl ChatEngine {
@@ -330,6 +337,7 @@ impl ChatEngine {
             total_output_tokens: 0,
             title: "New Chat".to_string(),
             is_ready: false,
+            services_loaded: config.services_loaded,
             git_branch: None,
             model_picker: None,
             tool_picker: None,
@@ -796,6 +804,7 @@ impl ChatEngine {
                 self.skill_service =
                     chatty_core::services::SkillService::new(services.embedding_service.clone());
                 self.embedding_service = services.embedding_service;
+                self.services_loaded = true;
                 // Re-initialize conversation only if the user hasn't sent any messages yet.
                 // This gives the agent access to MCP tools, memory, etc. without losing context.
                 if self.messages.is_empty() && !self.is_streaming {
