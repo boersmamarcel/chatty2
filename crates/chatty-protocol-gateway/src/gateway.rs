@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tracing::info;
 
 use chatty_module_registry::ModuleRegistry;
-use hive_client::UsageCollector;
+use hive_client::{CreditGuard, UsageCollector};
 
 use crate::handlers::{a2a, index, mcp, openai};
 
@@ -25,6 +25,7 @@ use crate::handlers::{a2a, index, mcp, openai};
 pub struct GatewayState {
     pub registry: Arc<RwLock<ModuleRegistry>>,
     pub usage: Option<Arc<UsageCollector>>,
+    pub credit_guard: Option<Arc<CreditGuard>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ pub struct ProtocolGateway {
     port: u16,
     shutdown_tx: Option<oneshot::Sender<()>>,
     usage: Option<Arc<UsageCollector>>,
+    credit_guard: Option<Arc<CreditGuard>>,
 }
 
 impl ProtocolGateway {
@@ -79,12 +81,19 @@ impl ProtocolGateway {
             port,
             shutdown_tx: None,
             usage: None,
+            credit_guard: None,
         }
     }
 
     /// Attach a [`UsageCollector`] so that WASM invocations are automatically reported.
     pub fn with_usage_collector(mut self, collector: Arc<UsageCollector>) -> Self {
         self.usage = Some(collector);
+        self
+    }
+
+    /// Attach a [`CreditGuard`] for pre-invocation credit checks on paid modules.
+    pub fn with_credit_guard(mut self, guard: Arc<CreditGuard>) -> Self {
+        self.credit_guard = Some(guard);
         self
     }
 
@@ -96,6 +105,7 @@ impl ProtocolGateway {
         let state = GatewayState {
             registry: Arc::clone(&self.registry),
             usage: self.usage.clone(),
+            credit_guard: self.credit_guard.clone(),
         };
 
         Router::new()

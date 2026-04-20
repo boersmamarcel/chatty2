@@ -10,8 +10,8 @@ use crate::{
     cache::Cache,
     error::ClientError,
     models::{
-        AuthTokenResponse, CategoryList, DownloadResult, ListParams, ModuleList, ModuleMetadata,
-        VersionList,
+        AuthTokenResponse, CategoryList, CreditBalance, DownloadResult, ListParams, ModuleList,
+        ModuleMetadata, ModulePricingInfo, VersionList,
     },
     verify::{self, TrustLevel, VerifyInput},
 };
@@ -324,6 +324,23 @@ impl HiveRegistryClient {
             .json::<crate::models::UsageReportResponse>()
             .await
             .map_err(ClientError::from)
+    }
+
+    // ── Credits ─────────────────────────────────────────────────────────────
+
+    /// Get the authenticated user's credit balance.
+    pub async fn get_credit_balance(&self) -> Result<CreditBalance, ClientError> {
+        self.get_json::<CreditBalance>("/api/credits/balance", &())
+            .await
+    }
+
+    /// Get pricing configuration for a module.
+    pub async fn get_module_pricing(&self, name: &str) -> Result<ModulePricingInfo, ClientError> {
+        self.get_json::<ModulePricingInfo>(
+            &format!("/api/modules/{}/pricing", urlencoded(name)),
+            &(),
+        )
+        .await
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────

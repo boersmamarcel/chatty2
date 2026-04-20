@@ -204,6 +204,25 @@ pub struct UsageSummaryList {
     pub total: i64,
 }
 
+// ── Credit balance ─────────────────────────────────────────────────────────
+
+/// Credit balance for the authenticated user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditBalance {
+    pub balance_tokens: i64,
+    pub lifetime_purchased_tokens: i64,
+    pub lifetime_consumed_tokens: i64,
+}
+
+/// Pricing configuration for a module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModulePricingInfo {
+    pub module_name: String,
+    pub price_per_call: String,
+    pub free_tier_calls: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ── Query parameters ───────────────────────────────────────────────────────
 
 /// Optional filters for [`HiveRegistryClient::list_modules`].

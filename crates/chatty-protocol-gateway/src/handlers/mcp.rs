@@ -156,6 +156,19 @@ async fn handle_tools_call(
         }
     };
 
+    // Pre-invocation credit check
+    if let Some(ref guard) = state.credit_guard {
+        if let Err(e) = guard.has_credits(module_name).await {
+            drop(reg);
+            return json_rpc_error(
+                StatusCode::OK,
+                id,
+                -32000,
+                e.to_string(),
+            );
+        }
+    }
+
     match module.invoke_tool(&tool_name, &args).await {
         Ok(result) => {
             let metrics = module.last_invocation_metrics();

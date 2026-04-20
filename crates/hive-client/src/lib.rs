@@ -54,12 +54,14 @@
 
 pub mod cache;
 pub mod client;
+pub mod credit_guard;
 pub mod error;
 pub mod models;
 pub mod usage;
 pub mod verify;
 
 pub use client::HiveRegistryClient;
+pub use credit_guard::{CreditGuard, InsufficientFunds};
 pub use error::ClientError;
 pub use usage::{UsageCollector, UsageCollectorConfig};
 pub use verify::{TrustLevel, VerifyError};

@@ -164,6 +164,19 @@ async fn handle_message_send(
         }
     };
 
+    // Pre-invocation credit check
+    if let Some(ref guard) = state.credit_guard {
+        if let Err(e) = guard.has_credits(module_name).await {
+            drop(reg);
+            return json_rpc_error(
+                StatusCode::OK,
+                id,
+                -32000,
+                e.to_string(),
+            );
+        }
+    }
+
     match module.chat(req).await {
         Ok(resp) => {
             let metrics = module.last_invocation_metrics();
@@ -246,6 +259,18 @@ async fn handle_message_stream(
         let reg = state.registry.read().await;
         if reg.get(&module_name).is_none() {
             return module_not_found(id.clone(), &module_name);
+        }
+    }
+
+    // Pre-invocation credit check
+    if let Some(ref guard) = state.credit_guard {
+        if let Err(e) = guard.has_credits(&module_name).await {
+            return json_rpc_error(
+                StatusCode::OK,
+                id,
+                -32000,
+                e.to_string(),
+            );
         }
     }
 
