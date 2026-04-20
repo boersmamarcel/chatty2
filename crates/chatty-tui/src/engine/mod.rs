@@ -304,7 +304,6 @@ impl ChatEngine {
     pub fn new(config: ChatEngineConfig, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let skill_service =
             chatty_core::services::SkillService::new(config.embedding_service.clone());
-        let git_branch = detect_git_branch(config.execution_settings.workspace_dir.as_deref());
         Self {
             conversation: None,
             model_config: config.model_config,
@@ -331,7 +330,7 @@ impl ChatEngine {
             total_output_tokens: 0,
             title: "New Chat".to_string(),
             is_ready: false,
-            git_branch,
+            git_branch: None,
             model_picker: None,
             tool_picker: None,
             scroll_offset: 0,
@@ -346,7 +345,12 @@ impl ChatEngine {
     }
 
     pub fn refresh_workspace_context(&mut self) {
-        self.git_branch = detect_git_branch(self.execution_settings.workspace_dir.as_deref());
+        let workspace_dir = self.execution_settings.workspace_dir.clone();
+        let event_tx = self.event_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let branch = detect_git_branch(workspace_dir.as_deref());
+            let _ = event_tx.send(AppEvent::GitBranchDetected(branch));
+        });
     }
 
     /// Pin the chat viewport to the bottom so new content is auto-followed.
@@ -783,6 +787,26 @@ impl ChatEngine {
                 self.add_system_message(format!("Failed to initialize: {}", error));
                 EngineAction::Redraw
             }
+            AppEvent::ServicesReady(services) => {
+                info!("Deferred services loaded, patching engine state");
+                self.user_secrets = services.user_secrets;
+                self.mcp_service = services.mcp_service;
+                self.memory_service = services.memory_service;
+                self.search_settings = services.search_settings;
+                self.embedding_service = services.embedding_service.clone();
+                self.skill_service =
+                    chatty_core::services::SkillService::new(services.embedding_service);
+                // Re-initialize conversation only if the user hasn't sent any messages yet.
+                // This gives the agent access to MCP tools, memory, etc. without losing context.
+                if self.messages.is_empty() && !self.is_streaming {
+                    self.spawn_init_conversation();
+                }
+                EngineAction::Redraw
+            }
+            AppEvent::GitBranchDetected(branch) => {
+                self.git_branch = branch;
+                EngineAction::Redraw
+            }
             AppEvent::SubAgentProgress(line) => {
                 let line = sanitize_progress_line(&line);
                 if line.is_empty() {
@@ -887,7 +911,7 @@ impl ChatEngine {
     }
 }
 
-fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
+pub fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
     let working_dir = workspace_dir
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
