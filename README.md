@@ -5,7 +5,7 @@
 <h1 align="center">Chatty</h1>
  
 <p align="center">
-  <strong>A native, GPU-accelerated AI agent desktop — built with Rust. Run powerful multi-tool agents against any LLM provider, fully local and fully private. Also ships <code>chatty-tui</code>, a headless terminal agent for scripting, pipelines, and sub-agent orchestration.</strong>
+  <strong>A native, GPU-accelerated AI agent desktop — built with Rust. Run powerful multi-tool agents against your chosen LLM provider, with local storage and optional fully local workflows via Ollama. Also ships <code>chatty-tui</code>, a headless terminal agent for scripting, pipelines, and sub-agent orchestration.</strong>
 </p>
 
 <p align="center">
@@ -87,9 +87,9 @@ See [Tools & MCP](#tools--mcp) below for the full list of agent tools.
 
 ## Why Chatty?
 
-**Designed for agentic work.** Chatty is built from the ground up for multi-turn agents, not just chat. Your LLM can autonomously chain dozens of tool calls — read files, run shell commands, query databases, browse the web, write and execute code, generate charts and documents, spawn sub-agents for parallel subtasks — and come back with a complete answer. Everything runs locally under your control.
+**Designed for agentic work.** Chatty is built from the ground up for multi-turn agents, not just chat. Your LLM can autonomously chain dozens of tool calls — read files, run shell commands, query databases, browse the web, write and execute code, generate charts and documents, spawn sub-agents for parallel subtasks — and come back with a complete answer. The app runs locally under your control; network access depends on the provider and tools you enable.
 
-**Your keys, your data.** No middleman, no subscriptions. Talk directly to OpenAI, Anthropic, Google, Mistral, or your local Ollama instance. See exactly what each conversation costs with per-message token tracking and running cost totals in the sidebar.
+**Your keys, your data.** No middleman, no subscriptions. Chatty talks directly to OpenAI, Anthropic, Google, Mistral, Azure, your local Ollama instance, and any MCP/A2A services you configure. Conversations and settings are stored locally; prompts, attachments, and tool results may still be sent to the remote providers or services you choose to use.
 
 **Native Rust performance.** Not another Electron wrapper — built on [GPUI](https://crates.io/crates/gpui), the GPU-accelerated framework behind the Zed editor. Instant startup, smooth scrolling, minimal memory footprint.
 
@@ -97,7 +97,7 @@ See [Tools & MCP](#tools--mcp) below for the full list of agent tools.
 
 **Real tool use, properly sandboxed.** Give your LLM filesystem access, a bash shell, and MCP servers — all within a workspace sandbox. On Linux, shell commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with namespace isolation. On macOS, they use `sandbox-exec` with policy profiles that block access to `.ssh`, `.aws`, and other sensitive directories. You choose the approval mode: ask every time, auto-approve, or deny all.
 
-**Privacy first.** Run fully local with Ollama — no data leaves your machine. No telemetry, no tracking. Conversations are stored in a local SQLite database, never uploaded anywhere.
+**Privacy-aware by default.** Chatty does not run its own cloud relay or product telemetry, and conversations are stored in a local SQLite database. If you want a fully local setup, use local models like Ollama and avoid networked tools or services; otherwise, data is sent directly to the providers, websites, MCP servers, and update endpoints you enable.
 
 ---
 
@@ -431,7 +431,7 @@ Every tool that has a side effect (file writes, shell commands, sub-agents) supp
 
 - **API key masking** — MCP server API keys are never exposed to the agent; the agent can see whether a key is set (`has_api_key: true`) but never the value itself
 - **User secrets** — environment variables added in Settings > Secrets are injected into shell sessions but their values are never revealed to the agent or logged in tool output
-- **No telemetry** — nothing is sent anywhere except directly to your configured LLM provider
+- **No product telemetry or hosted relay** — network traffic goes only to the providers, MCP/A2A services, websites, package registries, and update endpoints you explicitly configure or invoke
 
 ---
 
@@ -477,7 +477,7 @@ For `apply_diff` tool calls, Chatty renders a **visual diff view** — additions
 
 ### Conversations & Cost Tracking
 
-- Persistent conversations saved locally in a SQLite database — nothing is stored remotely
+- Persistent conversations saved locally in a SQLite database — Chatty does not sync them to a Chatty-hosted service
 - Auto-generated conversation titles
 - **Search conversations** — click the search icon in the title bar to open a live-filter dialog; type to narrow results by title and click any entry to jump straight to it
 - **Export to Markdown** — click the `…` menu on any sidebar conversation and choose **Download** to save it as a `.md` file via your OS file picker
