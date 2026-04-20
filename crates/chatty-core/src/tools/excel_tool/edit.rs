@@ -40,6 +40,13 @@ fn excel_cell_matrix_schema() -> Value {
     })
 }
 
+fn operation_type_schema(operation: &str) -> Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": [operation]
+    })
+}
+
 fn edit_excel_parameters_schema() -> Value {
     serde_json::json!({
         "type": "object",
@@ -60,7 +67,7 @@ fn edit_excel_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": { "const": "set_cell" },
+                                "type": operation_type_schema("set_cell"),
                                 "sheet": { "type": "string" },
                                 "cell": { "type": "string", "description": "Cell reference, e.g. 'B2'" },
                                 "value": excel_cell_value_schema()
@@ -70,7 +77,7 @@ fn edit_excel_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": { "const": "set_range" },
+                                "type": operation_type_schema("set_range"),
                                 "sheet": { "type": "string" },
                                 "start_cell": { "type": "string", "description": "Top-left cell, e.g. 'A1'" },
                                 "data": excel_cell_matrix_schema()
@@ -80,7 +87,7 @@ fn edit_excel_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": { "const": "add_sheet" },
+                                "type": operation_type_schema("add_sheet"),
                                 "name": { "type": "string" },
                                 "data": excel_cell_matrix_schema()
                             },
@@ -89,7 +96,7 @@ fn edit_excel_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": { "const": "delete_rows" },
+                                "type": operation_type_schema("delete_rows"),
                                 "sheet": { "type": "string" },
                                 "start_row": { "type": "integer", "description": "1-based row index" },
                                 "count": { "type": "integer" }
@@ -99,7 +106,7 @@ fn edit_excel_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": { "const": "set_formula" },
+                                "type": operation_type_schema("set_formula"),
                                 "sheet": { "type": "string" },
                                 "cell": { "type": "string" },
                                 "formula": { "type": "string" }
@@ -109,7 +116,7 @@ fn edit_excel_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": { "const": "format_range" },
+                                "type": operation_type_schema("format_range"),
                                 "sheet": { "type": "string" },
                                 "range": { "type": "string" },
                                 "bold": { "type": "boolean" },
@@ -551,6 +558,26 @@ impl Tool for EditExcelTool {
 #[cfg(test)]
 mod tests {
     use super::edit_excel_parameters_schema;
+    use rig::completion::ToolDefinition;
+    use rig::providers::gemini::completion::gemini_api_types::{Schema, Tool};
+    use serde_json::Value;
+
+    fn assert_no_empty_types(schema: &Schema) {
+        assert!(
+            !schema.r#type.is_empty(),
+            "Gemini schema type should never be empty"
+        );
+
+        if let Some(items) = &schema.items {
+            assert_no_empty_types(items);
+        }
+
+        if let Some(properties) = &schema.properties {
+            for property_schema in properties.values() {
+                assert_no_empty_types(property_schema);
+            }
+        }
+    }
 
     #[test]
     fn edit_excel_schema_defines_nested_array_items() {
@@ -586,5 +613,40 @@ mod tests {
                 .is_none(),
             "operations.items should NOT use oneOf"
         );
+    }
+
+    #[test]
+    fn edit_excel_schema_converts_to_gemini_without_empty_types() {
+        let gemini_tool = Tool::try_from(ToolDefinition {
+            name: "edit_excel".to_string(),
+            description: "Edit an existing Excel file".to_string(),
+            parameters: edit_excel_parameters_schema(),
+        })
+        .expect("edit_excel schema should convert for Gemini");
+
+        let parameters = gemini_tool.function_declarations[0]
+            .parameters
+            .as_ref()
+            .expect("edit_excel should expose Gemini parameters");
+
+        assert_no_empty_types(parameters);
+    }
+
+    #[test]
+    fn edit_excel_operation_type_tags_are_string_enums() {
+        let schema = edit_excel_parameters_schema();
+        let variants = schema["properties"]["operations"]["items"]["anyOf"]
+            .as_array()
+            .expect("operations.anyOf should be an array");
+
+        for variant in variants {
+            let type_schema = &variant["properties"]["type"];
+            assert_eq!(type_schema["type"], Value::String("string".to_string()));
+            assert_eq!(
+                type_schema["enum"].as_array().map(Vec::len),
+                Some(1),
+                "operation type tags should be single-value enums"
+            );
+        }
     }
 }
