@@ -5,7 +5,7 @@
 <h1 align="center">Chatty</h1>
  
 <p align="center">
-  <strong>A native, GPU-accelerated AI agent desktop — built with Rust. Run powerful multi-tool agents against your chosen LLM provider, with local storage and optional fully local workflows via Ollama. Also ships <code>chatty-tui</code>, a headless terminal agent for scripting, pipelines, and sub-agent orchestration.</strong>
+  <strong>A desktop AI agent for real work — built with Rust. Run powerful multi-tool agents against your chosen LLM provider, with local storage and optional fully local workflows via Ollama. Also ships <code>chatty-tui</code>, a headless terminal agent for scripting, pipelines, and sub-agent orchestration.</strong>
 </p>
 
 <p align="center">
