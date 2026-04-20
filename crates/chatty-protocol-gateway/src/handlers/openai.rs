@@ -15,9 +15,8 @@ use axum::{
 use chatty_wasm_runtime::{ChatRequest, Message, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
 
-use chatty_module_registry::ModuleRegistry;
+use crate::gateway::GatewayState;
 
 // ---------------------------------------------------------------------------
 // OpenAI request / response shapes
@@ -136,10 +135,10 @@ fn build_response(
 
 pub(crate) async fn chat_completions_module(
     Path(module_name): Path<String>,
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
-    run_chat(&module_name, &body, registry).await
+    run_chat(&module_name, &body, state).await
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +146,7 @@ pub(crate) async fn chat_completions_module(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn chat_completions_routed(
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
     // Expect model in format "module:{name}"
@@ -167,7 +166,7 @@ pub(crate) async fn chat_completions_routed(
         }
     };
 
-    run_chat(&module_name, &body, registry).await
+    run_chat(&module_name, &body, state).await
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +176,7 @@ pub(crate) async fn chat_completions_routed(
 async fn run_chat(
     module_name: &str,
     body: &ChatCompletionRequest,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: GatewayState,
 ) -> axum::response::Response {
     let messages = convert_messages(&body.messages);
     let req = ChatRequest {
@@ -185,7 +184,7 @@ async fn run_chat(
         conversation_id: String::new(),
     };
 
-    let mut reg = registry.write().await;
+    let mut reg = state.registry.write().await;
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
@@ -204,6 +203,26 @@ async fn run_chat(
 
     match module.chat(req).await {
         Ok(resp) => {
+            let metrics = module.last_invocation_metrics();
+            drop(reg);
+
+            if let Some(ref usage) = state.usage {
+                tokio::spawn({
+                    let usage = Arc::clone(usage);
+                    let name = module_name.to_string();
+                    async move {
+                        usage.record_invocation(
+                            &name,
+                            "latest",
+                            metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
+                            metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
+                            metrics.as_ref().map(|m| m.fuel_consumed),
+                            metrics.as_ref().map(|m| m.execution_ms),
+                        ).await;
+                    }
+                });
+            }
+
             let (prompt_tokens, completion_tokens) = resp
                 .usage
                 .map(|u| (u.input_tokens, u.output_tokens))

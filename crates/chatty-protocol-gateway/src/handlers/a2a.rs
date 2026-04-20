@@ -17,10 +17,10 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use chatty_module_registry::ModuleRegistry;
 use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+
+use crate::gateway::GatewayState;
 
 use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
@@ -33,9 +33,9 @@ use super::jsonrpc::{
 
 pub(crate) async fn module_agent_card(
     Path(module_name): Path<String>,
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
 ) -> impl IntoResponse {
-    let mut reg = registry.write().await;
+    let mut reg = state.registry.write().await;
     let module = match reg.get_mut(&module_name) {
         Some(m) => m,
         None => {
@@ -58,17 +58,17 @@ pub(crate) async fn module_agent_card(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn aggregated_agent_card(
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
 ) -> impl IntoResponse {
     let names: Vec<String> = {
-        let reg = registry.read().await;
+        let reg = state.registry.read().await;
         reg.module_names().map(str::to_string).collect()
     };
 
     let mut agents: Vec<Value> = Vec::new();
 
     for name in &names {
-        let mut reg = registry.write().await;
+        let mut reg = state.registry.write().await;
         if let Some(module) = reg.get_mut(name)
             && let Ok(card) = module.agent_card()
         {
@@ -89,7 +89,7 @@ pub(crate) async fn aggregated_agent_card(
 
 pub(crate) async fn a2a_jsonrpc(
     Path(module_name): Path<String>,
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if body.jsonrpc != "2.0" {
@@ -102,8 +102,8 @@ pub(crate) async fn a2a_jsonrpc(
     }
 
     match body.method.as_str() {
-        "message/send" => handle_message_send(&module_name, body.id, body.params, registry).await,
-        "message/stream" => handle_message_stream(&module_name, body.id, body.params, registry)
+        "message/send" => handle_message_send(&module_name, body.id, body.params, &state).await,
+        "message/stream" => handle_message_stream(&module_name, body.id, body.params, &state)
             .await
             .into_response(),
         "tasks/get" => handle_tasks_get(&module_name, body.id, body.params).await,
@@ -124,7 +124,7 @@ async fn handle_message_send(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: &GatewayState,
 ) -> axum::response::Response {
     use chatty_wasm_runtime::{ChatRequest, Message, Role};
 
@@ -156,7 +156,7 @@ async fn handle_message_send(
         conversation_id: String::new(),
     };
 
-    let mut reg = registry.write().await;
+    let mut reg = state.registry.write().await;
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
@@ -166,6 +166,26 @@ async fn handle_message_send(
 
     match module.chat(req).await {
         Ok(resp) => {
+            let metrics = module.last_invocation_metrics();
+            drop(reg);
+
+            if let Some(ref usage) = state.usage {
+                tokio::spawn({
+                    let usage = Arc::clone(usage);
+                    let name = module_name.to_string();
+                    async move {
+                        usage.record_invocation(
+                            &name,
+                            "latest",
+                            metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
+                            metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
+                            metrics.as_ref().map(|m| m.fuel_consumed),
+                            metrics.as_ref().map(|m| m.execution_ms),
+                        ).await;
+                    }
+                });
+            }
+
             let task_id = format!("task-{}", crate::gateway::new_id());
             json_rpc_ok(
                 id,
@@ -195,7 +215,7 @@ async fn handle_message_stream(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: &GatewayState,
 ) -> axum::response::Response {
     use chatty_wasm_runtime::{ChatRequest, Message, Role};
 
@@ -223,7 +243,7 @@ async fn handle_message_stream(
 
     // Verify the module exists before starting the stream.
     {
-        let reg = registry.read().await;
+        let reg = state.registry.read().await;
         if reg.get(&module_name).is_none() {
             return module_not_found(id.clone(), &module_name);
         }
@@ -239,6 +259,9 @@ async fn handle_message_stream(
 
     // Create a progress channel for real-time streaming of module log messages.
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let registry = Arc::clone(&state.registry);
+    let usage = state.usage.clone();
 
     // Build an SSE stream that interleaves progress events with the chat result.
     let stream = async_stream::stream! {
@@ -260,13 +283,37 @@ async fn handle_message_stream(
             let module_name = module_name.clone();
             let req = req;
             let progress_tx = progress_tx;
+            let usage = usage.clone();
             move || {
                 let rt = tokio::runtime::Handle::current();
                 rt.block_on(async {
                     let mut reg = registry.write().await;
                     if let Some(m) = reg.get_mut(&module_name) {
                         m.set_progress_sender(progress_tx);
-                        m.chat(req).await
+                        let result = m.chat(req).await;
+
+                        // Capture metrics before dropping the lock
+                        let metrics = m.last_invocation_metrics();
+                        drop(reg);
+
+                        if result.is_ok() {
+                            if let Some(ref usage) = usage {
+                                let usage = Arc::clone(usage);
+                                let name = module_name.clone();
+                                tokio::spawn(async move {
+                                    usage.record_invocation(
+                                        &name,
+                                        "latest",
+                                        metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
+                                        metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
+                                        metrics.as_ref().map(|m| m.fuel_consumed),
+                                        metrics.as_ref().map(|m| m.execution_ms),
+                                    ).await;
+                                });
+                            }
+                        }
+
+                        result
                     } else {
                         Err(anyhow::anyhow!("module '{}' not found", module_name))
                     }

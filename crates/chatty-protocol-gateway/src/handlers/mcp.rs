@@ -14,9 +14,8 @@ use axum::{
 };
 use chatty_wasm_runtime::ToolDefinition;
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
 
-use chatty_module_registry::ModuleRegistry;
+use crate::gateway::GatewayState;
 
 use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
@@ -29,7 +28,7 @@ use super::jsonrpc::{
 
 pub(crate) async fn mcp_jsonrpc(
     Path(module_name): Path<String>,
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if body.jsonrpc != "2.0" {
@@ -43,15 +42,15 @@ pub(crate) async fn mcp_jsonrpc(
 
     match body.method.as_str() {
         // MCP lifecycle
-        "initialize" => handle_initialize(&module_name, body.id, registry).await,
+        "initialize" => handle_initialize(&module_name, body.id, &state).await,
         "notifications/initialized" | "initialized" => (StatusCode::ACCEPTED, "").into_response(),
         method if method.starts_with("notifications/") => {
             (StatusCode::ACCEPTED, "").into_response()
         }
         "ping" => json_rpc_ok(body.id, json!({})),
         // MCP tool methods
-        "tools/list" => handle_tools_list(&module_name, body.id, registry).await,
-        "tools/call" => handle_tools_call(&module_name, body.id, body.params, registry).await,
+        "tools/list" => handle_tools_list(&module_name, body.id, &state).await,
+        "tools/call" => handle_tools_call(&module_name, body.id, body.params, &state).await,
         method => json_rpc_error(
             StatusCode::OK,
             body.id,
@@ -64,9 +63,9 @@ pub(crate) async fn mcp_jsonrpc(
 async fn handle_initialize(
     module_name: &str,
     id: Option<Value>,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: &GatewayState,
 ) -> axum::response::Response {
-    let reg = registry.read().await;
+    let reg = state.registry.read().await;
     if reg.get(module_name).is_none() {
         return module_not_found(id, module_name);
     }
@@ -90,9 +89,9 @@ async fn handle_initialize(
 async fn handle_tools_list(
     module_name: &str,
     id: Option<Value>,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: &GatewayState,
 ) -> axum::response::Response {
-    let mut reg = registry.write().await;
+    let mut reg = state.registry.write().await;
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
@@ -118,7 +117,7 @@ async fn handle_tools_call(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: &GatewayState,
 ) -> axum::response::Response {
     let params = match params {
         Some(p) => p,
@@ -149,7 +148,7 @@ async fn handle_tools_call(
         .map(|v| v.to_string())
         .unwrap_or_else(|| "{}".to_string());
 
-    let mut reg = registry.write().await;
+    let mut reg = state.registry.write().await;
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
@@ -158,10 +157,32 @@ async fn handle_tools_call(
     };
 
     match module.invoke_tool(&tool_name, &args).await {
-        Ok(result) => json_rpc_ok(
-            id,
-            json!({ "content": [{ "type": "text", "text": result }] }),
-        ),
+        Ok(result) => {
+            let metrics = module.last_invocation_metrics();
+            drop(reg);
+
+            if let Some(ref usage) = state.usage {
+                tokio::spawn({
+                    let usage = Arc::clone(usage);
+                    let name = module_name.to_string();
+                    async move {
+                        usage.record_invocation(
+                            &name,
+                            "latest",
+                            metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
+                            metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
+                            metrics.as_ref().map(|m| m.fuel_consumed),
+                            metrics.as_ref().map(|m| m.execution_ms),
+                        ).await;
+                    }
+                });
+            }
+
+            json_rpc_ok(
+                id,
+                json!({ "content": [{ "type": "text", "text": result }] }),
+            )
+        }
         Err(e) => json_rpc_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             id,
@@ -177,11 +198,11 @@ async fn handle_tools_call(
 
 pub(crate) async fn mcp_sse(
     Path(module_name): Path<String>,
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
 ) -> impl IntoResponse {
     // Verify the module exists.
     {
-        let reg = registry.read().await;
+        let reg = state.registry.read().await;
         if reg.get(&module_name).is_none() {
             return module_not_found_json(&module_name);
         }

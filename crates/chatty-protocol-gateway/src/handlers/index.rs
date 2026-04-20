@@ -1,21 +1,18 @@
 //! Index handler: `GET /` — JSON listing of all modules and their endpoints.
 
-use std::sync::Arc;
-
 use axum::{Json, extract::State, response::IntoResponse};
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
 
-use chatty_module_registry::ModuleRegistry;
+use crate::gateway::GatewayState;
 
 // ---------------------------------------------------------------------------
 // Handler: GET /
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn index(
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
 ) -> impl IntoResponse {
-    let reg = registry.read().await;
+    let reg = state.registry.read().await;
 
     let modules: Vec<Value> = reg
         .module_names()

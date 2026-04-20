@@ -12,8 +12,20 @@ use tokio::sync::oneshot;
 use tracing::info;
 
 use chatty_module_registry::ModuleRegistry;
+use hive_client::UsageCollector;
 
 use crate::handlers::{a2a, index, mcp, openai};
+
+// ---------------------------------------------------------------------------
+// GatewayState
+// ---------------------------------------------------------------------------
+
+/// Shared state for all gateway handlers.
+#[derive(Clone)]
+pub struct GatewayState {
+    pub registry: Arc<RwLock<ModuleRegistry>>,
+    pub usage: Option<Arc<UsageCollector>>,
+}
 
 // ---------------------------------------------------------------------------
 // ProtocolGateway
@@ -53,6 +65,7 @@ pub struct ProtocolGateway {
     registry: Arc<RwLock<ModuleRegistry>>,
     port: u16,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    usage: Option<Arc<UsageCollector>>,
 }
 
 impl ProtocolGateway {
@@ -65,7 +78,14 @@ impl ProtocolGateway {
             registry,
             port,
             shutdown_tx: None,
+            usage: None,
         }
+    }
+
+    /// Attach a [`UsageCollector`] so that WASM invocations are automatically reported.
+    pub fn with_usage_collector(mut self, collector: Arc<UsageCollector>) -> Self {
+        self.usage = Some(collector);
+        self
     }
 
     /// Build the axum [`Router`] for this gateway.
@@ -73,7 +93,10 @@ impl ProtocolGateway {
     /// Exposed separately from `start` to allow embedding the router into a
     /// larger application or for testing with [`axum::serve`].
     pub fn build_router(&self) -> Router {
-        let registry = Arc::clone(&self.registry);
+        let state = GatewayState {
+            registry: Arc::clone(&self.registry),
+            usage: self.usage.clone(),
+        };
 
         Router::new()
             // ── Index ────────────────────────────────────────────────────────
@@ -99,7 +122,7 @@ impl ProtocolGateway {
             )
             .route("/a2a/{module}", post(a2a::a2a_jsonrpc))
             // ── Shared state ─────────────────────────────────────────────────
-            .with_state(registry)
+            .with_state(state)
     }
 
     /// Start the HTTP server in the background.
