@@ -299,7 +299,18 @@ fn marketplace_group() -> SettingGroup {
                                                     "v{} · ⬇ {}",
                                                     version, module.downloads
                                                 )),
-                                        ),
+                                        )
+                                        .when(module.pricing_model != "free", |el| {
+                                            el.child(
+                                                div()
+                                                    .text_xs()
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .bg(gpui::rgb(0xFEF3C7))
+                                                    .text_color(gpui::rgb(0x92400E))
+                                                    .child("Paid"),
+                                            )
+                                        }),
                                     ),
                             )
                             .child(if is_installed {
