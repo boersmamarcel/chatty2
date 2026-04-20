@@ -49,6 +49,39 @@ chatty-tui --model claude-3.5-sonnet
 chatty-tui --model "Claude 3.5 Sonnet"
 ```
 
+### Zero-config with Ollama
+
+Connect directly to a running Ollama instance — no desktop app setup needed:
+
+```bash
+# Auto-discover models from local Ollama (localhost:11434)
+chatty-tui --ollama
+
+# Pick a specific Ollama model
+chatty-tui --ollama --model llama3.2
+
+# Connect to a remote Ollama instance
+chatty-tui --ollama http://remote-host:11434
+```
+
+### Zero-config with vllm / llama.cpp / LM Studio
+
+Connect to any OpenAI-compatible server:
+
+```bash
+# vllm
+chatty-tui --openai-compat-url http://localhost:8000
+
+# llama.cpp
+chatty-tui --openai-compat-url http://localhost:8080
+
+# Pick a specific model
+chatty-tui --openai-compat-url http://localhost:8000 --model my-model
+
+# With API key (if required)
+chatty-tui --openai-compat-url https://api.example.com --api-key sk-...
+```
+
 ### Headless mode
 
 Send a single message and print the response to stdout:
@@ -72,6 +105,8 @@ chatty-tui shares configuration with the desktop app. You need:
 
 1. **At least one provider configured** — API keys and provider settings are read from the same JSON config files as chatty-gpui (stored in `~/.config/chatty/` or platform equivalent).
 2. **At least one model configured** — run the desktop app once to set up providers and models, or edit the config files directly.
+
+**Or use `--ollama` / `--openai-compat-url`** to skip all configuration and connect directly to a running model server.
 
 MCP servers configured in the desktop app are also available in chatty-tui.
 

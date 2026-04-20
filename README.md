@@ -580,9 +580,23 @@ Background update checks against GitHub releases with one-click install. Downloa
 | **Headless** | `chatty-tui --headless -m "your question"` | Send a single message; response printed to stdout — ideal for scripts and sub-agents |
 | **Pipe** | `cat file.rs \| chatty-tui --pipe` | Read from stdin, send as a message, print the response — compose with shell pipelines |
 
+### Zero-Config Quick Start
+
+Connect directly to a running model server — no desktop app setup required:
+
+```bash
+# Ollama (auto-discovers models from localhost:11434)
+chatty-tui --ollama
+chatty-tui --ollama --model llama3.2
+
+# vllm / llama.cpp / LM Studio (any OpenAI-compatible server)
+chatty-tui --openai-compat-url http://localhost:8000
+chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key sk-...
+```
+
 ### Installing chatty-tui
 
-**From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
+**From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. On macOS, the menu is in the system menu bar at the top of the screen. On Linux and Windows, it appears as a dropdown in the app's title bar. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
 
 **From releases** — download the same release package as the desktop app; `chatty-tui` is included.
 
@@ -594,7 +608,7 @@ cargo install --path crates/chatty-tui
 
 ### Welcome Screen & Status Bar
 
-When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace.
+When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace. A hint footer below the input bar shows the most useful shortcuts at a glance and updates to show `Ctrl+C stop` while the agent is streaming. A scrollbar appears on the right side of the chat area when content overflows; scrolling up unpins the viewport from the bottom (new content continues to stream in the background), and pressing `End` or scrolling back down re-pins it.
 
 ### Interactive Mode Keybindings
 
@@ -604,7 +618,8 @@ When you launch `chatty-tui` in interactive mode with an empty conversation, a w
 | `/` | Open slash-command picker (use `↑/↓` to select, `Tab` or `Enter` to apply) |
 | `@` | Open file picker — type to filter, `↑/↓` to navigate, `Enter` to insert file reference |
 | `--enable tool1,tool2` / `--disable tool1,tool2` | Override tool availability at launch |
-| `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` | Scroll chat view |
+| `PageUp` / `PageDown` or `Shift+↑` / `Shift+↓` or mouse wheel | Scroll chat view |
+| `End` | Jump to bottom and resume auto-scroll |
 | `y` / `n` | Approve / deny a tool execution prompt |
 | `Ctrl+C` | Stop streaming response (or quit if idle) |
 | `Ctrl+Q` | Quit immediately |
@@ -622,9 +637,10 @@ When you launch `chatty-tui` in interactive mode with an empty conversation, a w
 | `/compact` | Summarize older messages to reduce context usage for longer agent runs |
 | `/context` | Show token/context usage and current working directory |
 | `/copy` | Copy the latest agent response to system clipboard |
+| `/update` | Trigger CLI auto-update (Linux: refreshes `~/.local/bin/chatty-tui` from the running binary) |
 | `/cwd`, `/cd [directory]` | Show or change the agent's working directory |
 
-> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent.
+> **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent. Alternatively, use `--ollama` or `--openai-compat-url` to skip configuration entirely and connect directly to a running server.
 
 ---
 

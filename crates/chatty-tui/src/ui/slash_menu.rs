@@ -1,11 +1,12 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::ui::InputState;
 use crate::ui::input::SlashMenuItem;
+use crate::ui::theme;
 
 pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &mut InputState) {
     let items = input_state.slash_menu_items();
@@ -22,8 +23,9 @@ pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &mut InputS
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(theme::border())
         .title(" Slash Commands & Skills (↑↓ Tab/Enter) ")
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(ratatui::style::Color::Black));
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
@@ -33,12 +35,7 @@ pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &mut InputS
     let list_items: Vec<ListItem> = items.iter().map(menu_item_to_list_item).collect();
 
     let list = List::new(list_items)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(theme::highlight_accent())
         .highlight_symbol("▸ ");
 
     let selected = input_state
@@ -51,38 +48,32 @@ pub fn render_slash_menu(frame: &mut Frame, area: Rect, input_state: &mut InputS
     input_state.set_slash_menu_scroll_offset(state.offset());
 
     let help = Line::from(vec![
-        Span::styled("Type /", Style::default().fg(Color::Cyan)),
+        Span::styled("Type /", theme::accent()),
         Span::raw(" to filter  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::styled("↑↓", theme::accent()),
         Span::raw(" select  "),
-        Span::styled("Tab/Enter", Style::default().fg(Color::Cyan)),
+        Span::styled("Tab/Enter", theme::accent()),
         Span::raw(" apply"),
     ]);
-    frame.render_widget(
-        Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
-        chunks[1],
-    );
+    frame.render_widget(Paragraph::new(help).style(theme::muted()), chunks[1]);
 }
 
 /// Convert a single slash-menu item into a ratatui `ListItem`, with distinct
-/// styling for built-in commands (cyan) vs. filesystem skills (magenta).
+/// styling for built-in commands (accent) vs. filesystem skills (tool color).
 fn menu_item_to_list_item(item: &SlashMenuItem) -> ListItem<'static> {
     let display = item.display_command();
     let description = item.description().to_string();
 
     if item.is_skill() {
         ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{:<18}", display),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled("[skill] ", Style::default().fg(Color::Magenta)),
-            Span::styled(description, Style::default().fg(Color::White)),
+            Span::styled(format!("{:<18}", display), theme::tool()),
+            Span::styled("[skill] ", theme::tool()),
+            Span::styled(description, theme::text()),
         ]))
     } else {
         ListItem::new(Line::from(vec![
-            Span::styled(format!("{:<18}", display), Style::default().fg(Color::Cyan)),
-            Span::styled(description, Style::default().fg(Color::White)),
+            Span::styled(format!("{:<18}", display), theme::accent()),
+            Span::styled(description, theme::text()),
         ]))
     }
 }

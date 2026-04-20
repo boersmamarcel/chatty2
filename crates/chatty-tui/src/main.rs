@@ -9,6 +9,7 @@ use chatty_core::MCP_SERVICE;
 use chatty_core::services::McpService;
 use chatty_core::settings::models::ModelsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
+use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -67,6 +68,9 @@ TOOL GROUPS:
 EXAMPLES:
   chatty-tui                                     # Interactive, default model
   chatty-tui --model claude-3.5-sonnet           # Use a specific model
+  chatty-tui --ollama                            # Auto-discover local Ollama models
+  chatty-tui --ollama --model llama3.2           # Use a specific Ollama model
+  chatty-tui --openai-compat-url http://localhost:8000  # Connect to vllm/llama.cpp
   chatty-tui --enable git,shell --disable fetch   # Custom tool set
   chatty-tui --headless -m \"What is Rust?\"        # One-shot query
   cat src/main.rs | chatty-tui --pipe             # Pipe file contents as input"
@@ -135,6 +139,40 @@ struct Cli {
     /// any enabled tool without user review.
     #[arg(long)]
     auto_approve: bool,
+
+    /// Connect to a local Ollama instance and auto-discover models.
+    ///
+    /// No pre-configuration needed — chatty-tui queries the Ollama API
+    /// to discover available models and starts immediately. Combine with
+    /// --model to pick a specific Ollama model.
+    ///
+    /// Examples:
+    ///   chatty-tui --ollama
+    ///   chatty-tui --ollama --model llama3.2
+    ///   chatty-tui --ollama http://remote:11434
+    #[arg(long, value_name = "URL", default_missing_value = "http://localhost:11434", num_args = 0..=1)]
+    ollama: Option<String>,
+
+    /// Connect to any OpenAI-compatible server (vllm, llama.cpp, LM Studio, etc.)
+    /// and auto-discover models via /v1/models.
+    ///
+    /// No pre-configuration needed — just point chatty-tui at your server.
+    /// Combine with --model to pick a specific model and --api-key if auth
+    /// is required.
+    ///
+    /// Examples:
+    ///   chatty-tui --openai-compat-url http://localhost:8000
+    ///   chatty-tui --openai-compat-url http://localhost:8000 --model my-model
+    ///   chatty-tui --openai-compat-url https://api.example.com --api-key sk-...
+    #[arg(long, value_name = "URL")]
+    openai_compat_url: Option<String>,
+
+    /// API key for the OpenAI-compatible server (used with --openai-compat-url).
+    ///
+    /// Some servers (e.g. hosted vllm endpoints) require an API key.
+    /// For servers that don't need auth, this can be omitted.
+    #[arg(long, value_name = "KEY")]
+    api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -182,11 +220,50 @@ async fn main() -> Result<()> {
         chatty_core::a2a_repository().load_all(),
     );
 
-    let providers = providers_result.context("Failed to load providers")?;
-    let models_list = models_result.context("Failed to load models")?;
+    let mut providers = providers_result.context("Failed to load providers")?;
+    let mut models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
     let module_settings = module_settings_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
+
+    // --ollama / --openai-compat-url: auto-discover models from a running server
+    // and inject ephemeral provider + model configs so no pre-configuration is needed.
+    if let Some(ref ollama_url) = cli.ollama {
+        let discovered = discover_ollama(ollama_url).await?;
+        inject_discovered(
+            &mut providers,
+            &mut models_list,
+            discovered,
+            ProviderType::Ollama,
+            "Ollama (CLI)",
+            Some(ollama_url.clone()),
+            None,
+        );
+    }
+    if let Some(ref compat_url) = cli.openai_compat_url {
+        let discovered = discover_openai_compat(compat_url, cli.api_key.as_deref()).await?;
+        // OpenAI-compatible servers may not require auth, but rig's OpenAI
+        // client always needs an API key string. Use a placeholder when none
+        // is provided — most local servers (vllm, llama.cpp) ignore it.
+        let api_key = match cli.api_key.clone() {
+            Some(key) => key,
+            None => {
+                info!(
+                    "No --api-key provided; using placeholder (most local servers don't need auth)"
+                );
+                "no-key-required".to_string()
+            }
+        };
+        inject_discovered(
+            &mut providers,
+            &mut models_list,
+            discovered,
+            ProviderType::OpenAI,
+            "OpenAI-compat (CLI)",
+            Some(compat_url.clone()),
+            Some(api_key),
+        );
+    }
 
     // Default workspace_dir to CWD at launch so tools have an explicit root
     if execution_settings.workspace_dir.is_none()
@@ -526,4 +603,162 @@ async fn start_mcp_servers() -> Option<McpService> {
     });
 
     Some(service)
+}
+
+// ---------------------------------------------------------------------------
+// Zero-config server discovery (--ollama / --openai-compat-url)
+// ---------------------------------------------------------------------------
+
+/// A discovered model from a running server (identifier + display name + vision flag).
+struct DiscoveredModel {
+    identifier: String,
+    display_name: String,
+    supports_vision: bool,
+}
+
+/// Query a running Ollama instance at `base_url` via `/api/tags` (and `/api/show`
+/// for vision detection). Returns an error if Ollama is unreachable.
+async fn discover_ollama(base_url: &str) -> Result<Vec<DiscoveredModel>> {
+    use chatty_core::settings::providers::ollama::discovery::discover_ollama_models;
+
+    let models = discover_ollama_models(base_url).await.with_context(|| {
+        format!(
+            "Could not connect to Ollama at {base_url} — is it running?\n\
+                 Start it with: ollama serve"
+        )
+    })?;
+
+    if models.is_empty() {
+        bail!(
+            "Ollama is running at {base_url} but has no models installed.\n\
+             Pull one with: ollama pull llama3.2"
+        );
+    }
+
+    Ok(models
+        .into_iter()
+        .map(
+            |(identifier, display_name, supports_vision)| DiscoveredModel {
+                identifier,
+                display_name,
+                supports_vision,
+            },
+        )
+        .collect())
+}
+
+/// JSON shape returned by the OpenAI-compatible `/v1/models` endpoint
+/// (used by vllm, llama.cpp, LM Studio, etc.).
+#[derive(serde::Deserialize)]
+struct OpenAIModelList {
+    data: Vec<OpenAIModelEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAIModelEntry {
+    id: String,
+}
+
+/// Query an OpenAI-compatible server at `base_url` via `GET /v1/models`.
+async fn discover_openai_compat(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<DiscoveredModel>> {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = chatty_core::services::http_client::default_client(15);
+
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req.send().await.with_context(|| {
+        format!("Could not connect to OpenAI-compatible server at {base_url} — is it running?")
+    })?;
+
+    if !resp.status().is_success() {
+        bail!(
+            "Server at {} returned HTTP {} when listing models",
+            url,
+            resp.status()
+        );
+    }
+
+    let list: OpenAIModelList = resp
+        .json()
+        .await
+        .context("Failed to parse /v1/models response (is this an OpenAI-compatible server?)")?;
+
+    if list.data.is_empty() {
+        bail!(
+            "Server at {base_url} returned an empty model list.\n\
+             Make sure at least one model is loaded."
+        );
+    }
+
+    Ok(list
+        .data
+        .into_iter()
+        .map(|entry| {
+            let display_name = entry.id.clone();
+            DiscoveredModel {
+                identifier: entry.id,
+                display_name,
+                supports_vision: false,
+            }
+        })
+        .collect())
+}
+
+/// Inject discovered models and a synthetic provider config into the existing
+/// provider/model lists. This is ephemeral — nothing is persisted to disk.
+#[allow(clippy::too_many_arguments)]
+fn inject_discovered(
+    providers: &mut Vec<ProviderConfig>,
+    models_list: &mut Vec<ModelConfig>,
+    discovered: Vec<DiscoveredModel>,
+    provider_type: ProviderType,
+    provider_name: &str,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) {
+    // Add a synthetic provider if one of this type doesn't already exist
+    if !providers.iter().any(|p| p.provider_type == provider_type) {
+        let mut config = ProviderConfig::new(provider_name.to_string(), provider_type.clone());
+        config.base_url = base_url.clone();
+        config.api_key = api_key;
+        providers.push(config);
+    } else if let Some(existing) = providers
+        .iter_mut()
+        .find(|p| p.provider_type == provider_type)
+    {
+        // Update base_url if the user provided one via CLI
+        if let Some(ref url) = base_url {
+            existing.base_url = Some(url.clone());
+        }
+    }
+
+    // Add discovered models that aren't already configured
+    let existing_identifiers: std::collections::HashSet<String> = models_list
+        .iter()
+        .filter(|m| m.provider_type == provider_type)
+        .map(|m| m.model_identifier.clone())
+        .collect();
+
+    for dm in discovered {
+        if existing_identifiers.contains(&dm.identifier) {
+            continue;
+        }
+        let id = format!(
+            "cli-{}-{}",
+            provider_type
+                .display_name()
+                .to_lowercase()
+                .replace(' ', "-"),
+            dm.identifier.replace([':', '/'], "-")
+        );
+        let mut mc = ModelConfig::new(id, dm.display_name, provider_type.clone(), dm.identifier);
+        mc.supports_images = dm.supports_vision;
+        models_list.push(mc);
+    }
 }

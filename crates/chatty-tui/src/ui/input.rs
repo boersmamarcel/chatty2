@@ -1,8 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
 use tui_textarea::TextArea;
+
+use crate::ui::theme;
 
 // ---------------------------------------------------------------------------
 // @ mention / file picker
@@ -244,11 +246,12 @@ impl InputState {
         textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(theme::border())
                 .title(" Message (Enter to send, Alt+Enter for newline) "),
         );
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_text("Type a message...");
-        textarea.set_placeholder_style(Style::default().fg(Color::DarkGray));
+        textarea.set_placeholder_style(theme::muted());
         Self {
             textarea,
             slash_menu_selected: 0,

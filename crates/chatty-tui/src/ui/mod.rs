@@ -1,10 +1,12 @@
 mod approval;
 mod at_menu;
 mod chat_view;
+mod hint_bar;
 mod input;
 mod model_picker;
 mod slash_menu;
 mod status_bar;
+pub mod theme;
 mod tool_picker;
 
 use ratatui::Frame;
@@ -15,17 +17,18 @@ use crate::engine::ChatEngine;
 pub use input::InputState;
 
 /// Render the full TUI layout
-pub fn render(frame: &mut Frame, engine: &ChatEngine, input_state: &mut InputState) {
+pub fn render(frame: &mut Frame, engine: &mut ChatEngine, input_state: &mut InputState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),    // Chat messages (fills remaining space)
             Constraint::Length(1), // Status bar
             Constraint::Length(3), // Input area
+            Constraint::Length(1), // Hint footer
         ])
         .split(frame.area());
 
-    // Chat messages area
+    // Chat messages area (also records last_chat_area for mouse routing)
     chat_view::render_messages(frame, chunks[0], engine);
 
     // Status bar
@@ -37,6 +40,9 @@ pub fn render(frame: &mut Frame, engine: &ChatEngine, input_state: &mut InputSta
     } else {
         input::render_input(frame, chunks[2], input_state);
     }
+
+    // Hint footer
+    hint_bar::render_hint_bar(frame, chunks[3], engine);
 
     // Model picker overlay (rendered last so it appears on top)
     if let Some(ref picker) = engine.model_picker {

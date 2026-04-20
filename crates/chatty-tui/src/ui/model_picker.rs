@@ -1,10 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::engine::ModelPicker;
+use crate::ui::theme;
 
 pub fn render_model_picker(frame: &mut Frame, area: Rect, picker: &ModelPicker) {
     // Center the popup: 50 chars wide, height = items + 4 (borders + help line)
@@ -17,8 +18,9 @@ pub fn render_model_picker(frame: &mut Frame, area: Rect, picker: &ModelPicker) 
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(theme::border())
         .title(" Select Model (↑↓ Enter Esc) ")
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(ratatui::style::Color::Black));
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
@@ -33,10 +35,10 @@ pub fn render_model_picker(frame: &mut Frame, area: Rect, picker: &ModelPicker) 
         .map(|item| {
             let active_marker = if item.is_active { " (active)" } else { "" };
             let line = Line::from(vec![
-                Span::styled(&item.name, Style::default().fg(Color::White)),
+                Span::styled(&item.name, theme::text()),
                 Span::styled(
                     format!(" — {}{}", item.provider, active_marker),
-                    Style::default().fg(Color::DarkGray),
+                    theme::muted(),
                 ),
             ]);
             ListItem::new(line)
@@ -44,12 +46,7 @@ pub fn render_model_picker(frame: &mut Frame, area: Rect, picker: &ModelPicker) 
         .collect();
 
     let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(theme::highlight_accent())
         .highlight_symbol("▸ ");
 
     let mut state = ListState::default().with_selected(Some(picker.selected));
@@ -57,15 +54,15 @@ pub fn render_model_picker(frame: &mut Frame, area: Rect, picker: &ModelPicker) 
 
     // Help line
     let help = Line::from(vec![
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::styled("↑↓", theme::accent()),
         Span::raw(" navigate  "),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::styled("Enter", theme::accent()),
         Span::raw(" select  "),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::styled("Esc", theme::accent()),
         Span::raw(" cancel"),
     ]);
     frame.render_widget(
-        ratatui::widgets::Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
+        ratatui::widgets::Paragraph::new(help).style(theme::muted()),
         chunks[1],
     );
 }
