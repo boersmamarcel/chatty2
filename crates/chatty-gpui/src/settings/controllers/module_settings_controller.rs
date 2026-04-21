@@ -5,6 +5,11 @@ use crate::settings::models::{
     ModuleLoadStatus,
 };
 use anyhow::{Context, Result};
+use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
+use chatty_core::settings::models::extensions_store::{
+    ExtensionKind, ExtensionSource, ExtensionsModel,
+};
+use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderType;
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
@@ -12,6 +17,7 @@ use chatty_wasm_runtime::{
     CompletionResponse, LlmProvider, Message, ResourceLimits, Role, TokenUsage, ToolCall,
 };
 use gpui::{App, AsyncApp};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -907,6 +913,56 @@ pub fn refresh_runtime(cx: &mut App) {
                 Ok(registry) => {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
                     let mut gateway = ProtocolGateway::new(shared, settings.gateway_port);
+                    
+                    // Attach hive client and runner URL for remote execution support
+                    let hive_settings_result = cx.update(|cx| {
+                        let hive = cx.global::<HiveSettingsModel>();
+                        let ext = cx.global::<ExtensionsModel>();
+                        // Collect module names of paid Hive WASM modules
+                        let paid_modules: HashSet<String> = ext
+                            .extensions
+                            .iter()
+                            .filter(|e| {
+                                matches!(e.kind, ExtensionKind::WasmModule)
+                                    && matches!(e.pricing_model.as_deref(), Some("paid"))
+                            })
+                            .filter_map(|e| match &e.source {
+                                ExtensionSource::Hive { module_name, .. } => {
+                                    Some(module_name.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        (hive.clone(), hive.token.clone(), paid_modules)
+                    });
+                    
+                    if let Ok((hive_settings, token, paid_modules)) = hive_settings_result {
+                        // Create hive client with auth token if available
+                        let mut hive_client = HiveRegistryClient::new(&hive_settings.registry_url);
+                        if let Some(ref t) = token {
+                            hive_client = hive_client.with_token(t.clone());
+                        }
+                        let hive_client = Arc::new(hive_client);
+
+                        // Wire CreditGuard for pre-invocation balance checks
+                        let credit_guard = Arc::new(CreditGuard::with_default_ttl(Arc::clone(&hive_client)));
+
+                        // Wire UsageCollector for post-invocation usage reporting
+                        let usage_config = UsageCollectorConfig::default();
+                        let usage_collector = Arc::new(UsageCollector::new(&hive_settings.registry_url, usage_config));
+                        if let Some(t) = token {
+                            let uc = Arc::clone(&usage_collector);
+                            tokio::spawn(async move { uc.set_token(t).await });
+                        }
+
+                        gateway = gateway
+                            .with_hive_client(hive_client)
+                            .with_runner_url(hive_settings.runner_url)
+                            .with_credit_guard(credit_guard)
+                            .with_usage_collector(usage_collector)
+                            .with_paid_modules(paid_modules);
+                    }
+                    
                     gateway.start().await.map(|_| gateway)
                 }
                 Err(err) => Err(err),

@@ -1,6 +1,7 @@
 //! Core `ProtocolGateway` implementation — builds the axum router and manages
 //! the server lifecycle.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ use tokio::sync::oneshot;
 use tracing::info;
 
 use chatty_module_registry::ModuleRegistry;
-use hive_client::{CreditGuard, UsageCollector};
+use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 
 use crate::handlers::{a2a, index, mcp, openai};
 
@@ -26,6 +27,12 @@ pub struct GatewayState {
     pub registry: Arc<RwLock<ModuleRegistry>>,
     pub usage: Option<Arc<UsageCollector>>,
     pub credit_guard: Option<Arc<CreditGuard>>,
+    pub hive_client: Option<Arc<HiveRegistryClient>>,
+    pub runner_url: Option<String>,
+    /// Set of module names that require credits (paid modules).
+    /// Credit checks are skipped for modules NOT in this set.
+    /// An empty set means no paid modules — all credit checks are skipped.
+    pub paid_modules: Arc<HashSet<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +75,9 @@ pub struct ProtocolGateway {
     shutdown_tx: Option<oneshot::Sender<()>>,
     usage: Option<Arc<UsageCollector>>,
     credit_guard: Option<Arc<CreditGuard>>,
+    hive_client: Option<Arc<HiveRegistryClient>>,
+    runner_url: Option<String>,
+    paid_modules: HashSet<String>,
 }
 
 impl ProtocolGateway {
@@ -82,6 +92,9 @@ impl ProtocolGateway {
             shutdown_tx: None,
             usage: None,
             credit_guard: None,
+            hive_client: None,
+            runner_url: None,
+            paid_modules: HashSet::new(),
         }
     }
 
@@ -97,6 +110,27 @@ impl ProtocolGateway {
         self
     }
 
+    /// Attach a [`HiveRegistryClient`] for remote module execution.
+    pub fn with_hive_client(mut self, client: Arc<HiveRegistryClient>) -> Self {
+        self.hive_client = Some(client);
+        self
+    }
+
+    /// Set the runner URL for remote module execution.
+    pub fn with_runner_url(mut self, url: impl Into<String>) -> Self {
+        self.runner_url = Some(url.into());
+        self
+    }
+
+    /// Specify which modules require credits (paid modules).
+    ///
+    /// Credit checks are only applied to modules in this set.
+    /// Free modules are always allowed regardless of credit balance.
+    pub fn with_paid_modules(mut self, modules: HashSet<String>) -> Self {
+        self.paid_modules = modules;
+        self
+    }
+
     /// Build the axum [`Router`] for this gateway.
     ///
     /// Exposed separately from `start` to allow embedding the router into a
@@ -106,6 +140,9 @@ impl ProtocolGateway {
             registry: Arc::clone(&self.registry),
             usage: self.usage.clone(),
             credit_guard: self.credit_guard.clone(),
+            hive_client: self.hive_client.clone(),
+            runner_url: self.runner_url.clone(),
+            paid_modules: Arc::new(self.paid_modules.clone()),
         };
 
         Router::new()
