@@ -262,7 +262,7 @@ pub struct SettleSessionResponse {
     pub session_id: String,
     pub tokens_deducted: i64,
     pub tokens_released: i64,
-    pub new_balance: i64,
+    pub balance_after: i64,
 }
 
 // ── Query parameters ───────────────────────────────────────────────────────
