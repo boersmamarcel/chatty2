@@ -1,0 +1,23 @@
+[package]
+name = "hive-billing-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "Publisher-facing SDK for Hive billing integration in WASM modules"
+
+[dependencies]
+# JWT verification - minimal pure Rust implementation for WASM
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HMAC-SHA256 for JWT signature verification (pure Rust, WASM-compatible)
+hmac = "0.12"
+sha2 = "0.10"
+
+# WIT bindings for the billing interface
+wit-bindgen = "0.51.0"
+
+# This crate is intentionally NOT part of the chatty workspace.
+# It targets wasm32-wasip2 (see .cargo/config.toml) and is compiled
+# independently by module authors alongside chatty-module-sdk.
+[workspace]
