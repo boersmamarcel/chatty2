@@ -223,6 +223,48 @@ pub struct ModulePricingInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+// ── Billing session (Phase 3b) ─────────────────────────────────────────────
+
+/// Request to acquire a billing session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireSessionRequest {
+    pub module_name: String,
+    pub module_version: String,
+    pub estimated_tokens: i64,
+}
+
+/// Response from acquire-session — includes signed JWT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireSessionResponse {
+    /// Unique session ID (UUID).
+    pub session_id: String,
+    /// Hive-signed JWT containing session claims.
+    pub token: String,
+    /// User's current balance after reservation.
+    pub balance_tokens: i64,
+    /// Tokens reserved for this session.
+    pub reserved_tokens: i64,
+    /// Module's pricing model.
+    pub pricing_model: String,
+}
+
+/// Request to settle a billing session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettleSessionRequest {
+    pub session_id: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// Response from settle-session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettleSessionResponse {
+    pub session_id: String,
+    pub tokens_deducted: i64,
+    pub tokens_released: i64,
+    pub new_balance: i64,
+}
+
 // ── Query parameters ───────────────────────────────────────────────────────
 
 /// Optional filters for [`HiveRegistryClient::list_modules`].

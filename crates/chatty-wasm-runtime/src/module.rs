@@ -12,7 +12,7 @@ use crate::bindings::Module;
 use crate::bindings::chatty::module::types::{
     AgentCard, ChatRequest, ChatResponse, ToolDefinition,
 };
-use crate::host::{LlmProvider, ModuleManifest, ModuleState};
+use crate::host::{BillingProvider, LlmProvider, ModuleManifest, ModuleState};
 use crate::limits::ResourceLimits;
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,9 @@ pub struct WasmModule {
     limits: ResourceLimits,
     /// Metrics from the most recent invocation.
     last_metrics: Option<InvocationMetrics>,
+    /// Billing provider for session management.
+    #[allow(dead_code)]
+    billing_provider: Option<Arc<dyn BillingProvider>>,
 }
 
 impl WasmModule {
@@ -74,12 +77,31 @@ impl WasmModule {
         llm_provider: Arc<dyn LlmProvider>,
         limits: ResourceLimits,
     ) -> Result<Self> {
+        Self::from_file_with_billing(engine, path, manifest, llm_provider, None, limits)
+    }
+
+    /// Load a WASM component from `path` with optional billing provider.
+    pub fn from_file_with_billing(
+        engine: &Engine,
+        path: &Path,
+        manifest: ModuleManifest,
+        llm_provider: Arc<dyn LlmProvider>,
+        billing_provider: Option<Arc<dyn BillingProvider>>,
+        limits: ResourceLimits,
+    ) -> Result<Self> {
         info!(path = %path.display(), module = %manifest.name, "loading WASM module");
 
         let component =
             Component::from_file(engine, path).context("failed to load WASM component")?;
 
-        Self::from_component(engine, &component, manifest, llm_provider, limits)
+        Self::from_component(
+            engine,
+            &component,
+            manifest,
+            llm_provider,
+            billing_provider,
+            limits,
+        )
     }
 
     /// Load a WASM component from raw bytes and instantiate it.
@@ -92,10 +114,29 @@ impl WasmModule {
         llm_provider: Arc<dyn LlmProvider>,
         limits: ResourceLimits,
     ) -> Result<Self> {
+        Self::from_bytes_with_billing(engine, bytes, manifest, llm_provider, None, limits)
+    }
+
+    /// Load a WASM component from raw bytes with optional billing provider.
+    pub fn from_bytes_with_billing(
+        engine: &Engine,
+        bytes: &[u8],
+        manifest: ModuleManifest,
+        llm_provider: Arc<dyn LlmProvider>,
+        billing_provider: Option<Arc<dyn BillingProvider>>,
+        limits: ResourceLimits,
+    ) -> Result<Self> {
         let component =
             Component::from_binary(engine, bytes).context("failed to parse WASM component")?;
 
-        Self::from_component(engine, &component, manifest, llm_provider, limits)
+        Self::from_component(
+            engine,
+            &component,
+            manifest,
+            llm_provider,
+            billing_provider,
+            limits,
+        )
     }
 
     fn from_component(
@@ -103,6 +144,7 @@ impl WasmModule {
         component: &Component,
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
+        billing_provider: Option<Arc<dyn BillingProvider>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
         let mut linker: Linker<ModuleState> = Linker::new(engine);
@@ -115,7 +157,7 @@ impl WasmModule {
         Module::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 
-        let state = ModuleState::new(manifest, llm_provider, &limits);
+        let state = ModuleState::new(manifest, llm_provider, billing_provider.clone(), &limits);
         let mut store = Store::new(engine, state);
 
         // Register memory limiter.
@@ -136,6 +178,7 @@ impl WasmModule {
             module,
             limits,
             last_metrics: None,
+            billing_provider,
         })
     }
 

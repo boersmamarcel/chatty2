@@ -8,7 +8,7 @@ mod host;
 mod limits;
 mod module;
 
-pub use host::{LlmProvider, ModuleManifest};
+pub use host::{BillingProvider, LlmProvider, ModuleManifest};
 pub use limits::ResourceLimits;
 pub use module::{InvocationMetrics, WasmModule};
 

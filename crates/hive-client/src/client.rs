@@ -343,6 +343,85 @@ impl HiveRegistryClient {
         .await
     }
 
+    // ── Billing sessions (Phase 3b) ────────────────────────────────────────
+
+    /// Acquire a billing session before module invocation.
+    ///
+    /// Reserves credits for the estimated usage and returns a signed JWT
+    /// that the module can verify.
+    pub async fn acquire_session(
+        &self,
+        module_name: &str,
+        module_version: &str,
+        estimated_tokens: i64,
+    ) -> Result<crate::models::AcquireSessionResponse, ClientError> {
+        let url = format!("{}/api/credits/acquire-session", self.base_url);
+
+        let body = crate::models::AcquireSessionRequest {
+            module_name: module_name.to_string(),
+            module_version: module_version.to_string(),
+            estimated_tokens,
+        };
+
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+
+        response
+            .json::<crate::models::AcquireSessionResponse>()
+            .await
+            .map_err(ClientError::from)
+    }
+
+    /// Settle a billing session after module execution.
+    ///
+    /// Reports actual usage and releases unused reserved credits.
+    pub async fn settle_session(
+        &self,
+        session_id: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+    ) -> Result<crate::models::SettleSessionResponse, ClientError> {
+        let url = format!("{}/api/credits/settle-session", self.base_url);
+
+        let body = crate::models::SettleSessionRequest {
+            session_id: session_id.to_string(),
+            input_tokens,
+            output_tokens,
+        };
+
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+
+        response
+            .json::<crate::models::SettleSessionResponse>()
+            .await
+            .map_err(ClientError::from)
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────────
 
     async fn get_json<T>(&self, path: &str, query: &impl Serialize) -> Result<T, ClientError>
