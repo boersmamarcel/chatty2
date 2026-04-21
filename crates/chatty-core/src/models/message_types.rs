@@ -274,23 +274,72 @@ pub fn is_denial_result(result: &str) -> bool {
 /// Map raw tool names to user-friendly display names
 pub fn friendly_tool_name(name: &str) -> String {
     match name {
+        // Filesystem — read
         "read_file" => "Reading file".to_string(),
         "read_binary" => "Reading binary file".to_string(),
         "list_directory" => "Listing directory".to_string(),
         "glob_search" => "Searching files".to_string(),
+        // Filesystem — write
         "write_file" => "Writing file".to_string(),
         "create_directory" => "Creating directory".to_string(),
         "delete_file" => "Deleting file".to_string(),
         "move_file" => "Moving file".to_string(),
-        "apply_diff" => "Applying diff".to_string(),
+        "apply_diff" => "Applying changes".to_string(),
+        // Shell
         "shell_execute" => "Running command".to_string(),
+        "shell_cd" => "Changing directory".to_string(),
+        "shell_set_env" => "Setting environment".to_string(),
+        "shell_status" => "Checking shell".to_string(),
+        // Code search
+        "search_code" => "Searching code".to_string(),
+        "find_files" => "Finding files".to_string(),
+        "find_definition" => "Looking up definition".to_string(),
+        // Git
+        "git_status" => "Checking git status".to_string(),
+        "git_diff" => "Viewing diff".to_string(),
+        "git_log" => "Viewing git log".to_string(),
+        "git_add" => "Staging changes".to_string(),
+        "git_commit" => "Committing changes".to_string(),
+        "git_create_branch" => "Creating branch".to_string(),
+        "git_switch_branch" => "Switching branch".to_string(),
+        // Web
+        "search_web" => "Searching the web".to_string(),
+        "fetch" => "Fetching page".to_string(),
+        // Media & documents
+        "add_attachment" => "Attaching file".to_string(),
         "create_chart" => "Creating chart".to_string(),
-        "search_memory" => "Searching memory".to_string(),
-        "remember" => "Remembering".to_string(),
-        "search_web" => "Searching online".to_string(),
-        "fetch" => "Fetching".to_string(),
+        "compile_typst" => "Generating PDF".to_string(),
+        // Excel
+        "read_excel" => "Reading spreadsheet".to_string(),
+        "write_excel" => "Writing spreadsheet".to_string(),
+        "edit_excel" => "Editing spreadsheet".to_string(),
+        // PDF
+        "pdf_info" => "Inspecting PDF".to_string(),
+        "pdf_extract_text" => "Extracting PDF text".to_string(),
+        "pdf_to_image" => "Rendering PDF page".to_string(),
+        // Data
+        "query_data" => "Querying data".to_string(),
+        "describe_data" => "Inspecting schema".to_string(),
+        // Code execution & sandboxes
+        "execute_code" => "Executing code".to_string(),
         "daytona_run" => "Running in sandbox".to_string(),
+        // Memory
+        "search_memory" => "Searching memory".to_string(),
+        "remember" => "Saving to memory".to_string(),
+        "save_skill" => "Saving skill".to_string(),
+        // Agents
+        "list_agents" => "Listing agents".to_string(),
+        "invoke_agent" => "Calling agent".to_string(),
+        "sub_agent" => "Delegating to sub-agent".to_string(),
+        // Browser
         "browser_use" => "Browsing web".to_string(),
+        // MCP & modules
+        "list_mcp_services" => "Listing MCP services".to_string(),
+        "publish_wasm_module" => "Publishing module".to_string(),
+        // Meta
+        "list_tools" => "Listing tools".to_string(),
+        "read_skill" => "Loading skill".to_string(),
+        // Unknown tool — show raw name
         other => other.to_string(),
     }
 }

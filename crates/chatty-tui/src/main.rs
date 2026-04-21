@@ -14,7 +14,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use engine::{ChatEngine, ChatEngineConfig};
+use engine::{ChatEngine, ChatEngineConfig, detect_git_branch};
 use events::AppEvent;
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -321,10 +321,118 @@ async fn main() -> Result<()> {
         "Using model"
     );
 
-    // Parallel batch 2: user secrets, MCP servers, memory service, and search settings
-    // are all independent of each other — run them concurrently to reduce startup latency.
+    // Create event channel
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
+
+    // Route based on mode — headless/pipe load all services eagerly (latency
+    // doesn't matter for non-interactive use), while the interactive TUI defers
+    // heavy services to a background task so the UI appears instantly.
+    if cli.pipe || cli.headless {
+        // ── Headless / pipe mode: load everything before running ─────────
+        let (user_secrets, mcp_service, memory_service, search_settings) =
+            load_deferred_services(&execution_settings).await;
+
+        let embedding_service =
+            init_embedding_service(&execution_settings, &providers, &memory_service).await;
+
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config,
+                provider_config,
+                execution_settings,
+                module_settings,
+                models,
+                providers,
+                mcp_service,
+                memory_service,
+                search_settings,
+                embedding_service,
+                user_secrets,
+                remote_agents,
+                is_sub_agent: true,
+                services_loaded: true,
+            },
+            event_tx,
+        );
+
+        engine.init_conversation().await?;
+        if cli.pipe {
+            headless::run_pipe(engine, event_rx).await
+        } else {
+            let message = cli
+                .message
+                .context("--message is required in headless mode")?;
+            headless::run_headless(engine, event_rx, message).await
+        }
+    } else {
+        // ── Interactive TUI: start immediately, load services in background ──
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config,
+                provider_config,
+                execution_settings: execution_settings.clone(),
+                module_settings,
+                models,
+                providers: providers.clone(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: vec![],
+                remote_agents,
+                is_sub_agent: false,
+                services_loaded: false,
+            },
+            event_tx.clone(),
+        );
+
+        // Show TUI first, then init conversation once services arrive.
+        // Spawn background tasks for heavy services and git branch detection.
+        let bg_tx = event_tx.clone();
+        tokio::spawn(async move {
+            let (user_secrets, mcp_service, memory_service, search_settings) =
+                load_deferred_services(&execution_settings).await;
+
+            let embedding_service =
+                init_embedding_service(&execution_settings, &providers, &memory_service).await;
+
+            let _ = bg_tx.send(AppEvent::ServicesReady(Box::new(
+                events::DeferredServices {
+                    user_secrets,
+                    mcp_service,
+                    memory_service,
+                    search_settings,
+                    embedding_service,
+                },
+            )));
+        });
+
+        // Detect git branch in a background thread (avoids blocking on subprocess spawn)
+        let git_tx = event_tx;
+        let workspace_dir = engine.execution_settings.workspace_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let branch = detect_git_branch(workspace_dir.as_deref());
+            let _ = git_tx.send(AppEvent::GitBranchDetected(branch));
+        });
+
+        // Start conversation init immediately (without heavy services).
+        // It will be re-initialized once ServicesReady arrives with full context.
+        engine.spawn_init_conversation();
+        app::run(engine, event_rx).await
+    }
+}
+
+/// Load all deferred services concurrently (MCP, memory, user secrets, search settings).
+async fn load_deferred_services(
+    execution_settings: &chatty_core::settings::models::ExecutionSettingsModel,
+) -> (
+    Vec<(String, String)>,
+    Option<McpService>,
+    Option<chatty_core::services::MemoryService>,
+    Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
+) {
     let memory_enabled = execution_settings.memory_enabled;
-    let (user_secrets, mcp_service, memory_service, search_settings) = tokio::join!(
+    tokio::join!(
         async {
             match chatty_core::user_secrets_repository().load().await {
                 Ok(secrets) => secrets.as_env_pairs(),
@@ -361,102 +469,71 @@ async fn main() -> Result<()> {
                 }
             }
         },
-    );
+    )
+}
 
-    // Initialize embedding service for semantic memory search (if configured)
-    let embedding_service = if execution_settings.embedding_enabled {
-        if let (Some(embed_provider_type), Some(embed_model)) = (
-            execution_settings.embedding_provider.as_ref(),
-            execution_settings.embedding_model.as_ref(),
-        ) {
-            // Find the provider config for the embedding provider
-            let embed_provider_config = providers
-                .iter()
-                .find(|p| &p.provider_type == embed_provider_type);
-            let api_key = embed_provider_config.and_then(|p| p.api_key.as_deref());
-            let base_url = embed_provider_config.and_then(|p| p.base_url.as_deref());
+/// Initialize embedding service for semantic memory search (if configured).
+async fn init_embedding_service(
+    execution_settings: &chatty_core::settings::models::ExecutionSettingsModel,
+    providers: &[ProviderConfig],
+    memory_service: &Option<chatty_core::services::MemoryService>,
+) -> Option<chatty_core::services::EmbeddingService> {
+    if !execution_settings.embedding_enabled {
+        return None;
+    }
 
-            // Fetch Entra ID token if the Azure provider uses Entra ID auth
-            let azure_token = if *embed_provider_type
-                == chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
-                && embed_provider_config.map(|p| p.azure_auth_method())
-                    == Some(
-                        chatty_core::settings::models::providers_store::AzureAuthMethod::EntraId,
-                    ) {
-                match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
-                    Ok(token) => Some(token),
-                    Err(e) => {
-                        warn!(error = ?e, "Failed to fetch Entra ID token for Azure OpenAI embeddings");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            let svc = chatty_core::services::embedding_service::try_create_embedding_service(
-                embed_provider_type,
-                embed_model,
-                api_key,
-                base_url,
-                azure_token,
-            );
-
-            // Enable vector index on memory service if embedding service is available
-            if let (Some(embed_svc), Some(mem_svc)) = (&svc, &memory_service) {
-                if let Err(e) = mem_svc.enable_vec().await {
-                    warn!(error = ?e, "Failed to enable vector index on memory service");
-                } else if let Err(e) = mem_svc.set_vec_model(&embed_svc.model_identifier()).await {
-                    warn!(error = ?e, "Failed to set vector model — falling back to BM25-only");
-                }
-            }
-
-            svc
-        } else {
+    let (embed_provider_type, embed_model) = match (
+        execution_settings.embedding_provider.as_ref(),
+        execution_settings.embedding_model.as_ref(),
+    ) {
+        (Some(pt), Some(m)) => (pt, m),
+        _ => {
             info!("Semantic search enabled but no embedding provider/model configured");
-            None
+            return None;
+        }
+    };
+
+    let embed_provider_config = providers
+        .iter()
+        .find(|p| &p.provider_type == embed_provider_type);
+    let api_key = embed_provider_config.and_then(|p| p.api_key.as_deref());
+    let base_url = embed_provider_config.and_then(|p| p.base_url.as_deref());
+
+    // Fetch Entra ID token if the Azure provider uses Entra ID auth
+    let azure_token = if *embed_provider_type
+        == chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
+        && embed_provider_config.map(|p| p.azure_auth_method())
+            == Some(chatty_core::settings::models::providers_store::AzureAuthMethod::EntraId)
+    {
+        match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
+            Ok(token) => Some(token),
+            Err(e) => {
+                warn!(error = ?e, "Failed to fetch Entra ID token for Azure OpenAI embeddings");
+                None
+            }
         }
     } else {
         None
     };
 
-    // Create event channel
-    let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
-
-    let mut engine = ChatEngine::new(
-        ChatEngineConfig {
-            model_config,
-            provider_config,
-            execution_settings,
-            module_settings,
-            models,
-            providers,
-            mcp_service,
-            memory_service,
-            search_settings,
-            embedding_service,
-            user_secrets,
-            remote_agents,
-            is_sub_agent: cli.headless, // headless mode means we are running as a sub-agent
-        },
-        event_tx,
+    let svc = chatty_core::services::embedding_service::try_create_embedding_service(
+        embed_provider_type,
+        embed_model,
+        api_key,
+        base_url,
+        azure_token,
     );
 
-    // Route based on mode
-    if cli.pipe {
-        engine.init_conversation().await?;
-        headless::run_pipe(engine, event_rx).await
-    } else if cli.headless {
-        let message = cli
-            .message
-            .context("--message is required in headless mode")?;
-        engine.init_conversation().await?;
-        headless::run_headless(engine, event_rx, message).await
-    } else {
-        // Interactive mode: show TUI immediately, init conversation in background
-        engine.spawn_init_conversation();
-        app::run(engine, event_rx).await
+    // Enable vector index on memory service if embedding service is available
+    if let (Some(embed_svc), Some(mem_svc)) = (&svc, memory_service) {
+        if let Err(e) = mem_svc.enable_vec().await {
+            warn!(error = ?e, "Failed to enable vector index on memory service");
+        } else if let Err(e) = mem_svc.set_vec_model(&embed_svc.model_identifier()).await {
+            warn!(error = ?e, "Failed to set vector model — falling back to BM25-only");
+        }
     }
+
+    svc
 }
 
 fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {

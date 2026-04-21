@@ -773,6 +773,7 @@ impl AgentClient {
         // Build the augmented preamble
         let preamble = build_preamble(
             &model_config.preamble,
+            &model_config.provider_type,
             &tool_availability,
             &search_settings,
             &mcp_mgmt_tools,

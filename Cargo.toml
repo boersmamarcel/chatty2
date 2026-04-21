@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.6"
+version = "0.3.9"
 edition = "2024"
 
 [workspace.dependencies]
@@ -101,7 +101,7 @@ ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf1
 tiktoken-rs = "0.9.1"
 
 # Agent memory
-memvid-core = { version = "2.0.139", default-features = false, features = ["lex", "vec", "temporal_track"] }
+memvid-core = { version = "2.0.139", default-features = false, features = ["lex", "temporal_track"] }
 
 # GPUI (UI only)
 gpui = "0.2.2"

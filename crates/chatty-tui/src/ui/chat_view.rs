@@ -180,17 +180,29 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
                 badge(search_label, search_enabled),
                 badge("browser-use", browser_use_enabled),
                 badge("daytona", daytona_enabled),
-                badge("MCP", engine.mcp_service.is_some()),
+                if engine.services_loaded {
+                    badge("MCP", engine.mcp_service.is_some())
+                } else {
+                    loading_badge("MCP")
+                },
             ]),
         ),
         welcome_line(
             "Runtime",
             join_spans(vec![
-                badge("memory", engine.memory_service.is_some()),
-                badge(
-                    "semantic memory",
-                    engine.memory_service.is_some() && engine.embedding_service.is_some(),
-                ),
+                if engine.services_loaded {
+                    badge("memory", engine.memory_service.is_some())
+                } else {
+                    loading_badge("memory")
+                },
+                if engine.services_loaded {
+                    badge(
+                        "semantic memory",
+                        engine.memory_service.is_some() && engine.embedding_service.is_some(),
+                    )
+                } else {
+                    loading_badge("semantic memory")
+                },
                 badge("modules", engine.module_settings.enabled),
                 badge("local agent", !engine.is_sub_agent),
                 badge(format!("remote {remote_agent_count}"), remote_agent_count > 0),
@@ -325,6 +337,10 @@ fn badge(label: impl Into<String>, enabled: bool) -> Span<'static> {
         theme::muted()
     };
     Span::styled(format!("[{}]", label.into()), style)
+}
+
+fn loading_badge(label: impl Into<String>) -> Span<'static> {
+    Span::styled(format!("[{} ⟳]", label.into()), theme::accent())
 }
 
 fn command_span(command: &str) -> Span<'static> {

@@ -1,3 +1,4 @@
+use crate::settings::models::providers_store::ProviderType;
 use crate::settings::models::search_settings::SearchSettingsModel;
 
 use super::mcp_helpers::McpTools;
@@ -7,6 +8,7 @@ use super::tool_registry::ToolAvailability;
 /// memory instructions, and secret key names.
 pub(super) fn build_preamble(
     base_preamble: &str,
+    provider_type: &ProviderType,
     tools: &ToolAvailability,
     search_settings: &Option<SearchSettingsModel>,
     mcp_mgmt_tools: &McpTools,
@@ -31,73 +33,44 @@ pub(super) fn build_preamble(
             "DuckDuckGo fallback"
         };
         tool_sections.push(format!(
-            "- **search_web**: Search the web for up-to-date information ({search_note}). \
-             Use this first when you need current information.\n\
-             - **fetch**: Fetch any web URL and return its readable text content. \
-             Use this to read specific pages, documentation, or articles."
+            "- **search_web** ({search_note}), **fetch** (read any URL)"
         ));
     }
     if tools.shell {
         tool_sections.push(
-            "- **shell_execute / shell_cd / shell_set_env / shell_status**: \
-             Run any shell/terminal command in a persistent session that preserves \
-             working directory and environment variables across calls. \
-             Prefer this over asking the user to run commands manually."
+            "- **shell_execute / shell_cd / shell_set_env / shell_status** \
+             (persistent session; prefer over asking the user to run commands)"
                 .to_string(),
         );
     }
     if tools.fs_read {
-        tool_sections.push(
-            "- **read_file / read_binary / list_directory / glob_search**: \
-             Read files and explore the workspace directory."
-                .to_string(),
-        );
+        tool_sections
+            .push("- **read_file / read_binary / list_directory / glob_search**".to_string());
     }
     if tools.fs_write {
         tool_sections.push(
-            "- **write_file / apply_diff / create_directory / delete_file / move_file**: \
-             Create, edit, and manage files in the workspace. \
-             Use apply_diff for targeted edits to existing files."
+            "- **write_file / apply_diff / create_directory / delete_file / move_file** \
+             (use apply_diff for targeted edits)"
                 .to_string(),
         );
     }
     if tools.search {
-        tool_sections.push(
-            "- **search_code / find_files / find_definition**: \
-             Search for patterns, files, and symbol definitions in the workspace."
-                .to_string(),
-        );
+        tool_sections.push("- **search_code / find_files / find_definition**".to_string());
     }
     if tools.git {
         tool_sections.push(
             "- **git_status / git_diff / git_log / git_add / git_commit / \
-             git_create_branch / git_switch_branch**: \
-             Inspect and manage git history and branches."
+             git_create_branch / git_switch_branch**"
                 .to_string(),
         );
     }
     if tools.add_attachment {
-        tool_sections.push(
-            "- **add_attachment**: Display an image or PDF inline in the chat response. \
-             Useful for showing generated plots, screenshots, or documents."
-                .to_string(),
-        );
+        tool_sections.push("- **add_attachment** (display image or PDF inline)".to_string());
     }
     // Chart tool is always available (no filesystem/service dependencies)
-    tool_sections.push(
-        "- **create_chart**: Create and display a chart inline in the chat response. \
-         Supports bar (with value labels), line, pie, donut, area, and candlestick charts. \
-         Use this to visualize data for the user."
-            .to_string(),
-    );
+    tool_sections.push("- **create_chart** (bar, line, pie, donut, area, candlestick)".to_string());
     if tools.compile_typst {
-        tool_sections.push(
-            "- **compile_typst**: Compile Typst markup into a PDF file saved to disk. \
-             Use for generating formatted documents: reports, papers, documents with math, \
-             tables, headings, and code blocks. Typst syntax is markdown-like — \
-             `= Heading`, `*bold*`, `_italic_`, `$ math $`, `#table(...)`, etc."
-                .to_string(),
-        );
+        tool_sections.push("- **compile_typst** (Typst markup → PDF)".to_string());
     }
     if tools.excel_read || tools.excel_write {
         let mut excel_desc = Vec::new();
@@ -107,126 +80,67 @@ pub(super) fn build_preamble(
         if tools.excel_write {
             excel_desc.push("**write_excel** / **edit_excel**");
         }
-        tool_sections.push(format!(
-            "- {}: Read, create, and edit Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods). \
-             Supports cell data, formatting, formulas, merged cells, and auto-filters.",
-            excel_desc.join(" / ")
-        ));
+        tool_sections.push(format!("- {} (.xlsx, .xls, .ods)", excel_desc.join(" / ")));
     }
     if tools.pdf_to_image || tools.pdf_info || tools.pdf_extract_text {
-        let mut pdf_desc = String::from("- **PDF tools**:");
+        let mut pdf_names = Vec::new();
         if tools.pdf_info {
-            pdf_desc.push_str(" `pdf_info` (page count, dimensions, metadata),");
+            pdf_names.push("`pdf_info`");
         }
         if tools.pdf_extract_text {
-            pdf_desc.push_str(" `pdf_extract_text` (extract text from pages),");
+            pdf_names.push("`pdf_extract_text`");
         }
         if tools.pdf_to_image {
-            pdf_desc
-                .push_str(" `pdf_to_image` (render pages as PNG images for visual inspection),");
+            pdf_names.push("`pdf_to_image`");
         }
-        if pdf_desc.ends_with(',') {
-            pdf_desc.pop();
-        }
-        pdf_desc.push('.');
-        tool_sections.push(pdf_desc);
+        tool_sections.push(format!("- **PDF tools**: {}", pdf_names.join(", ")));
     }
     if tools.data_query {
         tool_sections.push(
-            "- **query_data / describe_data**: Run SQL queries against local Parquet, CSV, \
-             and JSON files using DuckDB. Use `describe_data` to inspect schema first, \
-             then `query_data` for analytical SQL (aggregations, joins, window functions)."
-                .to_string(),
+            "- **query_data / describe_data** (SQL via DuckDB on Parquet/CSV/JSON)".to_string(),
         );
     }
     if mcp_mgmt_tools.is_enabled() {
-        tool_sections.push(
-            "- **list_mcp_services**: \
-             List configured MCP server integrations."
-                .to_string(),
-        );
+        tool_sections.push("- **list_mcp_services**".to_string());
     }
     // list_agents + invoke_agent are always present
-    tool_sections.push(
-        "- **list_agents**: List all available agents (remote A2A and local WASM modules). \
-         Call this to discover agents before invoking them."
-            .to_string(),
-    );
-    tool_sections.push(
-        "- **invoke_agent**: Invoke a named agent with a prompt. Use `list_agents` first to \
-         discover available agents, then call `invoke_agent` with the agent's name and your \
-         prompt. The agent runs autonomously and returns its response."
-            .to_string(),
-    );
+    tool_sections
+        .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
     if tools.execute_code {
         tool_sections.push(
-            "- **execute_code**: Execute code in an isolated Docker sandbox. \
-             Supports python, javascript, typescript, rust, and bash. \
-             State (variables, installed packages) persists throughout the conversation. \
-             No network access. Use this for running code snippets, \
-             data analysis, or verifying solutions."
-                .to_string(),
+            "- **execute_code** (isolated Docker sandbox; Python/JS/TS/Rust/Bash)".to_string(),
         );
     }
     if tools.memory {
         tool_sections.push(
-            "- **remember**: Store important information in persistent cross-conversation memory.\n\
-             - **save_skill**: Save a reusable multi-step procedure to persistent memory for \
-             automatic recall in future conversations.\n\
-             - **search_memory**: Search previously stored memories by natural language query."
+            "- **remember** / **save_skill** / **search_memory** (persistent cross-conversation memory)"
                 .to_string(),
         );
     }
     if tools.sub_agent {
         tool_sections.push(
-            "- **sub_agent**: Delegate a task to an independent sub-agent that has access to \
-             the same tools. The sub-agent runs autonomously and returns the result. \
-             Use this to parallelize work or isolate complex sub-tasks. Each sub-agent \
-             starts fresh — include all necessary context in the task description. \
-             You can optionally pass a `model` parameter to run the sub-agent with a \
-             different model (e.g., a faster model for simple tasks)."
+            "- **sub_agent** (delegate tasks to an independent sub-agent with the same tools)"
                 .to_string(),
         );
     }
     if tools.browser_use {
-        tool_sections.push(
-            "- **browser_use**: Automate browser tasks using the browser-use cloud service. \
-             Describe what you want the browser agent to do in natural language and it will \
-             control a real browser and return the result."
-                .to_string(),
-        );
+        tool_sections
+            .push("- **browser_use** (automate browser tasks via natural language)".to_string());
     }
     if tools.daytona {
-        tool_sections.push(
-            "- **daytona_run**: Execute code in an isolated Daytona cloud sandbox. \
-             Creates a secure, ephemeral environment, runs the code, returns output, \
-             and cleans up automatically. Useful for running code with internet access \
-             or in a fresh environment."
-                .to_string(),
-        );
+        tool_sections
+            .push("- **daytona_run** (execute code in an isolated cloud sandbox)".to_string());
     }
     if tools.publish_module {
-        tool_sections.push(
-            "- **publish_wasm_module**: Publish a WASM module to the hive registry. \
-             Provide the path to the .wasm file and a TOML manifest string. The tool \
-             reads the binary, base64-encodes it, and uploads it automatically. \
-             Use this instead of manually reading and encoding the file."
-                .to_string(),
-        );
+        tool_sections
+            .push("- **publish_wasm_module** (publish WASM module to hive registry)".to_string());
     }
     // read_skill is always present
-    tool_sections.push(
-        "- **read_skill**: Load the full step-by-step instructions for a skill by name. \
-         Skills are listed with a one-line description in the automatic context — \
-         call this tool to get the complete procedure before executing it."
-            .to_string(),
-    );
+    tool_sections
+        .push("- **read_skill** (load full skill instructions before executing)".to_string());
     // Always present
-    tool_sections.push(
-        "- **list_tools**: Call this at any time to get the full, up-to-date list of \
-         available tools with their exact names and descriptions."
-            .to_string(),
-    );
+    tool_sections
+        .push("- **list_tools** (get full tool list with descriptions at any time)".to_string());
 
     // Add MCP tools to the tool summary
     if !mcp_tool_info.is_empty() {
@@ -242,8 +156,10 @@ pub(super) fn build_preamble(
     } else {
         format!(
             "\n\n## Available Tools\n\
-             You have access to the following tools. Use them proactively to help the user \
-             instead of asking them to do things manually:\n\n{}",
+             Use tools proactively instead of asking the user to do things manually. \
+             When a task requires multiple steps, execute them yourself by chaining \
+             tool calls rather than listing instructions for the user. \
+             Each tool's full schema is provided separately; here is a quick reference:\n\n{}",
             tool_sections.join("\n")
         )
     };
@@ -314,7 +230,11 @@ pub(super) fn build_preamble(
          context space. Call `read_skill` with the exact skill name before executing any \
          skill procedure so you have the complete, up-to-date steps.";
 
-    let mut p = base_preamble.to_string();
+    let mut p = if base_preamble.trim().is_empty() {
+        default_system_prompt(provider_type)
+    } else {
+        base_preamble.to_string()
+    };
     p.push_str(&tool_summary);
     p.push_str(formatting_guide);
     p.push_str(memory_instructions);
@@ -331,6 +251,56 @@ pub(super) fn build_preamble(
     p
 }
 
+fn default_system_prompt(provider_type: &ProviderType) -> String {
+    let provider_name = provider_type.display_name();
+    let provider_specific_guidance = match provider_type {
+        ProviderType::Anthropic => {
+            "Prefer clear XML-tagged sectioning for complex instructions when it improves readability."
+        }
+        ProviderType::OpenAI | ProviderType::AzureOpenAI => {
+            "Prefer concise structured markdown and explicit assumptions for technical tasks."
+        }
+        ProviderType::Gemini => {
+            "Prioritize clear step-by-step reasoning summaries and explicit uncertainty when relevant."
+        }
+        ProviderType::Mistral | ProviderType::Ollama => {
+            "Keep responses direct and efficient, and verify important details with tools when available."
+        }
+    };
+
+    format!(
+        "<identity>\n\
+You are Chatty, a capable and trustworthy AI assistant inside the Chatty desktop app.\n\
+</identity>\n\
+\n\
+<provider_context>\n\
+Current model provider: {provider_name}.\n\
+{provider_specific_guidance}\n\
+</provider_context>\n\
+\n\
+<refusal_handling>\n\
+Refuse requests that are unsafe, illegal, or meaningfully harmful. When refusing, be brief, respectful, and provide a safer alternative when possible.\n\
+</refusal_handling>\n\
+\n\
+<tone>\n\
+Be clear, practical, and collaborative. Default to concise responses (1–3 paragraphs). \
+Only give longer responses when the task inherently requires it (code generation, detailed analysis, step-by-step guides) or the user asks for depth.\n\
+</tone>\n\
+\n\
+<wellbeing>\n\
+Avoid escalating distress, manipulation, or harmful dependency. Encourage healthy, reality-based next steps when users appear vulnerable.\n\
+</wellbeing>\n\
+\n\
+<evenhandedness>\n\
+Present balanced, evidence-aware perspectives on disputed topics. Distinguish facts, uncertainty, and opinion.\n\
+</evenhandedness>\n\
+\n\
+<knowledge_cutoff>\n\
+Knowledge limits vary by provider/model. If asked about your cutoff and you do not have a reliable date in context, say that the cutoff is provider/model-dependent and unknown in-session, then use available tools for current or uncertain information.\n\
+</knowledge_cutoff>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::mcp_helpers::McpTools;
@@ -338,6 +308,7 @@ mod tests {
     use super::*;
 
     fn default_preamble_args() -> (
+        ProviderType,
         ToolAvailability,
         Option<SearchSettingsModel>,
         McpTools,
@@ -345,6 +316,7 @@ mod tests {
         Vec<String>,
     ) {
         (
+            ProviderType::OpenAI,
             ToolAvailability::default(),
             None,
             McpTools::none(),
@@ -355,8 +327,16 @@ mod tests {
 
     #[test]
     fn empty_tools_still_includes_chart_and_formatting() {
-        let (tools, search, mcp, mcp_info, secrets) = default_preamble_args();
-        let result = build_preamble("Base prompt.", &tools, &search, &mcp, &mcp_info, &secrets);
+        let (provider, tools, search, mcp, mcp_info, secrets) = default_preamble_args();
+        let result = build_preamble(
+            "Base prompt.",
+            &provider,
+            &tools,
+            &search,
+            &mcp,
+            &mcp_info,
+            &secrets,
+        );
         assert!(result.starts_with("Base prompt."));
         assert!(result.contains("create_chart"));
         assert!(result.contains("## Formatting Capabilities"));
@@ -368,7 +348,15 @@ mod tests {
     fn shell_tools_included_when_enabled() {
         let mut tools = ToolAvailability::default();
         tools.shell = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("shell_execute"));
         assert!(result.contains("shell_cd"));
         assert!(result.contains("shell_set_env"));
@@ -380,7 +368,15 @@ mod tests {
         let mut tools = ToolAvailability::default();
         tools.fs_read = true;
         tools.fs_write = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("read_file"));
         assert!(result.contains("write_file"));
         assert!(result.contains("apply_diff"));
@@ -390,7 +386,15 @@ mod tests {
     fn git_tools_included_when_enabled() {
         let mut tools = ToolAvailability::default();
         tools.git = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("git_status"));
         assert!(result.contains("git_diff"));
         assert!(result.contains("git_commit"));
@@ -400,7 +404,15 @@ mod tests {
     fn memory_section_included_when_enabled() {
         let mut tools = ToolAvailability::default();
         tools.memory = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("## Memory"));
         assert!(result.contains("remember"));
         assert!(result.contains("save_skill"));
@@ -410,7 +422,15 @@ mod tests {
     #[test]
     fn memory_section_excluded_when_disabled() {
         let tools = ToolAvailability::default();
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(!result.contains("## Memory"));
     }
 
@@ -418,7 +438,15 @@ mod tests {
     fn secret_keys_appended() {
         let tools = ToolAvailability::default();
         let secrets = vec!["API_KEY".to_string(), "DB_PASSWORD".to_string()];
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &secrets);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &secrets,
+        );
         assert!(result.contains("API_KEY"));
         assert!(result.contains("DB_PASSWORD"));
         assert!(result.contains("environment variables"));
@@ -427,7 +455,15 @@ mod tests {
     #[test]
     fn secret_keys_not_appended_when_empty() {
         let tools = ToolAvailability::default();
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(!result.contains("environment variables with sensitive"));
     }
 
@@ -439,7 +475,15 @@ mod tests {
             "my_tool".to_string(),
             "does something".to_string(),
         )];
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &mcp_info, &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &mcp_info,
+            &[],
+        );
         assert!(result.contains("MCP tools"));
         assert!(result.contains("my_tool"));
         assert!(result.contains("my-server"));
@@ -449,7 +493,15 @@ mod tests {
     fn excel_section_shows_read_only_when_write_disabled() {
         let mut tools = ToolAvailability::default();
         tools.excel_read = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("read_excel"));
         assert!(!result.contains("write_excel"));
     }
@@ -459,7 +511,15 @@ mod tests {
         let mut tools = ToolAvailability::default();
         tools.excel_read = true;
         tools.excel_write = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("read_excel"));
         assert!(result.contains("write_excel"));
         assert!(result.contains("edit_excel"));
@@ -470,7 +530,15 @@ mod tests {
         let mut tools = ToolAvailability::default();
         tools.pdf_info = true;
         tools.pdf_extract_text = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("pdf_info"));
         assert!(result.contains("pdf_extract_text"));
     }
@@ -479,7 +547,15 @@ mod tests {
     fn data_query_section_included() {
         let mut tools = ToolAvailability::default();
         tools.data_query = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("query_data"));
         assert!(result.contains("describe_data"));
     }
@@ -488,15 +564,31 @@ mod tests {
     fn sub_agent_section_included() {
         let mut tools = ToolAvailability::default();
         tools.sub_agent = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("sub_agent"));
-        assert!(result.contains("Delegate a task"));
+        assert!(result.contains("delegate"));
     }
 
     #[test]
     fn skills_section_always_present() {
         let tools = ToolAvailability::default();
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("## Skills"));
         assert!(result.contains("read_skill"));
     }
@@ -506,7 +598,15 @@ mod tests {
         let mut tools = ToolAvailability::default();
         tools.fetch = true;
         tools.search_web = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("search_web"));
         assert!(result.contains("fetch"));
     }
@@ -515,7 +615,15 @@ mod tests {
     fn compile_typst_section_included() {
         let mut tools = ToolAvailability::default();
         tools.compile_typst = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("compile_typst"));
         assert!(result.contains("Typst markup"));
     }
@@ -524,7 +632,15 @@ mod tests {
     fn execute_code_section_included() {
         let mut tools = ToolAvailability::default();
         tools.execute_code = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("execute_code"));
         assert!(result.contains("Docker sandbox"));
     }
@@ -533,7 +649,15 @@ mod tests {
     fn browser_use_section_included() {
         let mut tools = ToolAvailability::default();
         tools.browser_use = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("browser_use"));
     }
 
@@ -541,7 +665,15 @@ mod tests {
     fn daytona_section_included() {
         let mut tools = ToolAvailability::default();
         tools.daytona = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("daytona_run"));
     }
 
@@ -549,7 +681,56 @@ mod tests {
     fn publish_module_section_included() {
         let mut tools = ToolAvailability::default();
         tools.publish_module = true;
-        let result = build_preamble("", &tools, &None, &McpTools::none(), &[], &[]);
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
         assert!(result.contains("publish_wasm_module"));
+    }
+
+    #[test]
+    fn default_prompt_is_used_when_base_is_empty() {
+        let tools = ToolAvailability::default();
+        let result = build_preamble(
+            "",
+            &ProviderType::Anthropic,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        assert!(result.contains("<identity>"));
+        assert!(result.contains("Current model provider: Anthropic."));
+    }
+
+    #[test]
+    fn default_prompt_is_dynamic_for_provider() {
+        let tools = ToolAvailability::default();
+        let anthropic = build_preamble(
+            "",
+            &ProviderType::Anthropic,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        let openai = build_preamble(
+            "",
+            &ProviderType::OpenAI,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        assert!(anthropic.contains("XML-tagged sectioning"));
+        assert!(openai.contains("structured markdown"));
     }
 }
