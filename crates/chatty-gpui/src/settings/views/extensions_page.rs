@@ -118,6 +118,7 @@ fn installed_extensions_group() -> SettingGroup {
                     this.children(extensions.iter().map(|ext| {
                         let id = ext.id.clone();
                         let toggle_id = ext.id.clone();
+                        let is_wasm_module = matches!(&ext.kind, ExtensionKind::WasmModule);
                         let kind_label = match &ext.kind {
                             ExtensionKind::McpServer(_) => "MCP",
                             ExtensionKind::WasmModule => "Agent",
@@ -128,7 +129,7 @@ fn installed_extensions_group() -> SettingGroup {
                         // For WASM modules: look up discovered module metadata for
                         // execution_mode and wasm_file presence.
                         let (discovered_exec_mode, has_wasm_file) =
-                            if matches!(&ext.kind, ExtensionKind::WasmModule) {
+                            if is_wasm_module {
                                 cx.try_global::<DiscoveredModulesModel>()
                                     .and_then(|dm| dm.modules.iter().find(|m| m.name == ext.id).map(|m| {
                                         let has_wasm = m.wasm_file != "remote" && !m.wasm_file.is_empty();
@@ -138,13 +139,23 @@ fn installed_extensions_group() -> SettingGroup {
                             } else {
                                 (String::new(), false)
                             };
+                        let effective_exec_mode = if is_wasm_module
+                            && (discovered_exec_mode.is_empty() || discovered_exec_mode == "local")
+                        {
+                            "local"
+                        } else {
+                            discovered_exec_mode.as_str()
+                        };
 
-                        // Determine egress badge: remote WASM → cloud; external MCP/A2A → external
+                        // Show current execution mode for WASM modules and egress badges for
+                        // external services.
                         let egress_badge: Option<(&'static str, u32)> = match &ext.kind {
                             ExtensionKind::WasmModule => {
-                                let is_remote = discovered_exec_mode == "remote"
-                                    || discovered_exec_mode == "remote_only";
-                                if is_remote { Some(("☁ Cloud", 0x3B82F6)) } else { None }
+                                match effective_exec_mode {
+                                    "remote_only" => Some(("☁ Cloud Only", 0x3B82F6)),
+                                    "remote" => Some(("☁ Cloud", 0x3B82F6)),
+                                    _ => Some(("• Local", 0x6B7280)),
+                                }
                             }
                             ExtensionKind::McpServer(cfg) => {
                                 let is_local = cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
@@ -218,16 +229,14 @@ fn installed_extensions_group() -> SettingGroup {
                                     // Execution mode toggle: only for WASM modules that are
                                     // not remote_only.
                                     .when(
-                                        matches!(&ext.kind, ExtensionKind::WasmModule)
-                                            && discovered_exec_mode != "remote_only",
+                                        is_wasm_module && effective_exec_mode != "remote_only",
                                         |el| {
                                             let mode_id = id.clone();
-                                            let is_currently_remote =
-                                                discovered_exec_mode == "remote";
+                                            let is_currently_remote = effective_exec_mode == "remote";
                                             let (btn_label, target_mode) = if is_currently_remote {
-                                                ("⬇ Run Local", "local")
+                                                ("Switch to Local", "local")
                                             } else {
-                                                ("☁ Run Cloud", "remote")
+                                                ("Switch to Cloud", "remote")
                                             };
                                             // Can switch to local only if wasm file exists.
                                             let can_click = !is_currently_remote || has_wasm_file;

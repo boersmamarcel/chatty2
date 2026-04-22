@@ -31,3 +31,16 @@ pub(crate) mod bindings {
         path: "../../wit",
     });
 }
+
+/// Backwards-compatible bindings for `chatty:module@0.1.0`.
+///
+/// Older modules (built before the package bump to 0.2.0) still import the
+/// host imports under the `@0.1.0` package id. The interfaces are byte-for-byte
+/// identical to 0.2.0 minus the new optional `billing` interface, so we
+/// register both versions in the linker.
+pub(crate) mod bindings_v0_1 {
+    wasmtime::component::bindgen!({
+        world: "module",
+        path: "wit-v0_1",
+    });
+}

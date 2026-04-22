@@ -339,6 +339,97 @@ impl crate::bindings::chatty::module::billing::Host for ModuleState {
 }
 
 // ---------------------------------------------------------------------------
+// Backwards-compat host impls for chatty:module@0.1.0
+// ---------------------------------------------------------------------------
+//
+// These delegate to the same business logic as the @0.2.0 impls. Bindgen
+// generates separate (but structurally identical) Host traits per package
+// version, so we need explicit impls. Types are also distinct nominal types,
+// so we convert at the boundary.
+
+impl crate::bindings_v0_1::chatty::module::types::Host for ModuleState {}
+
+impl crate::bindings_v0_1::chatty::module::llm::Host for ModuleState {
+    fn complete(
+        &mut self,
+        model: String,
+        messages: Vec<crate::bindings_v0_1::chatty::module::types::Message>,
+        tools: Option<String>,
+    ) -> Result<crate::bindings_v0_1::chatty::module::types::CompletionResponse, String> {
+        debug!(
+            module = %self.manifest.name,
+            model = %model,
+            message_count = messages.len(),
+            "llm::complete (v0.1) called by WASM module"
+        );
+        // Convert v0.1 messages -> v0.2 (identical layout)
+        let v2_messages: Vec<Message> = messages
+            .into_iter()
+            .map(|m| Message {
+                role: match m.role {
+                    crate::bindings_v0_1::chatty::module::types::Role::System => {
+                        crate::bindings::chatty::module::types::Role::System
+                    }
+                    crate::bindings_v0_1::chatty::module::types::Role::User => {
+                        crate::bindings::chatty::module::types::Role::User
+                    }
+                    crate::bindings_v0_1::chatty::module::types::Role::Assistant => {
+                        crate::bindings::chatty::module::types::Role::Assistant
+                    }
+                },
+                content: m.content,
+            })
+            .collect();
+        let result = self.llm_provider.complete(&model, v2_messages, tools);
+        if let Err(ref e) = result {
+            warn!(module = %self.manifest.name, error = %e, "llm::complete (v0.1) returned error");
+        }
+        // Convert v0.2 response back to v0.1
+        result.map(|r| crate::bindings_v0_1::chatty::module::types::CompletionResponse {
+            content: r.content,
+            usage: r
+                .usage
+                .map(|u| crate::bindings_v0_1::chatty::module::types::TokenUsage {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                }),
+            tool_calls: r
+                .tool_calls
+                .into_iter()
+                .map(|tc| crate::bindings_v0_1::chatty::module::types::ToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    arguments: tc.arguments,
+                })
+                .collect(),
+        })
+    }
+}
+
+impl crate::bindings_v0_1::chatty::module::config::Host for ModuleState {
+    fn get(&mut self, key: String) -> Option<String> {
+        self.manifest.get_config(&key)
+    }
+}
+
+impl crate::bindings_v0_1::chatty::module::logging::Host for ModuleState {
+    fn log(&mut self, level: String, message: String) {
+        let module = &self.manifest.name;
+        match level.as_str() {
+            "trace" => trace!(module = %module, "{}", message),
+            "debug" => debug!(module = %module, "{}", message),
+            "info" => info!(module = %module, "{}", message),
+            "warn" => warn!(module = %module, "{}", message),
+            "error" => error!(module = %module, "{}", message),
+            other => info!(module = %module, level = %other, "{}", message),
+        }
+        if let Some(ref tx) = self.progress_tx {
+            let _ = tx.send(message);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

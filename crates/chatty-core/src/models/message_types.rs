@@ -99,6 +99,26 @@ pub enum ThinkingState {
     Completed,
 }
 
+/// Where a tool call executes — used to render data-egress badges in the UI.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub enum ToolSource {
+    /// Executes locally; no data leaves Chatty.
+    #[default]
+    Local,
+    /// Remote WASM module executed on the Hive cloud runner.
+    HiveCloud,
+    /// Built-in internet-facing tool (web fetch, web search, cloud sandbox, browser automation).
+    Internet {
+        /// Short human-readable label, e.g. "web search", "cloud sandbox".
+        label: String,
+    },
+    /// External service: remote A2A agent or user-configured external MCP server.
+    ExternalService {
+        /// Display name of the service, e.g. an A2A agent name or MCP server name.
+        name: String,
+    },
+}
+
 /// Represents a single tool call and its execution
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallBlock {
@@ -122,6 +142,9 @@ pub struct ToolCallBlock {
     /// Text content that appeared before this tool call (for interleaved rendering)
     #[serde(default)]
     pub text_before: String,
+    /// Where this tool call executes — used to render data-egress badges.
+    #[serde(default)]
+    pub source: ToolSource,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -416,6 +439,7 @@ mod tests {
             state,
             duration: None,
             text_before: String::new(),
+            source: ToolSource::Local,
         }
     }
 

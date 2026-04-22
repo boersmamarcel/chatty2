@@ -9,8 +9,18 @@ use std::time::Duration;
 use super::diff_view_component::DiffViewComponent;
 use super::message_types::{
     ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceEvent, TraceItem,
+    ToolSource,
 };
 use gpui::EventEmitter;
+
+fn tool_source_badge(source: &ToolSource) -> Option<(String, Rgba)> {
+    match source {
+        ToolSource::HiveCloud => Some(("☁ Remote".to_string(), rgba(0x3B82F6ff))),
+        ToolSource::Internet { label } => Some((format!("↗ {label}"), rgba(0xF59E0Bff))),
+        ToolSource::ExternalService { name } => Some((format!("↗ {name}"), rgba(0xA855F7ff))),
+        ToolSource::Local => None,
+    }
+}
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
@@ -219,6 +229,22 @@ impl SystemTraceView {
                             .child(format!("({})", name)),
                     );
 
+                // Data-egress badge for the active/last tool call
+                if let TraceItem::ToolCall(tool_call) = item {
+                    if let Some((badge_text, badge_color)) = tool_source_badge(&tool_call.source) {
+                        step_container = step_container.child(
+                            div()
+                                .text_xs()
+                                .text_color(badge_color)
+                                .px_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(badge_color)
+                                .child(badge_text),
+                        );
+                    }
+                }
+
                 header = header.child(step_container);
             }
         }
@@ -373,7 +399,7 @@ impl SystemTraceView {
                         .child(extract_command_display(tool_call)),
                 )
                 .map(|this| {
-                    if is_running {
+                    let this = if is_running {
                         this.child(
                             badge.with_animation(
                                 ElementId::Name(format!("tool-badge-pulse-{}", index).into()),
@@ -385,6 +411,22 @@ impl SystemTraceView {
                         )
                     } else {
                         this.child(badge)
+                    };
+
+                    if let Some((badge_text, badge_color)) = tool_source_badge(&tool_call.source) {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .px_2()
+                                .py(px(0.5))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(badge_color)
+                                .text_color(badge_color)
+                                .child(badge_text),
+                        )
+                    } else {
+                        this
                     }
                 })
                 .when_some(tool_call.duration, |this, duration| {

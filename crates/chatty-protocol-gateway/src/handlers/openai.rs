@@ -174,7 +174,7 @@ pub(crate) async fn chat_completions_routed(
 // ---------------------------------------------------------------------------
 
 /// Execute a chat completion request remotely via hive-runner.
-async fn execute_remotely(
+pub(crate) async fn execute_remotely(
     module_name: &str,
     body: &ChatCompletionRequest,
     state: &GatewayState,
@@ -186,20 +186,22 @@ async fn execute_remotely(
 
     let url = format!("{}/v1/{}/chat/completions", runner_url.trim_end_matches('/'), module_name);
 
-    // Build the request - forward the original body
+    // Forward the user's Hive Bearer token so the runner can authenticate the
+    // request, look up the user, and deduct credits from the correct account
+    // (A4 for #72).
     let client = reqwest::Client::new();
-
-    // Add auth token if available from hive_client
-    if let Some(ref _hive_client) = state.hive_client {
-        // Extract token from the client using reflection through debug or by storing it separately
-        // For now, we'll need to pass the token explicitly - this is a known limitation
-        // The token should be stored in the gateway state or extracted from hive_client
-        tracing::warn!("Remote execution: auth token not yet passed to runner (requires Phase 4 enhancement)");
+    let mut req_builder = client.post(&url).json(&body);
+    if let Some(hive_client) = state.hive_client.as_ref() {
+        if let Some(token) = hive_client.token() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+        } else {
+            tracing::warn!(
+                "Remote execution: hive_client has no token — runner will reject with 401"
+            );
+        }
     }
 
-    let response = client
-        .post(&url)
-        .json(&body)
+    let response = req_builder
         .send()
         .await
         .map_err(|e| format!("Failed to connect to runner: {}", e))?;
@@ -222,33 +224,7 @@ async fn run_chat(
     state: GatewayState,
 ) -> axum::response::Response {
     // Check if we should route to remote execution
-    // First, check if module metadata indicates remote execution
-    let should_execute_remotely = if let Some(ref hive_client) = state.hive_client {
-        match hive_client.get_module(module_name).await {
-            Ok(metadata) => {
-                let exec_mode = metadata.execution_mode.as_str();
-                tracing::debug!(module = module_name, execution_mode = exec_mode, "Checked module execution mode");
-                
-                match exec_mode {
-                    "remote_only" => true,
-                    "remote" => {
-                        // For now, keep "remote" as local by default
-                        // This could be made configurable with a preference flag in the future
-                        tracing::debug!(module = module_name, "Module prefers remote execution but using local by default");
-                        false
-                    }
-                    _ => false, // "local" or unknown
-                }
-            }
-            Err(e) => {
-                // If we can't fetch metadata, assume local execution
-                tracing::warn!(module = module_name, error = %e, "Failed to fetch module metadata, assuming local execution");
-                false
-            }
-        }
-    } else {
-        false
-    };
+    let should_execute_remotely = should_route_remotely(module_name, &state).await;
 
     // If remote execution is required, delegate to runner
     if should_execute_remotely {
@@ -374,6 +350,53 @@ async fn run_chat(
             })),
         )
             .into_response(),
+    }
+}
+
+/// Returns true when the module's registry metadata says it should run on
+/// the remote runner (`execution_mode` ∈ {`remote`, `remote_only`}).
+/// Falls back to local on errors / when no hive_client is configured.
+pub(crate) async fn should_route_remotely(module_name: &str, state: &GatewayState) -> bool {
+    let Some(ref hive_client) = state.hive_client else {
+        return false;
+    };
+    match hive_client.get_module(module_name).await {
+        Ok(metadata) => {
+            let exec_mode = metadata.execution_mode.as_str();
+            tracing::debug!(
+                module = module_name,
+                execution_mode = exec_mode,
+                "Checked module execution mode"
+            );
+            matches!(exec_mode, "remote" | "remote_only")
+        }
+        Err(e) => {
+            tracing::warn!(
+                module = module_name,
+                error = %e,
+                "Failed to fetch module metadata, assuming local execution"
+            );
+            false
+        }
+    }
+}
+
+/// Build an OpenAI-compat request from a single user prompt — used by the
+/// A2A handler when routing remote-mode modules through the runner's
+/// `/v1/{module}/chat/completions` endpoint.
+pub(crate) fn build_oai_request_from_prompt(
+    module_name: &str,
+    prompt: &str,
+) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: module_name.to_string(),
+        messages: vec![OaiMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        }],
+        temperature: None,
+        max_tokens: None,
+        stream: None,
     }
 }
 

@@ -6,3 +6,4 @@ license = "MIT"
 tags = ["demo", "echo", "text", "transform"]
 category = "utility"
 pricing_model = "free"
+execution_mode = "local"

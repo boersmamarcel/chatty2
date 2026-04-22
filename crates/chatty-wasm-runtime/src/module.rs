@@ -28,6 +28,13 @@ pub struct InvocationMetrics {
     pub output_tokens: Option<u32>,
 }
 
+/// Wraps the generated world binding for whichever WIT package version
+/// the loaded component implements.
+enum ModuleVariant {
+    V02(Module),
+    V01(crate::bindings_v0_1::Module),
+}
+
 /// A loaded and instantiated WASM component module.
 ///
 /// Wraps a Wasmtime [`Store`] and the generated [`Module`] binding so the
@@ -36,7 +43,7 @@ pub struct WasmModule {
     /// Wasmtime store holding the instance state.
     store: Store<ModuleState>,
     /// Generated world wrapper giving typed access to guest exports.
-    module: Module,
+    module: ModuleVariant,
     /// Resource limits — kept for timeout enforcement.
     limits: ResourceLimits,
     /// Metrics from the most recent invocation.
@@ -157,6 +164,16 @@ impl WasmModule {
         Module::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 
+        // Backwards-compat: also register the @0.1.0 host imports so older
+        // modules built against the v0.1 SDK still resolve their llm/config/log
+        // imports against the same handler implementations.
+        crate::bindings_v0_1::chatty::module::llm::add_to_linker(&mut linker, |s| s)
+            .context("failed to add v0.1 llm import to linker")?;
+        crate::bindings_v0_1::chatty::module::config::add_to_linker(&mut linker, |s| s)
+            .context("failed to add v0.1 config import to linker")?;
+        crate::bindings_v0_1::chatty::module::logging::add_to_linker(&mut linker, |s| s)
+            .context("failed to add v0.1 logging import to linker")?;
+
         let state = ModuleState::new(manifest, llm_provider, billing_provider.clone(), &limits);
         let mut store = Store::new(engine, state);
 
@@ -168,10 +185,28 @@ impl WasmModule {
             .set_fuel(limits.max_fuel)
             .context("failed to set fuel")?;
 
-        let module = Module::instantiate(&mut store, component, &linker)
-            .context("failed to instantiate WASM module")?;
-
-        debug!("WASM module instantiated successfully");
+        let module = match Module::instantiate(&mut store, component, &linker) {
+            Ok(m) => {
+                debug!("WASM module instantiated successfully (chatty:module@0.2.0)");
+                ModuleVariant::V02(m)
+            }
+            Err(e_v2) => {
+                // Fall back to legacy chatty:module@0.1.0 SDK.
+                match crate::bindings_v0_1::Module::instantiate(&mut store, component, &linker) {
+                    Ok(m) => {
+                        debug!(
+                            "WASM module instantiated successfully (chatty:module@0.1.0 backwards-compat)"
+                        );
+                        ModuleVariant::V01(m)
+                    }
+                    Err(e_v1) => {
+                        return Err(e_v2)
+                            .context(format!("v0.1 fallback also failed: {e_v1:#}"))
+                            .context("failed to instantiate WASM module");
+                    }
+                }
+            }
+        };
 
         Ok(Self {
             store,
@@ -207,14 +242,25 @@ impl WasmModule {
         let initial_fuel = self.store.get_fuel().unwrap_or(0);
 
         let result = {
-            let agent = self.module.chatty_module_agent();
             let store = &mut self.store;
+            let module = &self.module;
 
             tokio::time::timeout(timeout, async move {
-                agent
-                    .call_chat(store, &req)
-                    .context("WASM trap in agent::chat")?
-                    .map_err(|e| anyhow::anyhow!("agent::chat returned error: {e}"))
+                match module {
+                    ModuleVariant::V02(m) => m
+                        .chatty_module_agent()
+                        .call_chat(store, &req)
+                        .context("WASM trap in agent::chat")?
+                        .map_err(|e| anyhow::anyhow!("agent::chat returned error: {e}")),
+                    ModuleVariant::V01(m) => {
+                        let v1_req = convert::chat_request_to_v01(&req);
+                        m.chatty_module_agent()
+                            .call_chat(store, &v1_req)
+                            .context("WASM trap in agent::chat")?
+                            .map(convert::chat_response_from_v01)
+                            .map_err(|e| anyhow::anyhow!("agent::chat returned error: {e}"))
+                    }
+                }
             })
             .await
             .context("agent::chat timed out")?
@@ -253,14 +299,22 @@ impl WasmModule {
         let start_time = std::time::Instant::now();
         let initial_fuel = self.store.get_fuel().unwrap_or(0);
 
-        let agent = self.module.chatty_module_agent();
         let store = &mut self.store;
+        let module = &self.module;
 
         let result = tokio::time::timeout(timeout, async move {
-            agent
-                .call_invoke_tool(store, name, args)
-                .context("WASM trap in agent::invoke-tool")?
-                .map_err(|e| anyhow::anyhow!("agent::invoke-tool returned error: {e}"))
+            match module {
+                ModuleVariant::V02(m) => m
+                    .chatty_module_agent()
+                    .call_invoke_tool(store, name, args)
+                    .context("WASM trap in agent::invoke-tool")?
+                    .map_err(|e| anyhow::anyhow!("agent::invoke-tool returned error: {e}")),
+                ModuleVariant::V01(m) => m
+                    .chatty_module_agent()
+                    .call_invoke_tool(store, name, args)
+                    .context("WASM trap in agent::invoke-tool")?
+                    .map_err(|e| anyhow::anyhow!("agent::invoke-tool returned error: {e}")),
+            }
         })
         .await
         .context("agent::invoke-tool timed out")?;
@@ -282,18 +336,32 @@ impl WasmModule {
 
     /// Call the `agent::list-tools` export.
     pub fn list_tools(&mut self) -> Result<Vec<ToolDefinition>> {
-        self.module
-            .chatty_module_agent()
-            .call_list_tools(&mut self.store)
-            .context("WASM trap in agent::list-tools")
+        match &self.module {
+            ModuleVariant::V02(m) => m
+                .chatty_module_agent()
+                .call_list_tools(&mut self.store)
+                .context("WASM trap in agent::list-tools"),
+            ModuleVariant::V01(m) => m
+                .chatty_module_agent()
+                .call_list_tools(&mut self.store)
+                .context("WASM trap in agent::list-tools")
+                .map(|tools| tools.into_iter().map(convert::tool_def_from_v01).collect()),
+        }
     }
 
     /// Call the `agent::get-agent-card` export.
     pub fn agent_card(&mut self) -> Result<AgentCard> {
-        self.module
-            .chatty_module_agent()
-            .call_get_agent_card(&mut self.store)
-            .context("WASM trap in agent::get-agent-card")
+        match &self.module {
+            ModuleVariant::V02(m) => m
+                .chatty_module_agent()
+                .call_get_agent_card(&mut self.store)
+                .context("WASM trap in agent::get-agent-card"),
+            ModuleVariant::V01(m) => m
+                .chatty_module_agent()
+                .call_get_agent_card(&mut self.store)
+                .context("WASM trap in agent::get-agent-card")
+                .map(convert::agent_card_from_v01),
+        }
     }
 
     /// Return the remaining fuel in the store.
@@ -312,6 +380,83 @@ impl WasmModule {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// v0.1 ↔ v0.2 type conversions
+// ---------------------------------------------------------------------------
+
+mod convert {
+    use crate::bindings::chatty::module::types as v2;
+    use crate::bindings_v0_1::chatty::module::types as v1;
+
+    fn role_to_v01(r: &v2::Role) -> v1::Role {
+        match r {
+            v2::Role::System => v1::Role::System,
+            v2::Role::User => v1::Role::User,
+            v2::Role::Assistant => v1::Role::Assistant,
+        }
+    }
+
+    fn message_to_v01(m: &v2::Message) -> v1::Message {
+        v1::Message {
+            role: role_to_v01(&m.role),
+            content: m.content.clone(),
+        }
+    }
+
+    fn tool_call_from_v01(tc: v1::ToolCall) -> v2::ToolCall {
+        v2::ToolCall {
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+        }
+    }
+
+    pub fn chat_request_to_v01(req: &v2::ChatRequest) -> v1::ChatRequest {
+        v1::ChatRequest {
+            messages: req.messages.iter().map(message_to_v01).collect(),
+            conversation_id: req.conversation_id.clone(),
+        }
+    }
+
+    pub fn chat_response_from_v01(resp: v1::ChatResponse) -> v2::ChatResponse {
+        v2::ChatResponse {
+            content: resp.content,
+            tool_calls: resp.tool_calls.into_iter().map(tool_call_from_v01).collect(),
+            usage: resp.usage.map(|u| v2::TokenUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+            }),
+        }
+    }
+
+    pub fn tool_def_from_v01(t: v1::ToolDefinition) -> v2::ToolDefinition {
+        v2::ToolDefinition {
+            name: t.name,
+            description: t.description,
+            parameters_schema: t.parameters_schema,
+        }
+    }
+
+    pub fn agent_card_from_v01(c: v1::AgentCard) -> v2::AgentCard {
+        v2::AgentCard {
+            name: c.name,
+            display_name: c.display_name,
+            description: c.description,
+            version: c.version,
+            skills: c
+                .skills
+                .into_iter()
+                .map(|s| v2::Skill {
+                    name: s.name,
+                    description: s.description,
+                    examples: s.examples,
+                })
+                .collect(),
+            tools: c.tools.into_iter().map(tool_def_from_v01).collect(),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

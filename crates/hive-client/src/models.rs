@@ -19,6 +19,7 @@ pub struct ModuleMetadata {
     pub category: Option<String>,
     pub downloads: i64,
     pub pricing_model: String,
+    pub execution_mode: String,
     pub homepage: Option<String>,
     pub support_email: Option<String>,
     pub created_at: DateTime<Utc>,

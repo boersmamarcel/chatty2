@@ -6,6 +6,8 @@ pub enum ModuleLoadStatus {
     Loaded,
     #[allow(dead_code)]
     Error(String),
+    /// Module runs remotely on hive-runner; no local WASM binary.
+    Remote,
 }
 
 #[allow(dead_code)]
@@ -23,6 +25,8 @@ pub struct DiscoveredModuleEntry {
     pub mcp: bool,
     pub a2a: bool,
     pub status: ModuleLoadStatus,
+    /// `"local"`, `"remote"`, or `"remote_only"`.
+    pub execution_mode: String,
 }
 
 pub struct DiscoveredModulesModel {

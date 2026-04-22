@@ -54,7 +54,18 @@ pub(crate) struct RawModuleSection {
     pub version: String,
     #[serde(default)]
     pub description: String,
-    pub wasm: String,
+    /// Path to the WASM binary, relative to the module directory.
+    /// Optional for `execution_mode = "remote"` modules which run on the
+    /// hive-runner and do not need a local binary.
+    #[serde(default)]
+    pub wasm: Option<String>,
+    /// Where the module is executed: `"local"` (default) or `"remote"`.
+    #[serde(default = "default_local")]
+    pub execution_mode: String,
+}
+
+fn default_local() -> String {
+    "local".to_string()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -129,7 +140,10 @@ pub struct ModuleManifest {
     /// Human-readable description.
     pub description: String,
     /// Path to the `.wasm` file, resolved relative to the manifest directory.
-    pub wasm_path: PathBuf,
+    /// `None` for remote-execution modules which have no local WASM binary.
+    pub wasm_path: Option<PathBuf>,
+    /// Execution location: `"local"` (default) or `"remote"` / `"remote_only"`.
+    pub execution_mode: String,
     /// Capability declarations.
     pub capabilities: ModuleCapabilities,
     /// Protocol declarations.
@@ -182,24 +196,30 @@ impl ModuleManifest {
             );
         }
 
-        // -- [module].wasm must be non-empty --
-        let wasm_rel = raw.module.wasm.trim().to_owned();
-        if wasm_rel.is_empty() {
-            bail!(
-                "manifest {}: [module].wasm must not be empty",
-                manifest_path.display()
-            );
-        }
+        let execution_mode = raw.module.execution_mode.clone();
+        let is_remote = matches!(execution_mode.as_str(), "remote" | "remote_only");
 
-        // Resolve wasm path relative to the manifest directory.
-        let module_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-        let wasm_path = module_dir.join(&wasm_rel);
+        // -- [module].wasm required for local execution only --
+        let wasm_path = if is_remote {
+            None
+        } else {
+            let wasm_rel = raw.module.wasm.as_deref().unwrap_or("").trim().to_owned();
+            if wasm_rel.is_empty() {
+                bail!(
+                    "manifest {}: [module].wasm must not be empty for local execution",
+                    manifest_path.display()
+                );
+            }
+            let module_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+            Some(module_dir.join(&wasm_rel))
+        };
 
         Ok(Self {
             name,
             version,
             description: raw.module.description,
             wasm_path,
+            execution_mode,
             capabilities: ModuleCapabilities {
                 tools: raw.capabilities.tools,
                 chat: raw.capabilities.chat,
@@ -259,7 +279,7 @@ max_execution_ms = 30000
         assert_eq!(m.name, "echo-agent");
         assert_eq!(m.version, "0.1.0");
         assert_eq!(m.description, "A simple echo agent for testing");
-        assert_eq!(m.wasm_path, Path::new("/fake/echo_agent.wasm"));
+        assert_eq!(m.wasm_path, Some(PathBuf::from("/fake/echo_agent.wasm")));
         assert_eq!(m.capabilities.tools, vec!["echo", "reverse"]);
         assert!(m.capabilities.chat);
         assert!(m.capabilities.agent);
@@ -315,7 +335,7 @@ wasm = "x.wasm"
     }
 
     #[test]
-    fn empty_wasm_is_rejected() {
+    fn empty_wasm_is_rejected_for_local() {
         let toml = r#"
 [module]
 name = "x"
@@ -323,6 +343,22 @@ version = "1.0.0"
 wasm = ""
 "#;
         assert!(parse(toml).is_err());
+    }
+
+    #[test]
+    fn missing_wasm_ok_for_remote() {
+        let toml = r#"
+[module]
+name = "x"
+version = "1.0.0"
+execution_mode = "remote"
+
+[protocols]
+a2a = true
+"#;
+        let m = parse(toml).expect("remote module without wasm should parse");
+        assert_eq!(m.execution_mode, "remote");
+        assert!(m.wasm_path.is_none());
     }
 
     #[test]
@@ -342,6 +378,6 @@ wasm = "sub/mod.wasm"
             Path::new("/some/dir/module.toml"),
         )
         .unwrap();
-        assert_eq!(m.wasm_path, Path::new("/some/dir/sub/mod.wasm"));
+        assert_eq!(m.wasm_path, Some(PathBuf::from("/some/dir/sub/mod.wasm")));
     }
 }

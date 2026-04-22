@@ -844,6 +844,7 @@ mod tests {
             state: super::super::message_types::ToolCallState::Success,
             duration: Some(Duration::from_millis(100)),
             text_before: String::new(),
+            source: super::super::message_types::ToolSource::Local,
         }
     }
 

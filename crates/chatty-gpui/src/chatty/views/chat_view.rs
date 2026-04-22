@@ -14,7 +14,7 @@ use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_with_skills}
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
-    ToolCallState, TraceItem, UserMessage, friendly_tool_name, is_denial_result,
+    ToolCallState, ToolSource, TraceItem, UserMessage, friendly_tool_name, is_denial_result,
 };
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
@@ -462,7 +462,13 @@ impl ChatView {
     }
 
     /// Handle tool call started event
-    pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+    pub fn handle_tool_call_started(
+        &mut self,
+        id: String,
+        name: String,
+        source: ToolSource,
+        cx: &mut Context<Self>,
+    ) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
         // Capture current message content as "text_before" for interleaved rendering
@@ -491,6 +497,7 @@ impl ChatView {
             state: ToolCallState::Running,
             duration: None,
             text_before,
+            source,
         };
 
         // Update live trace and create/update system_trace_view entity
@@ -980,7 +987,12 @@ impl ChatView {
     ///
     /// The progress is shown as a collapsible `ToolCallBlock` (Running state) so
     /// the user can expand it to see live stderr output while the sub-agent runs.
-    pub fn start_sub_agent_progress(&mut self, prompt: &str, cx: &mut Context<Self>) {
+    pub fn start_sub_agent_progress(
+        &mut self,
+        prompt: &str,
+        source: ToolSource,
+        cx: &mut Context<Self>,
+    ) {
         let tool_call = ToolCallBlock {
             id: format!(
                 "sub-agent-{}",
@@ -997,6 +1009,7 @@ impl ChatView {
             state: ToolCallState::Running,
             duration: None,
             text_before: String::new(),
+            source,
         };
 
         let mut trace = SystemTrace::new();
@@ -1425,7 +1438,7 @@ impl ChatView {
                 model
                     .modules
                     .iter()
-                    .filter(|module| matches!(module.status, ModuleLoadStatus::Loaded))
+                    .filter(|module| matches!(module.status, ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote))
                     .count()
             })
             .unwrap_or(0);
@@ -1436,7 +1449,7 @@ impl ChatView {
                     .iter()
                     .filter(|module| {
                         module.agent
-                            && matches!(module.status, ModuleLoadStatus::Loaded)
+                            && matches!(module.status, ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote)
                             && enabled_module_ids.contains(module.name.as_str())
                     })
                     .count()

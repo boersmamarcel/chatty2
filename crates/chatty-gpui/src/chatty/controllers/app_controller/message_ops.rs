@@ -358,6 +358,7 @@ impl ChattyApp {
                             state: ToolCallState::Running,
                             duration: None,
                             text_before,
+                            source: classify_tool_source(&name),
                         };
                         let trace = conv.ensure_streaming_trace();
                         let index = trace.items.len();
@@ -371,9 +372,10 @@ impl ChattyApp {
                     // system will handle visualisation via the progress channel.
                     self.active_invoke_agent_ids.insert(id);
                 } else {
+                    let source = classify_tool_source(&name);
                     chat_view.update(cx, |view, cx| {
                         if view.conversation_id() == Some(conversation_id) {
-                            view.handle_tool_call_started(id, name, cx);
+                            view.handle_tool_call_started(id, name, source, cx);
                         }
                     });
                 }
@@ -1409,7 +1411,8 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                         let label = format!("[Agent: {}] {}", agent_name, prompt);
                         chat_view
                             .update(cx, |view, cx| {
-                                view.start_sub_agent_progress(&label, cx);
+                                let source = classify_agent_source(&agent_name, cx);
+                                view.start_sub_agent_progress(&label, source, cx);
                             })
                             .ok();
                     }

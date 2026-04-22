@@ -64,6 +64,98 @@ impl HostLlmProvider {
         }
     }
 
+    /// Normalize a JSON tools blob from a WASM module into a canonical list
+    /// of `{name, description, parameters}` records.
+    ///
+    /// Accepts either:
+    /// - OpenAI wrapped form: `[{"type":"function","function":{name,description,parameters}}]`
+    /// - Flat form: `[{name, description, parameters}]` (or `parameters_schema`)
+    /// - A single object instead of an array
+    ///
+    /// Tools missing a `name` are dropped.
+    fn normalize_tools(tools_json: &str) -> Vec<serde_json::Value> {
+        let parsed: serde_json::Value = match serde_json::from_str(tools_json) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let arr: Vec<serde_json::Value> = match parsed {
+            serde_json::Value::Array(a) => a,
+            v @ serde_json::Value::Object(_) => vec![v],
+            _ => return Vec::new(),
+        };
+        arr.into_iter()
+            .filter_map(|t| {
+                let inner = t.get("function").cloned().unwrap_or(t);
+                let name = inner.get("name")?.as_str()?.to_string();
+                let description = inner
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let parameters = inner
+                    .get("parameters")
+                    .or_else(|| inner.get("parameters_schema"))
+                    .or_else(|| inner.get("input_schema"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                Some(serde_json::json!({
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                }))
+            })
+            .collect()
+    }
+
+    /// Recursively clean up a JSON Schema for Gemini's function declarations.
+    ///
+    /// Gemini's API rejects schemas with empty/missing `type` on nested
+    /// items/properties, and a few fields it doesn't understand. Strip
+    /// unknown fields and inject `type: "object"` defaults where missing.
+    fn sanitize_gemini_schema(value: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        const ALLOWED: &[&str] = &[
+            "type",
+            "format",
+            "description",
+            "nullable",
+            "enum",
+            "properties",
+            "required",
+            "items",
+            "minimum",
+            "maximum",
+        ];
+        match value {
+            Value::Object(mut map) => {
+                map.retain(|k, _| ALLOWED.contains(&k.as_str()));
+                if !map.contains_key("type") {
+                    if map.contains_key("properties") {
+                        map.insert("type".into(), Value::String("object".into()));
+                    } else if map.contains_key("items") {
+                        map.insert("type".into(), Value::String("array".into()));
+                    } else {
+                        map.insert("type".into(), Value::String("string".into()));
+                    }
+                }
+                if let Some(props) = map.get_mut("properties")
+                    && let Value::Object(prop_map) = props
+                {
+                    let cleaned: serde_json::Map<String, Value> = prop_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Self::sanitize_gemini_schema(v.clone())))
+                        .collect();
+                    *prop_map = cleaned;
+                }
+                if let Some(items) = map.remove("items") {
+                    map.insert("items".into(), Self::sanitize_gemini_schema(items));
+                }
+                Value::Object(map)
+            }
+            other => other,
+        }
+    }
+
     async fn complete_openai(
         &self,
         model: &str,
@@ -101,10 +193,15 @@ impl HostLlmProvider {
             body["max_tokens"] = serde_json::json!(max);
         }
 
-        if let Some(ref tools_json) = tools
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(tools_json)
-        {
-            body["tools"] = parsed;
+        if let Some(ref tools_json) = tools {
+            let normalized = Self::normalize_tools(tools_json);
+            if !normalized.is_empty() {
+                let openai_tools: Vec<serde_json::Value> = normalized
+                    .iter()
+                    .map(|t| serde_json::json!({"type": "function", "function": t}))
+                    .collect();
+                body["tools"] = serde_json::json!(openai_tools);
+            }
         }
 
         let mut req = self.client.post(&url);
@@ -173,20 +270,18 @@ impl HostLlmProvider {
             body["system"] = serde_json::json!(&sys.content);
         }
 
-        if let Some(ref tools_json) = tools
-            && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json)
-        {
-            let anthropic_tools: Vec<serde_json::Value> = parsed
-                    .iter()
-                    .filter_map(|t| {
-                        let func = t.get("function")?;
-                        Some(serde_json::json!({
-                            "name": func.get("name")?,
-                            "description": func.get("description").unwrap_or(&serde_json::json!("")),
-                            "input_schema": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object"})),
-                        }))
+        if let Some(ref tools_json) = tools {
+            let normalized = Self::normalize_tools(tools_json);
+            let anthropic_tools: Vec<serde_json::Value> = normalized
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.get("name").cloned().unwrap_or(serde_json::json!("")),
+                        "description": t.get("description").cloned().unwrap_or(serde_json::json!("")),
+                        "input_schema": t.get("parameters").cloned().unwrap_or(serde_json::json!({"type": "object"})),
                     })
-                    .collect();
+                })
+                .collect();
             if !anthropic_tools.is_empty() {
                 body["tools"] = serde_json::json!(anthropic_tools);
             }
@@ -274,20 +369,20 @@ impl HostLlmProvider {
         }
 
         // Tools mapping for Gemini (simplified — function declarations only)
-        if let Some(ref tools_json) = tools
-            && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(tools_json)
-        {
-            let decls: Vec<serde_json::Value> = parsed
-                    .iter()
-                    .filter_map(|t| {
-                        let func = t.get("function")?;
-                        Some(serde_json::json!({
-                            "name": func.get("name")?,
-                            "description": func.get("description").unwrap_or(&serde_json::json!("")),
-                            "parameters": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object"})),
-                        }))
+        if let Some(ref tools_json) = tools {
+            let normalized = Self::normalize_tools(tools_json);
+            let decls: Vec<serde_json::Value> = normalized
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.get("name").cloned().unwrap_or(serde_json::json!("")),
+                        "description": t.get("description").cloned().unwrap_or(serde_json::json!("")),
+                        "parameters": Self::sanitize_gemini_schema(
+                            t.get("parameters").cloned().unwrap_or(serde_json::json!({"type": "object"}))
+                        ),
                     })
-                    .collect();
+                })
+                .collect();
             if !decls.is_empty() {
                 body["tools"] = serde_json::json!([{"functionDeclarations": decls}]);
             }
@@ -628,17 +723,26 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
 
         match ModuleManifest::from_file(&manifest_path) {
             Ok(manifest) => {
-                let status = match validation_registry.load(&module_dir) {
-                    Ok(_) => ModuleLoadStatus::Loaded,
-                    Err(err) => ModuleLoadStatus::Error(err.to_string()),
-                };
+                let execution_mode = manifest.execution_mode.clone();
+                let is_remote = matches!(execution_mode.as_str(), "remote" | "remote_only");
 
-                let wasm_file = manifest
-                    .wasm_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                // Remote modules run on hive-runner — skip WASM loading entirely.
+                let (status, wasm_file) = if is_remote {
+                    (ModuleLoadStatus::Remote, "remote".to_string())
+                } else {
+                    let st = match validation_registry.load(&module_dir) {
+                        Ok(_) => ModuleLoadStatus::Loaded,
+                        Err(err) => ModuleLoadStatus::Error(err.to_string()),
+                    };
+                    let wf = manifest
+                        .wasm_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    (st, wf)
+                };
 
                 modules.push(DiscoveredModuleEntry {
                     directory_name,
@@ -653,6 +757,7 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
                     mcp: manifest.protocols.mcp,
                     a2a: manifest.protocols.a2a,
                     status,
+                    execution_mode,
                 });
             }
             Err(err) => {
@@ -669,6 +774,7 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
                     mcp: false,
                     a2a: false,
                     status: ModuleLoadStatus::Error(err.to_string()),
+                    execution_mode: "local".to_string(),
                 });
             }
         }
@@ -954,6 +1060,10 @@ pub fn refresh_runtime(cx: &mut App) {
                             let uc = Arc::clone(&usage_collector);
                             tokio::spawn(async move { uc.set_token(t).await });
                         }
+                        // Start the periodic flush task — without this, events
+                        // accumulate in memory but are never sent to the registry,
+                        // so dashboard analytics never increment.
+                        usage_collector.start_background_flush();
 
                         gateway = gateway
                             .with_hive_client(hive_client)

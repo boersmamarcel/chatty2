@@ -64,6 +64,15 @@ impl HiveRegistryClient {
         self
     }
 
+    /// Return the currently configured Bearer token, if any.
+    ///
+    /// Used by the protocol gateway to forward the user's credentials to
+    /// remote execution targets (hive-runner) so they can charge the correct
+    /// user's credit balance.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     // ── Authentication ─────────────────────────────────────────────────────
 
     /// Register a new account on the Hive registry.

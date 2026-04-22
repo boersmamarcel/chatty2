@@ -1806,6 +1806,7 @@ dependencies = [
  "chatty-module-registry",
  "chatty-wasm-runtime",
  "hive-client",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
@@ -8709,9 +8710,11 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "encoding_rs",
  "futures-channel",
  "futures-core",
  "futures-util",
+ "h2",
  "http 1.4.0",
  "http-body",
  "http-body-util",
@@ -8721,6 +8724,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
@@ -8838,8 +8842,6 @@ dependencies = [
 [[package]]
 name = "rig-core"
 version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31caace97ed9646cfb713f32f8321c9fe5dc6ee4390ff5041b565163bf900dc"
 dependencies = [
  "as-any",
  "async-stream",

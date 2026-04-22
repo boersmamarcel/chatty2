@@ -54,6 +54,9 @@ pub struct InstalledExtension {
     pub kind: ExtensionKind,
     /// Where this extension came from.
     pub source: ExtensionSource,
+    /// Marketplace pricing classification for Hive-sourced modules.
+    #[serde(default)]
+    pub pricing_model: Option<String>,
     /// Whether the extension is currently active.
     #[serde(default = "default_true")]
     pub enabled: bool,

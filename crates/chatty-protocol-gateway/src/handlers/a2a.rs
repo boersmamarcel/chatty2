@@ -26,6 +26,7 @@ use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
 };
+use super::openai::{build_oai_request_from_prompt, execute_remotely, should_route_remotely};
 
 // ---------------------------------------------------------------------------
 // Handler: GET /a2a/{module}/.well-known/agent.json
@@ -151,10 +152,48 @@ async fn handle_message_send(
     let req = ChatRequest {
         messages: vec![Message {
             role: Role::User,
-            content,
+            content: content.clone(),
         }],
         conversation_id: String::new(),
     };
+
+    // Remote routing: if the registry says this module is `remote`/`remote_only`,
+    // forward to the hive-runner via its OpenAI-compat endpoint and return the
+    // assistant text as the A2A artifact.
+    if should_route_remotely(module_name, state).await {
+        tracing::info!(module = module_name, "A2A: routing to remote runner");
+        let oai_req = build_oai_request_from_prompt(module_name, &content);
+        return match execute_remotely(module_name, &oai_req, state).await {
+            Ok(resp) => {
+                let text = resp
+                    .choices
+                    .into_iter()
+                    .next()
+                    .map(|c| c.message.content)
+                    .unwrap_or_default();
+                let task_id = format!("task-{}", crate::gateway::new_id());
+                json_rpc_ok(
+                    id,
+                    json!({
+                        "id": task_id,
+                        "status": { "state": "completed" },
+                        "artifacts": [{
+                            "parts": [{ "type": "text", "text": text }]
+                        }]
+                    }),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(module = module_name, error = %e, "Remote A2A execution failed");
+                json_rpc_error(
+                    StatusCode::OK,
+                    id,
+                    INTERNAL_ERROR,
+                    format!("Remote execution failed: {}", e),
+                )
+            }
+        };
+    }
 
     let mut reg = state.registry.write().await;
     let module = match reg.get_mut(module_name) {
@@ -256,25 +295,67 @@ async fn handle_message_stream(
     let task_id = format!("task-{}", crate::gateway::new_id());
     let module_name = module_name.to_string();
 
-    // Verify the module exists before starting the stream.
+    // Remote routing check must come BEFORE registry lookup — remote modules
+    // are not loaded into the local WASM registry (no binary), so checking the
+    // registry first would return 404 for them.
+    if should_route_remotely(&module_name, state).await {
+        tracing::info!(module = %module_name, "A2A stream: routing to remote runner");
+        let oai_req = build_oai_request_from_prompt(&module_name, &content);
+        let task_id_clone = task_id.clone();
+        let id_clone = id.clone();
+        let result = execute_remotely(&module_name, &oai_req, state).await;
+        let stream = async_stream::stream! {
+            let working = json!({
+                "jsonrpc": "2.0",
+                "id": id_clone,
+                "result": {
+                    "id": task_id_clone,
+                    "status": { "state": "working" },
+                    "final": false
+                }
+            });
+            yield Ok::<_, std::convert::Infallible>(Event::default().data(working.to_string()));
+
+            let payload = match result {
+                Ok(resp) => {
+                    let text = resp
+                        .choices
+                        .into_iter()
+                        .next()
+                        .map(|c| c.message.content)
+                        .unwrap_or_default();
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id_clone,
+                        "result": {
+                            "id": task_id_clone,
+                            "status": { "state": "completed" },
+                            "artifacts": [{
+                                "parts": [{ "type": "text", "text": text }]
+                            }],
+                            "final": true
+                        }
+                    })
+                }
+                Err(e) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id_clone,
+                    "error": {
+                        "code": INTERNAL_ERROR,
+                        "message": format!("Remote execution failed: {}", e),
+                    }
+                }),
+            };
+            yield Ok(Event::default().data(payload.to_string()));
+        };
+        return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    }
+
+    // Verify the module exists in the local registry before starting the stream.
     {
         let reg = state.registry.read().await;
         if reg.get(&module_name).is_none() {
             return module_not_found(id.clone(), &module_name);
-        }
-    }
-
-    // Pre-invocation credit check for paid modules only
-    if let Some(ref guard) = state.credit_guard {
-        if state.paid_modules.contains(module_name.as_str()) {
-            if let Err(e) = guard.has_credits(&module_name).await {
-                return json_rpc_error(
-                    StatusCode::OK,
-                    id,
-                    -32000,
-                    e.to_string(),
-                );
-            }
         }
     }
 
