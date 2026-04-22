@@ -162,12 +162,18 @@ pub fn search_marketplace(query: String, cx: &mut App) {
 
 // ── Install / Uninstall ────────────────────────────────────────────────────
 
-/// Install a WASM module from the Hive registry.
+/// Install a WASM module (or register a remote module) from the Hive registry.
+///
+/// For `execution_mode = "remote"` / `"remote_only"`: fetches version metadata
+/// to extract capabilities, writes a `module.toml` marker, and registers in
+/// `ExtensionsModel` — no WASM binary is downloaded.
 pub fn install_extension(
     name: String,
     version: String,
     display_name: String,
     description: String,
+    pricing_model: String,
+    execution_mode: String,
     cx: &mut App,
 ) {
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
@@ -177,60 +183,107 @@ pub fn install_extension(
         client = client.with_token(tok);
     }
 
+    let is_remote = matches!(execution_mode.as_str(), "remote" | "remote_only");
+
     cx.spawn(async move |cx| {
-        match client.download(&name, &version).await {
-            Ok(download) => {
-                cx.update(|cx| {
-                    let extensions = cx.global_mut::<ExtensionsModel>();
-                    match install::install_wasm_module(
-                        &download,
-                        &name,
-                        &version,
-                        &display_name,
-                        &description,
-                        extensions,
-                    ) {
-                        Ok(ext) => {
-                            info!(id = %ext.id, "Installed extension from Hive");
-                            save_extensions_async(extensions.clone(), cx);
-                            // Rescan module directory so the new WASM module
-                            // appears in DiscoveredModulesModel and becomes
-                            // available as an agent tool. The scan completion
-                            // triggers RebuildRequired automatically.
-                            module_settings_controller::refresh_runtime(cx);
-                        }
-                        Err(e) => {
-                            error!(error = ?e, "Failed to install extension");
-                            let state = cx.global_mut::<MarketplaceState>();
-                            state.set_error(format!("Install failed: {e}"));
-                        }
+        if is_remote {
+            // Fetch version list to get capabilities manifest without downloading WASM.
+            let version_manifest = match client.list_versions(&name).await {
+                Ok(list) => {
+                    list.items
+                        .into_iter()
+                        .find(|v| v.version == version)
+                        .map(|v| v.manifest)
+                        .unwrap_or_default()
+                }
+                Err(e) => {
+                    warn!(name = %name, error = ?e, "Failed to fetch version metadata for remote install; using empty manifest");
+                    serde_json::Value::Object(Default::default())
+                }
+            };
+
+            cx.update(|cx| {
+                let extensions = cx.global_mut::<ExtensionsModel>();
+                match install::install_remote_module(
+                    &name,
+                    &version,
+                    &display_name,
+                    &description,
+                    &pricing_model,
+                    &version_manifest,
+                    extensions,
+                ) {
+                    Ok(ext) => {
+                        info!(id = %ext.id, "Installed remote extension from Hive");
+                        save_extensions_async(extensions.clone(), cx);
+                        module_settings_controller::refresh_runtime(cx);
                     }
-                    cx.refresh_windows();
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
-                .ok();
-            }
-            Err(chatty_core::hive::ClientError::Unauthorized) => {
-                warn!(name = %name, "Download requires authentication");
-                cx.update(|cx| {
-                    let state = cx.global_mut::<MarketplaceState>();
-                    state.set_error(
-                        "Login required to download modules. Please sign in first.".to_string(),
-                    );
-                    cx.refresh_windows();
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after auth error"))
-                .ok();
-            }
-            Err(e) => {
-                error!(error = ?e, name = %name, "Failed to download module");
-                cx.update(|cx| {
-                    let state = cx.global_mut::<MarketplaceState>();
-                    state.set_error(format!("Download failed: {e}"));
-                    cx.refresh_windows();
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after download error"))
-                .ok();
+                    Err(e) => {
+                        error!(error = ?e, "Failed to install remote extension");
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.set_error(format!("Install failed: {e}"));
+                    }
+                }
+                cx.refresh_windows();
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to update UI after remote install"))
+            .ok();
+        } else {
+            match client.download(&name, &version).await {
+                Ok(download) => {
+                    cx.update(|cx| {
+                        let extensions = cx.global_mut::<ExtensionsModel>();
+                        match install::install_wasm_module(
+                            &download,
+                            &name,
+                            &version,
+                            &display_name,
+                            &description,
+                            &pricing_model,
+                            extensions,
+                        ) {
+                            Ok(ext) => {
+                                info!(id = %ext.id, "Installed extension from Hive");
+                                save_extensions_async(extensions.clone(), cx);
+                                // Rescan module directory so the new WASM module
+                                // appears in DiscoveredModulesModel and becomes
+                                // available as an agent tool. The scan completion
+                                // triggers RebuildRequired automatically.
+                                module_settings_controller::refresh_runtime(cx);
+                            }
+                            Err(e) => {
+                                error!(error = ?e, "Failed to install extension");
+                                let state = cx.global_mut::<MarketplaceState>();
+                                state.set_error(format!("Install failed: {e}"));
+                            }
+                        }
+                        cx.refresh_windows();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
+                    .ok();
+                }
+                Err(chatty_core::hive::ClientError::Unauthorized) => {
+                    warn!(name = %name, "Download requires authentication");
+                    cx.update(|cx| {
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.set_error(
+                            "Login required to download modules. Please sign in first.".to_string(),
+                        );
+                        cx.refresh_windows();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update UI after auth error"))
+                    .ok();
+                }
+                Err(e) => {
+                    error!(error = ?e, name = %name, "Failed to download module");
+                    cx.update(|cx| {
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.set_error(format!("Download failed: {e}"));
+                        cx.refresh_windows();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update UI after download error"))
+                    .ok();
+                }
             }
         }
     })
@@ -255,10 +308,25 @@ pub fn uninstall_extension(id: String, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Switch a WASM module's execution mode between `"local"` and `"remote"`.
+/// After updating `module.toml` on disk, triggers a module re-scan so the new
+/// mode is reflected immediately in the UI.
+pub fn set_execution_mode(id: String, mode: String, cx: &mut App) {
+    match install::set_module_execution_mode(&id, &mode) {
+        Ok(()) => {
+            info!(id = %id, mode = %mode, "Updated module execution mode");
+            module_settings_controller::refresh_runtime(cx);
+        }
+        Err(e) => {
+            error!(error = ?e, id = %id, mode = %mode, "Failed to set execution mode");
+            let state = cx.global_mut::<MarketplaceState>();
+            state.set_error(format!("Could not change execution mode: {e}"));
+        }
+    }
+    cx.refresh_windows();
+}
+
 /// Toggle the enabled state of an extension.
-///
-/// For MCP extensions this also connects/disconnects the MCP service.
-/// For A2A extensions this probes the agent card when enabling.
 pub fn toggle_extension(id: String, cx: &mut App) {
     let extensions = cx.global_mut::<ExtensionsModel>();
     let Some(ext) = extensions.find_mut(&id) else {
@@ -425,6 +493,7 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
         description: String::new(),
         kind: ExtensionKind::McpServer(config.clone()),
         source: ExtensionSource::Custom,
+        pricing_model: None,
         enabled: true,
     });
     save_extensions_async(extensions.clone(), cx);
