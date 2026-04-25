@@ -69,7 +69,10 @@ fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
                 .iter()
                 .filter(|m| {
                     m.agent
-                        && matches!(m.status, ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote)
+                        && matches!(
+                            m.status,
+                            ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
+                        )
                         && enabled_ids.contains(m.name.as_str())
                 })
                 .map(|m| LocalModuleAgentSummary {
@@ -78,6 +81,7 @@ fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
                     description: m.description.clone(),
                     tools: m.tools.clone(),
                     supports_a2a: m.a2a,
+                    execution_mode: m.execution_mode.clone(),
                 })
                 .collect()
         })
@@ -765,23 +769,7 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
 /// Internet-facing tools are classified here. Module agent calls (invoke_agent /
 /// sub_agent) are classified separately by [`classify_agent_source`].
 pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
-    match tool_name {
-        "fetch" | "fetch_url" => ToolSource::Internet {
-            label: "web fetch".to_string(),
-        },
-        name if name.starts_with("web_search") || name.starts_with("brave_search") => {
-            ToolSource::Internet {
-                label: "web search".to_string(),
-            }
-        }
-        "daytona_run" => ToolSource::Internet {
-            label: "cloud sandbox".to_string(),
-        },
-        "browser_use" => ToolSource::Internet {
-            label: "browser-use.com".to_string(),
-        },
-        _ => ToolSource::Local,
-    }
+    chatty_core::models::message_types::classify_tool_source(tool_name)
 }
 
 /// Classify an agent invocation by agent name into a [`ToolSource`].

@@ -359,6 +359,7 @@ impl ChattyApp {
                             duration: None,
                             text_before,
                             source: classify_tool_source(&name),
+                            execution_engine: chatty_core::models::message_types::classify_initial_execution_engine(&name),
                         };
                         let trace = conv.ensure_streaming_trace();
                         let index = trace.items.len();
@@ -395,6 +396,12 @@ impl ChattyApp {
                     {
                         let args = arguments.clone();
                         if !trace.update_tool_call(&id, |tc| {
+                            tc.execution_engine =
+                                chatty_core::models::message_types::predict_execution_engine(
+                                    &tc.tool_name,
+                                    &args,
+                                )
+                                .or(tc.execution_engine);
                             tc.input = args;
                         }) {
                             warn!(tool_id = %id, "ToolCallInput: tool call not found in model trace");
@@ -426,7 +433,12 @@ impl ChattyApp {
                         let res = result.clone();
                         let is_denied = is_denial_result(&res);
                         if !trace.update_tool_call(&id, |tc| {
-                            tc.output = Some(res);
+                            tc.execution_engine =
+                                chatty_core::models::message_types::detect_execution_engine(
+                                    &tc.tool_name,
+                                    &res,
+                                );
+                            tc.output = Some(res.clone());
                             tc.state = if is_denied {
                                 ToolCallState::Error("Denied by user".to_string())
                             } else {
@@ -645,6 +657,7 @@ impl ChattyApp {
                     if let Some(conv) = store.get_conversation_mut(conversation_id) {
                         conv.set_streaming_message(None);
                         conv.set_streaming_trace(None);
+                        conv.set_streaming_sub_agent_trace(None);
                     }
                 });
             }
@@ -1407,26 +1420,56 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
             Some(progress) = progress_rx.recv() => {
                 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
                 match progress {
-                    InvokeAgentProgress::Started { agent_name, prompt } => {
+                    InvokeAgentProgress::Started {
+                        agent_name,
+                        prompt,
+                        source,
+                    } => {
                         let label = format!("[Agent: {}] {}", agent_name, prompt);
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                conv.start_sub_agent_progress(&label, source.clone());
+                            }
+                        })
+                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent start"))
+                        .ok();
                         chat_view
                             .update(cx, |view, cx| {
-                                let source = classify_agent_source(&agent_name, cx);
-                                view.start_sub_agent_progress(&label, source, cx);
+                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                                    view.start_sub_agent_progress(&label, source, cx);
+                                }
                             })
                             .ok();
                     }
                     InvokeAgentProgress::Text(text) => {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                conv.append_sub_agent_progress(&text);
+                            }
+                        })
+                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent progress"))
+                        .ok();
                         chat_view
                             .update(cx, |view, cx| {
-                                view.append_sub_agent_progress(&text, cx);
+                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                                    view.append_sub_agent_progress(&text, cx);
+                                }
                             })
                             .ok();
                     }
                     InvokeAgentProgress::Finished { success, result } => {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                conv.finalize_sub_agent_progress(success, result.clone());
+                            }
+                        })
+                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent final state"))
+                        .ok();
                         chat_view
                             .update(cx, |view, cx| {
-                                view.finalize_sub_agent_progress(success, result, cx);
+                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                                    view.finalize_sub_agent_progress(success, result, cx);
+                                }
                             })
                             .ok();
                     }
@@ -1530,16 +1573,34 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
         match progress {
             InvokeAgentProgress::Text(text) => {
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                        conv.append_sub_agent_progress(&text);
+                    }
+                })
+                .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist drained sub-agent progress"))
+                .ok();
                 chat_view
                     .update(cx, |view, cx| {
-                        view.append_sub_agent_progress(&text, cx);
+                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                            view.append_sub_agent_progress(&text, cx);
+                        }
                     })
                     .ok();
             }
             InvokeAgentProgress::Finished { success, result } => {
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                        conv.finalize_sub_agent_progress(success, result.clone());
+                    }
+                })
+                .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist drained sub-agent final state"))
+                .ok();
                 chat_view
                     .update(cx, |view, cx| {
-                        view.finalize_sub_agent_progress(success, result, cx);
+                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                            view.finalize_sub_agent_progress(success, result, cx);
+                        }
                     })
                     .ok();
             }

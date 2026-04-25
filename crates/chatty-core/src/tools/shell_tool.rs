@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
+use crate::models::message_types::ExecutionEngine;
 use crate::services::shell_service::{ShellOutput, ShellSession, ShellStatus};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::tools::ToolError;
@@ -20,6 +21,7 @@ pub struct ShellExecuteOutput {
     pub stdout: String,
     pub exit_code: i32,
     pub truncated: bool,
+    pub execution_engine: ExecutionEngine,
 }
 
 impl From<ShellOutput> for ShellExecuteOutput {
@@ -28,6 +30,7 @@ impl From<ShellOutput> for ShellExecuteOutput {
             stdout: o.stdout,
             exit_code: o.exit_code,
             truncated: o.truncated,
+            execution_engine: ExecutionEngine::Shell,
         }
     }
 }

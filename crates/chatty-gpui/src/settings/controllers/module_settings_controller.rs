@@ -1019,7 +1019,7 @@ pub fn refresh_runtime(cx: &mut App) {
                 Ok(registry) => {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
                     let mut gateway = ProtocolGateway::new(shared, settings.gateway_port);
-                    
+
                     // Attach hive client and runner URL for remote execution support
                     let hive_settings_result = cx.update(|cx| {
                         let hive = cx.global::<HiveSettingsModel>();
@@ -1041,7 +1041,7 @@ pub fn refresh_runtime(cx: &mut App) {
                             .collect();
                         (hive.clone(), hive.token.clone(), paid_modules)
                     });
-                    
+
                     if let Ok((hive_settings, token, paid_modules)) = hive_settings_result {
                         // Create hive client with auth token if available
                         let mut hive_client = HiveRegistryClient::new(&hive_settings.registry_url);
@@ -1051,11 +1051,15 @@ pub fn refresh_runtime(cx: &mut App) {
                         let hive_client = Arc::new(hive_client);
 
                         // Wire CreditGuard for pre-invocation balance checks
-                        let credit_guard = Arc::new(CreditGuard::with_default_ttl(Arc::clone(&hive_client)));
+                        let credit_guard =
+                            Arc::new(CreditGuard::with_default_ttl(Arc::clone(&hive_client)));
 
                         // Wire UsageCollector for post-invocation usage reporting
                         let usage_config = UsageCollectorConfig::default();
-                        let usage_collector = Arc::new(UsageCollector::new(&hive_settings.registry_url, usage_config));
+                        let usage_collector = Arc::new(UsageCollector::new(
+                            &hive_settings.registry_url,
+                            usage_config,
+                        ));
                         if let Some(t) = token {
                             let uc = Arc::clone(&usage_collector);
                             tokio::spawn(async move { uc.set_token(t).await });
@@ -1072,7 +1076,7 @@ pub fn refresh_runtime(cx: &mut App) {
                             .with_usage_collector(usage_collector)
                             .with_paid_modules(paid_modules);
                     }
-                    
+
                     gateway.start().await.map(|_| gateway)
                 }
                 Err(err) => Err(err),

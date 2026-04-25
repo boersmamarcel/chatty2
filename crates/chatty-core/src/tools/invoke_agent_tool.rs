@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
+use crate::models::message_types::ToolSource;
 use crate::services::a2a_client::A2aClient;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
@@ -14,7 +15,11 @@ use crate::tools::list_agents_tool::LocalModuleAgentSummary;
 #[derive(Debug, Clone)]
 pub enum InvokeAgentProgress {
     /// Agent invocation started.
-    Started { agent_name: String, prompt: String },
+    Started {
+        agent_name: String,
+        prompt: String,
+        source: ToolSource,
+    },
     /// A text chunk from the agent's response.
     Text(String),
     /// Agent invocation finished.
@@ -169,6 +174,9 @@ impl Tool for InvokeAgentTool {
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: agent_name.clone(),
                 prompt: prompt.clone(),
+                source: ToolSource::ExternalService {
+                    name: agent_name.clone(),
+                },
             });
             return self.call_streaming(config, &prompt).await;
         }
@@ -201,6 +209,11 @@ impl Tool for InvokeAgentTool {
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: agent_name.clone(),
                 prompt: prompt.clone(),
+                source: if matches!(module.execution_mode.as_str(), "remote" | "remote_only") {
+                    ToolSource::HiveCloud
+                } else {
+                    ToolSource::Local
+                },
             });
             return self.call_streaming(&config, &prompt).await;
         }
@@ -239,9 +252,10 @@ impl InvokeAgentTool {
             .send_message_stream(config, prompt)
             .await
             .map_err(|e| {
+                let err_text = format!("⚠️ Failed to invoke agent '{}': {}", config.name, e);
                 self.send_progress(InvokeAgentProgress::Finished {
                     success: false,
-                    result: None,
+                    result: Some(err_text),
                 });
                 InvokeAgentError::InvocationFailed(format!(
                     "Failed to invoke agent '{}': {}",
@@ -318,17 +332,16 @@ impl InvokeAgentTool {
 
         debug!(agent = %config.name, response_len = response.len(), "Agent responded");
 
-        // Return a brief summary to rig-core so the LLM knows the agent
-        // finished without echoing the full response (it's already shown
-        // in the sub-agent trace block visible to the user).
+        // Return the actual agent output to the parent model as well. This keeps
+        // the sub-agent trace useful for transparency while still giving the
+        // calling model the concrete result it needs to answer correctly.
         Ok(InvokeAgentOutput {
             agent: config.name.clone(),
-            response: format!(
-                "Agent '{}' completed successfully. The full response ({} chars) \
-                 has been displayed to the user in the sub-agent trace.",
-                config.name,
-                response.len()
-            ),
+            response: if response.is_empty() {
+                format!("Agent '{}' completed successfully.", config.name)
+            } else {
+                response
+            },
             success: true,
         })
     }
@@ -356,6 +369,7 @@ mod tests {
             description: format!("{} module", name),
             tools: vec!["tool_a".to_string()],
             supports_a2a,
+            execution_mode: "local".to_string(),
         }
     }
 

@@ -101,7 +101,12 @@ impl RenderOnce for McpIndicatorView {
 }
 
 /// Render a single server item in the popover
-fn render_server_item(ext_id: String, name: String, enabled: bool, is_external: bool) -> impl IntoElement {
+fn render_server_item(
+    ext_id: String,
+    name: String,
+    enabled: bool,
+    is_external: bool,
+) -> impl IntoElement {
     let button_id = SharedString::from(format!("toggle-{}", name));
     let display_name = if is_external {
         format!("↗ {}", name)

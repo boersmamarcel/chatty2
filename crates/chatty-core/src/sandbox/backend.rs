@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::models::message_types::ExecutionEngine;
+
 /// Result of executing code in a sandbox container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
@@ -13,6 +15,8 @@ pub struct ExecutionResult {
     /// Exposed port mappings: container_port → host_port (populated when ports are published)
     #[serde(default)]
     pub port_mappings: HashMap<u16, u16>,
+    /// Which backend actually executed the code.
+    pub execution_engine: ExecutionEngine,
 }
 
 /// Configuration for a sandbox container.

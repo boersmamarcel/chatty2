@@ -451,13 +451,13 @@ fn strip_html_tags(html: &str) -> String {
 
 /// Truncate a snippet to a maximum length at a word boundary
 fn truncate_snippet(s: &str) -> String {
-    if s.len() <= MAX_SNIPPET_LENGTH {
+    if s.chars().count() <= MAX_SNIPPET_LENGTH {
         return s.to_string();
     }
-    // Find last space before the limit
-    let truncated = &s[..MAX_SNIPPET_LENGTH];
+
+    let truncated = s.chars().take(MAX_SNIPPET_LENGTH).collect::<String>();
     if let Some(last_space) = truncated.rfind(' ') {
-        format!("{}...", &s[..last_space])
+        format!("{}...", &truncated[..last_space])
     } else {
         format!("{}...", truncated)
     }
@@ -479,6 +479,15 @@ mod tests {
         let result = truncate_snippet(&long);
         assert!(result.len() <= MAX_SNIPPET_LENGTH + 5); // +5 for "..."
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_snippet_multibyte_boundary() {
+        let long = format!("{}📈 trailing text", "a".repeat(MAX_SNIPPET_LENGTH - 1));
+        let result = truncate_snippet(&long);
+        assert!(result.ends_with("..."));
+        assert!(result.contains('📈'));
+        assert!(result.chars().count() <= MAX_SNIPPET_LENGTH + 3);
     }
 
     #[tokio::test]

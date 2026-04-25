@@ -3,6 +3,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::models::message_types::ExecutionEngine;
 use crate::sandbox::backend::Language;
 use crate::sandbox::manager::SandboxManager;
 use crate::tools::ToolError;
@@ -27,6 +28,7 @@ pub struct ExecuteCodeOutput {
     pub stderr: String,
     pub exit_code: i64,
     pub timed_out: bool,
+    pub execution_engine: ExecutionEngine,
     /// Published port mappings: container_port → host_port.
     /// When a web server is running, tell the user to connect to http://localhost:<host_port>
     pub port_mappings: std::collections::HashMap<u16, u16>,
@@ -34,11 +36,13 @@ pub struct ExecuteCodeOutput {
 
 // ── Tool ─────────────────────────────────────────────────────────────────────
 
-/// Execute code in an isolated Docker sandbox.
+/// Execute code in an isolated sandbox.
 ///
 /// Supported languages: python, javascript, typescript, rust, bash.
-/// The sandbox preserves state (variables, installed packages) throughout
-/// the conversation. No network access by default.
+/// Python may use the fast Monty interpreter for simple snippets and fall back
+/// to Docker automatically; other languages use Docker. The sandbox preserves
+/// state (variables, installed packages) throughout the conversation. No
+/// network access by default.
 #[derive(Clone)]
 pub struct ExecuteCodeTool {
     manager: Arc<SandboxManager>,
@@ -59,7 +63,7 @@ impl Tool for ExecuteCodeTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         serde_json::from_value(serde_json::json!({
             "name": "execute_code",
-            "description": "Execute code in an isolated Docker sandbox. Supported languages: python, javascript, typescript, rust, bash. The sandbox preserves state (variables, installed packages) throughout the conversation. To start a web server the user can access, set expose_port to the port your server listens on (e.g. 8080). The actual host port is returned in port_mappings — tell the user to open http://localhost:<host_port>.",
+            "description": "Execute code in an isolated sandbox. Supported languages: python, javascript, typescript, rust, bash. Python may use the built-in Monty interpreter for simple snippets and automatically fall back to Docker when a fuller environment is needed; other languages use Docker. The sandbox preserves state (variables, installed packages) throughout the conversation. The output includes execution_engine so you can tell the user whether Monty or Docker ran the code. To start a web server the user can access, set expose_port to the port your server listens on (e.g. 8080). The actual host port is returned in port_mappings — tell the user to open http://localhost:<host_port>.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -95,6 +99,7 @@ impl Tool for ExecuteCodeTool {
             stderr: result.stderr,
             exit_code: result.exit_code,
             timed_out: result.timed_out,
+            execution_engine: result.execution_engine,
             port_mappings: result.port_mappings,
         })
     }

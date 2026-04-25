@@ -286,7 +286,7 @@ impl ListToolsTool {
         if tools.execute_code {
             native_tools.push(ToolInfo {
                 name: "execute_code".to_string(),
-                description: "Execute code in an isolated Docker sandbox. Supports python, javascript, typescript, rust, and bash. State persists throughout the conversation. No network access.".to_string(),
+                description: "Execute code in an isolated sandbox. Python may use the built-in Monty interpreter for simple snippets and fall back to Docker automatically; javascript, typescript, rust, and bash use Docker. State persists throughout the conversation. No network access.".to_string(),
                 source: "native".to_string(),
             });
         }

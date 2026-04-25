@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chatty_core::hive::models::{Category, ModuleMetadata};
 use gpui::Global;
 
@@ -15,6 +17,9 @@ pub struct MarketplaceState {
     pub loading: bool,
     pub error: Option<String>,
     pub featured: Vec<ModuleMetadata>,
+    /// Per-module download progress: module name → 0.0 … 1.0.
+    /// Only present while a download is in flight.
+    pub downloading: HashMap<String, f32>,
 }
 
 impl MarketplaceState {
@@ -35,6 +40,21 @@ impl MarketplaceState {
     pub fn set_error(&mut self, msg: String) {
         self.loading = false;
         self.error = Some(msg);
+    }
+
+    /// Record that `name` is being downloaded at `progress` (0.0 – 1.0).
+    pub fn set_download_progress(&mut self, name: &str, progress: f32) {
+        self.downloading.insert(name.to_string(), progress.clamp(0.0, 1.0));
+    }
+
+    /// Remove the download-in-progress entry for `name` (called on success or failure).
+    pub fn clear_download_progress(&mut self, name: &str) {
+        self.downloading.remove(name);
+    }
+
+    /// Return the current download progress for `name`, or `None` if not downloading.
+    pub fn download_progress(&self, name: &str) -> Option<f32> {
+        self.downloading.get(name).copied()
     }
 
     pub fn set_results(&mut self, items: Vec<ModuleMetadata>, total: i64, page: i64) {

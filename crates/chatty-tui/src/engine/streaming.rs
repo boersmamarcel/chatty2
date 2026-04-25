@@ -97,8 +97,16 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
 
     fn on_progress(&mut self, progress: InvokeAgentProgress) {
         match progress {
-            InvokeAgentProgress::Started { agent_name, prompt } => {
-                let label = format!("[Agent: {agent_name}] {prompt}");
+            InvokeAgentProgress::Started {
+                agent_name,
+                prompt,
+                source,
+            } => {
+                let mode = match source {
+                    chatty_core::models::message_types::ToolSource::Local => "local",
+                    _ => "remote",
+                };
+                let label = format!("[{mode} agent: {agent_name}] {prompt}");
                 let _ = self.event_tx.send(AppEvent::SubAgentProgress(label));
             }
             InvokeAgentProgress::Text(text) => {

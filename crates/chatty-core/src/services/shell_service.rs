@@ -34,6 +34,11 @@ struct ShellProcess {
     is_sandboxed: bool,
 }
 
+struct CommandReadResult {
+    exit_code: i32,
+    shell_exited: bool,
+}
+
 /// A persistent shell session that maintains state across multiple commands.
 ///
 /// The session keeps a bash process alive, preserving environment variables,
@@ -120,6 +125,24 @@ impl ShellSession {
     /// Return the workspace directory this session was created with
     pub fn workspace_dir(&self) -> Option<&String> {
         self.workspace_dir.as_ref()
+    }
+
+    fn truncate_output_at_char_boundary(output: &mut String, max_output_bytes: usize) {
+        if output.len() <= max_output_bytes {
+            return;
+        }
+
+        let original_len = output.len();
+        let mut end = max_output_bytes;
+        while end > 0 && !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
+        output.push_str(&format!("\n... [truncated {} bytes]", original_len - end));
+    }
+
+    fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
+        status.code().unwrap_or(-1)
     }
 
     /// Check if the current session process is running inside a sandbox
@@ -514,7 +537,17 @@ impl ShellSession {
                     .map_err(|e| anyhow!("Failed to read from shell stdout: {}", e))?;
 
                 if bytes_read == 0 {
-                    return Err(anyhow!("Shell process terminated unexpectedly"));
+                    return match proc.child.try_wait() {
+                        Ok(Some(status)) => Ok(CommandReadResult {
+                            exit_code: Self::exit_code_from_status(status),
+                            shell_exited: true,
+                        }),
+                        Ok(None) => Err(anyhow!("Shell stdout closed before command completion")),
+                        Err(e) => Err(anyhow!(
+                            "Failed to read shell exit status after stdout closed: {}",
+                            e
+                        )),
+                    };
                 }
 
                 if line.starts_with(&marker_prefix) {
@@ -526,7 +559,10 @@ impl ShellSession {
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(-1);
 
-                    return Ok(exit_code);
+                    return Ok(CommandReadResult {
+                        exit_code,
+                        shell_exited: false,
+                    });
                 }
 
                 output.push_str(&line);
@@ -535,20 +571,19 @@ impl ShellSession {
         .await;
 
         match read_result {
-            Ok(Ok(exit_code)) => {
+            Ok(Ok(result)) => {
+                if result.shell_exited {
+                    process.take();
+                }
+
                 let truncated = output.len() > self.max_output_bytes;
                 if truncated {
-                    let original_len = output.len();
-                    output.truncate(self.max_output_bytes);
-                    output.push_str(&format!(
-                        "\n... [truncated {} bytes]",
-                        original_len - self.max_output_bytes
-                    ));
+                    Self::truncate_output_at_char_boundary(&mut output, self.max_output_bytes);
                 }
 
                 Ok(ShellOutput {
                     stdout: output.trim_end().to_string(),
-                    exit_code,
+                    exit_code: result.exit_code,
                     truncated,
                 })
             }
@@ -765,9 +800,12 @@ mod tests {
     async fn test_exit_code_capture() {
         let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
 
-        let _result = session.execute("exit 42").await;
-        // After `exit 42`, the shell process dies, but it should respawn
-        // on the next command. Use a non-exit failing command to test exit code.
+        let result = session.execute("exit 42").await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.exit_code, 42);
+
+        // After `exit 42`, the shell process dies, but it should respawn on the next command.
         let result = session.execute("false").await;
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -1133,5 +1171,23 @@ mod tests {
 
         let masked_entry = masked.iter().find(|(k, _)| k == "MY_SECRET").unwrap();
         assert_eq!(masked_entry.1, "****", "Secret value should be masked");
+    }
+
+    #[test]
+    fn test_truncate_output_at_char_boundary_preserves_utf8() {
+        let mut output = format!("{}📈bbb📈tail", "a".repeat(995));
+        ShellSession::truncate_output_at_char_boundary(&mut output, 1004);
+        assert!(output.contains('📈'));
+        assert!(output.contains("[truncated"));
+    }
+
+    #[test]
+    fn test_exit_code_from_status_preserves_shell_exit_code() {
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 42")
+            .status()
+            .expect("failed to capture exit status");
+        assert_eq!(ShellSession::exit_code_from_status(status), 42);
     }
 }

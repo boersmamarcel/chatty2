@@ -1,11 +1,16 @@
 use chatty_module_registry::ModuleRegistry;
-use chatty_wasm_runtime::{LlmProvider, Message, CompletionResponse, ResourceLimits};
-use std::sync::Arc;
+use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 struct Noop;
 impl LlmProvider for Noop {
-    fn complete(&self, _: &str, _: Vec<Message>, _: Option<String>) -> Result<CompletionResponse, String> {
+    fn complete(
+        &self,
+        _: &str,
+        _: Vec<Message>,
+        _: Option<String>,
+    ) -> Result<CompletionResponse, String> {
         Err("noop".into())
     }
 }

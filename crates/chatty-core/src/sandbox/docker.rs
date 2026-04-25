@@ -17,6 +17,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::backend::{ExecutionResult, Language, SandboxBackend, SandboxConfig};
+use crate::models::message_types::ExecutionEngine;
 
 /// Build a list of common Docker socket paths to try as fallbacks.
 fn fallback_socket_paths() -> Vec<String> {
@@ -354,6 +355,7 @@ impl DockerSandbox {
                 exit_code,
                 timed_out: false,
                 port_mappings: HashMap::new(), // filled in by caller
+                execution_engine: ExecutionEngine::Docker,
             })
         };
 
@@ -365,6 +367,7 @@ impl DockerSandbox {
                 exit_code: -1,
                 timed_out: true,
                 port_mappings: HashMap::new(),
+                execution_engine: ExecutionEngine::Docker,
             }),
         }
     }

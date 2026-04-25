@@ -140,6 +140,22 @@ interface logging {
     log: func(level: string, message: string);
 }
 
+/// Sandboxed file access for reading model weights from disk.
+///
+/// Paths are resolved relative to the module's `weights-root` config key.
+/// Absolute paths and `..` path components are rejected by the host.
+/// Free modules never need this; ML inference modules use it to load weights
+/// once at startup.
+interface file {
+    /// Read the raw bytes of a file at `path`.
+    ///
+    /// `path` must be relative (no leading `/`, no `..` segments).
+    /// The host resolves it against the module's `weights-root` config value.
+    /// Returns an error if the path is invalid, the file is missing, or
+    /// `weights-root` is not configured.
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+}
+
 /// Billing interface for paid modules.
 ///
 /// Free modules never call this interface — zero overhead.
@@ -217,7 +233,8 @@ world module {
     import llm;
     import config;
     import logging;
-    import billing;  // optional: only called by paid modules
+    import file;      // optional: ML modules use this to load weights
+    import billing;   // optional: only called by paid modules
 
     // Guest → Host exports
     export agent;

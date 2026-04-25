@@ -1822,6 +1822,7 @@ version = "0.3.9"
 dependencies = [
  "anyhow",
  "chatty-core",
+ "chatty-module-registry",
  "clap",
  "crossterm 0.29.0",
  "dirs 5.0.1",
@@ -4870,8 +4871,10 @@ name = "hive-client"
 version = "0.3.9"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "percent-encoding",
  "rand 0.8.5",

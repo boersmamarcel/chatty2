@@ -9,9 +9,7 @@ use crate::gateway::GatewayState;
 // Handler: GET /
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn index(
-    State(state): State<GatewayState>,
-) -> impl IntoResponse {
+pub(crate) async fn index(State(state): State<GatewayState>) -> impl IntoResponse {
     let reg = state.registry.read().await;
 
     let modules: Vec<Value> = reg

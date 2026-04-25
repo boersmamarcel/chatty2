@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
+use crate::models::message_types::ExecutionEngine;
+
 /// Base URL for the Daytona cloud API
 const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
 
@@ -52,6 +54,8 @@ pub struct DaytonaToolOutput {
     pub result: String,
     /// Exit code (0 = success)
     pub exit_code: i32,
+    /// Which runtime executed the code.
+    pub execution_engine: ExecutionEngine,
     /// Whether the sandbox was cleaned up after use
     pub sandbox_cleaned_up: bool,
     /// Local file paths of downloaded artifacts (images, CSVs, etc.)
@@ -1083,6 +1087,7 @@ impl Tool for DaytonaTool {
             code,
             result: final_result,
             exit_code,
+            execution_engine: ExecutionEngine::Daytona,
             sandbox_cleaned_up: cleaned_up,
             downloaded_files,
         })

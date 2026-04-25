@@ -10,10 +10,11 @@ use std::sync::Arc;
 
 use axum::{
     Json,
+    body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
 };
@@ -26,7 +27,7 @@ use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
 };
-use super::openai::{build_oai_request_from_prompt, execute_remotely, should_route_remotely};
+use super::openai::should_route_remotely;
 
 // ---------------------------------------------------------------------------
 // Handler: GET /a2a/{module}/.well-known/agent.json
@@ -58,9 +59,7 @@ pub(crate) async fn module_agent_card(
 // Handler: GET /.well-known/agent.json  (aggregated)
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn aggregated_agent_card(
-    State(state): State<GatewayState>,
-) -> impl IntoResponse {
+pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> impl IntoResponse {
     let names: Vec<String> = {
         let reg = state.registry.read().await;
         reg.module_names().map(str::to_string).collect()
@@ -82,6 +81,76 @@ pub(crate) async fn aggregated_agent_card(
         "gateway": true,
         "agents": agents,
     }))
+}
+
+async fn forward_remote_a2a_jsonrpc(
+    module_name: &str,
+    body: Value,
+    state: &GatewayState,
+) -> Result<Response, String> {
+    let runner_url = state
+        .runner_url
+        .as_ref()
+        .ok_or_else(|| "Remote execution requested but runner URL is not configured".to_string())?;
+    let url = format!("{}/a2a/{}", runner_url.trim_end_matches('/'), module_name);
+
+    let client = reqwest::Client::new();
+    let mut req_builder = client.post(&url).json(&body);
+    if let Some(hive_client) = state.hive_client.as_ref() {
+        if let Some(token) = hive_client.token() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+        } else {
+            tracing::warn!(
+                module = module_name,
+                "Remote A2A forwarding: hive_client has no token — runner will reject with 401"
+            );
+        }
+    }
+
+    let response = req_builder
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to runner: {}", e))?;
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    if content_type.contains("text/event-stream") {
+        let stream = async_stream::stream! {
+            let mut response = response;
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => yield Ok::<_, std::io::Error>(chunk),
+                    Ok(None) => break,
+                    Err(err) => {
+                        yield Err(std::io::Error::other(format!("runner SSE read failed: {}", err)));
+                        break;
+                    }
+                }
+            }
+        };
+        return Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from_stream(stream))
+            .map_err(|e| format!("Failed to build proxied SSE response: {}", e));
+    }
+
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read runner response: {}", e))?;
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body_bytes))
+        .map_err(|e| format!("Failed to build proxied response: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -158,31 +227,23 @@ async fn handle_message_send(
     };
 
     // Remote routing: if the registry says this module is `remote`/`remote_only`,
-    // forward to the hive-runner via its OpenAI-compat endpoint and return the
-    // assistant text as the A2A artifact.
+    // forward to the hive-runner's A2A endpoint so the remote execution keeps
+    // the same JSON-RPC shape as local module execution.
     if should_route_remotely(module_name, state).await {
         tracing::info!(module = module_name, "A2A: routing to remote runner");
-        let oai_req = build_oai_request_from_prompt(module_name, &content);
-        return match execute_remotely(module_name, &oai_req, state).await {
-            Ok(resp) => {
-                let text = resp
-                    .choices
-                    .into_iter()
-                    .next()
-                    .map(|c| c.message.content)
-                    .unwrap_or_default();
-                let task_id = format!("task-{}", crate::gateway::new_id());
-                json_rpc_ok(
-                    id,
-                    json!({
-                        "id": task_id,
-                        "status": { "state": "completed" },
-                        "artifacts": [{
-                            "parts": [{ "type": "text", "text": text }]
-                        }]
-                    }),
-                )
-            }
+        return match forward_remote_a2a_jsonrpc(
+            module_name,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "message/send",
+                "params": params,
+            }),
+            state,
+        )
+        .await
+        {
+            Ok(response) => response,
             Err(e) => {
                 tracing::warn!(module = module_name, error = %e, "Remote A2A execution failed");
                 json_rpc_error(
@@ -208,12 +269,7 @@ async fn handle_message_send(
         if state.paid_modules.contains(module_name) {
             if let Err(e) = guard.has_credits(module_name).await {
                 drop(reg);
-                return json_rpc_error(
-                    StatusCode::OK,
-                    id,
-                    -32000,
-                    e.to_string(),
-                );
+                return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
             }
         }
     }
@@ -228,14 +284,20 @@ async fn handle_message_send(
                     let usage = Arc::clone(usage);
                     let name = module_name.to_string();
                     async move {
-                        usage.record_invocation(
-                            &name,
-                            "latest",
-                            metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
-                            metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
-                            metrics.as_ref().map(|m| m.fuel_consumed),
-                            metrics.as_ref().map(|m| m.execution_ms),
-                        ).await;
+                        usage
+                            .record_invocation(
+                                &name,
+                                "latest",
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.input_tokens.map(|t| t as i32)),
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.output_tokens.map(|t| t as i32)),
+                                metrics.as_ref().map(|m| m.fuel_consumed),
+                                metrics.as_ref().map(|m| m.execution_ms),
+                            )
+                            .await;
                     }
                 });
             }
@@ -300,55 +362,40 @@ async fn handle_message_stream(
     // registry first would return 404 for them.
     if should_route_remotely(&module_name, state).await {
         tracing::info!(module = %module_name, "A2A stream: routing to remote runner");
-        let oai_req = build_oai_request_from_prompt(&module_name, &content);
-        let task_id_clone = task_id.clone();
-        let id_clone = id.clone();
-        let result = execute_remotely(&module_name, &oai_req, state).await;
-        let stream = async_stream::stream! {
-            let working = json!({
+        return match forward_remote_a2a_jsonrpc(
+            &module_name,
+            json!({
                 "jsonrpc": "2.0",
-                "id": id_clone,
-                "result": {
-                    "id": task_id_clone,
-                    "status": { "state": "working" },
-                    "final": false
-                }
-            });
-            yield Ok::<_, std::convert::Infallible>(Event::default().data(working.to_string()));
-
-            let payload = match result {
-                Ok(resp) => {
-                    let text = resp
-                        .choices
-                        .into_iter()
-                        .next()
-                        .map(|c| c.message.content)
-                        .unwrap_or_default();
-                    json!({
+                "id": id,
+                "method": "message/stream",
+                "params": params,
+            }),
+            state,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                let stream = async_stream::stream! {
+                    let failed = json!({
                         "jsonrpc": "2.0",
-                        "id": id_clone,
+                        "id": id,
                         "result": {
-                            "id": task_id_clone,
-                            "status": { "state": "completed" },
-                            "artifacts": [{
-                                "parts": [{ "type": "text", "text": text }]
-                            }],
+                            "id": task_id,
+                            "status": {
+                                "state": "failed",
+                                "message": { "parts": [{ "type": "text", "text": format!("Remote execution failed: {}", e) }] }
+                            },
                             "final": true
                         }
-                    })
-                }
-                Err(e) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id_clone,
-                    "error": {
-                        "code": INTERNAL_ERROR,
-                        "message": format!("Remote execution failed: {}", e),
-                    }
-                }),
-            };
-            yield Ok(Event::default().data(payload.to_string()));
+                    });
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(failed.to_string()));
+                };
+                Sse::new(stream)
+                    .keep_alive(KeepAlive::default())
+                    .into_response()
+            }
         };
-        return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
     }
 
     // Verify the module exists in the local registry before starting the stream.

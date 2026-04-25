@@ -166,7 +166,7 @@ pub fn build_memory_context_block(hits: Vec<MemoryHit>) -> Option<String> {
             "For filesystem skills, call `read_skill` with the skill name to get full instructions. For memory-backed skills, use `search_memory` to recall the saved procedure.\n",
         );
         block.push_str(
-            "For Python-oriented skills, prefer `uv` for shell package management, or use `execute_code` when you want Docker-isolated execution.\n",
+            "For Python-oriented skills, prefer `uv` for shell package management, or use `execute_code` when you want isolated sandbox execution.\n",
         );
         for hit in &skill_hits {
             let display_name = hit

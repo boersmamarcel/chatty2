@@ -60,7 +60,6 @@ pub(super) async fn build_provider_agent(
             let key =
                 api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
 
-
             let is_reasoning = is_reasoning_model(&model_config.model_identifier);
             let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
 

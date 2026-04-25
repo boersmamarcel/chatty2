@@ -65,6 +65,12 @@ impl WasmModule {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
+        // SIMD128: 4-wide f32/i32 vector ops — ~4× throughput for ML kernels.
+        // Enabled here; modules opt in at compile time via +simd128 RUSTFLAGS.
+        config.wasm_simd(true);
+        // Threads proposal: shared linear memory + atomics for Rayon-based
+        // parallelism in ML modules (wasm32-wasip2 + wasi:threads).
+        config.wasm_threads(true);
 
         Engine::new(&config).context("failed to create Wasmtime engine")
     }
@@ -422,7 +428,11 @@ mod convert {
     pub fn chat_response_from_v01(resp: v1::ChatResponse) -> v2::ChatResponse {
         v2::ChatResponse {
             content: resp.content,
-            tool_calls: resp.tool_calls.into_iter().map(tool_call_from_v01).collect(),
+            tool_calls: resp
+                .tool_calls
+                .into_iter()
+                .map(tool_call_from_v01)
+                .collect(),
             usage: resp.usage.map(|u| v2::TokenUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,

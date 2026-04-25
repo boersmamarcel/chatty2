@@ -184,7 +184,11 @@ pub(crate) async fn execute_remotely(
         .as_ref()
         .ok_or_else(|| "Remote execution requested but runner_url not configured".to_string())?;
 
-    let url = format!("{}/v1/{}/chat/completions", runner_url.trim_end_matches('/'), module_name);
+    let url = format!(
+        "{}/v1/{}/chat/completions",
+        runner_url.trim_end_matches('/'),
+        module_name
+    );
 
     // Forward the user's Hive Bearer token so the runner can authenticate the
     // request, look up the user, and deduct credits from the correct account
@@ -242,7 +246,11 @@ async fn run_chat(
         }
 
         return match execute_remotely(module_name, body, &state).await {
-            Ok(response) => (StatusCode::OK, Json(serde_json::to_value(response).unwrap_or_default())).into_response(),
+            Ok(response) => (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({
@@ -309,14 +317,20 @@ async fn run_chat(
                     let usage = Arc::clone(usage);
                     let name = module_name.to_string();
                     async move {
-                        usage.record_invocation(
-                            &name,
-                            "latest",
-                            metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
-                            metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
-                            metrics.as_ref().map(|m| m.fuel_consumed),
-                            metrics.as_ref().map(|m| m.execution_ms),
-                        ).await;
+                        usage
+                            .record_invocation(
+                                &name,
+                                "latest",
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.input_tokens.map(|t| t as i32)),
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.output_tokens.map(|t| t as i32)),
+                                metrics.as_ref().map(|m| m.fuel_consumed),
+                                metrics.as_ref().map(|m| m.execution_ms),
+                            )
+                            .await;
                     }
                 });
             }
@@ -378,25 +392,6 @@ pub(crate) async fn should_route_remotely(module_name: &str, state: &GatewayStat
             );
             false
         }
-    }
-}
-
-/// Build an OpenAI-compat request from a single user prompt — used by the
-/// A2A handler when routing remote-mode modules through the runner's
-/// `/v1/{module}/chat/completions` endpoint.
-pub(crate) fn build_oai_request_from_prompt(
-    module_name: &str,
-    prompt: &str,
-) -> ChatCompletionRequest {
-    ChatCompletionRequest {
-        model: module_name.to_string(),
-        messages: vec![OaiMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        }],
-        temperature: None,
-        max_tokens: None,
-        stream: None,
     }
 }
 

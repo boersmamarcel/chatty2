@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+// futures_util is needed for the Stream bound on BegunDownload::stream.
+use futures_util;
 
 // ── Module metadata ────────────────────────────────────────────────────────
 
@@ -85,6 +87,24 @@ pub struct DownloadResult {
     pub publisher_public_key: Option<String>,
     /// The manifest JSON from the version record.
     pub manifest: Value,
+}
+
+/// An in-progress download whose body has not yet been consumed.
+///
+/// Returned by [`HiveRegistryClient::begin_download`]; stream the body
+/// chunk-by-chunk (reporting progress between each), then pass the
+/// collected bytes + this value to [`HiveRegistryClient::finalize_download`].
+pub struct BegunDownload {
+    /// `Content-Length` from the response, or 0 if the server did not send one.
+    pub total_size: u64,
+    /// `x-wasm-sha256` response header (hex-encoded SHA-256), if present.
+    pub registry_hash: Option<String>,
+    /// `x-signature` response header (Ed25519 signature), if present.
+    pub signature: Option<String>,
+    /// `x-publisher-public-key` response header, if present.
+    pub publisher_public_key: Option<String>,
+    /// Streaming response body.  Consume with `futures_util::StreamExt::next`.
+    pub stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
 }
 
 // ── Authentication ─────────────────────────────────────────────────────────

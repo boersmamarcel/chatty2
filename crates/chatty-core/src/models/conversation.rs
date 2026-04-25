@@ -10,7 +10,7 @@ use rig::completion::message::{AssistantContent, Text};
 
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;
-use crate::models::message_types::SystemTrace;
+use crate::models::message_types::{SystemTrace, ToolSource};
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::services::shell_service::ShellSession;
@@ -72,6 +72,10 @@ pub struct Conversation {
     streaming_message: Option<String>,
     /// Partial streaming trace being composed (None if no active stream)
     streaming_trace: Option<SystemTrace>,
+    /// Transient sub-agent progress trace shown as a separate in-progress UI message.
+    /// This is kept in-memory so switching conversations during an active
+    /// sub-agent run can restore the trace and its source badge.
+    streaming_sub_agent_trace: Option<SystemTrace>,
     /// Shared state for artifacts queued by AddAttachmentTool during a stream
     pending_artifacts: PendingArtifacts,
     /// Persistent shell session for this conversation (lazily initialized)
@@ -139,6 +143,7 @@ impl Conversation {
             updated_at: now,
             streaming_message: None,
             streaming_trace: None,
+            streaming_sub_agent_trace: None,
             pending_artifacts,
             shell_session,
             working_dir: None,
@@ -246,6 +251,7 @@ impl Conversation {
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
             streaming_trace: None,
+            streaming_sub_agent_trace: None,
             pending_artifacts,
             shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
@@ -660,6 +666,43 @@ impl Conversation {
         self.streaming_trace = trace;
     }
 
+    pub fn streaming_sub_agent_trace(&self) -> Option<&SystemTrace> {
+        self.streaming_sub_agent_trace.as_ref()
+    }
+
+    pub fn set_streaming_sub_agent_trace(&mut self, trace: Option<SystemTrace>) {
+        self.streaming_sub_agent_trace = trace;
+    }
+
+    pub fn start_sub_agent_progress(&mut self, prompt: &str, source: ToolSource) {
+        start_sub_agent_progress_state(
+            &mut self.streaming_message,
+            &mut self.streaming_trace,
+            &mut self.streaming_sub_agent_trace,
+            prompt,
+            source,
+        );
+    }
+
+    pub fn append_sub_agent_progress(&mut self, line: &str) {
+        append_sub_agent_progress_state(
+            &mut self.streaming_message,
+            &mut self.streaming_trace,
+            &mut self.streaming_sub_agent_trace,
+            line,
+        );
+    }
+
+    pub fn finalize_sub_agent_progress(&mut self, success: bool, result: Option<String>) {
+        finalize_sub_agent_progress_state(
+            &mut self.streaming_message,
+            &mut self.streaming_trace,
+            &mut self.streaming_sub_agent_trace,
+            success,
+            result,
+        );
+    }
+
     /// Get or create the streaming trace, returning a mutable reference
     pub fn ensure_streaming_trace(&mut self) -> &mut SystemTrace {
         self.streaming_trace.get_or_insert_with(SystemTrace::new)
@@ -680,6 +723,7 @@ impl Conversation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::message_types::TraceItem;
 
     #[test]
     fn test_regeneration_record_serialize_roundtrip() {
@@ -757,5 +801,107 @@ mod tests {
         assert_eq!(deserialized[1].message_index, 3);
         assert_eq!(deserialized[0].original_text, "Attempt 1");
         assert_eq!(deserialized[1].original_text, "Attempt 2");
+    }
+
+    #[test]
+    fn deserialize_traces_preserves_running_sub_agent_source() {
+        let mut trace = SystemTrace::new_sub_agent("review this thread", ToolSource::HiveCloud);
+        trace.append_sub_agent_progress("Working...");
+
+        let json =
+            serde_json::to_string(&vec![Some(serde_json::to_value(&trace).unwrap())]).unwrap();
+        let traces = Conversation::deserialize_traces(&json).unwrap();
+        let restored_trace = traces[0].clone().unwrap();
+        let restored: SystemTrace = serde_json::from_value(restored_trace).unwrap();
+
+        let tc = match &restored.items[0] {
+            TraceItem::ToolCall(tc) => tc,
+            _ => panic!("expected ToolCall"),
+        };
+
+        assert_eq!(tc.source, ToolSource::HiveCloud);
+        assert!(restored.is_running_sub_agent());
+        assert_eq!(tc.output.as_deref(), Some("Working..."));
+    }
+
+    #[test]
+    fn sub_agent_progress_does_not_touch_parent_body() {
+        let mut streaming_message = Some("assistant body".to_string());
+        let mut streaming_trace = None;
+        let mut streaming_sub_agent_trace = None;
+
+        start_sub_agent_progress_state(
+            &mut streaming_message,
+            &mut streaming_trace,
+            &mut streaming_sub_agent_trace,
+            "investigate",
+            ToolSource::Local,
+        );
+        append_sub_agent_progress_state(
+            &mut streaming_message,
+            &mut streaming_trace,
+            &mut streaming_sub_agent_trace,
+            "working...",
+        );
+        finalize_sub_agent_progress_state(
+            &mut streaming_message,
+            &mut streaming_trace,
+            &mut streaming_sub_agent_trace,
+            true,
+            Some("done".to_string()),
+        );
+
+        assert_eq!(streaming_message.as_deref(), Some("assistant body"));
+
+        let trace = streaming_sub_agent_trace
+            .as_ref()
+            .expect("sub-agent trace should persist");
+        let tc = match &trace.items[0] {
+            TraceItem::ToolCall(tc) => tc,
+            _ => panic!("expected ToolCall"),
+        };
+        assert_eq!(tc.output.as_deref(), Some("working...\n\n---\n\ndone"));
+        assert!(!trace.is_running_sub_agent());
+    }
+}
+
+fn start_sub_agent_progress_state(
+    _streaming_message: &mut Option<String>,
+    streaming_trace: &mut Option<SystemTrace>,
+    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+    prompt: &str,
+    source: ToolSource,
+) {
+    let trace = SystemTrace::new_sub_agent(prompt, source);
+    *streaming_trace = Some(trace.clone());
+    *streaming_sub_agent_trace = Some(trace);
+}
+
+fn append_sub_agent_progress_state(
+    _streaming_message: &mut Option<String>,
+    streaming_trace: &mut Option<SystemTrace>,
+    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+    line: &str,
+) {
+    if let Some(trace) = streaming_trace.as_mut() {
+        trace.append_sub_agent_progress(line);
+    }
+    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
+        trace.append_sub_agent_progress(line);
+    }
+}
+
+fn finalize_sub_agent_progress_state(
+    _streaming_message: &mut Option<String>,
+    streaming_trace: &mut Option<SystemTrace>,
+    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+    success: bool,
+    result: Option<String>,
+) {
+    if let Some(trace) = streaming_trace.as_mut() {
+        trace.finalize_sub_agent_progress(success, result.clone());
+    }
+    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
+        trace.finalize_sub_agent_progress(success, result);
     }
 }

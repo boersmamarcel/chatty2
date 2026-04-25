@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -338,6 +339,37 @@ impl crate::bindings::chatty::module::billing::Host for ModuleState {
     }
 }
 
+impl crate::bindings::chatty::module::file::Host for ModuleState {
+    fn read_bytes(&mut self, path: String) -> Result<Vec<u8>, String> {
+        // Resolve weights-root from the module's own config.
+        let root = self
+            .manifest
+            .get_config("weights_root")
+            .ok_or_else(|| "file::read_bytes: `weights_root` not configured".to_string())?;
+
+        // Sandbox: reject absolute paths and any `..` component.
+        if Path::new(&path).is_absolute() {
+            return Err(format!("file::read_bytes: absolute path rejected: {path}"));
+        }
+        if path.split('/').any(|seg| seg == "..") {
+            return Err(format!("file::read_bytes: `..` component rejected: {path}"));
+        }
+
+        let full = Path::new(&root).join(&path);
+
+        debug!(
+            module = %self.manifest.name,
+            path = %full.display(),
+            "file::read_bytes"
+        );
+
+        std::fs::read(&full).map_err(|e| {
+            warn!(module = %self.manifest.name, path = %full.display(), error = %e, "file::read_bytes failed");
+            format!("file::read_bytes: {e}")
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backwards-compat host impls for chatty:module@0.1.0
 // ---------------------------------------------------------------------------
@@ -385,24 +417,26 @@ impl crate::bindings_v0_1::chatty::module::llm::Host for ModuleState {
             warn!(module = %self.manifest.name, error = %e, "llm::complete (v0.1) returned error");
         }
         // Convert v0.2 response back to v0.1
-        result.map(|r| crate::bindings_v0_1::chatty::module::types::CompletionResponse {
-            content: r.content,
-            usage: r
-                .usage
-                .map(|u| crate::bindings_v0_1::chatty::module::types::TokenUsage {
-                    input_tokens: u.input_tokens,
-                    output_tokens: u.output_tokens,
-                }),
-            tool_calls: r
-                .tool_calls
-                .into_iter()
-                .map(|tc| crate::bindings_v0_1::chatty::module::types::ToolCall {
-                    id: tc.id,
-                    name: tc.name,
-                    arguments: tc.arguments,
-                })
-                .collect(),
-        })
+        result.map(
+            |r| crate::bindings_v0_1::chatty::module::types::CompletionResponse {
+                content: r.content,
+                usage: r.usage.map(
+                    |u| crate::bindings_v0_1::chatty::module::types::TokenUsage {
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                    },
+                ),
+                tool_calls: r
+                    .tool_calls
+                    .into_iter()
+                    .map(|tc| crate::bindings_v0_1::chatty::module::types::ToolCall {
+                        id: tc.id,
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    })
+                    .collect(),
+            },
+        )
     }
 }
 

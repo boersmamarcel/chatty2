@@ -61,6 +61,7 @@ pub mod usage;
 pub mod verify;
 
 pub use client::HiveRegistryClient;
+pub use models::BegunDownload;
 pub use credit_guard::{CreditGuard, InsufficientFunds};
 pub use error::ClientError;
 pub use usage::{UsageCollector, UsageCollectorConfig};

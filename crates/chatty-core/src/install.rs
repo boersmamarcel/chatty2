@@ -106,14 +106,8 @@ pub fn install_remote_module(
     }
 
     // Write module.toml with execution_mode = "remote" (no wasm field).
-    let toml_content = build_module_toml(
-        name,
-        version,
-        description,
-        None,
-        "remote",
-        version_manifest,
-    );
+    let toml_content =
+        build_module_toml(name, version, description, None, "remote", version_manifest);
     std::fs::write(dest.join("module.toml"), toml_content)?;
 
     let ext = InstalledExtension {
@@ -216,10 +210,7 @@ pub enum SetExecutionModeError {
 ///
 /// Rewrites only the `execution_mode` line of `module.toml`.  A rescan must
 /// be triggered afterwards to apply the new mode.
-pub fn set_module_execution_mode(
-    name: &str,
-    new_mode: &str,
-) -> Result<(), SetExecutionModeError> {
+pub fn set_module_execution_mode(name: &str, new_mode: &str) -> Result<(), SetExecutionModeError> {
     if new_mode != "local" && new_mode != "remote" {
         return Err(SetExecutionModeError::InvalidMode(new_mode.to_string()));
     }
@@ -441,7 +432,14 @@ mod tests {
     #[test]
     fn build_module_toml_minimal() {
         let manifest = serde_json::json!({});
-        let toml = build_module_toml("test-mod", "0.1.0", "A test", Some("test-mod.wasm"), "local", &manifest);
+        let toml = build_module_toml(
+            "test-mod",
+            "0.1.0",
+            "A test",
+            Some("test-mod.wasm"),
+            "local",
+            &manifest,
+        );
         assert!(toml.contains("name = \"test-mod\""));
         assert!(toml.contains("wasm = \"test-mod.wasm\""));
         // local is default — execution_mode should NOT be written
@@ -471,7 +469,14 @@ mod tests {
                 "max_execution_ms": 5000
             }
         });
-        let toml = build_module_toml("echo-agent", "1.0.0", "Echo", Some("echo.wasm"), "local", &manifest);
+        let toml = build_module_toml(
+            "echo-agent",
+            "1.0.0",
+            "Echo",
+            Some("echo.wasm"),
+            "local",
+            &manifest,
+        );
         assert!(toml.contains("tools = [\"echo\", \"reverse\"]"));
         assert!(toml.contains("chat = true"));
         assert!(toml.contains("mcp = true"));

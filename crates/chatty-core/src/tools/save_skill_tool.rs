@@ -76,7 +76,7 @@ impl Tool for SaveSkillTool {
                          Good candidates: deployment workflows, data analysis pipelines, \
                          build/test procedures, API integration patterns. For Python-oriented \
                          skills, prefer recording shell steps that use `uv` for package management \
-                         or `execute_code` when Docker-isolated execution is the better fit. \
+                         or `execute_code` when isolated sandbox execution is the better fit. \
                          Note: users can also provide skills as SKILL.md files in \
                          <workspace>/.claude/skills/<name>/ (project-local) or \
                          <data_dir>/chatty/skills/<name>/ (global). Both sources are merged \

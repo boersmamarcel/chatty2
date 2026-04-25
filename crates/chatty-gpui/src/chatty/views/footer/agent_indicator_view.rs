@@ -42,7 +42,11 @@ impl RenderOnce for AgentIndicatorView {
                 name: cfg.name,
                 kind_label: "A2A",
                 pricing_model: None,
-                execution_mode: if is_external { "remote".to_string() } else { String::new() },
+                execution_mode: if is_external {
+                    "remote".to_string()
+                } else {
+                    String::new()
+                },
                 enabled,
                 ext_id: Some(id),
             });
@@ -97,7 +101,12 @@ impl RenderOnce for AgentIndicatorView {
          */
         if let Some(dm) = discovered_modules {
             for m in &dm.modules {
-                if m.agent && matches!(m.status, ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote) {
+                if m.agent
+                    && matches!(
+                        m.status,
+                        ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
+                    )
+                {
                     if store.is_installed(&m.name) {
                         continue;
                     }
@@ -153,12 +162,7 @@ impl RenderOnce for AgentIndicatorView {
                                 .size(px(12.0))
                                 .text_color(agent_color),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(agent_color)
-                                .child(summary_label),
-                        ),
+                        .child(div().text_xs().text_color(agent_color).child(summary_label)),
                 );
 
             this.child(

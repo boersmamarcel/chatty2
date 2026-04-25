@@ -161,12 +161,7 @@ async fn handle_tools_call(
         if state.paid_modules.contains(module_name) {
             if let Err(e) = guard.has_credits(module_name).await {
                 drop(reg);
-                return json_rpc_error(
-                    StatusCode::OK,
-                    id,
-                    -32000,
-                    e.to_string(),
-                );
+                return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
             }
         }
     }
@@ -181,14 +176,20 @@ async fn handle_tools_call(
                     let usage = Arc::clone(usage);
                     let name = module_name.to_string();
                     async move {
-                        usage.record_invocation(
-                            &name,
-                            "latest",
-                            metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
-                            metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
-                            metrics.as_ref().map(|m| m.fuel_consumed),
-                            metrics.as_ref().map(|m| m.execution_ms),
-                        ).await;
+                        usage
+                            .record_invocation(
+                                &name,
+                                "latest",
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.input_tokens.map(|t| t as i32)),
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.output_tokens.map(|t| t as i32)),
+                                metrics.as_ref().map(|m| m.fuel_consumed),
+                                metrics.as_ref().map(|m| m.execution_ms),
+                            )
+                            .await;
                     }
                 });
             }

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::time::Duration;
+use std::time::SystemTime;
+
+use crate::sandbox::MontySandbox;
 
 /// User message content
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +123,27 @@ pub enum ToolSource {
     },
 }
 
+/// Which engine actually executed a runnable tool call.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionEngine {
+    Shell,
+    Monty,
+    Docker,
+    Daytona,
+}
+
+impl ExecutionEngine {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Monty => "monty",
+            Self::Docker => "docker",
+            Self::Daytona => "daytona",
+        }
+    }
+}
+
 /// Represents a single tool call and its execution
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallBlock {
@@ -145,6 +170,9 @@ pub struct ToolCallBlock {
     /// Where this tool call executes — used to render data-egress badges.
     #[serde(default)]
     pub source: ToolSource,
+    /// Which runtime actually executed this tool call, when known.
+    #[serde(default)]
+    pub execution_engine: Option<ExecutionEngine>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -286,12 +314,177 @@ impl SystemTrace {
 
         false
     }
+
+    pub fn new_sub_agent(prompt: &str, source: ToolSource) -> Self {
+        let tool_call = ToolCallBlock {
+            id: format!(
+                "sub-agent-{}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
+            tool_name: "sub_agent".to_string(),
+            display_name: "Sub-agent".to_string(),
+            input: json!({ "task": prompt }).to_string(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Running,
+            duration: None,
+            text_before: String::new(),
+            source,
+            execution_engine: None,
+        };
+
+        let mut trace = Self::new();
+        trace.add_tool_call(tool_call);
+        trace.set_active_tool(0);
+        trace
+    }
+
+    pub fn is_running_sub_agent(&self) -> bool {
+        self.active_tool_index.is_some_and(|idx| {
+            matches!(
+                self.items.get(idx),
+                Some(TraceItem::ToolCall(tc))
+                    if tc.tool_name == "sub_agent" && matches!(tc.state, ToolCallState::Running)
+            )
+        })
+    }
+
+    pub fn append_sub_agent_progress(&mut self, line: &str) {
+        for item in self.items.iter_mut() {
+            if let TraceItem::ToolCall(tc) = item
+                && tc.tool_name == "sub_agent"
+            {
+                let new_output = if let Some(ref existing) = tc.output {
+                    format!("{existing}\n{line}")
+                } else {
+                    line.to_string()
+                };
+                tc.output = Some(new_output);
+                break;
+            }
+        }
+    }
+
+    pub fn finalize_sub_agent_progress(&mut self, success: bool, result: Option<String>) {
+        for item in self.items.iter_mut() {
+            if let TraceItem::ToolCall(tc) = item
+                && tc.tool_name == "sub_agent"
+            {
+                let error_text = (!success).then(|| {
+                    result
+                        .as_ref()
+                        .filter(|text| !text.trim().is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| "Sub-agent failed".to_string())
+                });
+                tc.state = if success {
+                    ToolCallState::Success
+                } else {
+                    ToolCallState::Error(
+                        error_text
+                            .clone()
+                            .unwrap_or_else(|| "Sub-agent failed".to_string()),
+                    )
+                };
+
+                if let Some(text) = result.or(error_text) {
+                    tc.output = Some(match tc.output.take() {
+                        Some(existing) if !existing.is_empty() => {
+                            format!("{existing}\n\n---\n\n{text}")
+                        }
+                        _ => text,
+                    });
+                }
+                break;
+            }
+        }
+
+        self.clear_active_tool();
+    }
 }
 
 /// Returns true if a tool result string indicates the action was denied by the user.
 pub fn is_denial_result(result: &str) -> bool {
     let lower = result.to_lowercase();
     lower.contains("denied by user") || lower.contains("execution denied")
+}
+
+/// Classify a built-in tool call by name into a [`ToolSource`] for source badges.
+pub fn classify_tool_source(tool_name: &str) -> ToolSource {
+    match tool_name {
+        "fetch" | "fetch_url" => ToolSource::Internet {
+            label: "web fetch".to_string(),
+        },
+        name if name.starts_with("web_search") || name.starts_with("brave_search") => {
+            ToolSource::Internet {
+                label: "web search".to_string(),
+            }
+        }
+        "daytona_run" => ToolSource::Internet {
+            label: "cloud sandbox".to_string(),
+        },
+        "browser_use" => ToolSource::Internet {
+            label: "browser-use.com".to_string(),
+        },
+        _ => ToolSource::Local,
+    }
+}
+
+/// Return the execution engine that is known immediately when a tool starts.
+pub fn classify_initial_execution_engine(tool_name: &str) -> Option<ExecutionEngine> {
+    match tool_name {
+        "shell_execute" => Some(ExecutionEngine::Shell),
+        "daytona_run" => Some(ExecutionEngine::Daytona),
+        _ => None,
+    }
+}
+
+/// Predict the execution engine from a tool's input while it is still running.
+pub fn predict_execution_engine(tool_name: &str, input: &str) -> Option<ExecutionEngine> {
+    match tool_name {
+        "execute_code" => {
+            let json = serde_json::from_str::<serde_json::Value>(input).ok()?;
+            let language = json
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("python");
+            if language != "python" {
+                return Some(ExecutionEngine::Docker);
+            }
+
+            if json.get("expose_port").and_then(|v| v.as_u64()).is_some() {
+                return Some(ExecutionEngine::Docker);
+            }
+
+            let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            if MontySandbox::can_handle(code) {
+                Some(ExecutionEngine::Monty)
+            } else {
+                Some(ExecutionEngine::Docker)
+            }
+        }
+        _ => classify_initial_execution_engine(tool_name),
+    }
+}
+
+/// Detect the execution engine for a completed tool call from its output payload.
+pub fn detect_execution_engine(tool_name: &str, output: &str) -> Option<ExecutionEngine> {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output)
+        && let Some(engine) = json.get("execution_engine").and_then(|v| v.as_str())
+    {
+        return match engine {
+            "shell" => Some(ExecutionEngine::Shell),
+            "monty" => Some(ExecutionEngine::Monty),
+            "docker" => Some(ExecutionEngine::Docker),
+            "daytona" => Some(ExecutionEngine::Daytona),
+            _ => None,
+        };
+    }
+
+    classify_initial_execution_engine(tool_name)
 }
 
 /// Map raw tool names to user-friendly display names
@@ -345,7 +538,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "describe_data" => "Inspecting schema".to_string(),
         // Code execution & sandboxes
         "execute_code" => "Executing code".to_string(),
-        "daytona_run" => "Running in sandbox".to_string(),
+        "daytona_run" => "Executing code".to_string(),
         // Memory
         "search_memory" => "Searching memory".to_string(),
         "remember" => "Saving to memory".to_string(),
@@ -440,6 +633,7 @@ mod tests {
             duration: None,
             text_before: String::new(),
             source: ToolSource::Local,
+            execution_engine: None,
         }
     }
 
@@ -623,5 +817,107 @@ mod tests {
             _ => panic!("expected ToolCall"),
         };
         assert!(matches!(&tc.state, ToolCallState::Success));
+    }
+
+    #[test]
+    fn sub_agent_helpers_preserve_source_progress_and_result() {
+        let mut trace = SystemTrace::new_sub_agent("audit these values", ToolSource::HiveCloud);
+
+        trace.append_sub_agent_progress("Preparing remote module...");
+        trace.append_sub_agent_progress("Running analysis...");
+        trace.finalize_sub_agent_progress(true, Some("Analysis complete".to_string()));
+
+        let tc = match &trace.items[0] {
+            TraceItem::ToolCall(tc) => tc,
+            _ => panic!("expected ToolCall"),
+        };
+
+        assert_eq!(tc.tool_name, "sub_agent");
+        assert_eq!(tc.source, ToolSource::HiveCloud);
+        assert!(matches!(&tc.state, ToolCallState::Success));
+
+        let output = tc.output.as_deref().unwrap_or_default();
+        assert!(output.contains("Preparing remote module..."));
+        assert!(output.contains("Running analysis..."));
+        assert!(output.contains("Analysis complete"));
+    }
+
+    #[test]
+    fn running_sub_agent_detection_uses_active_trace_item() {
+        let mut trace = SystemTrace::new_sub_agent("audit these values", ToolSource::Local);
+        assert!(trace.is_running_sub_agent());
+
+        trace.finalize_sub_agent_progress(true, None);
+        assert!(!trace.is_running_sub_agent());
+    }
+
+    #[test]
+    fn sub_agent_trace_roundtrip_preserves_source_and_running_state() {
+        let mut trace = SystemTrace::new_sub_agent(
+            "audit these values",
+            ToolSource::ExternalService {
+                name: "team-a2a".to_string(),
+            },
+        );
+
+        trace.append_sub_agent_progress("Checking inputs...");
+
+        let json = serde_json::to_string(&trace).unwrap();
+        let restored: SystemTrace = serde_json::from_str(&json).unwrap();
+
+        let tc = match &restored.items[0] {
+            TraceItem::ToolCall(tc) => tc,
+            _ => panic!("expected ToolCall"),
+        };
+
+        assert_eq!(
+            tc.source,
+            ToolSource::ExternalService {
+                name: "team-a2a".to_string()
+            }
+        );
+        assert!(restored.is_running_sub_agent());
+        assert_eq!(tc.output.as_deref(), Some("Checking inputs..."));
+    }
+
+    #[test]
+    fn detects_execution_engine_from_result_json() {
+        let output = r#"{"stdout":"42\n","stderr":"","exit_code":0,"timed_out":false,"port_mappings":{},"execution_engine":"monty"}"#;
+        assert_eq!(
+            detect_execution_engine("execute_code", output),
+            Some(ExecutionEngine::Monty)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_known_start_engine_when_result_is_not_json() {
+        assert_eq!(
+            detect_execution_engine("shell_execute", "plain text output"),
+            Some(ExecutionEngine::Shell)
+        );
+        assert_eq!(
+            detect_execution_engine("execute_code", "plain text output"),
+            None
+        );
+    }
+
+    #[test]
+    fn predicts_execute_code_engine_from_input() {
+        let monty = r#"{"language":"python","code":"print(1 + 1)"}"#;
+        let docker = r#"{"language":"python","code":"import requests\nprint('hi')"}"#;
+        let typescript = r#"{"language":"typescript","code":"console.log('hi')"}"#;
+
+        assert_eq!(
+            predict_execution_engine("execute_code", monty),
+            Some(ExecutionEngine::Monty)
+        );
+        assert_eq!(
+            predict_execution_engine("execute_code", docker),
+            Some(ExecutionEngine::Docker)
+        );
+        assert_eq!(
+            predict_execution_engine("execute_code", typescript),
+            Some(ExecutionEngine::Docker)
+        );
     }
 }

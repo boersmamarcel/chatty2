@@ -8,8 +8,10 @@ use anyhow::{Context, Result, bail};
 use chatty_core::MCP_SERVICE;
 use chatty_core::services::McpService;
 use chatty_core::settings::models::ModelsModel;
+use chatty_core::settings::models::extensions_store::ExtensionsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+use chatty_core::tools::LocalModuleAgentSummary;
 use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -211,12 +213,14 @@ async fn main() -> Result<()> {
         models_result,
         exec_settings_result,
         module_settings_result,
+        extensions_result,
         a2a_agents_result,
     ) = tokio::join!(
         chatty_core::provider_repository().load_all(),
         chatty_core::models_repository().load_all(),
         chatty_core::execution_settings_repository().load(),
         chatty_core::module_settings_repository().load(),
+        chatty_core::extensions_repository().load(),
         chatty_core::a2a_repository().load_all(),
     );
 
@@ -224,7 +228,9 @@ async fn main() -> Result<()> {
     let mut models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
     let module_settings = module_settings_result.unwrap_or_default();
+    let extensions = extensions_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
+    let module_agents = discover_module_agents(&module_settings, &extensions);
 
     // --ollama / --openai-compat-url: auto-discover models from a running server
     // and inject ephemeral provider + model configs so no pre-configuration is needed.
@@ -349,6 +355,7 @@ async fn main() -> Result<()> {
                 embedding_service,
                 user_secrets,
                 remote_agents,
+                module_agents: module_agents.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
             },
@@ -380,6 +387,7 @@ async fn main() -> Result<()> {
                 embedding_service: None,
                 user_secrets: vec![],
                 remote_agents,
+                module_agents,
                 is_sub_agent: false,
                 services_loaded: false,
             },
@@ -534,6 +542,52 @@ async fn init_embedding_service(
     }
 
     svc
+}
+
+fn discover_module_agents(
+    module_settings: &chatty_core::settings::models::module_settings::ModuleSettingsModel,
+    extensions: &ExtensionsModel,
+) -> Vec<LocalModuleAgentSummary> {
+    let enabled_ids: std::collections::HashSet<&str> =
+        extensions.wasm_module_ids().into_iter().collect();
+    let root = std::path::Path::new(&module_settings.module_dir);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut agents = Vec::new();
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("module.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+
+        match chatty_module_registry::ModuleManifest::from_file(&manifest_path) {
+            Ok(manifest)
+                if manifest.capabilities.agent && enabled_ids.contains(manifest.name.as_str()) =>
+            {
+                agents.push(LocalModuleAgentSummary {
+                    name: manifest.name,
+                    version: manifest.version,
+                    description: manifest.description,
+                    tools: manifest.capabilities.tools,
+                    supports_a2a: manifest.protocols.a2a,
+                    execution_mode: manifest.execution_mode,
+                });
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(
+                    error = ?error,
+                    manifest = %manifest_path.display(),
+                    "Failed to parse module manifest for TUI agent discovery"
+                );
+            }
+        }
+    }
+
+    agents.sort_by(|left, right| left.name.cmp(&right.name));
+    agents
 }
 
 fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {

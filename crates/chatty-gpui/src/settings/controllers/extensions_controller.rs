@@ -229,9 +229,91 @@ pub fn install_extension(
             .map_err(|e| warn!(error = ?e, "Failed to update UI after remote install"))
             .ok();
         } else {
-            match client.download(&name, &version).await {
+            // Signal download start so the UI can show the progress bar.
+            cx.update(|cx| {
+                cx.global_mut::<MarketplaceState>().set_download_progress(&name, 0.0);
+                cx.refresh_windows();
+            })
+            .ok();
+
+            // Phase 1: send request, get headers.
+            let begun = match client.begin_download(&name, &version).await {
+                Ok(b) => b,
+                Err(chatty_core::hive::ClientError::Unauthorized) => {
+                    warn!(name = %name, "Download requires authentication");
+                    cx.update(|cx| {
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.clear_download_progress(&name);
+                        state.set_error(
+                            "Login required to download modules. Please sign in first.".to_string(),
+                        );
+                        cx.refresh_windows();
+                    })
+                    .ok();
+                    return;
+                }
+                Err(e) => {
+                    error!(error = ?e, name = %name, "Failed to start module download");
+                    cx.update(|cx| {
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.clear_download_progress(&name);
+                        state.set_error(format!("Download failed: {e}"));
+                        cx.refresh_windows();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            // Phase 2: stream body, updating progress on each chunk.
+            use futures::StreamExt as _;
+            let chatty_core::hive::BegunDownload {
+                total_size: total,
+                registry_hash,
+                signature,
+                publisher_public_key,
+                mut stream,
+            } = begun;
+
+            let mut wasm_bytes: Vec<u8> =
+                if total > 0 { Vec::with_capacity(total as usize) } else { Vec::new() };
+
+            loop {
+                match stream.next().await {
+                    None => break,
+                    Some(Err(e)) => {
+                        error!(error = ?e, name = %name, "Stream error during module download");
+                        cx.update(|cx| {
+                            let state = cx.global_mut::<MarketplaceState>();
+                            state.clear_download_progress(&name);
+                            state.set_error(format!("Download interrupted: {e}"));
+                            cx.refresh_windows();
+                        })
+                        .ok();
+                        return;
+                    }
+                    Some(Ok(chunk)) => {
+                        wasm_bytes.extend_from_slice(&chunk[..]);
+                        if total > 0 {
+                            let progress = (wasm_bytes.len() as f32 / total as f32).min(0.99);
+                            cx.update(|cx| {
+                                cx.global_mut::<MarketplaceState>()
+                                    .set_download_progress(&name, progress);
+                                cx.refresh_windows();
+                            })
+                            .ok();
+                        }
+                    }
+                }
+            }
+
+            // Phase 3: verify hash, fetch manifest.
+            match client.finalize_download(wasm_bytes, registry_hash, signature, publisher_public_key, &name, &version).await {
                 Ok(download) => {
                     cx.update(|cx| {
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.clear_download_progress(&name);
+
                         let extensions = cx.global_mut::<ExtensionsModel>();
                         match install::install_wasm_module(
                             &download,
@@ -245,10 +327,6 @@ pub fn install_extension(
                             Ok(ext) => {
                                 info!(id = %ext.id, "Installed extension from Hive");
                                 save_extensions_async(extensions.clone(), cx);
-                                // Rescan module directory so the new WASM module
-                                // appears in DiscoveredModulesModel and becomes
-                                // available as an agent tool. The scan completion
-                                // triggers RebuildRequired automatically.
                                 module_settings_controller::refresh_runtime(cx);
                             }
                             Err(e) => {
@@ -263,25 +341,25 @@ pub fn install_extension(
                     .ok();
                 }
                 Err(chatty_core::hive::ClientError::Unauthorized) => {
-                    warn!(name = %name, "Download requires authentication");
+                    warn!(name = %name, "Finalise requires authentication");
                     cx.update(|cx| {
                         let state = cx.global_mut::<MarketplaceState>();
+                        state.clear_download_progress(&name);
                         state.set_error(
                             "Login required to download modules. Please sign in first.".to_string(),
                         );
                         cx.refresh_windows();
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to update UI after auth error"))
                     .ok();
                 }
                 Err(e) => {
-                    error!(error = ?e, name = %name, "Failed to download module");
+                    error!(error = ?e, name = %name, "Failed to finalise module download");
                     cx.update(|cx| {
                         let state = cx.global_mut::<MarketplaceState>();
+                        state.clear_download_progress(&name);
                         state.set_error(format!("Download failed: {e}"));
                         cx.refresh_windows();
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to update UI after download error"))
                     .ok();
                 }
             }

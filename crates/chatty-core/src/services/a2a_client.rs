@@ -47,6 +47,34 @@ pub struct A2aClient {
     http: reqwest::Client,
 }
 
+async fn detailed_http_error(operation: &str, resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let body = body.trim();
+
+    let mismatch_hint = if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        && (body.contains("missing field `task`")
+            || body.contains("missing field `taskId`")
+            || body.contains("Failed to deserialize"))
+    {
+        " (runner likely still uses the old non-JSON-RPC A2A handler; rebuild/restart hive-runner)"
+    } else {
+        ""
+    };
+
+    if body.is_empty() {
+        format!(
+            "A2A {} failed with status {}{}",
+            operation, status, mismatch_hint
+        )
+    } else {
+        format!(
+            "A2A {} failed with status {}: {}{}",
+            operation, status, body, mismatch_hint
+        )
+    }
+}
+
 impl A2aClient {
     pub fn new() -> Self {
         Self {
@@ -174,7 +202,7 @@ impl A2aClient {
             .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
 
         if !resp.status().is_success() {
-            bail!("A2A message/send failed with status {}", resp.status());
+            bail!("{}", detailed_http_error("message/send", resp).await);
         }
 
         let value: Value = resp
@@ -248,7 +276,7 @@ impl A2aClient {
             .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
 
         if !resp.status().is_success() {
-            bail!("A2A message/stream failed with status {}", resp.status());
+            bail!("{}", detailed_http_error("message/stream", resp).await);
         }
 
         // Check Content-Type — if not SSE, the server likely doesn't support
