@@ -12,48 +12,18 @@ use std::rc::Rc;
 
 pub fn providers_page() -> SettingPage {
     SettingPage::new("Providers").resettable(true).groups(vec![
-        create_openai_group(),
-        create_anthropic_group(),
-        create_gemini_group(),
-        create_mistral_group(),
+        create_openrouter_group(),
         create_ollama_group(),
         create_azure_openai_group(),
     ])
 }
 
-fn create_openai_group() -> SettingGroup {
+fn create_openrouter_group() -> SettingGroup {
     create_provider_group(
-        "OpenAI",
-        "Configure OpenAI API access - GPT-4, GPT-3.5, ChatGPT, DALL-E",
-        ProviderType::OpenAI,
-        "Enter your OpenAI API key (starts with sk-) for GPT models",
-    )
-}
-
-fn create_anthropic_group() -> SettingGroup {
-    create_provider_group(
-        "Anthropic (Claude)",
-        "Configure Anthropic API access - Claude 3.5 Sonnet, Claude 3 Opus, Claude 3 Haiku",
-        ProviderType::Anthropic,
-        "Enter your Anthropic API key (starts with sk-ant-) for Claude models",
-    )
-}
-
-fn create_gemini_group() -> SettingGroup {
-    create_provider_group(
-        "Google Gemini",
-        "Configure Google Gemini API access - Gemini Pro, Gemini Ultra, Google AI",
-        ProviderType::Gemini,
-        "Enter your Google AI API key for Gemini models",
-    )
-}
-
-fn create_mistral_group() -> SettingGroup {
-    create_provider_group(
-        "Mistral",
-        "Configure Mistral API access - Mistral Large, Mistral Medium, Mistral Small",
-        ProviderType::Mistral,
-        "Enter your Mistral API key for Mistral models",
+        "OpenRouter",
+        "Configure OpenRouter API access - gateway to 200+ models (Claude, Gemini, GPT, Mistral, Llama, and more)",
+        ProviderType::OpenRouter,
+        "Enter your OpenRouter API key (starts with sk-or-) to access all supported models",
     )
 }
 

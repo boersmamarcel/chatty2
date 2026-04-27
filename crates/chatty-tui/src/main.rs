@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
             &mut providers,
             &mut models_list,
             discovered,
-            ProviderType::OpenAI,
+            ProviderType::OpenRouter,
             "OpenAI-compat (CLI)",
             Some(compat_url.clone()),
             Some(api_key),

@@ -415,7 +415,7 @@ mod tests {
         ModelConfig {
             id: "test-id".to_string(),
             name: "Test Model".to_string(),
-            provider_type: ProviderType::Anthropic,
+            provider_type: ProviderType::OpenRouter,
             model_identifier: "claude-sonnet-4-20250514".to_string(),
             temperature: 0.7,
             preamble: preamble.to_string(),

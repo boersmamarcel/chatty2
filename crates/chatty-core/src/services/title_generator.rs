@@ -111,11 +111,7 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
     // Use agent.prompt() for non-streaming completion
     debug!("Calling LLM for title generation");
     let response_text = match agent {
-        AgentClient::Anthropic(agent) => agent.prompt(&title_prompt).await?,
-        AgentClient::OpenAI(agent) => agent.prompt(&title_prompt).await?,
-        AgentClient::OpenAICompletions(agent) => agent.prompt(&title_prompt).await?,
-        AgentClient::Gemini(agent) => agent.prompt(&title_prompt).await?,
-        AgentClient::Mistral(agent) => agent.prompt(&title_prompt).await?,
+        AgentClient::OpenRouter(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::Ollama(agent) => agent.prompt(&title_prompt).await?,
         AgentClient::AzureOpenAI(agent) => agent.prompt(&title_prompt).await?,
     };

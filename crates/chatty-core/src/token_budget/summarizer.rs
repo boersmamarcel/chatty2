@@ -241,11 +241,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// Dispatch a non-streaming prompt call to whichever provider the agent wraps.
 async fn call_agent(agent: &AgentClient, prompt: &str) -> Result<String> {
     match agent {
-        AgentClient::Anthropic(a) => Ok(a.prompt(prompt).await?),
-        AgentClient::OpenAI(a) => Ok(a.prompt(prompt).await?),
-        AgentClient::OpenAICompletions(a) => Ok(a.prompt(prompt).await?),
-        AgentClient::Gemini(a) => Ok(a.prompt(prompt).await?),
-        AgentClient::Mistral(a) => Ok(a.prompt(prompt).await?),
+        AgentClient::OpenRouter(a) => Ok(a.prompt(prompt).await?),
         AgentClient::Ollama(a) => Ok(a.prompt(prompt).await?),
         AgentClient::AzureOpenAI(a) => Ok(a.prompt(prompt).await?),
     }

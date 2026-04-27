@@ -127,11 +127,8 @@ fn build_agent(model_id: &str, model_config: Option<&ModelConfig>) -> AtifAgent 
 
 fn provider_name(provider_type: &ProviderType) -> String {
     match provider_type {
-        ProviderType::Anthropic => "anthropic",
-        ProviderType::OpenAI => "openai",
-        ProviderType::Gemini => "gemini",
+        ProviderType::OpenRouter => "openrouter",
         ProviderType::Ollama => "ollama",
-        ProviderType::Mistral => "mistral",
         ProviderType::AzureOpenAI => "azure_openai",
     }
     .to_string()
@@ -459,11 +456,8 @@ mod tests {
 
     #[test]
     fn provider_name_all_variants() {
-        assert_eq!(provider_name(&ProviderType::Anthropic), "anthropic");
-        assert_eq!(provider_name(&ProviderType::OpenAI), "openai");
-        assert_eq!(provider_name(&ProviderType::Gemini), "gemini");
+        assert_eq!(provider_name(&ProviderType::OpenRouter), "openrouter");
         assert_eq!(provider_name(&ProviderType::Ollama), "ollama");
-        assert_eq!(provider_name(&ProviderType::Mistral), "mistral");
         assert_eq!(provider_name(&ProviderType::AzureOpenAI), "azure_openai");
     }
 
@@ -662,7 +656,7 @@ mod tests {
             vec![],
             vec![],
         );
-        let cfg = make_model_config(ProviderType::Anthropic);
+        let cfg = make_model_config(ProviderType::OpenRouter);
         let result = conversation_to_atif(&conv, Some(&cfg)).unwrap();
         assert_eq!(result["agent"]["name"], "chatty");
         assert!(result["agent"]["version"].as_str().is_some());
@@ -1255,7 +1249,7 @@ mod tests {
             }],
         );
 
-        let cfg = make_model_config(ProviderType::Anthropic);
+        let cfg = make_model_config(ProviderType::OpenRouter);
         let result = conversation_to_atif(&conv, Some(&cfg)).unwrap();
         let mut expected: serde_json::Value =
             serde_json::from_str(include_str!("snapshots/full_conversation.json")).unwrap();

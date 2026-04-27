@@ -22,10 +22,8 @@ pub struct EmbeddingService {
 /// Concrete embedding model, one variant per supported provider.
 #[derive(Clone)]
 enum EmbeddingServiceInner {
-    OpenAI(rig::providers::openai::embedding::EmbeddingModel),
-    Gemini(rig::providers::gemini::embedding::EmbeddingModel),
+    OpenRouter(rig::providers::openrouter::EmbeddingModel),
     Ollama(rig::providers::ollama::EmbeddingModel),
-    Mistral(rig::providers::mistral::embedding::EmbeddingModel),
     AzureOpenAI(rig::providers::azure::EmbeddingModel),
 }
 
@@ -34,7 +32,7 @@ impl EmbeddingService {
     ///
     /// # Arguments
     /// * `provider_type` — Which provider to use for embeddings
-    /// * `model_name` — Embedding model identifier (e.g. "text-embedding-3-small")
+    /// * `model_name` — Embedding model identifier (e.g. "openai/text-embedding-3-small")
     /// * `api_key` — Provider API key (not needed for Ollama or Azure Entra ID)
     /// * `base_url` — Custom endpoint URL (optional; required for Ollama non-default)
     /// * `azure_token` — Bearer token for Azure Entra ID authentication (Azure only)
@@ -46,19 +44,19 @@ impl EmbeddingService {
         azure_token: Option<String>,
     ) -> Result<Self> {
         let inner = match provider_type {
-            ProviderType::OpenAI => {
+            ProviderType::OpenRouter => {
                 let key =
-                    api_key.ok_or_else(|| anyhow!("API key required for OpenAI embeddings"))?;
-                let client = rig::providers::openai::Client::new(key)?;
+                    api_key.ok_or_else(|| anyhow!("API key required for OpenRouter embeddings"))?;
+                let client = if let Some(url) = base_url {
+                    rig::providers::openrouter::Client::builder()
+                        .api_key(key)
+                        .base_url(url)
+                        .build()?
+                } else {
+                    rig::providers::openrouter::Client::new(key)?
+                };
                 let model = client.embedding_model(model_name);
-                EmbeddingServiceInner::OpenAI(model)
-            }
-            ProviderType::Gemini => {
-                let key =
-                    api_key.ok_or_else(|| anyhow!("API key required for Gemini embeddings"))?;
-                let client = rig::providers::gemini::Client::new(key)?;
-                let model = client.embedding_model(model_name);
-                EmbeddingServiceInner::Gemini(model)
+                EmbeddingServiceInner::OpenRouter(model)
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or("http://localhost:11434");
@@ -68,13 +66,6 @@ impl EmbeddingService {
                     .build()?;
                 let model = client.embedding_model(model_name);
                 EmbeddingServiceInner::Ollama(model)
-            }
-            ProviderType::Mistral => {
-                let key =
-                    api_key.ok_or_else(|| anyhow!("API key required for Mistral embeddings"))?;
-                let client = rig::providers::mistral::Client::new(key)?;
-                let model = client.embedding_model(model_name);
-                EmbeddingServiceInner::Mistral(model)
             }
             ProviderType::AzureOpenAI => {
                 let auth = if let Some(token) = azure_token {
@@ -96,12 +87,6 @@ impl EmbeddingService {
                 let model = client.embedding_model(model_name);
                 EmbeddingServiceInner::AzureOpenAI(model)
             }
-            ProviderType::Anthropic => {
-                return Err(anyhow!(
-                    "Anthropic does not offer an embedding API. \
-                     Configure a secondary provider (e.g. OpenAI, Ollama) for embeddings."
-                ));
-            }
         };
 
         info!(
@@ -120,22 +105,14 @@ impl EmbeddingService {
     /// Compute a single text embedding, returning `Vec<f32>` for memvid-core.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let embedding = match &self.inner {
-            EmbeddingServiceInner::OpenAI(m) => m
+            EmbeddingServiceInner::OpenRouter(m) => m
                 .embed_text(text)
                 .await
-                .map_err(|e| anyhow!("OpenAI embedding failed: {e}"))?,
-            EmbeddingServiceInner::Gemini(m) => m
-                .embed_text(text)
-                .await
-                .map_err(|e| anyhow!("Gemini embedding failed: {e}"))?,
+                .map_err(|e| anyhow!("OpenRouter embedding failed: {e}"))?,
             EmbeddingServiceInner::Ollama(m) => m
                 .embed_text(text)
                 .await
                 .map_err(|e| anyhow!("Ollama embedding failed: {e}"))?,
-            EmbeddingServiceInner::Mistral(m) => m
-                .embed_text(text)
-                .await
-                .map_err(|e| anyhow!("Mistral embedding failed: {e}"))?,
             EmbeddingServiceInner::AzureOpenAI(m) => m
                 .embed_text(text)
                 .await
@@ -148,7 +125,7 @@ impl EmbeddingService {
 
     /// Returns a stable identifier for memvid-core's `set_vec_model()`.
     ///
-    /// Format: "provider:model" (e.g. "OpenAI:text-embedding-3-small").
+    /// Format: "provider:model" (e.g. "OpenRouter:openai/text-embedding-3-small").
     /// If the user changes provider or model, memvid detects the mismatch.
     pub fn model_identifier(&self) -> String {
         format!("{}:{}", self.provider_type.display_name(), self.model_name)
@@ -157,18 +134,16 @@ impl EmbeddingService {
     /// Returns the default embedding model name for a given provider.
     pub fn default_model_for_provider(provider_type: &ProviderType) -> Option<&'static str> {
         match provider_type {
-            ProviderType::OpenAI => Some("text-embedding-3-small"),
-            ProviderType::Gemini => Some("text-embedding-004"),
+            ProviderType::OpenRouter => Some("openai/text-embedding-3-small"),
             ProviderType::Ollama => Some("nomic-embed-text"),
-            ProviderType::Mistral => Some("mistral-embed"),
             ProviderType::AzureOpenAI => Some("text-embedding-3-small"),
-            ProviderType::Anthropic => None,
         }
     }
 
     /// Returns whether a provider supports embeddings.
-    pub fn provider_supports_embeddings(provider_type: &ProviderType) -> bool {
-        !matches!(provider_type, ProviderType::Anthropic)
+    pub fn provider_supports_embeddings(_provider_type: &ProviderType) -> bool {
+        // All three remaining providers support embeddings
+        true
     }
 }
 

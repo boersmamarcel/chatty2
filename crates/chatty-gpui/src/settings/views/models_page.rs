@@ -24,13 +24,10 @@ pub type GlobalModelsListView = crate::global_entity::GlobalStrongEntity<ModelsL
 // Helper function to convert provider display name to ProviderType
 fn string_to_provider_type(s: &str) -> ProviderType {
     match s {
-        "OpenAI" => ProviderType::OpenAI,
-        "Anthropic" => ProviderType::Anthropic,
-        "Google Gemini" => ProviderType::Gemini,
-        "Mistral" => ProviderType::Mistral,
+        "OpenRouter" => ProviderType::OpenRouter,
         "Ollama" => ProviderType::Ollama,
         "Azure OpenAI" => ProviderType::AzureOpenAI,
-        _ => ProviderType::OpenAI, // Default fallback
+        _ => ProviderType::OpenRouter, // Default fallback
     }
 }
 
@@ -398,7 +395,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or("OpenAI");
+                                                        .unwrap_or("OpenRouter");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -828,7 +825,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or("OpenAI");
+                                                        .unwrap_or("OpenRouter");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -966,10 +963,7 @@ impl ModelsListDelegate {
         self.sections.clear();
 
         let provider_types = vec![
-            ProviderType::OpenAI,
-            ProviderType::Anthropic,
-            ProviderType::Gemini,
-            ProviderType::Mistral,
+            ProviderType::OpenRouter,
             ProviderType::Ollama,
             ProviderType::AzureOpenAI,
         ];

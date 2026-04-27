@@ -71,7 +71,7 @@ pub fn memory_settings_page() -> SettingPage {
                 .title("Semantic Search")
                 .description(
                     "Use vector similarity to find memories by meaning, not just keywords. \
-                     Requires an embedding provider (any configured provider except Anthropic).",
+                     Requires an embedding provider (any configured provider).",
                 )
                 .items(vec![
                     SettingItem::new(
@@ -148,8 +148,7 @@ pub fn memory_settings_page() -> SettingPage {
                         }),
                     )
                     .description(
-                        "Provider for computing embeddings (can differ from your chat model). \
-                         Anthropic does not offer an embedding API.",
+                        "Provider for computing embeddings (can differ from your chat model).",
                     ),
                     SettingItem::new(
                         "Embedding Model",
