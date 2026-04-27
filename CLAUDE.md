@@ -10,6 +10,77 @@ A desktop chat application built with Rust and GPUI.
 - **Async Runtime**: Tokio
 - **Serialization**: serde/serde_json for persistence
 
+## Behavioral Guidelines
+
+Guidelines to reduce common AI coding mistakes. **Bias toward caution over speed; for truly trivial changes, use judgment.**
+
+### 1. Think Before Coding
+
+**Don't assume. Surface tradeoffs. Ask when confused.**
+
+Before writing any code:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple valid interpretations exist, list them — don't pick silently.
+- If a simpler approach exists, say so and push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask before proceeding.
+
+This is especially important in this codebase because GPUI's entity/context model has subtle ownership rules that are easy to misread. When in doubt about `Context<T>` vs `AsyncApp` vs `App`, confirm before writing code that may not compile.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: *"Would a senior Rust engineer say this is overcomplicated?"* If yes, simplify.
+
+In this codebase specifically:
+- Prefer existing patterns (globals, events, optimistic updates) over inventing new ones.
+- Don't introduce new async primitives when `cx.spawn()` + `.detach()` already covers the case.
+- Don't add new crate dependencies unless absolutely necessary.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code or issues, mention them — don't silently fix them.
+
+When your changes create orphans:
+- Remove imports/variables/functions that *your* changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+**The test:** Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals before coding:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Reproduce it with a test, then make that test pass"
+- "Refactor X" → "Ensure `cargo test` passes before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Always run `cargo test && cargo clippy -- -D warnings && cargo fmt --check` after changes to verify nothing is broken before declaring the task done.
+
+---
+
+**These guidelines are working if:** diffs are clean and minimal, rewrites due to overcomplication are rare, and clarifying questions come *before* implementation rather than after mistakes.
+
 ## Project Structure
 
 ```
