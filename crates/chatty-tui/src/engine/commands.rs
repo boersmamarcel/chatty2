@@ -293,7 +293,7 @@ impl ChatEngine {
     ) -> Result<()> {
         info!(agent = %config.name, prompt = %prompt, "Dispatching task to remote A2A agent");
 
-        let label = format!("[Agent: {}] {}", config.name, prompt);
+        let label = format!("[remote agent: {}] {}", config.name, prompt);
         self.add_system_message(label);
         self.sub_agent_msg_idx = Some(self.messages.len() - 1);
 
@@ -376,7 +376,7 @@ impl ChatEngine {
         );
         let event_tx = self.event_tx.clone();
 
-        self.add_system_message("Launching sub-agent...".to_string());
+        self.add_system_message("Launching local sub-agent...".to_string());
         self.sub_agent_msg_idx = Some(self.messages.len() - 1);
 
         tokio::task::spawn_blocking(move || {
@@ -727,11 +727,23 @@ impl ChatEngine {
     }
 
     pub fn module_settings_summary(&self) -> String {
+        let local_agents = self
+            .module_agents
+            .iter()
+            .filter(|agent| !matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
+            .count();
+        let remote_agents = self
+            .module_agents
+            .iter()
+            .filter(|agent| matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
+            .count();
         format!(
-            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
+            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n- Local module agents: {}\n- Remote module agents: {}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
             self.module_settings.enabled,
             self.module_settings.module_dir,
-            self.module_settings.gateway_port
+            self.module_settings.gateway_port,
+            local_agents,
+            remote_agents
         )
     }
 }

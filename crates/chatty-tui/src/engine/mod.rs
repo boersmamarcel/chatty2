@@ -10,6 +10,10 @@ use chatty_core::models::Conversation;
 use chatty_core::models::execution_approval_store::{
     ApprovalDecision, ApprovalNotification, ApprovalResolution, ExecutionApprovalStore,
 };
+use chatty_core::models::message_types::{
+    ExecutionEngine, ToolSource, classify_initial_execution_engine, classify_tool_source,
+    detect_execution_engine, predict_execution_engine,
+};
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::{McpService, MemoryService};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
@@ -17,6 +21,7 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
+use chatty_core::tools::LocalModuleAgentSummary;
 
 use rig::message::UserContent;
 use tokio::sync::mpsc;
@@ -39,6 +44,8 @@ pub struct ToolCallInfo {
     pub input: String,
     pub output: Option<String>,
     pub state: ToolCallState,
+    pub source: ToolSource,
+    pub execution_engine: Option<ExecutionEngine>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +250,7 @@ pub struct ChatEngine {
     pub user_secrets: Vec<(String, String)>,
     /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
     pub remote_agents: Vec<A2aAgentConfig>,
+    pub module_agents: Vec<LocalModuleAgentSummary>,
     /// When `true`, this engine is running as a sub-agent and must not expose
     /// the sub_agent tool (preventing recursive sub-agent spawning).
     pub is_sub_agent: bool,
@@ -301,6 +309,7 @@ pub struct ChatEngineConfig {
     pub embedding_service: Option<chatty_core::services::EmbeddingService>,
     pub user_secrets: Vec<(String, String)>,
     pub remote_agents: Vec<A2aAgentConfig>,
+    pub module_agents: Vec<LocalModuleAgentSummary>,
     pub is_sub_agent: bool,
     /// Set to `true` when all services were loaded eagerly (headless mode).
     /// Set to `false` when services are deferred to background (interactive mode).
@@ -328,6 +337,7 @@ impl ChatEngine {
             write_approval_store: WriteApprovalStore::new(),
             user_secrets: config.user_secrets,
             remote_agents: config.remote_agents,
+            module_agents: config.module_agents,
             is_sub_agent: config.is_sub_agent,
             messages: Vec::new(),
             is_streaming: false,
@@ -439,7 +449,7 @@ impl ChatEngine {
                 search_settings: self.search_settings.clone(),
                 embedding_service: self.embedding_service.clone(),
                 allow_sub_agent: !self.is_sub_agent,
-                module_agents: Vec::new(), // no WASM module discovery in TUI
+                module_agents: self.module_agents.clone(),
                 gateway_port: self
                     .module_settings
                     .enabled
@@ -476,6 +486,7 @@ impl ChatEngine {
         let pending_write_approvals = self.write_approval_store.get_pending_approvals();
         let user_secrets = self.user_secrets.clone();
         let remote_agents = self.remote_agents.clone();
+        let module_agents = self.module_agents.clone();
         let available_model_ids = self.available_model_ids();
         let module_settings = self.module_settings.clone();
         let memory_service = self.memory_service.clone();
@@ -522,7 +533,7 @@ impl ChatEngine {
                     search_settings,
                     embedding_service,
                     allow_sub_agent: !is_sub_agent,
-                    module_agents: Vec::new(), // no WASM module discovery in TUI
+                    module_agents,
                     gateway_port: module_settings
                         .enabled
                         .then_some(module_settings.gateway_port),
@@ -668,12 +679,16 @@ impl ChatEngine {
                 if name == "invoke_agent" {
                     self.active_invoke_agent_ids.insert(id);
                 } else {
+                    let source = classify_tool_source(&name);
+                    let execution_engine = classify_initial_execution_engine(&name);
                     let info = ToolCallInfo {
                         id,
                         name,
                         input: String::new(),
                         output: None,
                         state: ToolCallState::Running,
+                        source,
+                        execution_engine,
                     };
                     if let Some(last) = self.messages.last_mut() {
                         last.push_tool_call(info);
@@ -686,6 +701,8 @@ impl ChatEngine {
                     && let Some(last) = self.messages.last_mut()
                     && let Some(tc) = last.tool_call_mut(&id)
                 {
+                    tc.execution_engine =
+                        predict_execution_engine(&tc.name, &arguments).or(tc.execution_engine);
                     tc.input.push_str(&arguments);
                 }
                 EngineAction::Redraw
@@ -696,6 +713,7 @@ impl ChatEngine {
                 } else if let Some(last) = self.messages.last_mut()
                     && let Some(tc) = last.tool_call_mut(&id)
                 {
+                    tc.execution_engine = detect_execution_engine(&tc.name, &result);
                     tc.output = Some(result);
                     tc.state = ToolCallState::Success;
                 }

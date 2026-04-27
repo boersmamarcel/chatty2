@@ -311,6 +311,24 @@ impl ModuleRegistry {
 
         let manifest = ModuleManifest::from_file(&manifest_path)?;
 
+        // Remote modules have no local WASM binary — they execute on the
+        // hive-runner.  Skip them silently; the gateway routes them via the
+        // runner's OpenAI-compat endpoint instead.
+        if matches!(manifest.execution_mode.as_str(), "remote" | "remote_only") {
+            debug!(
+                module = %manifest.name,
+                "skipping remote module during WASM registry scan"
+            );
+            return Ok(manifest.name);
+        }
+
+        let wasm_path = manifest.wasm_path.as_ref().with_context(|| {
+            format!(
+                "manifest {} declares local execution but has no wasm path",
+                manifest_path.display()
+            )
+        })?;
+
         // Build resource limits from manifest, falling back to defaults.
         let limits = self.limits_from_manifest(&manifest);
 
@@ -320,7 +338,7 @@ impl ModuleRegistry {
 
         let wasm = WasmModule::from_file(
             &self.engine,
-            &manifest.wasm_path,
+            wasm_path,
             runtime_manifest,
             self.llm_provider.clone(),
             limits,
@@ -329,7 +347,7 @@ impl ModuleRegistry {
             format!(
                 "failed to load WASM module '{}' from {}",
                 manifest.name,
-                manifest.wasm_path.display()
+                wasm_path.display()
             )
         })?;
 

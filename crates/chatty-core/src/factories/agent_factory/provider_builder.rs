@@ -60,34 +60,55 @@ pub(super) async fn build_provider_agent(
             let key =
                 api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
 
-            let client = if let Some(ref url) = base_url {
-                rig::providers::openai::Client::builder()
+            let is_reasoning = is_reasoning_model(&model_config.model_identifier);
+            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
+
+            // When base_url is set, use the Chat Completions API for compatibility
+            // with OpenAI-compatible servers (vLLM, llama.cpp, etc.).
+            if let Some(ref url) = base_url {
+                let http_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(600))
+                    .connect_timeout(std::time::Duration::from_secs(30))
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .context("Failed to build HTTP client for OpenAI-compatible server")?;
+                let client = rig::providers::openai::Client::builder()
                     .api_key(&key)
                     .base_url(url)
+                    .http_client(http_client)
                     .build()?
+                    .completions_api();
+                let mut builder = client
+                    .agent(&model_config.model_identifier)
+                    .preamble(preamble);
+
+                if model_config.supports_temperature && !is_reasoning {
+                    builder = builder.temperature(model_config.temperature as f64);
+                }
+
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
+                Ok(AgentClient::OpenAICompletions(agent))
             } else {
-                rig::providers::openai::Client::new(&key)?
-            };
-            let mut builder = client
-                .agent(&model_config.model_identifier)
-                .preamble(preamble);
+                let client = rig::providers::openai::Client::new(&key)?;
+                let mut builder = client
+                    .agent(&model_config.model_identifier)
+                    .preamble(preamble);
 
-            let is_reasoning = is_reasoning_model(&model_config.model_identifier);
+                if model_config.supports_temperature && !is_reasoning {
+                    builder = builder.temperature(model_config.temperature as f64);
+                }
 
-            if model_config.supports_temperature && !is_reasoning {
-                builder = builder.temperature(model_config.temperature as f64);
+                if is_reasoning || !model_config.supports_temperature {
+                    builder = builder.additional_params(serde_json::json!({
+                        "reasoning": { "summary": "auto" }
+                    }));
+                }
+
+                let agent =
+                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
+                Ok(AgentClient::OpenAI(agent))
             }
-
-            if is_reasoning || !model_config.supports_temperature {
-                builder = builder.additional_params(serde_json::json!({
-                    "reasoning": { "summary": "auto" }
-                }));
-            }
-
-            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-            let agent =
-                build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::OpenAI(agent))
         }
         ProviderType::Gemini => {
             let key =

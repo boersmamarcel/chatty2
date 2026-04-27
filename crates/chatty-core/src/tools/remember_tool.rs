@@ -1,12 +1,42 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use tracing::warn;
 
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
 use crate::tools::ToolError;
+
+/// Deserialize tags from either a JSON string, a JSON object, or null/missing.
+fn deserialize_tags<'de, D>(deserializer: D) -> Result<Option<HashMap<String, String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) if s.is_empty() => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let map: HashMap<String, String> =
+                serde_json::from_str(&s).map_err(D::Error::custom)?;
+            Ok(Some(map))
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            let map = obj
+                .into_iter()
+                .map(|(k, v)| (k, v.as_str().unwrap_or_default().to_string()))
+                .collect();
+            Ok(Some(map))
+        }
+        Some(other) => Err(D::Error::custom(format!(
+            "expected string or object for tags, got: {}",
+            other
+        ))),
+    }
+}
 
 /// Arguments for the remember tool
 #[derive(Deserialize, Serialize)]
@@ -16,8 +46,8 @@ pub struct RememberToolArgs {
     /// Short title or label for the memory
     #[serde(default)]
     pub title: Option<String>,
-    /// Key-value tags for categorization (e.g., {"project": "chatty", "topic": "architecture"})
-    #[serde(default)]
+    /// Key-value tags for categorization
+    #[serde(default, deserialize_with = "deserialize_tags")]
     pub tags: Option<HashMap<String, String>>,
 }
 
@@ -80,12 +110,11 @@ impl Tool for RememberTool {
                         "description": "Short title or label for this memory (e.g., 'User prefers dark mode', 'Project uses PostgreSQL')."
                     },
                     "tags": {
-                        "type": "object",
-                        "description": "Optional key-value tags for categorization (e.g., {\"project\": \"chatty\", \"topic\": \"architecture\"}).",
-                        "additionalProperties": { "type": "string" }
+                        "type": "string",
+                        "description": "Optional JSON object of key-value tags for categorization, as a string (e.g., \"{\\\"project\\\": \\\"chatty\\\", \\\"topic\\\": \\\"architecture\\\"}\"). Pass an empty string or omit if not needed."
                     }
                 },
-                "required": ["content"]
+                "required": ["content", "title", "tags"]
             }),
         }
     }

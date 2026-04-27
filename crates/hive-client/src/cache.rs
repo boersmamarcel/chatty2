@@ -88,6 +88,7 @@ mod tests {
                 category: None,
                 downloads: 42,
                 pricing_model: "free".to_string(),
+                execution_mode: "local".to_string(),
                 homepage: None,
                 support_email: None,
                 created_at: Utc::now(),

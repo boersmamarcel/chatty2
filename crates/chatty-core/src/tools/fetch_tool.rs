@@ -93,7 +93,7 @@ impl Tool for FetchTool {
                         "description": "Maximum length of returned content in characters. Defaults to 50000."
                     }
                 },
-                "required": ["url"]
+                "required": ["url", "max_length"]
             }),
         }
     }

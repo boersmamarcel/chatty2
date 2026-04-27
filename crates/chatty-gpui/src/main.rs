@@ -640,6 +640,7 @@ fn main() {
                                     description: String::new(),
                                     kind: ExtensionKind::McpServer(server.clone()),
                                     source: ExtensionSource::Custom,
+                                    pricing_model: None,
                                     enabled: server.enabled,
                                 });
                             }
@@ -1009,6 +1010,7 @@ fn main() {
                                         description: String::new(),
                                         kind: ExtensionKind::McpServer(server.clone()),
                                         source: ExtensionSource::Custom,
+                                        pricing_model: None,
                                         enabled: server.enabled,
                                     });
                                 }
@@ -1116,6 +1118,7 @@ fn main() {
                                         description: String::new(),
                                         kind: ExtensionKind::A2aAgent(agent.clone()),
                                         source: ExtensionSource::Custom,
+                                        pricing_model: None,
                                         enabled: agent.enabled,
                                     });
                                 }
@@ -1217,7 +1220,72 @@ fn main() {
                 chatty_core::extensions_repository().load(),
             );
 
-            if let Ok(hive) = hive_result {
+            let mut loaded_hive = hive_result.ok();
+            let mut loaded_ext = ext_result.ok();
+            let mut save_backfilled_extensions = false;
+
+            if let (Some(hive), Some(ext)) = (&loaded_hive, loaded_ext.as_mut()) {
+                let missing_pricing_modules: Vec<String> = ext
+                    .extensions
+                    .iter()
+                    .filter_map(|installed| match (&installed.source, &installed.pricing_model) {
+                        (
+                            chatty_core::settings::models::extensions_store::ExtensionSource::Hive {
+                                module_name,
+                                ..
+                            },
+                            None,
+                        ) => Some(module_name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if !missing_pricing_modules.is_empty() {
+                    let mut client = chatty_core::hive::HiveRegistryClient::new(&hive.registry_url);
+                    if let Some(token) = hive.token.clone() {
+                        client = client.with_token(token);
+                    }
+
+                    match client
+                        .list_modules(&chatty_core::hive::models::ListParams {
+                            page: Some(1),
+                            per_page: Some(200),
+                            ..Default::default()
+                        })
+                        .await
+                    {
+                        Ok(list) => {
+                            let mut updated = 0;
+                            for installed in &mut ext.extensions {
+                                let module_name = match &installed.source {
+                                    chatty_core::settings::models::extensions_store::ExtensionSource::Hive {
+                                        module_name,
+                                        ..
+                                    } if installed.pricing_model.is_none() => module_name,
+                                    _ => continue,
+                                };
+
+                                if let Some(module) =
+                                    list.items.iter().find(|module| module.name == *module_name)
+                                {
+                                    installed.pricing_model = Some(module.pricing_model.clone());
+                                    updated += 1;
+                                }
+                            }
+
+                            if updated > 0 {
+                                info!(updated, "Backfilled extension pricing metadata from Hive");
+                                save_backfilled_extensions = true;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = ?e, "Failed to backfill extension pricing metadata");
+                        }
+                    }
+                }
+            }
+
+            if let Some(hive) = loaded_hive.take() {
                 cx.update(|cx| {
                     info!(
                         registry = %hive.registry_url,
@@ -1229,11 +1297,24 @@ fn main() {
                 .ok();
             }
 
-            if let Ok(ext) = ext_result {
+            if let Some(ext) = loaded_ext.take() {
                 let count = ext.extensions.len();
+                if save_backfilled_extensions {
+                    if let Err(e) = chatty_core::extensions_repository().save(ext.clone()).await {
+                        warn!(error = ?e, "Failed to persist backfilled extension pricing metadata");
+                    }
+                }
                 cx.update(|cx| {
                     info!(count, "Extensions loaded from disk");
                     cx.set_global(ext);
+                    if let Some(notifier) = cx
+                        .try_global::<settings::models::GlobalAgentConfigNotifier>()
+                        .and_then(|g| g.try_upgrade())
+                    {
+                        notifier.update(cx, |_notifier, cx| {
+                            cx.emit(settings::models::AgentConfigEvent::RebuildRequired);
+                        });
+                    }
                 })
                 .ok();
             }

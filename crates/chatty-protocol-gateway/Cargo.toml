@@ -7,6 +7,7 @@ description = "HTTP protocol gateway exposing WASM modules via OpenAI, MCP, and 
 [dependencies]
 chatty-module-registry = { path = "../chatty-module-registry" }
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
+hive-client = { path = "../hive-client" }
 
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
@@ -17,6 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

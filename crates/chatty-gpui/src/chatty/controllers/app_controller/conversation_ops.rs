@@ -567,12 +567,18 @@ impl ChattyApp {
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                     conv.streaming_trace().cloned(),
+                    conv.streaming_sub_agent_trace().cloned(),
                     conv.working_dir().cloned(),
                 )
             });
 
-        if let Some((model_id, streaming_content, streaming_trace, conversation_working_dir)) =
-            minimal_data
+        if let Some((
+            model_id,
+            streaming_content,
+            streaming_trace,
+            streaming_sub_agent_trace,
+            conversation_working_dir,
+        )) = minimal_data
         {
             // Check if this conversation has an active stream via StreamManager
             let has_active_stream = cx
@@ -619,25 +625,39 @@ impl ChattyApp {
                     state.set_working_dir_silent(conversation_working_dir.clone());
                 });
 
-                // Restore in-progress streaming message from Conversation model if it exists
-                // This must happen AFTER setting the streaming state
+                // Restore in-progress state from Conversation model if it exists.
+                // Sub-agent progress uses a dedicated message layout, so restore that
+                // first and only fall back to the generic streaming message/trace path
+                // when no running sub-agent trace is active.
                 if has_active_stream {
-                    if let Some(content) = streaming_content {
-                        debug!(conv_id = %conv_id, content_len = content.len(),
-                               "Restoring streaming message content from Conversation model");
-                        view.start_assistant_message(cx);
-                        view.append_assistant_text(&content, cx);
-                    } else {
-                        // Stream active but no content yet - show placeholder
-                        debug!(conv_id = %conv_id, "Stream active but no content yet, starting placeholder");
-                        view.start_assistant_message(cx);
-                    }
+                    let running_sub_agent_trace = streaming_trace
+                        .as_ref()
+                        .filter(|trace| trace.is_running_sub_agent())
+                        .cloned()
+                        .or(streaming_sub_agent_trace);
 
-                    // Restore in-progress tool trace from Conversation model
-                    if let Some(trace) = streaming_trace {
+                    if let Some(trace) = running_sub_agent_trace {
                         debug!(conv_id = %conv_id, trace_items = trace.items.len(),
-                               "Restoring streaming trace from Conversation model");
-                        view.restore_live_trace(trace, cx);
+                               "Restoring sub-agent progress trace from Conversation model");
+                        view.restore_sub_agent_progress(trace, cx);
+                    } else {
+                        if let Some(content) = streaming_content {
+                            debug!(conv_id = %conv_id, content_len = content.len(),
+                                   "Restoring streaming message content from Conversation model");
+                            view.start_assistant_message(cx);
+                            view.append_assistant_text(&content, cx);
+                        } else {
+                            // Stream active but no content yet - show placeholder
+                            debug!(conv_id = %conv_id, "Stream active but no content yet, starting placeholder");
+                            view.start_assistant_message(cx);
+                        }
+
+                        // Restore in-progress tool trace from Conversation model
+                        if let Some(trace) = streaming_trace {
+                            debug!(conv_id = %conv_id, trace_items = trace.items.len(),
+                                   "Restoring streaming trace from Conversation model");
+                            view.restore_live_trace(trace, cx);
+                        }
                     }
                 }
             });

@@ -297,8 +297,10 @@ impl ChattyApp {
         // Show immediate progress feedback.
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
+            let source = classify_agent_source(&agent_name, cx);
             view.start_sub_agent_progress(
                 &format!("[Agent: {agent_name}] {prompt_for_display}"),
+                source,
                 cx,
             );
         });
@@ -458,7 +460,7 @@ impl ChattyApp {
         // Clone the prompt for the display before it is moved into the async task.
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
-            view.start_sub_agent_progress(&prompt_for_display, cx);
+            view.start_sub_agent_progress(&prompt_for_display, ToolSource::Local, cx);
         });
 
         // Channel for streaming stderr progress lines from the subprocess.

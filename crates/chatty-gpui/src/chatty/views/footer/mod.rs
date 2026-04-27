@@ -4,7 +4,7 @@ pub mod error_indicator_view;
 pub mod fetch_indicator_view;
 pub mod mcp_indicator_view;
 pub mod network_indicator_view;
-mod progress_circle;
+pub mod progress_circle;
 pub mod status_footer_view;
 pub mod token_context_bar_view;
 pub mod tools_indicator_view;

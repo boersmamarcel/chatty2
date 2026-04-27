@@ -29,7 +29,7 @@ use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, SkillEntr
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
-    TraceItem, friendly_tool_name, is_denial_result,
+    ToolSource, TraceItem, friendly_tool_name, is_denial_result,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
@@ -69,7 +69,10 @@ fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
                 .iter()
                 .filter(|m| {
                     m.agent
-                        && matches!(m.status, ModuleLoadStatus::Loaded)
+                        && matches!(
+                            m.status,
+                            ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
+                        )
                         && enabled_ids.contains(m.name.as_str())
                 })
                 .map(|m| LocalModuleAgentSummary {
@@ -78,6 +81,7 @@ fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
                     description: m.description.clone(),
                     tools: m.tools.clone(),
                     supports_a2a: m.a2a,
+                    execution_mode: m.execution_mode.clone(),
                 })
                 .collect()
         })
@@ -756,4 +760,49 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
         updated_at: now,
         working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),
     })
+}
+
+// ── Tool source classification ───────────────────────────────────────────────
+
+/// Classify a built-in tool call by name into a [`ToolSource`] for data-egress badges.
+///
+/// Internet-facing tools are classified here. Module agent calls (invoke_agent /
+/// sub_agent) are classified separately by [`classify_agent_source`].
+pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
+    chatty_core::models::message_types::classify_tool_source(tool_name)
+}
+
+/// Classify an agent invocation by agent name into a [`ToolSource`].
+///
+/// Checks the global [`DiscoveredModulesModel`] for remote WASM modules and the
+/// global [`ExtensionsModel`] for non-localhost A2A agents.
+pub(super) fn classify_agent_source(agent_name: &str, cx: &App) -> ToolSource {
+    use chatty_core::settings::models::extensions_store::ExtensionsModel;
+
+    // Remote WASM module on the Hive runner?
+    if let Some(discovered) = cx.try_global::<DiscoveredModulesModel>() {
+        if let Some(entry) = discovered.modules.iter().find(|m| m.name == agent_name) {
+            if entry.execution_mode == "remote" || entry.execution_mode == "remote_only" {
+                return ToolSource::HiveCloud;
+            }
+        }
+    }
+
+    // Remote A2A agent with a non-localhost URL?
+    if let Some(extensions) = cx.try_global::<ExtensionsModel>() {
+        if let Some((_, cfg, _)) = extensions
+            .all_a2a_agents()
+            .into_iter()
+            .find(|(_, cfg, _)| cfg.name == agent_name)
+        {
+            let is_local = cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+            if !is_local {
+                return ToolSource::ExternalService {
+                    name: cfg.name.clone(),
+                };
+            }
+        }
+    }
+
+    ToolSource::Local
 }

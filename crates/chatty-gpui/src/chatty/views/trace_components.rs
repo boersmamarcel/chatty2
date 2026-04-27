@@ -6,11 +6,106 @@ use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
 use std::time::Duration;
 
+use super::code_block_component::CodeBlockComponent;
 use super::diff_view_component::DiffViewComponent;
 use super::message_types::{
-    ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, TraceEvent, TraceItem,
+    ApprovalState, ExecutionEngine, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState,
+    ToolSource, TraceEvent, TraceItem,
 };
 use gpui::EventEmitter;
+
+fn render_outline_badge(text: String, color: Rgba) -> AnyElement {
+    div()
+        .text_xs()
+        .px_2()
+        .py(px(0.5))
+        .rounded_sm()
+        .border_1()
+        .border_color(color)
+        .text_color(color)
+        .child(text)
+        .into_any_element()
+}
+
+fn tool_source_badge(source: &ToolSource) -> Option<(String, Rgba)> {
+    match source {
+        ToolSource::HiveCloud => Some(("☁ Remote".to_string(), rgba(0x3B82F6ff))),
+        ToolSource::Internet { label } => Some((format!("↗ {label}"), rgba(0xF59E0Bff))),
+        ToolSource::ExternalService { name } => Some((format!("↗ {name}"), rgba(0xA855F7ff))),
+        ToolSource::Local => None,
+    }
+}
+
+fn execution_engine_badge(engine: ExecutionEngine) -> (String, Rgba) {
+    let color = match engine {
+        ExecutionEngine::Shell => rgba(0x6B7280ff),
+        ExecutionEngine::Monty => rgba(0x0EA5A4ff),
+        ExecutionEngine::Docker => rgba(0x2563EBff),
+        ExecutionEngine::Daytona => rgba(0x7C3AEDff),
+    };
+    let label = match engine {
+        ExecutionEngine::Shell => "shell (local)",
+        ExecutionEngine::Monty => "monty",
+        ExecutionEngine::Docker => "docker",
+        ExecutionEngine::Daytona => "daytona",
+    };
+    (label.to_string(), color)
+}
+
+fn render_mode_badge(label: &'static str, is_remote: bool, badge_text: Hsla) -> AnyElement {
+    let bg = if is_remote {
+        rgba(0x3B82F6ff)
+    } else {
+        rgba(0x6B7280ff)
+    };
+
+    div()
+        .text_xs()
+        .px_2()
+        .py(px(0.5))
+        .rounded_sm()
+        .bg(bg)
+        .text_color(badge_text)
+        .flex_shrink_0()
+        .child(label)
+        .into_any_element()
+}
+
+fn sub_agent_mode_label(source: &ToolSource) -> &'static str {
+    match source {
+        ToolSource::HiveCloud
+        | ToolSource::ExternalService { .. }
+        | ToolSource::Internet { .. } => "remote",
+        ToolSource::Local => "local",
+    }
+}
+
+fn render_sub_agent_mode_badge(source: &ToolSource, badge_text: Hsla) -> AnyElement {
+    render_mode_badge(
+        sub_agent_mode_label(source),
+        !matches!(source, ToolSource::Local),
+        badge_text,
+    )
+}
+
+fn is_code_execution_tool(tool_call: &ToolCallBlock) -> bool {
+    matches!(tool_call.tool_name.as_str(), "execute_code" | "daytona_run")
+}
+
+fn render_execution_mode_badge(engine: ExecutionEngine, badge_text: Hsla) -> AnyElement {
+    let (label, color) = execution_engine_badge(engine);
+
+    div()
+        .text_xs()
+        .px_2()
+        .py(px(0.5))
+        .rounded_sm()
+        .bg(color)
+        .text_color(badge_text)
+        .flex_shrink_0()
+        .child(label)
+        .into_any_element()
+}
 
 /// Component for rendering the system trace container
 pub struct SystemTraceView {
@@ -184,6 +279,7 @@ impl SystemTraceView {
                 };
 
                 let mut step_container = div().flex().items_center().gap_1();
+                let badge_text = cx.theme().primary_foreground;
 
                 // Add animated indicator when active
                 if is_active {
@@ -218,6 +314,25 @@ impl SystemTraceView {
                             .text_color(muted_text)
                             .child(format!("({})", name)),
                     );
+
+                // Data-egress badge for the active/last tool call
+                if let TraceItem::ToolCall(tool_call) = item {
+                    if let Some(engine) = tool_call.execution_engine {
+                        if is_code_execution_tool(tool_call) {
+                            step_container = step_container
+                                .child(render_execution_mode_badge(engine, badge_text));
+                        } else {
+                            let (badge_text, badge_color) = execution_engine_badge(engine);
+                            step_container =
+                                step_container.child(render_outline_badge(badge_text, badge_color));
+                        }
+                    } else if let Some((badge_text, badge_color)) =
+                        tool_source_badge(&tool_call.source)
+                    {
+                        step_container =
+                            step_container.child(render_outline_badge(badge_text, badge_color));
+                    }
+                }
 
                 header = header.child(step_container);
             }
@@ -373,7 +488,19 @@ impl SystemTraceView {
                         .child(extract_command_display(tool_call)),
                 )
                 .map(|this| {
-                    if is_running {
+                    let this = if tool_call.tool_name == "sub_agent" {
+                        this.child(render_sub_agent_mode_badge(&tool_call.source, badge_text))
+                    } else if is_code_execution_tool(tool_call) {
+                        if let Some(engine) = tool_call.execution_engine {
+                            this.child(render_execution_mode_badge(engine, badge_text))
+                        } else {
+                            this
+                        }
+                    } else {
+                        this
+                    };
+
+                    let this = if is_running {
                         this.child(
                             badge.with_animation(
                                 ElementId::Name(format!("tool-badge-pulse-{}", index).into()),
@@ -385,6 +512,21 @@ impl SystemTraceView {
                         )
                     } else {
                         this.child(badge)
+                    };
+
+                    if tool_call.tool_name != "sub_agent" && !is_code_execution_tool(tool_call) {
+                        if let Some(engine) = tool_call.execution_engine {
+                            let (badge_text, badge_color) = execution_engine_badge(engine);
+                            this.child(render_outline_badge(badge_text, badge_color))
+                        } else if let Some((badge_text, badge_color)) =
+                            tool_source_badge(&tool_call.source)
+                        {
+                            this.child(render_outline_badge(badge_text, badge_color))
+                        } else {
+                            this
+                        }
+                    } else {
+                        this
                     }
                 })
                 .when_some(tool_call.duration, |this, duration| {
@@ -397,17 +539,28 @@ impl SystemTraceView {
                 }),
         );
 
-        // Show full command when the header was truncated
-        let full_command = extract_full_command(tool_call);
-        if full_command.chars().count() > 80 {
+        // Show runnable code with syntax highlighting when available.
+        if let Some(code_block) = render_code_run_input(tool_call, index) {
             container = container.child(
                 div()
                     .ml_4()
                     .pl_3()
                     .border_l_2()
                     .border_color(border_color)
-                    .child(render_full_command_box(full_command, panel_bg, text_color)),
+                    .child(code_block),
             );
+        } else {
+            let full_command = extract_full_command(tool_call);
+            if full_command.chars().count() > 80 {
+                container = container.child(
+                    div()
+                        .ml_4()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(border_color)
+                        .child(render_full_command_box(full_command, panel_bg, text_color)),
+                );
+            }
         }
 
         // Output section (if available)
@@ -779,6 +932,18 @@ where
                 .child(format_tool_call_header(tool_call)),
         )
         .map(|this| {
+            let this = if tool_call.tool_name == "sub_agent" {
+                this.child(render_sub_agent_mode_badge(&tool_call.source, badge_text))
+            } else if is_code_execution_tool(tool_call) {
+                if let Some(engine) = tool_call.execution_engine {
+                    this.child(render_execution_mode_badge(engine, badge_text))
+                } else {
+                    this
+                }
+            } else {
+                this
+            };
+
             if is_running {
                 this.child(
                     inline_badge.with_animation(
@@ -808,10 +973,14 @@ where
     // Build accordion content children (what shows when expanded)
     let mut content_children = Vec::new();
 
-    // Show full command when the header was truncated
-    let full_command = extract_full_command(tool_call);
-    if full_command.chars().count() > 80 {
-        content_children.push(render_full_command_box(full_command, panel_bg, text_color));
+    // Show runnable code with syntax highlighting when available.
+    if let Some(code_block) = render_code_run_input(tool_call, message_index * 1000 + tool_index) {
+        content_children.push(code_block);
+    } else {
+        let full_command = extract_full_command(tool_call);
+        if full_command.chars().count() > 80 {
+            content_children.push(render_full_command_box(full_command, panel_bg, text_color));
+        }
     }
 
     // For apply_diff tool calls with success, render a visual diff view
@@ -985,6 +1154,11 @@ fn render_full_command_box(
         .into_any_element()
 }
 
+fn render_code_run_input(tool_call: &ToolCallBlock, block_index: usize) -> Option<AnyElement> {
+    let (language, code) = extract_code_run_input(tool_call)?;
+    Some(CodeBlockComponent::new(Some(language), code, block_index).into_any_element())
+}
+
 /// Format the inline header text for a tool call.
 ///
 /// Most tools show `$ <command>` (shell-style), but internet and memory tools use their
@@ -993,8 +1167,8 @@ fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 
     match tool_call.tool_name.as_str() {
-        "remember" | "search_memory" | "search_web" | "fetch" | "sub_agent" | "daytona_run"
-        | "browser_use" => {
+        "sub_agent" => format!("{}: {}", tool_call.display_name, detail),
+        "remember" | "search_memory" | "search_web" | "fetch" | "daytona_run" | "browser_use" => {
             // Use the friendly display_name as prefix with the detail
             format!("{}: {}", tool_call.display_name, detail)
         }
@@ -1094,6 +1268,21 @@ fn extract_full_command(tool_call: &ToolCallBlock) -> String {
 
     // Fallback to display_name if we can't extract anything
     tool_call.display_name.clone()
+}
+
+fn extract_code_run_input(tool_call: &ToolCallBlock) -> Option<(String, String)> {
+    if !matches!(tool_call.tool_name.as_str(), "execute_code" | "daytona_run") {
+        return None;
+    }
+
+    let json = serde_json::from_str::<serde_json::Value>(&tool_call.input).ok()?;
+    let language = json
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("python")
+        .to_string();
+    let code = json.get("code").and_then(|v| v.as_str())?.to_string();
+    Some((language, code))
 }
 
 /// Format tool call output for display (extract useful info from JSON)

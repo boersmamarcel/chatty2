@@ -31,6 +31,9 @@ pub struct LocalModuleAgentSummary {
     pub tools: Vec<String>,
     /// Whether the module supports the A2A protocol (accessible via the protocol gateway).
     pub supports_a2a: bool,
+    /// Module execution mode from the manifest (`local`, `remote`, `remote_only`).
+    #[serde(default)]
+    pub execution_mode: String,
 }
 
 /// Output from the list_agents tool
@@ -168,6 +171,7 @@ mod tests {
             description: format!("{} module agent", name),
             tools: vec!["tool_a".to_string()],
             supports_a2a: true,
+            execution_mode: "local".to_string(),
         }
     }
 

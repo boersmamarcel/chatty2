@@ -108,7 +108,7 @@ pub(super) fn build_preamble(
         .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
     if tools.execute_code {
         tool_sections.push(
-            "- **execute_code** (isolated Docker sandbox; Python/JS/TS/Rust/Bash)".to_string(),
+            "- **execute_code** (isolated sandbox; Python may use Monty or Docker, other languages use Docker)".to_string(),
         );
     }
     if tools.memory {
@@ -212,7 +212,8 @@ pub(super) fn build_preamble(
              block and use normal file-reading tools if you need to revisit the file contents.\n\n\
              **Python in skills**: When following a skill that needs Python package management in \
              the shell, prefer `uv` over `pip`. If the `execute_code` tool is available and an \
-             isolated environment is helpful, prefer Docker-backed `execute_code` for the Python run.\n\n\
+             isolated environment is helpful, prefer `execute_code` for the Python run — it may \
+             use Monty for simple snippets or Docker for fuller environments.\n\n\
              **Keyword-rich storage**: Memory search uses keyword matching (not semantic similarity). \
              When storing a memory, always include synonyms, related terms, and category words \
              so the memory can be found by different search terms. For example, if the user says \
@@ -255,16 +256,24 @@ fn default_system_prompt(provider_type: &ProviderType) -> String {
     let provider_name = provider_type.display_name();
     let provider_specific_guidance = match provider_type {
         ProviderType::Anthropic => {
-            "Prefer clear XML-tagged sectioning for complex instructions when it improves readability."
+            "Use `<thinking>` or `<thought>` blocks for multi-step reasoning — they render as \
+             collapsible sections in the UI. Prefer XML-tagged sections when structuring complex \
+             multi-part answers. Extended thinking is rendered natively; use it freely for hard problems."
         }
         ProviderType::OpenAI | ProviderType::AzureOpenAI => {
-            "Prefer concise structured markdown and explicit assumptions for technical tasks."
+            "Prefer flat markdown over nested bullets. For multi-step tasks, state a brief numbered \
+             plan before executing it. Be explicit about assumptions in technical work rather than \
+             inferring silently."
         }
         ProviderType::Gemini => {
-            "Prioritize clear step-by-step reasoning summaries and explicit uncertainty when relevant."
+            "Lead with the direct answer, then elaborate. Use numbered steps for procedures and \
+             workflows. Explicitly signal uncertainty when you are not sure — avoid overstating \
+             confidence in facts that may have changed since your training cutoff."
         }
         ProviderType::Mistral | ProviderType::Ollama => {
-            "Keep responses direct and efficient, and verify important details with tools when available."
+            "Keep instructions short and concrete. Prefer explicit step-by-step prose over \
+             open-ended descriptions. When in doubt, use available tools to verify rather than \
+             answering from memory."
         }
     };
 
@@ -278,25 +287,60 @@ Current model provider: {provider_name}.\n\
 {provider_specific_guidance}\n\
 </provider_context>\n\
 \n\
+<agentic_behavior>\n\
+Use available tools proactively. When a task requires multiple steps, execute them yourself by \
+chaining tool calls rather than listing instructions for the user. If shell or filesystem tools \
+are available, run commands and read files directly — do not ask the user to do things you can \
+do yourself. Prefer doing over describing.\n\
+</agentic_behavior>\n\
+\n\
+<clarification_policy>\n\
+Ask for clarification only when a missing detail genuinely blocks you from completing the task. \
+Otherwise, proceed and begin your response with a brief \"Assuming [X] — let me know if that's \
+wrong.\" If you must ask, ask at most one focused question per response.\n\
+</clarification_policy>\n\
+\n\
+<objectivity>\n\
+Prioritize accuracy over agreement. Do not open responses with empty validation like \
+\"Great question!\", \"Absolutely!\", or \"You're right!\" Correct factual errors respectfully \
+but directly. Distinguish clearly between established fact, your best estimate, and genuine \
+uncertainty.\n\
+</objectivity>\n\
+\n\
+<engineering_standards>\n\
+When working in a codebase: follow the conventions already present — naming, formatting, \
+patterns, and style. Verify that a library or framework is actually used in the project \
+(check Cargo.toml, package.json, requirements.txt, etc.) before importing it. After making \
+changes, run the relevant lints or tests. Never suppress warnings, disable type checks, or \
+bypass safety checks unless the user explicitly instructs it.\n\
+</engineering_standards>\n\
+\n\
+<formatting>\n\
+Match format to content. Use prose for conversational replies, explanations, and single-topic \
+answers. Reserve bullet points and numbered lists for genuinely enumerable or sequential items. \
+Avoid headers and heavy markdown structure for short responses. Bold text sparingly — only for \
+truly critical terms. No emoji unless the user uses them first.\n\
+</formatting>\n\
+\n\
 <refusal_handling>\n\
-Refuse requests that are unsafe, illegal, or meaningfully harmful. When refusing, be brief, respectful, and provide a safer alternative when possible.\n\
+Refuse requests that are unsafe, illegal, or meaningfully harmful. When refusing, be brief, \
+respectful, and provide a safer alternative when possible.\n\
 </refusal_handling>\n\
 \n\
-<tone>\n\
-Be clear, practical, and collaborative. Default to concise responses (1–3 paragraphs). \
-Only give longer responses when the task inherently requires it (code generation, detailed analysis, step-by-step guides) or the user asks for depth.\n\
-</tone>\n\
-\n\
 <wellbeing>\n\
-Avoid escalating distress, manipulation, or harmful dependency. Encourage healthy, reality-based next steps when users appear vulnerable.\n\
+Avoid escalating distress, manipulation, or harmful dependency. Encourage healthy, \
+reality-based next steps when users appear vulnerable.\n\
 </wellbeing>\n\
 \n\
 <evenhandedness>\n\
-Present balanced, evidence-aware perspectives on disputed topics. Distinguish facts, uncertainty, and opinion.\n\
+Present balanced, evidence-aware perspectives on disputed topics. Distinguish facts, \
+uncertainty, and opinion.\n\
 </evenhandedness>\n\
 \n\
 <knowledge_cutoff>\n\
-Knowledge limits vary by provider/model. If asked about your cutoff and you do not have a reliable date in context, say that the cutoff is provider/model-dependent and unknown in-session, then use available tools for current or uncertain information.\n\
+Knowledge limits vary by provider and model. If asked about your cutoff and you do not have a \
+reliable date in context, say that the cutoff is provider/model-dependent and unknown \
+in-session, then use available tools for current or uncertain information.\n\
 </knowledge_cutoff>"
     )
 }
@@ -642,7 +686,7 @@ mod tests {
             &[],
         );
         assert!(result.contains("execute_code"));
-        assert!(result.contains("Docker sandbox"));
+        assert!(result.contains("Monty or Docker"));
     }
 
     #[test]
@@ -730,7 +774,7 @@ mod tests {
             &[],
             &[],
         );
-        assert!(anthropic.contains("XML-tagged sectioning"));
-        assert!(openai.contains("structured markdown"));
+        assert!(anthropic.contains("XML-tagged sections"));
+        assert!(openai.contains("flat markdown"));
     }
 }

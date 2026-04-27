@@ -14,7 +14,8 @@ use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_with_skills}
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
-    ToolCallState, TraceItem, UserMessage, friendly_tool_name, is_denial_result,
+    ToolCallState, ToolSource, TraceItem, UserMessage, classify_initial_execution_engine,
+    detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
 };
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
@@ -462,7 +463,13 @@ impl ChatView {
     }
 
     /// Handle tool call started event
-    pub fn handle_tool_call_started(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+    pub fn handle_tool_call_started(
+        &mut self,
+        id: String,
+        name: String,
+        source: ToolSource,
+        cx: &mut Context<Self>,
+    ) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
         // Capture current message content as "text_before" for interleaved rendering
@@ -481,6 +488,7 @@ impl ChatView {
         );
 
         let display_name = friendly_tool_name(&name);
+        let execution_engine = classify_initial_execution_engine(&name);
         let tool_call = ToolCallBlock {
             id: id.clone(),
             tool_name: name,
@@ -491,6 +499,8 @@ impl ChatView {
             state: ToolCallState::Running,
             duration: None,
             text_before,
+            source,
+            execution_engine,
         };
 
         // Update live trace and create/update system_trace_view entity
@@ -612,6 +622,8 @@ impl ChatView {
     ) {
         // Update tool call input by ID
         self.update_tool_call_by_id(&id, |tc| {
+            tc.execution_engine =
+                predict_execution_engine(&tc.tool_name, &arguments).or(tc.execution_engine);
             tc.input = arguments.clone();
         });
 
@@ -637,6 +649,7 @@ impl ChatView {
 
         // Update trace by ID
         self.update_tool_call_by_id(&id, |tc| {
+            tc.execution_engine = detect_execution_engine(&tc.tool_name, &result);
             tc.output = Some(result.clone());
             tc.state = if is_denied {
                 ToolCallState::Error("Denied by user".to_string())
@@ -980,37 +993,27 @@ impl ChatView {
     ///
     /// The progress is shown as a collapsible `ToolCallBlock` (Running state) so
     /// the user can expand it to see live stderr output while the sub-agent runs.
-    pub fn start_sub_agent_progress(&mut self, prompt: &str, cx: &mut Context<Self>) {
-        let tool_call = ToolCallBlock {
-            id: format!(
-                "sub-agent-{}",
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            ),
-            tool_name: "sub_agent".to_string(),
-            display_name: "Sub-agent".to_string(),
-            input: serde_json::json!({ "task": prompt }).to_string(),
-            output: None,
-            output_preview: None,
-            state: ToolCallState::Running,
-            duration: None,
-            text_before: String::new(),
-        };
+    pub fn start_sub_agent_progress(
+        &mut self,
+        prompt: &str,
+        source: ToolSource,
+        cx: &mut Context<Self>,
+    ) {
+        let trace = SystemTrace::new_sub_agent(prompt, source);
+        self.restore_sub_agent_progress(trace, cx);
+    }
 
-        let mut trace = SystemTrace::new();
-        trace.add_tool_call(tool_call);
-        trace.set_active_tool(0);
+    pub fn restore_sub_agent_progress(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
+        let is_streaming = trace.active_tool_index.is_some();
 
         let trace_view = cx.new(|_cx| SystemTraceView::new(trace.clone()));
 
         self.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: String::new(),
-            is_streaming: true,
+            is_streaming,
             system_trace_view: Some(trace_view),
-            live_trace: Some(trace),
+            live_trace: if is_streaming { Some(trace) } else { None },
             is_markdown: true,
             attachments: Vec::new(),
             feedback: None,
@@ -1018,7 +1021,7 @@ impl ChatView {
         });
 
         let idx = self.messages.len() - 1;
-        self.sub_agent_progress_msg_idx = Some(idx);
+        self.sub_agent_progress_msg_idx = is_streaming.then_some(idx);
 
         // Start expanded so live progress output is visible while the sub-agent runs.
         self.collapsed_tool_calls.insert((idx, 0), false);
@@ -1041,19 +1044,7 @@ impl ChatView {
         };
 
         if let Some(ref mut trace) = msg.live_trace {
-            for item in trace.items.iter_mut() {
-                if let TraceItem::ToolCall(tc) = item {
-                    if tc.tool_name == "sub_agent" {
-                        let new_output = if let Some(ref existing) = tc.output {
-                            format!("{existing}\n{line}")
-                        } else {
-                            line.to_string()
-                        };
-                        tc.output = Some(new_output);
-                        break;
-                    }
-                }
-            }
+            trace.append_sub_agent_progress(line);
         }
 
         // Update the SystemTraceView entity so interleaved rendering picks up the change.
@@ -1086,30 +1077,7 @@ impl ChatView {
 
         if let Some(msg) = self.messages.get_mut(idx) {
             if let Some(ref mut trace) = msg.live_trace {
-                for item in trace.items.iter_mut() {
-                    if let TraceItem::ToolCall(tc) = item {
-                        if tc.tool_name == "sub_agent" {
-                            tc.state = if success {
-                                ToolCallState::Success
-                            } else {
-                                ToolCallState::Error("Sub-agent failed".to_string())
-                            };
-                            // Place the stdout/error text in the output field so it
-                            // renders inside the expanded trace body.
-                            if let Some(text) = result {
-                                // Prepend any live progress already accumulated.
-                                tc.output = Some(match tc.output.take() {
-                                    Some(existing) if !existing.is_empty() => {
-                                        format!("{existing}\n\n---\n\n{text}")
-                                    }
-                                    _ => text,
-                                });
-                            }
-                            break;
-                        }
-                    }
-                }
-                trace.clear_active_tool();
+                trace.finalize_sub_agent_progress(success, result);
             }
 
             // Push final trace state to the view entity.
@@ -1425,7 +1393,12 @@ impl ChatView {
                 model
                     .modules
                     .iter()
-                    .filter(|module| matches!(module.status, ModuleLoadStatus::Loaded))
+                    .filter(|module| {
+                        matches!(
+                            module.status,
+                            ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
+                        )
+                    })
                     .count()
             })
             .unwrap_or(0);
@@ -1436,7 +1409,10 @@ impl ChatView {
                     .iter()
                     .filter(|module| {
                         module.agent
-                            && matches!(module.status, ModuleLoadStatus::Loaded)
+                            && matches!(
+                                module.status,
+                                ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
+                            )
                             && enabled_module_ids.contains(module.name.as_str())
                     })
                     .count()

@@ -97,6 +97,20 @@ pub mod llm {
     }
 }
 
+/// Host-provided sandboxed file access for reading model weights.
+///
+/// Paths are resolved relative to the module's `weights-root` config key.
+/// Absolute paths and `..` components are rejected by the host.
+pub mod file {
+    /// Read the raw bytes of a file at `path`.
+    ///
+    /// `path` must be relative (no leading `/`, no `..` segments).
+    /// The host resolves it against the module's `weights_root` config value.
+    pub fn read_bytes(path: &str) -> Result<Vec<u8>, String> {
+        super::chatty::module::file::read_bytes(path)
+    }
+}
+
 /// Host-provided key-value configuration.
 ///
 /// Wraps the `config::get` host import.  Configuration values are set in the
@@ -231,7 +245,7 @@ macro_rules! export_module {
         // Generate the component-model ABI glue that wires the WASM export
         // names to the SDK's type-erased cabi helpers.
         const _: () = {
-            #[unsafe(export_name = "chatty:module/agent@0.1.0#chat")]
+            #[unsafe(export_name = "chatty:module/agent@0.2.0#chat")]
             unsafe extern "C" fn __chatty_export_chat(
                 arg0: *mut u8,
                 arg1: usize,
@@ -245,7 +259,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.1.0#chat")]
+            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#chat")]
             unsafe extern "C" fn __chatty_post_return_chat(arg0: *mut u8) {
                 unsafe {
                     $crate::exports::chatty::module::agent::__post_return_chat::<
@@ -254,7 +268,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "chatty:module/agent@0.1.0#invoke-tool")]
+            #[unsafe(export_name = "chatty:module/agent@0.2.0#invoke-tool")]
             unsafe extern "C" fn __chatty_export_invoke_tool(
                 arg0: *mut u8,
                 arg1: usize,
@@ -268,7 +282,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.1.0#invoke-tool")]
+            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#invoke-tool")]
             unsafe extern "C" fn __chatty_post_return_invoke_tool(arg0: *mut u8) {
                 unsafe {
                     $crate::exports::chatty::module::agent::__post_return_invoke_tool::<
@@ -277,7 +291,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "chatty:module/agent@0.1.0#list-tools")]
+            #[unsafe(export_name = "chatty:module/agent@0.2.0#list-tools")]
             unsafe extern "C" fn __chatty_export_list_tools() -> *mut u8 {
                 unsafe {
                     $crate::exports::chatty::module::agent::_export_list_tools_cabi::<
@@ -286,7 +300,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.1.0#list-tools")]
+            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#list-tools")]
             unsafe extern "C" fn __chatty_post_return_list_tools(arg0: *mut u8) {
                 unsafe {
                     $crate::exports::chatty::module::agent::__post_return_list_tools::<
@@ -295,7 +309,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "chatty:module/agent@0.1.0#get-agent-card")]
+            #[unsafe(export_name = "chatty:module/agent@0.2.0#get-agent-card")]
             unsafe extern "C" fn __chatty_export_get_agent_card() -> *mut u8 {
                 unsafe {
                     $crate::exports::chatty::module::agent::_export_get_agent_card_cabi::<
@@ -304,7 +318,7 @@ macro_rules! export_module {
                 }
             }
 
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.1.0#get-agent-card")]
+            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#get-agent-card")]
             unsafe extern "C" fn __chatty_post_return_get_agent_card(arg0: *mut u8) {
                 unsafe {
                     $crate::exports::chatty::module::agent::__post_return_get_agent_card::<

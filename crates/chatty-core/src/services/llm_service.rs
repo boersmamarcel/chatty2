@@ -361,6 +361,19 @@ pub async fn stream_prompt(
                 process_agent_stream!(stream)
             }
         }
+        AgentClient::OpenAICompletions(agent) => {
+            let mut stream = agent
+                .stream_prompt(user_message.clone())
+                .with_history(history_snapshot)
+                .multi_turn(max_agent_turns)
+                .await;
+
+            if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
+                process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx)
+            } else {
+                process_agent_stream!(stream)
+            }
+        }
         AgentClient::Gemini(agent) => {
             let mut stream = agent
                 .stream_prompt(user_message.clone())

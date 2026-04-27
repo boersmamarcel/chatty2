@@ -1,9 +1,11 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, trace, warn};
 use wasmtime_wasi::{IoView, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
+use crate::bindings::chatty::module::billing::SessionInfo;
 use crate::bindings::chatty::module::types::{CompletionResponse, Message};
 use crate::limits::ResourceLimits;
 
@@ -29,6 +31,85 @@ pub trait LlmProvider: Send + Sync {
         messages: Vec<Message>,
         tools: Option<String>,
     ) -> Result<CompletionResponse, String>;
+}
+
+// ---------------------------------------------------------------------------
+// BillingProvider trait
+// ---------------------------------------------------------------------------
+
+/// Callback interface for billing session management (Phase 3b).
+///
+/// The host implements this to forward billing requests to the Hive registry.
+/// Called synchronously from WASM; use `block_on` if the implementation is async.
+///
+/// # Example Implementation
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use chatty_wasm_runtime::BillingProvider;
+/// use chatty_wasm_runtime::bindings::chatty::module::billing::SessionInfo;
+///
+/// struct HiveBillingProvider {
+///     hive_client: Arc<hive_client::HiveRegistryClient>,
+///     module_name: String,
+///     module_version: String,
+///     session_id: std::sync::Mutex<Option<String>>,
+/// }
+///
+/// impl BillingProvider for HiveBillingProvider {
+///     fn acquire_session(&self, estimated_tokens: i64) -> Result<SessionInfo, String> {
+///         // Call Hive's acquire-session API (async, so we block_on)
+///         let response = tokio::runtime::Handle::current()
+///             .block_on(async {
+///                 self.hive_client
+///                     .acquire_session(&self.module_name, &self.module_version, estimated_tokens)
+///                     .await
+///             })
+///             .map_err(|e| format!("acquire-session failed: {}", e))?;
+///
+///         // Store session ID for later settlement
+///         *self.session_id.lock().unwrap() = Some(response.session_id.clone());
+///
+///         Ok(SessionInfo {
+///             token: response.token,
+///             balance_tokens: response.balance_tokens,
+///             reserved_tokens: response.reserved_tokens,
+///             pricing_model: response.pricing_model,
+///         })
+///     }
+///
+///     fn report_usage(&self, input_tokens: i64, output_tokens: i64) -> Result<(), String> {
+///         let session_id = self.session_id
+///             .lock()
+///             .unwrap()
+///             .as_ref()
+///             .ok_or("no active session")?
+///             .clone();
+///
+///         tokio::runtime::Handle::current()
+///             .block_on(async {
+///                 self.hive_client
+///                     .settle_session(&session_id, input_tokens, output_tokens)
+///                     .await
+///             })
+///             .map_err(|e| format!("settle-session failed: {}", e))?;
+///
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait BillingProvider: Send + Sync {
+    /// Acquire a billing session before module execution.
+    ///
+    /// Reserves credits on behalf of the user and returns a signed JWT
+    /// that the module can verify.
+    fn acquire_session(&self, estimated_tokens: i64) -> Result<SessionInfo, String>;
+
+    /// Report actual usage after module execution.
+    ///
+    /// Settles the session by deducting actual usage and releasing
+    /// the reserved remainder.
+    fn report_usage(&self, input_tokens: i64, output_tokens: i64) -> Result<(), String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +165,8 @@ pub(crate) struct ModuleState {
     pub(crate) manifest: ModuleManifest,
     /// Callback for LLM completions.
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
+    /// Callback for billing session management.
+    pub(crate) billing_provider: Option<Arc<dyn BillingProvider>>,
     /// WASI Preview 2 context — provides the WASI host implementations
     /// required by modules compiled for `wasm32-wasip2`.
     pub(crate) wasi_ctx: WasiCtx,
@@ -97,6 +180,7 @@ impl ModuleState {
     pub(crate) fn new(
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
+        billing_provider: Option<Arc<dyn BillingProvider>>,
         resource_limits: &ResourceLimits,
     ) -> Self {
         let limits = wasmtime::StoreLimitsBuilder::new()
@@ -113,6 +197,7 @@ impl ModuleState {
             limits,
             manifest,
             llm_provider,
+            billing_provider,
             wasi_ctx,
             table,
             progress_tx: None,
@@ -205,6 +290,179 @@ impl crate::bindings::chatty::module::logging::Host for ModuleState {
     }
 }
 
+impl crate::bindings::chatty::module::billing::Host for ModuleState {
+    fn acquire_session(&mut self, estimated_tokens: i64) -> Result<SessionInfo, String> {
+        debug!(
+            module = %self.manifest.name,
+            estimated_tokens = estimated_tokens,
+            "billing::acquire-session called by WASM module"
+        );
+
+        match &self.billing_provider {
+            Some(provider) => {
+                let result = provider.acquire_session(estimated_tokens);
+                if let Err(ref e) = result {
+                    warn!(module = %self.manifest.name, error = %e, "billing::acquire-session failed");
+                }
+                result
+            }
+            None => {
+                // No billing provider — module is calling billing but host doesn't support it.
+                // This is an error: paid modules require a billing provider.
+                error!(module = %self.manifest.name, "billing::acquire-session called but no BillingProvider configured");
+                Err("billing not configured on host".to_string())
+            }
+        }
+    }
+
+    fn report_usage(&mut self, input_tokens: i64, output_tokens: i64) -> Result<(), String> {
+        debug!(
+            module = %self.manifest.name,
+            input_tokens = input_tokens,
+            output_tokens = output_tokens,
+            "billing::report-usage called by WASM module"
+        );
+
+        match &self.billing_provider {
+            Some(provider) => {
+                let result = provider.report_usage(input_tokens, output_tokens);
+                if let Err(ref e) = result {
+                    warn!(module = %self.manifest.name, error = %e, "billing::report-usage failed");
+                }
+                result
+            }
+            None => {
+                error!(module = %self.manifest.name, "billing::report-usage called but no BillingProvider configured");
+                Err("billing not configured on host".to_string())
+            }
+        }
+    }
+}
+
+impl crate::bindings::chatty::module::file::Host for ModuleState {
+    fn read_bytes(&mut self, path: String) -> Result<Vec<u8>, String> {
+        // Resolve weights-root from the module's own config.
+        let root = self
+            .manifest
+            .get_config("weights_root")
+            .ok_or_else(|| "file::read_bytes: `weights_root` not configured".to_string())?;
+
+        // Sandbox: reject absolute paths and any `..` component.
+        if Path::new(&path).is_absolute() {
+            return Err(format!("file::read_bytes: absolute path rejected: {path}"));
+        }
+        if path.split('/').any(|seg| seg == "..") {
+            return Err(format!("file::read_bytes: `..` component rejected: {path}"));
+        }
+
+        let full = Path::new(&root).join(&path);
+
+        debug!(
+            module = %self.manifest.name,
+            path = %full.display(),
+            "file::read_bytes"
+        );
+
+        std::fs::read(&full).map_err(|e| {
+            warn!(module = %self.manifest.name, path = %full.display(), error = %e, "file::read_bytes failed");
+            format!("file::read_bytes: {e}")
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backwards-compat host impls for chatty:module@0.1.0
+// ---------------------------------------------------------------------------
+//
+// These delegate to the same business logic as the @0.2.0 impls. Bindgen
+// generates separate (but structurally identical) Host traits per package
+// version, so we need explicit impls. Types are also distinct nominal types,
+// so we convert at the boundary.
+
+impl crate::bindings_v0_1::chatty::module::types::Host for ModuleState {}
+
+impl crate::bindings_v0_1::chatty::module::llm::Host for ModuleState {
+    fn complete(
+        &mut self,
+        model: String,
+        messages: Vec<crate::bindings_v0_1::chatty::module::types::Message>,
+        tools: Option<String>,
+    ) -> Result<crate::bindings_v0_1::chatty::module::types::CompletionResponse, String> {
+        debug!(
+            module = %self.manifest.name,
+            model = %model,
+            message_count = messages.len(),
+            "llm::complete (v0.1) called by WASM module"
+        );
+        // Convert v0.1 messages -> v0.2 (identical layout)
+        let v2_messages: Vec<Message> = messages
+            .into_iter()
+            .map(|m| Message {
+                role: match m.role {
+                    crate::bindings_v0_1::chatty::module::types::Role::System => {
+                        crate::bindings::chatty::module::types::Role::System
+                    }
+                    crate::bindings_v0_1::chatty::module::types::Role::User => {
+                        crate::bindings::chatty::module::types::Role::User
+                    }
+                    crate::bindings_v0_1::chatty::module::types::Role::Assistant => {
+                        crate::bindings::chatty::module::types::Role::Assistant
+                    }
+                },
+                content: m.content,
+            })
+            .collect();
+        let result = self.llm_provider.complete(&model, v2_messages, tools);
+        if let Err(ref e) = result {
+            warn!(module = %self.manifest.name, error = %e, "llm::complete (v0.1) returned error");
+        }
+        // Convert v0.2 response back to v0.1
+        result.map(
+            |r| crate::bindings_v0_1::chatty::module::types::CompletionResponse {
+                content: r.content,
+                usage: r.usage.map(
+                    |u| crate::bindings_v0_1::chatty::module::types::TokenUsage {
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                    },
+                ),
+                tool_calls: r
+                    .tool_calls
+                    .into_iter()
+                    .map(|tc| crate::bindings_v0_1::chatty::module::types::ToolCall {
+                        id: tc.id,
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    })
+                    .collect(),
+            },
+        )
+    }
+}
+
+impl crate::bindings_v0_1::chatty::module::config::Host for ModuleState {
+    fn get(&mut self, key: String) -> Option<String> {
+        self.manifest.get_config(&key)
+    }
+}
+
+impl crate::bindings_v0_1::chatty::module::logging::Host for ModuleState {
+    fn log(&mut self, level: String, message: String) {
+        let module = &self.manifest.name;
+        match level.as_str() {
+            "trace" => trace!(module = %module, "{}", message),
+            "debug" => debug!(module = %module, "{}", message),
+            "info" => info!(module = %module, "{}", message),
+            "warn" => warn!(module = %module, "{}", message),
+            "error" => error!(module = %module, "{}", message),
+            other => info!(module = %module, level = %other, "{}", message),
+        }
+        if let Some(ref tx) = self.progress_tx {
+            let _ = tx.send(message);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -251,7 +509,7 @@ mod tests {
         let manifest = ModuleManifest::new("test-module")
             .with_config("api_key", "secret123")
             .with_config("endpoint", "https://example.com");
-        ModuleState::new(manifest, provider, &ResourceLimits::default())
+        ModuleState::new(manifest, provider, None, &ResourceLimits::default())
     }
 
     #[test]

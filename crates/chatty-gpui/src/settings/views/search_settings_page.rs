@@ -108,7 +108,7 @@ pub fn search_settings_page() -> SettingPage {
                                 .into_any_element()
                         }),
                     )
-                    .description("Select which search engine to use for web searches."),
+                    .description("Select which search engine to use for web searches. ↗ Sends queries to an external search provider."),
                     SettingItem::new(
                         "Tavily API Key",
                         masked_api_key_field(
@@ -177,7 +177,7 @@ pub fn search_settings_page() -> SettingPage {
                         )
                         .default_value(true),
                     )
-                    .description("Activate the browser_use tool. Requires an API key below."),
+                    .description("Activate the browser_use tool. ↗ Sends page content to browser-use.com."),
                     SettingItem::new(
                         "API Key",
                         masked_api_key_field(
@@ -217,7 +217,7 @@ pub fn search_settings_page() -> SettingPage {
                         )
                         .default_value(true),
                     )
-                    .description("Activate the daytona_run tool. Requires an API key below."),
+                    .description("Activate the daytona_run tool. ↗ Runs code in a remote cloud sandbox."),
                     SettingItem::new(
                         "API Key",
                         masked_api_key_field(

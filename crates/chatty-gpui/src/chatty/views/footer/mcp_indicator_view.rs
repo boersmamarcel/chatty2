@@ -88,7 +88,9 @@ impl RenderOnce for McpIndicatorView {
                                 servers
                                     .into_iter()
                                     .map(|(id, cfg, enabled)| {
-                                        render_server_item(id, cfg.name, enabled)
+                                        let is_external = !cfg.url.contains("localhost")
+                                            && !cfg.url.contains("127.0.0.1");
+                                        render_server_item(id, cfg.name, enabled, is_external)
                                     })
                                     .collect::<Vec<_>>(),
                             )
@@ -99,8 +101,19 @@ impl RenderOnce for McpIndicatorView {
 }
 
 /// Render a single server item in the popover
-fn render_server_item(ext_id: String, name: String, enabled: bool) -> impl IntoElement {
+fn render_server_item(
+    ext_id: String,
+    name: String,
+    enabled: bool,
+    is_external: bool,
+) -> impl IntoElement {
     let button_id = SharedString::from(format!("toggle-{}", name));
+    let display_name = if is_external {
+        format!("↗ {}", name)
+    } else {
+        name
+    };
+    let name_color: Option<u32> = if is_external { Some(0xA855F7) } else { None };
 
     div()
         .flex()
@@ -111,7 +124,14 @@ fn render_server_item(ext_id: String, name: String, enabled: bool) -> impl IntoE
         .px_2()
         .py_1()
         .rounded_md()
-        .child(div().text_sm().child(name))
+        .child(
+            div()
+                .text_sm()
+                .when(name_color.is_some(), |el| {
+                    el.text_color(rgb(name_color.unwrap()))
+                })
+                .child(display_name),
+        )
         .child(
             Button::new(button_id)
                 .xsmall()

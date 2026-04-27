@@ -43,6 +43,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use super::backend::{ExecutionResult, Language, SandboxBackend, SandboxConfig};
+use crate::models::message_types::ExecutionEngine;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -267,6 +268,7 @@ impl SandboxBackend for MontySandbox {
                 exit_code,
                 timed_out: false,
                 port_mappings: HashMap::new(),
+                execution_engine: ExecutionEngine::Monty,
             })
         };
 
@@ -282,6 +284,7 @@ impl SandboxBackend for MontySandbox {
                     exit_code: -1,
                     timed_out: true,
                     port_mappings: HashMap::new(),
+                    execution_engine: ExecutionEngine::Monty,
                 })
             }
         }

@@ -1,6 +1,7 @@
 //! Core `ProtocolGateway` implementation — builds the axum router and manages
 //! the server lifecycle.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,8 +13,27 @@ use tokio::sync::oneshot;
 use tracing::info;
 
 use chatty_module_registry::ModuleRegistry;
+use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 
 use crate::handlers::{a2a, index, mcp, openai};
+
+// ---------------------------------------------------------------------------
+// GatewayState
+// ---------------------------------------------------------------------------
+
+/// Shared state for all gateway handlers.
+#[derive(Clone)]
+pub struct GatewayState {
+    pub registry: Arc<RwLock<ModuleRegistry>>,
+    pub usage: Option<Arc<UsageCollector>>,
+    pub credit_guard: Option<Arc<CreditGuard>>,
+    pub hive_client: Option<Arc<HiveRegistryClient>>,
+    pub runner_url: Option<String>,
+    /// Set of module names that require credits (paid modules).
+    /// Credit checks are skipped for modules NOT in this set.
+    /// An empty set means no paid modules — all credit checks are skipped.
+    pub paid_modules: Arc<HashSet<String>>,
+}
 
 // ---------------------------------------------------------------------------
 // ProtocolGateway
@@ -53,6 +73,11 @@ pub struct ProtocolGateway {
     registry: Arc<RwLock<ModuleRegistry>>,
     port: u16,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    usage: Option<Arc<UsageCollector>>,
+    credit_guard: Option<Arc<CreditGuard>>,
+    hive_client: Option<Arc<HiveRegistryClient>>,
+    runner_url: Option<String>,
+    paid_modules: HashSet<String>,
 }
 
 impl ProtocolGateway {
@@ -65,7 +90,45 @@ impl ProtocolGateway {
             registry,
             port,
             shutdown_tx: None,
+            usage: None,
+            credit_guard: None,
+            hive_client: None,
+            runner_url: None,
+            paid_modules: HashSet::new(),
         }
+    }
+
+    /// Attach a [`UsageCollector`] so that WASM invocations are automatically reported.
+    pub fn with_usage_collector(mut self, collector: Arc<UsageCollector>) -> Self {
+        self.usage = Some(collector);
+        self
+    }
+
+    /// Attach a [`CreditGuard`] for pre-invocation credit checks on paid modules.
+    pub fn with_credit_guard(mut self, guard: Arc<CreditGuard>) -> Self {
+        self.credit_guard = Some(guard);
+        self
+    }
+
+    /// Attach a [`HiveRegistryClient`] for remote module execution.
+    pub fn with_hive_client(mut self, client: Arc<HiveRegistryClient>) -> Self {
+        self.hive_client = Some(client);
+        self
+    }
+
+    /// Set the runner URL for remote module execution.
+    pub fn with_runner_url(mut self, url: impl Into<String>) -> Self {
+        self.runner_url = Some(url.into());
+        self
+    }
+
+    /// Specify which modules require credits (paid modules).
+    ///
+    /// Credit checks are only applied to modules in this set.
+    /// Free modules are always allowed regardless of credit balance.
+    pub fn with_paid_modules(mut self, modules: HashSet<String>) -> Self {
+        self.paid_modules = modules;
+        self
     }
 
     /// Build the axum [`Router`] for this gateway.
@@ -73,7 +136,14 @@ impl ProtocolGateway {
     /// Exposed separately from `start` to allow embedding the router into a
     /// larger application or for testing with [`axum::serve`].
     pub fn build_router(&self) -> Router {
-        let registry = Arc::clone(&self.registry);
+        let state = GatewayState {
+            registry: Arc::clone(&self.registry),
+            usage: self.usage.clone(),
+            credit_guard: self.credit_guard.clone(),
+            hive_client: self.hive_client.clone(),
+            runner_url: self.runner_url.clone(),
+            paid_modules: Arc::new(self.paid_modules.clone()),
+        };
 
         Router::new()
             // ── Index ────────────────────────────────────────────────────────
@@ -99,7 +169,7 @@ impl ProtocolGateway {
             )
             .route("/a2a/{module}", post(a2a::a2a_jsonrpc))
             // ── Shared state ─────────────────────────────────────────────────
-            .with_state(registry)
+            .with_state(state)
     }
 
     /// Start the HTTP server in the background.

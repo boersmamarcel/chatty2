@@ -10,8 +10,8 @@ use crate::{
     cache::Cache,
     error::ClientError,
     models::{
-        AuthTokenResponse, CategoryList, DownloadResult, ListParams, ModuleList, ModuleMetadata,
-        VersionList,
+        AuthTokenResponse, BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams,
+        ModuleList, ModuleMetadata, ModulePricingInfo, VersionList,
     },
     verify::{self, TrustLevel, VerifyInput},
 };
@@ -62,6 +62,15 @@ impl HiveRegistryClient {
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
         self
+    }
+
+    /// Return the currently configured Bearer token, if any.
+    ///
+    /// Used by the protocol gateway to forward the user's credentials to
+    /// remote execution targets (hive-runner) so they can charge the correct
+    /// user's credit balance.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
     }
 
     // ── Authentication ─────────────────────────────────────────────────────
@@ -210,11 +219,20 @@ impl HiveRegistryClient {
 
     // ── Download ───────────────────────────────────────────────────────────
 
-    /// Download the `.wasm` binary for a specific version.
+    /// Begin a streaming download of the `.wasm` binary for a specific version.
     ///
-    /// Performs integrity (SHA-256) and signature (Ed25519) verification.
-    /// Returns [`ClientError::SignatureInvalid`] on any mismatch.
-    pub async fn download(&self, name: &str, version: &str) -> Result<DownloadResult, ClientError> {
+    /// Returns a [`BegunDownload`] whose body can be consumed chunk-by-chunk,
+    /// allowing callers to report progress to the UI between each chunk.
+    /// Call [`HiveRegistryClient::finalize_download`] once all bytes have been
+    /// collected to complete integrity verification and fetch the manifest.
+    ///
+    /// For a simple one-shot download without progress reporting, use
+    /// [`download`][Self::download] instead.
+    pub async fn begin_download(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<BegunDownload, ClientError> {
         let url = format!(
             "{}/api/modules/{}/{}",
             self.base_url,
@@ -222,7 +240,7 @@ impl HiveRegistryClient {
             urlencoded(version)
         );
 
-        tracing::debug!(%url, "downloading module");
+        tracing::debug!(%url, "beginning streaming download");
 
         let mut request = self.http.get(&url);
         if let Some(ref token) = self.token {
@@ -245,15 +263,39 @@ impl HiveRegistryClient {
             });
         }
 
+        let total_size = response.content_length().unwrap_or(0);
         let registry_hash = header_str(response.headers(), "x-wasm-sha256").map(str::to_owned);
         let signature = header_str(response.headers(), "x-signature").map(str::to_owned);
         let publisher_public_key =
             header_str(response.headers(), "x-publisher-public-key").map(str::to_owned);
 
-        let wasm_vec: Vec<u8> = response.bytes().await?.to_vec();
+        Ok(BegunDownload {
+            total_size,
+            registry_hash,
+            signature,
+            publisher_public_key,
+            stream: Box::pin(response.bytes_stream()),
+        })
+    }
 
-        // Integrity check
-        let computed_hash = hex::encode(Sha256::digest(&wasm_vec));
+    /// Verify and finalise a download started with [`begin_download`][Self::begin_download].
+    ///
+    /// Performs SHA-256 integrity check, Ed25519 signature verification, and
+    /// fetches the version manifest.  Returns the completed [`DownloadResult`].
+    ///
+    /// The `BegunDownload` value is passed only for its metadata fields
+    /// (hash/signature/key headers); its stream must already be fully consumed
+    /// before calling this method.
+    pub async fn finalize_download(
+        &self,
+        wasm: Vec<u8>,
+        registry_hash: Option<String>,
+        signature: Option<String>,
+        publisher_public_key: Option<String>,
+        name: &str,
+        version: &str,
+    ) -> Result<DownloadResult, ClientError> {
+        let computed_hash = hex::encode(Sha256::digest(&wasm));
         if let Some(ref expected) = registry_hash
             && &computed_hash != expected
         {
@@ -262,18 +304,12 @@ impl HiveRegistryClient {
             )));
         }
 
-        // Signature verification
         let trust_level = verify_ed25519(
             &computed_hash,
             signature.as_deref(),
             publisher_public_key.as_deref(),
         )?;
 
-        // Fetch manifest from version metadata.
-        // NOTE: This is a known extra HTTP round-trip. The download endpoint
-        // doesn't include the manifest in its response, so we must call
-        // list_versions separately. If the API adds manifest headers in the
-        // future, this call can be eliminated.
         let manifest = match self.list_versions(name).await {
             Ok(vl) => vl
                 .items
@@ -285,13 +321,174 @@ impl HiveRegistryClient {
         };
 
         Ok(DownloadResult {
-            wasm: wasm_vec,
+            wasm,
             wasm_hash: registry_hash.unwrap_or(computed_hash),
             trust_level,
             signature,
             publisher_public_key,
             manifest,
         })
+    }
+
+    /// Download the `.wasm` binary for a specific version.
+    ///
+    /// Performs integrity (SHA-256) and signature (Ed25519) verification.
+    /// Returns [`ClientError::SignatureInvalid`] on any mismatch.
+    ///
+    /// For streaming with progress reporting, use [`begin_download`][Self::begin_download]
+    /// and [`finalize_download`][Self::finalize_download] instead.
+    pub async fn download(&self, name: &str, version: &str) -> Result<DownloadResult, ClientError> {
+        use futures_util::StreamExt as _;
+
+        let BegunDownload {
+            registry_hash,
+            signature,
+            publisher_public_key,
+            mut stream,
+            ..
+        } = self.begin_download(name, version).await?;
+
+        let mut wasm_vec = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            wasm_vec.extend_from_slice(&chunk?[..]);
+        }
+        self.finalize_download(
+            wasm_vec,
+            registry_hash,
+            signature,
+            publisher_public_key,
+            name,
+            version,
+        )
+        .await
+    }
+
+    // ── Usage reporting ────────────────────────────────────────────────────
+
+    /// Report a batch of usage events to the registry.
+    pub async fn report_usage(
+        &self,
+        events: Vec<crate::models::UsageEvent>,
+    ) -> Result<crate::models::UsageReportResponse, ClientError> {
+        let url = format!("{}/api/usage/report", self.base_url);
+
+        let body = crate::models::UsageReportRequest { events };
+
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+
+        response
+            .json::<crate::models::UsageReportResponse>()
+            .await
+            .map_err(ClientError::from)
+    }
+
+    // ── Credits ─────────────────────────────────────────────────────────────
+
+    /// Get the authenticated user's credit balance.
+    pub async fn get_credit_balance(&self) -> Result<CreditBalance, ClientError> {
+        self.get_json::<CreditBalance>("/api/credits/balance", &())
+            .await
+    }
+
+    /// Get pricing configuration for a module.
+    pub async fn get_module_pricing(&self, name: &str) -> Result<ModulePricingInfo, ClientError> {
+        self.get_json::<ModulePricingInfo>(
+            &format!("/api/modules/{}/pricing", urlencoded(name)),
+            &(),
+        )
+        .await
+    }
+
+    // ── Billing sessions (Phase 3b) ────────────────────────────────────────
+
+    /// Acquire a billing session before module invocation.
+    ///
+    /// Reserves credits for the estimated usage and returns a signed JWT
+    /// that the module can verify.
+    pub async fn acquire_session(
+        &self,
+        module_name: &str,
+        module_version: &str,
+        estimated_tokens: i64,
+    ) -> Result<crate::models::AcquireSessionResponse, ClientError> {
+        let url = format!("{}/api/credits/acquire-session", self.base_url);
+
+        let body = crate::models::AcquireSessionRequest {
+            module_name: module_name.to_string(),
+            module_version: module_version.to_string(),
+            estimated_tokens,
+        };
+
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+
+        response
+            .json::<crate::models::AcquireSessionResponse>()
+            .await
+            .map_err(ClientError::from)
+    }
+
+    /// Settle a billing session after module execution.
+    ///
+    /// Reports actual usage and releases unused reserved credits.
+    pub async fn settle_session(
+        &self,
+        session_id: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+    ) -> Result<crate::models::SettleSessionResponse, ClientError> {
+        let url = format!("{}/api/credits/settle-session", self.base_url);
+
+        let body = crate::models::SettleSessionRequest {
+            session_id: session_id.to_string(),
+            input_tokens,
+            output_tokens,
+        };
+
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+
+        response
+            .json::<crate::models::SettleSessionResponse>()
+            .await
+            .map_err(ClientError::from)
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────

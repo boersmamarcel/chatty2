@@ -1,4 +1,4 @@
-package chatty:module@0.1.0;
+package chatty:module@0.2.0;
 
 /// The contract between chatty (host) and WASM modules (guest).
 ///
@@ -140,6 +140,59 @@ interface logging {
     log: func(level: string, message: string);
 }
 
+/// Sandboxed file access for reading model weights from disk.
+///
+/// Paths are resolved relative to the module's `weights-root` config key.
+/// Absolute paths and `..` path components are rejected by the host.
+/// Free modules never need this; ML inference modules use it to load weights
+/// once at startup.
+interface file {
+    /// Read the raw bytes of a file at `path`.
+    ///
+    /// `path` must be relative (no leading `/`, no `..` segments).
+    /// The host resolves it against the module's `weights-root` config value.
+    /// Returns an error if the path is invalid, the file is missing, or
+    /// `weights-root` is not configured.
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+}
+
+/// Billing interface for paid modules.
+///
+/// Free modules never call this interface — zero overhead.
+/// Paid modules call acquire-session before doing work and
+/// report-usage after completion.
+interface billing {
+    /// Information about an acquired billing session.
+    record session-info {
+        /// Hive-signed JWT. Module can verify using embedded public key.
+        token: string,
+        /// User's current credit balance (informational).
+        balance-tokens: s64,
+        /// Tokens reserved for this session.
+        reserved-tokens: s64,
+        /// Module's pricing model at time of session creation.
+        pricing-model: string,
+    }
+
+    /// Acquire a billing session before doing work.
+    ///
+    /// The host calls Hive's API to reserve credits. Hive returns
+    /// a signed session token that the module can cryptographically
+    /// verify. Returns an error if the user has insufficient credits.
+    ///
+    /// * `estimated-tokens` — estimated token usage for this invocation
+    acquire-session: func(estimated-tokens: s64) -> result<session-info, string>;
+
+    /// Report actual usage after work is done.
+    ///
+    /// The host forwards this to Hive, which settles the session:
+    /// deducts actual usage, releases the remainder of the reservation.
+    ///
+    /// * `input-tokens`  — actual input tokens consumed
+    /// * `output-tokens` — actual output tokens consumed
+    report-usage: func(input-tokens: s64, output-tokens: s64) -> result<_, string>;
+}
+
 // ---------------------------------------------------------------------------
 // Guest exports — provided by WASM modules to chatty
 // ---------------------------------------------------------------------------
@@ -180,6 +233,8 @@ world module {
     import llm;
     import config;
     import logging;
+    import file;      // optional: ML modules use this to load weights
+    import billing;   // optional: only called by paid modules
 
     // Guest → Host exports
     export agent;

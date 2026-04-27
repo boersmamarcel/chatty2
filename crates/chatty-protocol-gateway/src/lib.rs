@@ -42,4 +42,4 @@
 mod gateway;
 mod handlers;
 
-pub use gateway::ProtocolGateway;
+pub use gateway::{GatewayState, ProtocolGateway};

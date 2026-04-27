@@ -112,7 +112,7 @@ impl Tool for GitDiffTool {
                         "description": "Optional file path to restrict the diff to"
                     }
                 },
-                "required": []
+                "required": ["staged", "path"]
             }),
         }
     }
@@ -176,7 +176,7 @@ impl Tool for GitLogTool {
                         "description": "Maximum number of commits to return (default: 10, max: 100)"
                     }
                 },
-                "required": []
+                "required": ["max_count"]
             }),
         }
     }

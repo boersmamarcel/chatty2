@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 reqwest = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true, features = ["serde", "now"] }
@@ -22,6 +22,8 @@ hex = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 percent-encoding = { workspace = true }
+futures-util = "0.3"
+bytes = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

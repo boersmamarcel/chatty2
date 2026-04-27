@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+// futures_util is needed for the Stream bound on BegunDownload::stream.
+use futures_util;
 
 // ── Module metadata ────────────────────────────────────────────────────────
 
@@ -19,6 +21,7 @@ pub struct ModuleMetadata {
     pub category: Option<String>,
     pub downloads: i64,
     pub pricing_model: String,
+    pub execution_mode: String,
     pub homepage: Option<String>,
     pub support_email: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -86,6 +89,26 @@ pub struct DownloadResult {
     pub manifest: Value,
 }
 
+/// An in-progress download whose body has not yet been consumed.
+///
+/// Returned by [`HiveRegistryClient::begin_download`]; stream the body
+/// chunk-by-chunk (reporting progress between each), then pass the
+/// collected bytes + this value to [`HiveRegistryClient::finalize_download`].
+pub struct BegunDownload {
+    /// `Content-Length` from the response, or 0 if the server did not send one.
+    pub total_size: u64,
+    /// `x-wasm-sha256` response header (hex-encoded SHA-256), if present.
+    pub registry_hash: Option<String>,
+    /// `x-signature` response header (Ed25519 signature), if present.
+    pub signature: Option<String>,
+    /// `x-publisher-public-key` response header, if present.
+    pub publisher_public_key: Option<String>,
+    /// Streaming response body.  Consume with `futures_util::StreamExt::next`.
+    pub stream: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>,
+    >,
+}
+
 // ── Authentication ─────────────────────────────────────────────────────────
 
 /// Response from register/login endpoints.
@@ -140,6 +163,129 @@ pub struct Category {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryList {
     pub items: Vec<Category>,
+}
+
+// ── Usage tracking ─────────────────────────────────────────────────────────
+
+/// A single usage event to report to the registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageEvent {
+    pub idempotency_key: String,
+    pub module_name: String,
+    pub module_version: String,
+    #[serde(default = "default_event_type")]
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fuel_consumed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_ms: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+fn default_event_type() -> String {
+    "invocation".to_string()
+}
+
+/// Batch of usage events sent to the registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageReportRequest {
+    pub events: Vec<UsageEvent>,
+}
+
+/// Response from the usage report endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageReportResponse {
+    pub accepted: usize,
+    pub duplicates: usize,
+}
+
+/// Summary of usage for a module over a time period.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSummary {
+    pub module_name: String,
+    pub period: String,
+    pub invocation_count: i64,
+    pub tool_call_count: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_fuel: i64,
+    pub total_execution_ms: i64,
+}
+
+/// Paginated list of usage summaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSummaryList {
+    pub items: Vec<UsageSummary>,
+    pub page: i64,
+    pub per_page: i64,
+    pub total: i64,
+}
+
+// ── Credit balance ─────────────────────────────────────────────────────────
+
+/// Credit balance for the authenticated user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditBalance {
+    pub balance_tokens: i64,
+    pub lifetime_purchased_tokens: i64,
+    pub lifetime_consumed_tokens: i64,
+}
+
+/// Pricing configuration for a module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModulePricingInfo {
+    pub module_name: String,
+    pub price_per_call: String,
+    pub free_tier_calls: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── Billing session (Phase 3b) ─────────────────────────────────────────────
+
+/// Request to acquire a billing session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireSessionRequest {
+    pub module_name: String,
+    pub module_version: String,
+    pub estimated_tokens: i64,
+}
+
+/// Response from acquire-session — includes signed JWT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireSessionResponse {
+    /// Unique session ID (UUID).
+    pub session_id: String,
+    /// Hive-signed JWT containing session claims.
+    pub token: String,
+    /// User's current balance after reservation.
+    pub balance_tokens: i64,
+    /// Tokens reserved for this session.
+    pub reserved_tokens: i64,
+    /// Module's pricing model.
+    pub pricing_model: String,
+}
+
+/// Request to settle a billing session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettleSessionRequest {
+    pub session_id: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// Response from settle-session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettleSessionResponse {
+    pub session_id: String,
+    pub tokens_deducted: i64,
+    pub tokens_released: i64,
+    pub balance_after: i64,
 }
 
 // ── Query parameters ───────────────────────────────────────────────────────

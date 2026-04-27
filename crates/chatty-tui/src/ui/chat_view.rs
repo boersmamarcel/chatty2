@@ -124,6 +124,16 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
         .iter()
         .filter(|agent| agent.enabled)
         .count();
+    let local_module_count = engine
+        .module_agents
+        .iter()
+        .filter(|agent| !matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
+        .count();
+    let remote_module_count = engine
+        .module_agents
+        .iter()
+        .filter(|agent| matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
+        .count();
 
     lines.extend([
         Line::from(""),
@@ -204,6 +214,11 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
                     loading_badge("semantic memory")
                 },
                 badge("modules", engine.module_settings.enabled),
+                badge(format!("module local {local_module_count}"), local_module_count > 0),
+                badge(
+                    format!("module remote {remote_module_count}"),
+                    remote_module_count > 0,
+                ),
                 badge("local agent", !engine.is_sub_agent),
                 badge(format!("remote {remote_agent_count}"), remote_agent_count > 0),
             ]),
@@ -276,12 +291,21 @@ fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
         ToolCallState::Error => ("✗", theme::error()),
     };
 
-    lines.push(Line::from(vec![
-        Span::styled(format!("  [tool: {}] ", tc.name), theme::tool()),
+    let mut header = vec![Span::styled(
+        format!("  [tool: {}] ", tc.name),
+        theme::tool(),
+    )];
+    if let Some(engine) = tc.execution_engine {
+        header.push(engine_badge_span(engine_location_label(engine)));
+    } else {
+        header.push(source_badge_span(&tc.source));
+    }
+    header.extend([
         Span::styled(icon, tc_style),
         Span::raw(" "),
         Span::styled(truncate(&tc.input, 60), theme::muted()),
-    ]));
+    ]);
+    lines.push(Line::from(header));
 
     if let Some(ref output) = tc.output {
         let preview = truncate(output, 80);
@@ -293,6 +317,36 @@ fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
             format!("    → {}", preview),
             out_style,
         )));
+    }
+}
+
+fn source_badge_span(source: &chatty_core::models::message_types::ToolSource) -> Span<'static> {
+    match source {
+        chatty_core::models::message_types::ToolSource::Local => Span::raw(""),
+        chatty_core::models::message_types::ToolSource::HiveCloud => {
+            Span::styled("[remote] ", theme::accent())
+        }
+        chatty_core::models::message_types::ToolSource::Internet { .. } => {
+            Span::styled("[remote] ", theme::warning())
+        }
+        chatty_core::models::message_types::ToolSource::ExternalService { .. } => {
+            Span::styled("[remote] ", theme::accent())
+        }
+    }
+}
+
+fn engine_badge_span(label: &str) -> Span<'static> {
+    Span::styled(format!("[{}] ", label), theme::muted())
+}
+
+fn engine_location_label(
+    engine: chatty_core::models::message_types::ExecutionEngine,
+) -> &'static str {
+    match engine {
+        chatty_core::models::message_types::ExecutionEngine::Shell => "shell (local)",
+        chatty_core::models::message_types::ExecutionEngine::Monty => "monty (local)",
+        chatty_core::models::message_types::ExecutionEngine::Docker => "docker (local)",
+        chatty_core::models::message_types::ExecutionEngine::Daytona => "daytona (remote)",
     }
 }
 

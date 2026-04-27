@@ -8,9 +8,9 @@ mod host;
 mod limits;
 mod module;
 
-pub use host::{LlmProvider, ModuleManifest};
+pub use host::{BillingProvider, LlmProvider, ModuleManifest};
 pub use limits::ResourceLimits;
-pub use module::WasmModule;
+pub use module::{InvocationMetrics, WasmModule};
 
 /// Host-side WIT types re-exported for callers.
 pub use bindings::chatty::module::types::{
@@ -29,5 +29,18 @@ pub(crate) mod bindings {
     wasmtime::component::bindgen!({
         world: "module",
         path: "../../wit",
+    });
+}
+
+/// Backwards-compatible bindings for `chatty:module@0.1.0`.
+///
+/// Older modules (built before the package bump to 0.2.0) still import the
+/// host imports under the `@0.1.0` package id. The interfaces are byte-for-byte
+/// identical to 0.2.0 minus the new optional `billing` interface, so we
+/// register both versions in the linker.
+pub(crate) mod bindings_v0_1 {
+    wasmtime::component::bindgen!({
+        world: "module",
+        path: "wit-v0_1",
     });
 }

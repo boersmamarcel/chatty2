@@ -15,9 +15,8 @@ use axum::{
 use chatty_wasm_runtime::{ChatRequest, Message, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
 
-use chatty_module_registry::ModuleRegistry;
+use crate::gateway::GatewayState;
 
 // ---------------------------------------------------------------------------
 // OpenAI request / response shapes
@@ -29,7 +28,7 @@ use chatty_module_registry::ModuleRegistry;
 /// API compatibility but are not forwarded to the WASM module, which owns
 /// its own model configuration.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<OaiMessage>,
@@ -41,13 +40,13 @@ pub(crate) struct ChatCompletionRequest {
     pub stream: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct OaiMessage {
     pub role: String,
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ChatCompletionResponse {
     pub id: String,
     pub object: String,
@@ -57,20 +56,20 @@ pub(crate) struct ChatCompletionResponse {
     pub usage: UsageStats,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Choice {
     pub index: u32,
     pub message: AssistantMessage,
     pub finish_reason: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct AssistantMessage {
     pub role: String,
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct UsageStats {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -136,10 +135,10 @@ fn build_response(
 
 pub(crate) async fn chat_completions_module(
     Path(module_name): Path<String>,
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
-    run_chat(&module_name, &body, registry).await
+    run_chat(&module_name, &body, state).await
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +146,7 @@ pub(crate) async fn chat_completions_module(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn chat_completions_routed(
-    State(registry): State<Arc<RwLock<ModuleRegistry>>>,
+    State(state): State<GatewayState>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
     // Expect model in format "module:{name}"
@@ -167,25 +166,112 @@ pub(crate) async fn chat_completions_routed(
         }
     };
 
-    run_chat(&module_name, &body, registry).await
+    run_chat(&module_name, &body, state).await
 }
 
 // ---------------------------------------------------------------------------
 // Shared chat runner
 // ---------------------------------------------------------------------------
 
+/// Execute a chat completion request remotely via hive-runner.
+pub(crate) async fn execute_remotely(
+    module_name: &str,
+    body: &ChatCompletionRequest,
+    state: &GatewayState,
+) -> Result<ChatCompletionResponse, String> {
+    let runner_url = state
+        .runner_url
+        .as_ref()
+        .ok_or_else(|| "Remote execution requested but runner_url not configured".to_string())?;
+
+    let url = format!(
+        "{}/v1/{}/chat/completions",
+        runner_url.trim_end_matches('/'),
+        module_name
+    );
+
+    // Forward the user's Hive Bearer token so the runner can authenticate the
+    // request, look up the user, and deduct credits from the correct account
+    // (A4 for #72).
+    let client = reqwest::Client::new();
+    let mut req_builder = client.post(&url).json(&body);
+    if let Some(hive_client) = state.hive_client.as_ref() {
+        if let Some(token) = hive_client.token() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+        } else {
+            tracing::warn!(
+                "Remote execution: hive_client has no token — runner will reject with 401"
+            );
+        }
+    }
+
+    let response = req_builder
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to runner: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Runner returned error {}: {}", status, body));
+    }
+
+    response
+        .json::<ChatCompletionResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse runner response: {}", e))
+}
+
 async fn run_chat(
     module_name: &str,
     body: &ChatCompletionRequest,
-    registry: Arc<RwLock<ModuleRegistry>>,
+    state: GatewayState,
 ) -> axum::response::Response {
+    // Check if we should route to remote execution
+    let should_execute_remotely = should_route_remotely(module_name, &state).await;
+
+    // If remote execution is required, delegate to runner
+    if should_execute_remotely {
+        if state.runner_url.is_none() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": {
+                        "message": format!("Module '{}' requires remote execution but runner URL is not configured", module_name),
+                        "type": "configuration_error",
+                    }
+                })),
+            )
+                .into_response();
+        }
+
+        return match execute_remotely(module_name, body, &state).await {
+            Ok(response) => (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": {
+                        "message": format!("Remote execution failed: {}", e),
+                        "type": "remote_execution_error",
+                    }
+                })),
+            )
+                .into_response(),
+        };
+    }
+
+    // Otherwise, proceed with local execution
     let messages = convert_messages(&body.messages);
     let req = ChatRequest {
         messages,
         conversation_id: String::new(),
     };
 
-    let mut reg = registry.write().await;
+    let mut reg = state.registry.write().await;
     let module = match reg.get_mut(module_name) {
         Some(m) => m,
         None => {
@@ -202,8 +288,53 @@ async fn run_chat(
         }
     };
 
+    // Pre-invocation credit check for paid modules only
+    if let Some(ref guard) = state.credit_guard {
+        if state.paid_modules.contains(module_name) {
+            if let Err(e) = guard.has_credits(module_name).await {
+                drop(reg);
+                return (
+                    StatusCode::PAYMENT_REQUIRED,
+                    Json(json!({
+                        "error": {
+                            "message": e.to_string(),
+                            "type": "insufficient_credits",
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     match module.chat(req).await {
         Ok(resp) => {
+            let metrics = module.last_invocation_metrics();
+            drop(reg);
+
+            if let Some(ref usage) = state.usage {
+                tokio::spawn({
+                    let usage = Arc::clone(usage);
+                    let name = module_name.to_string();
+                    async move {
+                        usage
+                            .record_invocation(
+                                &name,
+                                "latest",
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.input_tokens.map(|t| t as i32)),
+                                metrics
+                                    .as_ref()
+                                    .and_then(|m| m.output_tokens.map(|t| t as i32)),
+                                metrics.as_ref().map(|m| m.fuel_consumed),
+                                metrics.as_ref().map(|m| m.execution_ms),
+                            )
+                            .await;
+                    }
+                });
+            }
+
             let (prompt_tokens, completion_tokens) = resp
                 .usage
                 .map(|u| (u.input_tokens, u.output_tokens))
@@ -233,6 +364,34 @@ async fn run_chat(
             })),
         )
             .into_response(),
+    }
+}
+
+/// Returns true when the module's registry metadata says it should run on
+/// the remote runner (`execution_mode` ∈ {`remote`, `remote_only`}).
+/// Falls back to local on errors / when no hive_client is configured.
+pub(crate) async fn should_route_remotely(module_name: &str, state: &GatewayState) -> bool {
+    let Some(ref hive_client) = state.hive_client else {
+        return false;
+    };
+    match hive_client.get_module(module_name).await {
+        Ok(metadata) => {
+            let exec_mode = metadata.execution_mode.as_str();
+            tracing::debug!(
+                module = module_name,
+                execution_mode = exec_mode,
+                "Checked module execution mode"
+            );
+            matches!(exec_mode, "remote" | "remote_only")
+        }
+        Err(e) => {
+            tracing::warn!(
+                module = module_name,
+                error = %e,
+                "Failed to fetch module metadata, assuming local execution"
+            );
+            false
+        }
     }
 }
 

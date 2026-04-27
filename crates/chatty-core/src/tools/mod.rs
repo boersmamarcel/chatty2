@@ -91,3 +91,77 @@ pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatus
 pub use sub_agent_tool::SubAgentTool;
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
+
+/// Guard tests: every built-in tool's parameter schema must convert to a valid
+/// Gemini `Schema` without any empty `type` strings.
+///
+/// Gemini rejects requests containing `type: ""` (produced by rig's `infer_type`
+/// when a schema object has no `type`, no `properties`, and no composition
+/// keywords).  These tests catch regressions if the rig-core vendor patch is
+/// ever removed or if a new tool introduces a schema gap.
+#[cfg(test)]
+mod gemini_compat_tests {
+    use rig::completion::ToolDefinition;
+    use rig::providers::gemini::completion::gemini_api_types::{Schema, Tool};
+
+    /// Recursively assert that every [`Schema`] node has a non-empty `type`.
+    fn assert_no_empty_types(schema: &Schema, path: &str) {
+        assert!(
+            !schema.r#type.is_empty(),
+            "Gemini schema 'type' is empty at path '{path}'"
+        );
+        if let Some(items) = &schema.items {
+            assert_no_empty_types(items, &format!("{path}.items"));
+        }
+        if let Some(props) = &schema.properties {
+            for (key, val) in props {
+                assert_no_empty_types(val, &format!("{path}.{key}"));
+            }
+        }
+    }
+
+    /// Convert a [`ToolDefinition`] to a Gemini `Tool` and assert all types
+    /// are non-empty.
+    fn check_gemini_compat(def: ToolDefinition) {
+        let name = def.name.clone();
+        let tool = Tool::try_from(def)
+            .unwrap_or_else(|e| panic!("Tool '{name}' failed Gemini conversion: {e}"));
+        for decl in &tool.function_declarations {
+            if let Some(params) = &decl.parameters {
+                assert_no_empty_types(params, &name);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_tool_gemini_compat() {
+        use crate::tools::fetch_tool::FetchTool;
+        use rig::tool::Tool as RigTool;
+        let tool = FetchTool::new(None);
+        check_gemini_compat(tool.definition("".to_string()).await);
+    }
+
+    #[tokio::test]
+    async fn chart_tool_gemini_compat() {
+        use crate::tools::chart_tool::CreateChartTool;
+        use rig::tool::Tool as RigTool;
+        let tool = CreateChartTool::new(None, None);
+        check_gemini_compat(tool.definition("".to_string()).await);
+    }
+
+    #[tokio::test]
+    async fn daytona_tool_gemini_compat() {
+        use crate::tools::daytona_tool::DaytonaTool;
+        use rig::tool::Tool as RigTool;
+        let tool = DaytonaTool::new("dummy".to_string(), None);
+        check_gemini_compat(tool.definition("".to_string()).await);
+    }
+
+    #[tokio::test]
+    async fn search_web_tool_gemini_compat() {
+        use crate::tools::search_web_tool::SearchWebTool;
+        use rig::tool::Tool as RigTool;
+        let tool = SearchWebTool::new_fallback(10);
+        check_gemini_compat(tool.definition("".to_string()).await);
+    }
+}

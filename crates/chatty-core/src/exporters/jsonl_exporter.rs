@@ -380,7 +380,7 @@ pub async fn append_jsonl_with_dedup(
 mod tests {
     use super::*;
     use crate::models::conversation::{MessageFeedback, RegenerationRecord};
-    use crate::models::message_types::{ToolCallBlock, ToolCallState};
+    use crate::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
     use crate::settings::models::providers_store::ProviderType;
     use rig::OneOrMany;
     use rig::completion::message::Text;
@@ -619,6 +619,8 @@ mod tests {
                 state: ToolCallState::Success,
                 duration: None,
                 text_before: String::new(),
+                source: ToolSource::Local,
+                execution_engine: None,
             })],
             total_duration: None,
             active_tool_index: None,

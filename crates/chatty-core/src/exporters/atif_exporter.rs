@@ -351,7 +351,7 @@ fn build_extra(
 mod tests {
     use super::*;
     use crate::models::message_types::{
-        ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState,
+        ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource,
     };
     use crate::models::token_usage::TokenUsage;
     use rig::OneOrMany;
@@ -572,6 +572,8 @@ mod tests {
                 state: ToolCallState::Success,
                 duration: None,
                 text_before: String::new(),
+                source: ToolSource::Local,
+                execution_engine: None,
             })],
             total_duration: None,
             active_tool_index: None,
@@ -892,6 +894,8 @@ mod tests {
                 state: ToolCallState::Success,
                 duration: None,
                 text_before: String::new(),
+                source: ToolSource::Local,
+                execution_engine: None,
             })],
             total_duration: None,
             active_tool_index: None,
@@ -988,6 +992,8 @@ mod tests {
                     state: ToolCallState::Success,
                     duration: None,
                     text_before: String::new(),
+                    source: ToolSource::Local,
+                    execution_engine: None,
                 }),
                 TraceItem::ToolCall(ToolCallBlock {
                     id: "tc_2".to_string(),
@@ -999,6 +1005,8 @@ mod tests {
                     state: ToolCallState::Success,
                     duration: None,
                     text_before: String::new(),
+                    source: ToolSource::Local,
+                    execution_engine: None,
                 }),
             ],
             total_duration: None,
@@ -1194,6 +1202,8 @@ mod tests {
                     state: ToolCallState::Success,
                     duration: None,
                     text_before: String::new(),
+                    source: ToolSource::Local,
+                    execution_engine: None,
                 }),
             ],
             total_duration: None,

@@ -1,4 +1,6 @@
+use crate::chatty::views::footer::progress_circle::ProgressCircle;
 use crate::settings::controllers::extensions_controller;
+use crate::settings::models::DiscoveredModulesModel;
 use crate::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::marketplace_state::MarketplaceState;
@@ -8,7 +10,7 @@ use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{
-    ActiveTheme, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex, v_flex,
 };
 
 pub fn extensions_page() -> SettingPage {
@@ -117,12 +119,64 @@ fn installed_extensions_group() -> SettingGroup {
                     this.children(extensions.iter().map(|ext| {
                         let id = ext.id.clone();
                         let toggle_id = ext.id.clone();
+                        let is_wasm_module = matches!(&ext.kind, ExtensionKind::WasmModule);
                         let kind_label = match &ext.kind {
                             ExtensionKind::McpServer(_) => "MCP",
-                            ExtensionKind::WasmModule => "WASM",
+                            ExtensionKind::WasmModule => "Agent",
                             ExtensionKind::A2aAgent(_) => "A2A",
                         };
                         let status_icon = if ext.enabled { "🟢" } else { "⏸" };
+
+                        // For WASM modules: look up discovered module metadata for
+                        // execution_mode and wasm_file presence.
+                        let (discovered_exec_mode, has_wasm_file) = if is_wasm_module {
+                            cx.try_global::<DiscoveredModulesModel>()
+                                .and_then(|dm| {
+                                    dm.modules.iter().find(|m| m.name == ext.id).map(|m| {
+                                        let has_wasm =
+                                            m.wasm_file != "remote" && !m.wasm_file.is_empty();
+                                        (m.execution_mode.clone(), has_wasm)
+                                    })
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            (String::new(), false)
+                        };
+                        let effective_exec_mode = if is_wasm_module
+                            && (discovered_exec_mode.is_empty() || discovered_exec_mode == "local")
+                        {
+                            "local"
+                        } else {
+                            discovered_exec_mode.as_str()
+                        };
+
+                        // Show current execution mode for WASM modules and egress badges for
+                        // external services.
+                        let egress_badge: Option<(&'static str, u32)> = match &ext.kind {
+                            ExtensionKind::WasmModule => match effective_exec_mode {
+                                "remote_only" => Some(("☁ Cloud Only", 0x3B82F6)),
+                                "remote" => Some(("☁ Cloud", 0x3B82F6)),
+                                _ => Some(("• Local", 0x6B7280)),
+                            },
+                            ExtensionKind::McpServer(cfg) => {
+                                let is_local =
+                                    cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+                                if !is_local {
+                                    Some(("↗ External", 0xA855F7))
+                                } else {
+                                    None
+                                }
+                            }
+                            ExtensionKind::A2aAgent(cfg) => {
+                                let is_local =
+                                    cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+                                if !is_local {
+                                    Some(("↗ External", 0xA855F7))
+                                } else {
+                                    None
+                                }
+                            }
+                        };
 
                         h_flex()
                             .w_full()
@@ -142,6 +196,21 @@ fn installed_extensions_group() -> SettingGroup {
                                             .text_color(cx.theme().foreground)
                                             .child(ext.display_name.clone()),
                                     )
+                                    .when(
+                                        ext.pricing_model.as_deref() != Some("free")
+                                            && ext.pricing_model.is_some(),
+                                        |el| {
+                                            el.child(
+                                                div()
+                                                    .text_xs()
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .bg(gpui::rgb(0xFEF3C7))
+                                                    .text_color(gpui::rgb(0x92400E))
+                                                    .child("Paid"),
+                                            )
+                                        },
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -150,11 +219,61 @@ fn installed_extensions_group() -> SettingGroup {
                                             .bg(cx.theme().muted)
                                             .text_color(cx.theme().muted_foreground)
                                             .child(kind_label.to_string()),
-                                    ),
+                                    )
+                                    .when(egress_badge.is_some(), |el| {
+                                        let (label, color) = egress_badge.unwrap();
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(gpui::rgb(color))
+                                                .text_color(gpui::rgb(color))
+                                                .child(label),
+                                        )
+                                    }),
                             )
                             .child(
                                 h_flex()
                                     .gap_1()
+                                    // Execution mode toggle: only for WASM modules that are
+                                    // not remote_only.
+                                    .when(
+                                        is_wasm_module && effective_exec_mode != "remote_only",
+                                        |el| {
+                                            let mode_id = id.clone();
+                                            let is_currently_remote =
+                                                effective_exec_mode == "remote";
+                                            let (btn_label, target_mode) = if is_currently_remote {
+                                                ("Switch to Local", "local")
+                                            } else {
+                                                ("Switch to Cloud", "remote")
+                                            };
+                                            // Can switch to local only if wasm file exists.
+                                            let can_click = !is_currently_remote || has_wasm_file;
+                                            el.child(
+                                                Button::new(SharedString::from(format!(
+                                                    "exec-mode-{mode_id}"
+                                                )))
+                                                .small()
+                                                .ghost()
+                                                .label(btn_label)
+                                                .when(!can_click, |btn| btn.disabled(true))
+                                                .on_click({
+                                                    let mode_id = mode_id.clone();
+                                                    let target = target_mode.to_string();
+                                                    move |_, _window, cx| {
+                                                        extensions_controller::set_execution_mode(
+                                                            mode_id.clone(),
+                                                            target.clone(),
+                                                            cx,
+                                                        );
+                                                    }
+                                                }),
+                                            )
+                                        },
+                                    )
                                     .child(
                                         Button::new(SharedString::from(format!("toggle-{id}")))
                                             .small()
@@ -263,6 +382,10 @@ fn marketplace_group() -> SettingGroup {
                         let display = module.display_name.clone();
                         let desc = module.description.clone();
                         let is_installed = installed.is_installed(&name);
+                        let download_pct = cx
+                            .try_global::<MarketplaceState>()
+                            .and_then(|s| s.download_progress(&name))
+                            .map(|p| p * 100.0);
 
                         h_flex()
                             .w_full()
@@ -291,15 +414,28 @@ fn marketplace_group() -> SettingGroup {
                                             .child(desc.clone()),
                                     )
                                     .child(
-                                        h_flex().gap_2().child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "v{} · ⬇ {}",
-                                                    version, module.downloads
-                                                )),
-                                        ),
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!(
+                                                        "v{} · ⬇ {}",
+                                                        version, module.downloads
+                                                    )),
+                                            )
+                                            .when(module.pricing_model != "free", |el| {
+                                                el.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .px_1()
+                                                        .rounded_sm()
+                                                        .bg(gpui::rgb(0xFEF3C7))
+                                                        .text_color(gpui::rgb(0x92400E))
+                                                        .child("Paid"),
+                                                )
+                                            }),
                                     ),
                             )
                             .child(if is_installed {
@@ -317,6 +453,25 @@ fn marketplace_group() -> SettingGroup {
                                         }
                                     })
                                     .into_any_element()
+                            } else if let Some(pct) = download_pct {
+                                // Download in progress — show animated progress circle + percentage.
+                                h_flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        ProgressCircle::new(SharedString::from(format!(
+                                            "dl-progress-{name}"
+                                        )))
+                                        .value(pct)
+                                        .small(),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("{pct:.0}%")),
+                                    )
+                                    .into_any_element()
                             } else {
                                 Button::new(SharedString::from(format!("install-{name}")))
                                     .small()
@@ -326,12 +481,16 @@ fn marketplace_group() -> SettingGroup {
                                         let version = version.clone();
                                         let display = display.clone();
                                         let desc = desc.clone();
+                                        let pricing_model = module.pricing_model.clone();
+                                        let execution_mode = module.execution_mode.clone();
                                         move |_, _window, cx| {
                                             extensions_controller::install_extension(
                                                 name.clone(),
                                                 version.clone(),
                                                 display.clone(),
                                                 desc.clone(),
+                                                pricing_model.clone(),
+                                                execution_mode.clone(),
                                                 cx,
                                             );
                                         }
