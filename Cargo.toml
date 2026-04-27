@@ -117,11 +117,3 @@ clap = { version = "4.6.0", features = ["derive"] }
 # Unix-specific
 nix = { version = "0.29", features = ["signal"] }
 
-# Patch esaxx-rs to remove hardcoded .static_crt(true) which forces /MT on
-# Windows and conflicts with DuckDB bundled's default /MD CRT (LNK2038).
-[patch.crates-io]
-esaxx-rs = { path = "vendor/esaxx-rs" }
-# Patch rig-core to fix:
-#   1. Anthropic: add required `type: "custom"` field to tool definitions (claude-4+)
-#   2. Gemini: default empty inferred type to "string" instead of ""
-rig-core = { path = "vendor/rig-core-patched" }
