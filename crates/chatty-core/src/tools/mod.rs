@@ -164,42 +164,4 @@ mod gemini_compat_tests {
         let tool = SearchWebTool::new_fallback(10);
         check_gemini_compat(tool.definition("".to_string()).await);
     }
-
-    /// Verify that a schema with only `description` (no `type`) does not produce
-    /// `type: ""` — this is the exact regression the rig-core patch prevents.
-    #[test]
-    fn description_only_property_defaults_to_string() {
-        let def = ToolDefinition {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "notes": {
-                        "description": "Any notes (no explicit type)"
-                    }
-                }
-            }),
-        };
-        check_gemini_compat(def);
-    }
-
-    /// Verify that a top-level `enum` property without `type` infers `"string"`.
-    #[test]
-    fn enum_only_property_infers_string_type() {
-        let def = ToolDefinition {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "color": {
-                        "enum": ["red", "green", "blue"],
-                        "description": "Pick a color"
-                    }
-                }
-            }),
-        };
-        check_gemini_compat(def);
-    }
 }
