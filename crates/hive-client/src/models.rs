@@ -104,7 +104,9 @@ pub struct BegunDownload {
     /// `x-publisher-public-key` response header, if present.
     pub publisher_public_key: Option<String>,
     /// Streaming response body.  Consume with `futures_util::StreamExt::next`.
-    pub stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
+    pub stream: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>,
+    >,
 }
 
 // ── Authentication ─────────────────────────────────────────────────────────

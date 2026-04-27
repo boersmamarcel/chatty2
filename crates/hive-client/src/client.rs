@@ -257,7 +257,10 @@ impl HiveRegistryClient {
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::Http { status: status.as_u16(), body });
+            return Err(ClientError::Http {
+                status: status.as_u16(),
+                body,
+            });
         }
 
         let total_size = response.content_length().unwrap_or(0);
@@ -337,14 +340,27 @@ impl HiveRegistryClient {
     pub async fn download(&self, name: &str, version: &str) -> Result<DownloadResult, ClientError> {
         use futures_util::StreamExt as _;
 
-        let BegunDownload { registry_hash, signature, publisher_public_key, mut stream, .. } =
-            self.begin_download(name, version).await?;
+        let BegunDownload {
+            registry_hash,
+            signature,
+            publisher_public_key,
+            mut stream,
+            ..
+        } = self.begin_download(name, version).await?;
 
         let mut wasm_vec = Vec::new();
         while let Some(chunk) = stream.next().await {
             wasm_vec.extend_from_slice(&chunk?[..]);
         }
-        self.finalize_download(wasm_vec, registry_hash, signature, publisher_public_key, name, version).await
+        self.finalize_download(
+            wasm_vec,
+            registry_hash,
+            signature,
+            publisher_public_key,
+            name,
+            version,
+        )
+        .await
     }
 
     // ── Usage reporting ────────────────────────────────────────────────────

@@ -44,7 +44,8 @@ impl MarketplaceState {
 
     /// Record that `name` is being downloaded at `progress` (0.0 – 1.0).
     pub fn set_download_progress(&mut self, name: &str, progress: f32) {
-        self.downloading.insert(name.to_string(), progress.clamp(0.0, 1.0));
+        self.downloading
+            .insert(name.to_string(), progress.clamp(0.0, 1.0));
     }
 
     /// Remove the download-in-progress entry for `name` (called on success or failure).

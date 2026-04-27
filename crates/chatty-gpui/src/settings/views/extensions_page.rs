@@ -459,9 +459,9 @@ fn marketplace_group() -> SettingGroup {
                                     .items_center()
                                     .gap_1p5()
                                     .child(
-                                        ProgressCircle::new(SharedString::from(
-                                            format!("dl-progress-{name}"),
-                                        ))
+                                        ProgressCircle::new(SharedString::from(format!(
+                                            "dl-progress-{name}"
+                                        )))
                                         .value(pct)
                                         .small(),
                                     )
