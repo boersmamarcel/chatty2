@@ -46,9 +46,7 @@ impl ChattyApp {
         let needs_conversation_creation = conv_id_for_task.is_none();
         let optimistic_ui_inserted = subtle_guidance_v1_enabled() && conv_id_for_task.is_some();
 
-        if optimistic_ui_inserted
-            && let Some(conv_id) = conv_id_for_task.clone()
-        {
+        if optimistic_ui_inserted && let Some(conv_id) = conv_id_for_task.clone() {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id, cx);
                 view.add_user_message(message.clone(), attachments.clone(), cx);

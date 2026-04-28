@@ -233,7 +233,9 @@ fn render_subtle_guidance_slot(index: usize, cx: &App) -> Div {
     let accent = cx.theme().primary;
 
     div()
-        .id(ElementId::Name(format!("assistant-guidance-slot-{index}").into()))
+        .id(ElementId::Name(
+            format!("assistant-guidance-slot-{index}").into(),
+        ))
         .w_full()
         .min_h(px(38.0))
         .px_3()
@@ -245,7 +247,9 @@ fn render_subtle_guidance_slot(index: usize, cx: &App) -> Div {
         .items_center()
         .child(
             div()
-                .id(ElementId::Name(format!("assistant-guidance-caret-{index}").into()))
+                .id(ElementId::Name(
+                    format!("assistant-guidance-caret-{index}").into(),
+                ))
                 .w(px(2.0))
                 .h(px(18.0))
                 .rounded_full()
