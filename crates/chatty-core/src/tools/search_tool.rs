@@ -70,7 +70,7 @@ impl Tool for SearchCodeTool {
                         "description": "Maximum number of results to return (default: 100)"
                     }
                 },
-                "required": ["pattern", "case_insensitive", "file_type", "max_results"]
+                "required": ["pattern"]
             }),
         }
     }

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use rig::OneOrMany;
 use rig::completion::Message;
-use rig::completion::Prompt;
 use rig::completion::message::{AssistantContent, Text};
 use rig::message::UserContent;
 use tracing::{debug, info};
@@ -240,11 +239,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 /// Dispatch a non-streaming prompt call to whichever provider the agent wraps.
 async fn call_agent(agent: &AgentClient, prompt: &str) -> Result<String> {
-    match agent {
-        AgentClient::OpenRouter(a) => Ok(a.prompt(prompt).await?),
-        AgentClient::Ollama(a) => Ok(a.prompt(prompt).await?),
-        AgentClient::AzureOpenAI(a) => Ok(a.prompt(prompt).await?),
-    }
+    agent.prompt(prompt).await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
