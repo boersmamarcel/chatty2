@@ -256,14 +256,26 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 
 ### Extensions & MCP Servers
 
-Chatty has a unified **Extensions** page (**Settings > Extensions**) that consolidates MCP servers, A2A agents, and WASM modules in one place.
+Chatty has a unified **Extensions** page (**Settings > Extensions**) that consolidates MCP servers, A2A agents, and WASM agent modules in one place.
 
 **Browse the Hive Marketplace** — discover and install community extensions directly from within Chatty:
 
 1. Go to **Settings > Extensions**
 2. Optionally sign in or register for a Hive account (top of the page)
-3. Use the **Browse Marketplace** section to search for extensions and click **Install**
+3. Use the **Browse Marketplace** section to search for extensions and click **Install** — a progress bar shows download progress for WASM modules
 4. Installed extensions appear in the **Installed** section where you can enable, disable, or uninstall them
+
+Each installed extension displays a badge showing its type (**Agent**, **MCP**, **A2A**) and execution context:
+
+| Badge | Meaning |
+|:------|:--------|
+| **• Local** | WASM agent module running on your machine |
+| **☁ Cloud** | WASM agent module running on a cloud runner |
+| **☁ Cloud Only** | Module available in cloud execution mode only |
+| **↗ External** | MCP server or A2A agent connecting to an external URL |
+| **Paid** | Module with a non-free pricing model |
+
+**Switching execution mode** — for WASM agent modules that support both local and cloud execution, a **Switch to Local** / **Switch to Cloud** button appears next to the module. Cloud execution runs the module on a Hive runner without requiring a local WASM binary. Modules marked as cloud-only do not have this toggle.
 
 **Add a custom MCP server manually:**
 
