@@ -208,7 +208,7 @@ fn render_waiting_status(status: &str, cx: &App) -> Div {
         .flex()
         .items_center()
         .gap_2()
-        .w_fit()
+        .flex_shrink_0()
         .px_2()
         .py_1()
         .rounded_full()

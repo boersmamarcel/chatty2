@@ -459,7 +459,7 @@ impl StreamManager {
 
     /// Cancel any pending stream (used when creating a new conversation).
     pub fn cancel_pending(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some(mut state) = self.streams.remove("__pending__") {
+        if let Some(state) = self.streams.remove("__pending__") {
             state.cancel_flag.store(true, Ordering::Relaxed);
             debug!("Cancelled pending stream");
             cx.emit(StreamManagerEvent::StreamEnded {
@@ -506,7 +506,7 @@ impl StreamManager {
     pub fn stop_all(&mut self, cx: &mut gpui::Context<Self>) {
         let keys: Vec<String> = self.streams.keys().cloned().collect();
         for key in keys {
-            if let Some(mut state) = self.streams.remove(&key) {
+            if let Some(state) = self.streams.remove(&key) {
                 state.cancel_flag.store(true, Ordering::Relaxed);
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: key,
