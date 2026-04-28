@@ -208,9 +208,22 @@ fn render_waiting_status(status: &str, cx: &App) -> Div {
         .flex()
         .items_center()
         .gap_2()
-        .text_sm()
+        .w_fit()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().muted.opacity(0.35))
+        .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .child(Icon::new(CustomIcon::Brain).size_4())
+        .child(
+            div()
+                .w_2()
+                .h_2()
+                .rounded_full()
+                .bg(cx.theme().primary.opacity(0.75)),
+        )
         .child(status.to_string())
 }
 
