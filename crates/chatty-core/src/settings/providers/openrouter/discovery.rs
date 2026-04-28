@@ -71,28 +71,26 @@ pub async fn discover_openrouter_models() -> Result<Vec<OpenRouterModel>> {
     Ok(body.data)
 }
 
-/// Return `true` if the model supports image input based on the
-/// `architecture.input_modalities` field.
-pub fn model_supports_images(model: &OpenRouterModel) -> bool {
-    model
-        .architecture
-        .input_modalities
-        .iter()
-        .any(|m| m.eq_ignore_ascii_case("image"))
+/// Return `true` if the model supports image input.
+///
+/// OpenRouter accepts images for **every** model — when a model does not
+/// natively support vision OpenRouter transparently parses the image and
+/// passes the extracted text to the model.  Therefore we conservatively
+/// return `true` for all OpenRouter models rather than relying on the
+/// `input_modalities` field which is often incomplete on the gateway side.
+pub fn model_supports_images(_model: &OpenRouterModel) -> bool {
+    true
 }
 
 /// Return `true` if the model supports PDF input.
-/// OpenRouter itself does not flag PDF support explicitly; we infer PDF
-/// support from text+image modalities on any model *except* legacy GPT-4
-/// series models that historically degrade PDF images.
-pub fn model_supports_pdf(model: &OpenRouterModel) -> bool {
-    // Everything with image support on OpenRouter gets PDF support unless
-    // it is a known legacy model that handles images poorly.
-    let id = &model.id;
-    let legacy_no_pdf = id.starts_with("openai/gpt-4-turbo")
-        || id.starts_with("openai/gpt-4-vision")
-        || id == "openai/gpt-4";
-    model_supports_images(model) && !legacy_no_pdf
+///
+/// OpenRouter accepts PDFs for **every** model.  When a model natively
+/// supports file input the PDF is passed directly; otherwise OpenRouter
+/// parses the file (e.g. with Cloudflare AI or Mistral OCR) and sends
+/// the extracted text/markdown to the model.  We therefore always report
+/// PDF support unconditionally.
+pub fn model_supports_pdf(_model: &OpenRouterModel) -> bool {
+    true
 }
 
 /// Prompt cost per 1 000 000 tokens (f64).
