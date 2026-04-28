@@ -254,6 +254,7 @@ impl ChatView {
             system_trace_view: None,
             live_trace: None,
             is_markdown: true,
+            status_message: None,
             attachments,
             feedback: None,
             history_index: None,
@@ -275,6 +276,7 @@ impl ChatView {
             system_trace_view: None,
             live_trace: Some(SystemTrace::new()),
             is_markdown: true,
+            status_message: Some("Composing final request…".to_string()),
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
@@ -286,6 +288,18 @@ impl ChatView {
         );
         cx.notify();
         self.activate_sticky_scroll();
+    }
+
+    /// Update the transient status shown before the first assistant text arrives.
+    pub fn set_assistant_status(&mut self, status: &str, cx: &mut Context<Self>) {
+        if let Some(last) = self.messages.last_mut()
+            && last.is_streaming
+            && last.content.is_empty()
+        {
+            last.status_message = Some(status.to_string());
+            cx.notify();
+            self.scroll_if_sticky();
+        }
     }
 
     /// Append text to the current streaming assistant message
@@ -302,6 +316,7 @@ impl ChatView {
                 "Last message details"
             );
             if last.is_streaming {
+                last.status_message = None;
                 last.content.push_str(text);
                 debug!(new_content_len = last.content.len(), "Text appended");
                 cx.notify();
@@ -318,6 +333,7 @@ impl ChatView {
     pub fn finalize_assistant_message(&mut self, cx: &mut Context<Self>) {
         if let Some(last) = self.messages.last_mut() {
             last.is_streaming = false;
+            last.status_message = None;
 
             // Finalize live trace - push final state to view entity
             if let Some(ref mut trace) = last.live_trace {
@@ -1015,6 +1031,7 @@ impl ChatView {
             system_trace_view: Some(trace_view),
             live_trace: if is_streaming { Some(trace) } else { None },
             is_markdown: true,
+            status_message: None,
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
@@ -1112,6 +1129,7 @@ impl ChatView {
             system_trace_view: None,
             live_trace: None,
             is_markdown: true,
+            status_message: None,
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
@@ -1157,6 +1175,7 @@ impl ChatView {
                             system_trace_view: None,
                             live_trace: None,
                             is_markdown: true,
+                            status_message: None,
                             attachments,
                             feedback: None,
                             history_index: Some(idx),
@@ -1199,6 +1218,7 @@ impl ChatView {
                             system_trace_view,
                             live_trace: None,
                             is_markdown: true,
+                            status_message: None,
                             attachments,
                             feedback,
                             history_index: Some(idx),

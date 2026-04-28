@@ -37,6 +37,8 @@ pub struct DisplayMessage {
     pub live_trace: Option<SystemTrace>,
     // Track if this message should render as markdown
     pub is_markdown: bool,
+    // Transient status shown while waiting for the first assistant text.
+    pub status_message: Option<String>,
     // File attachments (images/PDFs) for this message
     pub attachments: Vec<PathBuf>,
     // User feedback signal (thumbs up/down) for assistant messages
@@ -67,6 +69,7 @@ impl DisplayMessage {
             system_trace_view: trace_view,
             live_trace: None,
             is_markdown: true,
+            status_message: None,
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
@@ -198,6 +201,17 @@ fn render_thinking_block(
                 .text_color(muted_text)
                 .child(content.to_string()),
         )
+}
+
+fn render_waiting_status(status: &str, cx: &App) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(Icon::new(CustomIcon::Brain).size_4())
+        .child(status.to_string())
 }
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
@@ -694,6 +708,19 @@ where
     // Check if we should render interleaved content (tool calls mixed with text)
     let should_interleave =
         matches!(msg.role, MessageRole::Assistant) && msg.system_trace_view.is_some();
+
+    if matches!(msg.role, MessageRole::Assistant)
+        && msg.is_streaming
+        && msg.content.is_empty()
+        && !should_interleave
+    {
+        return container
+            .child(render_waiting_status(
+                msg.status_message.as_deref().unwrap_or("Digesting…"),
+                cx,
+            ))
+            .into_any_element();
+    }
 
     // Render attachments (images/PDFs) if present.
     // For assistant messages with interleaved tool calls, attachments are rendered

@@ -26,20 +26,19 @@ pub async fn load_auto_context_block(request: AutoContextRequest<'_>) -> Option<
     } else {
         request.query_text
     };
+    let bm25_query = (!request.query_text.is_empty())
+        .then_some(request.query_text)
+        .or(fallback_query);
 
     let bm25_search = async {
-        if request.query_text.is_empty() {
+        let Some(query) = bm25_query else {
             return Vec::new();
-        }
+        };
 
-        match request
-            .memory_service
-            .search(request.query_text, Some(3))
-            .await
-        {
+        match request.memory_service.search(query, Some(3)).await {
             Ok(hits) if !hits.is_empty() => hits,
             Ok(_) => {
-                if let Some(fallback) = fallback_query {
+                if let Some(fallback) = fallback_query.filter(|fallback| *fallback != query) {
                     info!("Simplified query got 0 hits, retrying with fallback text");
                     request
                         .memory_service

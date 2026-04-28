@@ -1222,6 +1222,15 @@ struct LlmStreamParams {
     invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
+fn set_stream_status(chat_view: &Entity<ChatView>, status: &str, cx: &mut AsyncApp) {
+    chat_view
+        .update(cx, |view, cx| {
+            view.set_assistant_status(status, cx);
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to update assistant stream status"))
+        .ok();
+}
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:
@@ -1356,10 +1365,12 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     // to conversation history (it is only forwarded to the LLM).
     let original_user_contents = user_contents.clone();
     let llm_user_contents = {
+        set_stream_status(&chat_view, "Retrieving relevant memories…", cx);
         let memory_service = await_memory_service(cx).await;
         let embedding_service = get_embedding_service(cx);
         let skill_service = get_skill_service(cx);
 
+        set_stream_status(&chat_view, "Searching for relevant skills…", cx);
         chatty_core::services::augment_with_memory(
             user_contents,
             memory_service.as_ref(),
@@ -1371,6 +1382,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     };
 
     // 3. Call stream_prompt with augmented contents (context block included for the LLM)
+    set_stream_status(&chat_view, "Composing final request…", cx);
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _augmented_user_message) = stream_prompt(
         &agent,
@@ -1381,6 +1393,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         max_agent_turns,
     )
     .await?;
+    set_stream_status(&chat_view, "Digesting…", cx);
 
     // 4. Optionally add user message to conversation model.
     // Use the original contents (without the injected context block) so that
