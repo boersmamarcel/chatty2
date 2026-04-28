@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(result["agent"]["name"], "chatty");
         assert!(result["agent"]["version"].as_str().is_some());
         assert_eq!(result["agent"]["model_name"], "claude-sonnet-4-20250514");
-        assert_eq!(result["agent"]["extra"]["provider"], "anthropic");
+        assert_eq!(result["agent"]["extra"]["provider"], "openrouter");
     }
 
     #[test]
