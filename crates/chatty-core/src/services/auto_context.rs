@@ -21,7 +21,17 @@ pub async fn load_auto_context_block(request: AutoContextRequest<'_>) -> Option<
         .fallback_query_text
         .filter(|query| !query.is_empty() && *query != request.query_text);
 
-    let bm25_hits = if !request.query_text.is_empty() {
+    let search_text = if request.query_text.is_empty() {
+        fallback_query.unwrap_or_default()
+    } else {
+        request.query_text
+    };
+
+    let bm25_search = async {
+        if request.query_text.is_empty() {
+            return Vec::new();
+        }
+
         match request
             .memory_service
             .search(request.query_text, Some(3))
@@ -45,19 +55,12 @@ pub async fn load_auto_context_block(request: AutoContextRequest<'_>) -> Option<
                 Vec::new()
             }
         }
-    } else {
-        Vec::new()
     };
 
-    let search_text = if request.query_text.is_empty() {
-        fallback_query.unwrap_or_default()
-    } else {
-        request.query_text
-    };
-
-    let mut query_embedding_opt: Option<Vec<f32>> = None;
-    let vec_hits = if let Some(embed_svc) = request.embedding_service {
-        if !search_text.is_empty() {
+    let vector_search = async {
+        if let Some(embed_svc) = request.embedding_service
+            && !search_text.is_empty()
+        {
             match embed_svc.embed(search_text).await {
                 Ok(query_embedding) => {
                     let hits = request
@@ -65,20 +68,18 @@ pub async fn load_auto_context_block(request: AutoContextRequest<'_>) -> Option<
                         .search_vec(query_embedding.clone(), Some(3))
                         .await
                         .unwrap_or_default();
-                    query_embedding_opt = Some(query_embedding);
-                    hits
+                    return (hits, Some(query_embedding));
                 }
                 Err(e) => {
                     warn!(error = ?e, "Memory auto-retrieval embedding failed (non-fatal)");
-                    Vec::new()
                 }
             }
-        } else {
-            Vec::new()
         }
-    } else {
-        Vec::new()
+
+        (Vec::new(), None)
     };
+
+    let (bm25_hits, (vec_hits, query_embedding_opt)) = tokio::join!(bm25_search, vector_search);
 
     let memory_hits = merge_search_results(bm25_hits, vec_hits, 5);
     let skill_hits = if search_text.is_empty() {

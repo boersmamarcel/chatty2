@@ -44,6 +44,8 @@ pub struct StreamState {
     pending_text: String,
     /// When the last TextChunk event was emitted (used for flush interval check).
     last_flush: Instant,
+    /// Whether any text has been emitted for this stream yet.
+    has_emitted_text: bool,
     /// Number of LLM API turns in this exchange. Starts at 1 (the initial request),
     /// incremented for each tool call result (which triggers another API call).
     /// Used to normalize rig-core's accumulated token usage back to per-turn values.
@@ -191,6 +193,7 @@ impl StreamManager {
                 pending_artifacts,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
+                has_emitted_text: false,
                 api_turn_count: 1,
             },
         );
@@ -252,6 +255,7 @@ impl StreamManager {
                 pending_artifacts,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
+                has_emitted_text: false,
                 api_turn_count: 1,
             },
         );
@@ -313,9 +317,10 @@ impl StreamManager {
             StreamChunk::Text(text) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.pending_text.push_str(&text);
-                    if state.last_flush.elapsed() >= FLUSH_INTERVAL {
+                    if !state.has_emitted_text || state.last_flush.elapsed() >= FLUSH_INTERVAL {
                         let batch = std::mem::take(&mut state.pending_text);
                         state.last_flush = Instant::now();
+                        state.has_emitted_text = true;
                         cx.emit(StreamManagerEvent::TextChunk {
                             conversation_id: conv_id.to_string(),
                             text: batch,
@@ -643,6 +648,7 @@ mod tests {
                 pending_artifacts: None,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                has_emitted_text: false,
                 api_turn_count: 1,
             },
         );
@@ -664,6 +670,7 @@ mod tests {
                 pending_artifacts: None,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                has_emitted_text: false,
                 api_turn_count: 1,
             },
         );
@@ -693,6 +700,7 @@ mod tests {
                 pending_artifacts: None,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                has_emitted_text: false,
                 api_turn_count: 1,
             },
         );
