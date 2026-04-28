@@ -73,13 +73,41 @@ pub async fn discover_openrouter_models() -> Result<Vec<OpenRouterModel>> {
 
 /// Return `true` if the model supports image input.
 ///
-/// OpenRouter accepts images for **every** model — when a model does not
-/// natively support vision OpenRouter transparently parses the image and
-/// passes the extracted text to the model.  Therefore we conservatively
-/// return `true` for all OpenRouter models rather than relying on the
-/// `input_modalities` field which is often incomplete on the gateway side.
-pub fn model_supports_images(_model: &OpenRouterModel) -> bool {
-    true
+/// OpenRouter **does not** transparently parse images for non-vision models —
+/// sending an `image_url` block to a text-only model results in a 404
+/// (`No endpoints found that support image input`).  We therefore rely on the
+/// `input_modalities` field from the public `/api/v1/models` endpoint and
+/// fall back to well-known multimodal model families when that field is empty
+/// or incomplete.
+pub fn model_supports_images(model: &OpenRouterModel) -> bool {
+    // 1. Explicit modality flag from the API
+    if model
+        .architecture
+        .input_modalities
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case("image"))
+    {
+        return true;
+    }
+
+    // 2. The `modality` field (e.g. "text+image") is often set even when
+    //    `input_modalities` is empty on the gateway side.
+    let modality = model.architecture.modality.to_lowercase();
+    if modality.contains("image") || modality.contains("vision") {
+        return true;
+    }
+
+    // 3. Fallback: known multimodal families that OpenRouter hosts.
+    //    The gateway metadata is sometimes sparse for models that do
+    //    accept vision input natively.
+    let id = &model.id.to_lowercase();
+    id.starts_with("anthropic/claude-3")
+        || id.starts_with("google/gemini")
+        || id.starts_with("openai/gpt-4o")
+        || id.starts_with("openai/gpt-4.5")
+        || id.starts_with("openai/gpt-5")
+        || id.starts_with("meta-llama/llama-3.2")
+        || id.contains("vision")
 }
 
 /// Return `true` if the model supports PDF input.
