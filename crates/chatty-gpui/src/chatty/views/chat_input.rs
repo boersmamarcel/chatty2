@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 use super::attachment_validation::{PDF_EXTENSION, is_image_extension, validate_attachment};
 use crate::assets::CustomIcon;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
+use crate::feature_flags::subtle_guidance_v1_enabled;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -362,6 +363,8 @@ pub struct ChatInputState {
     last_at_query: Option<String>,
     /// When set, this text is written into the input on the next render frame.
     pending_at_insert: Option<String>,
+    /// True between send acknowledgment and the first assistant token.
+    awaiting_first_token: bool,
 }
 
 impl ChatInputState {
@@ -387,6 +390,7 @@ impl ChatInputState {
             at_menu_scroll_handle: ScrollHandle::new(),
             last_at_query: None,
             pending_at_insert: None,
+            awaiting_first_token: false,
         }
     }
 
@@ -434,6 +438,14 @@ impl ChatInputState {
     /// Set streaming state
     pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
         self.is_streaming = streaming;
+        if !streaming {
+            self.awaiting_first_token = false;
+        }
+        cx.notify();
+    }
+
+    pub fn set_awaiting_first_token(&mut self, awaiting: bool, cx: &mut Context<Self>) {
+        self.awaiting_first_token = awaiting;
         cx.notify();
     }
 
@@ -969,6 +981,7 @@ impl RenderOnce for ChatInput {
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
         let is_streaming = self.state.read(cx).is_streaming();
+        let awaiting_first_token = self.state.read(cx).awaiting_first_token;
 
         // Read thumbnail cache (for PDF previews)
         let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
@@ -1220,6 +1233,9 @@ impl RenderOnce for ChatInput {
                     .rounded_2xl()
                     .border_color(rgb(0xe5e7eb))
                     .bg(cx.theme().secondary)
+                    .when(subtle_guidance_v1_enabled() && awaiting_first_token, |d| {
+                        d.opacity(0.7)
+                    })
                     .child(
                         div()
                             .child(

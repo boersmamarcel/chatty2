@@ -9,6 +9,7 @@ mod assets;
 mod auto_updater;
 mod chatty;
 mod cli_installer;
+mod feature_flags;
 pub mod global_entity;
 mod settings;
 

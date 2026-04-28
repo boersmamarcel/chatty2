@@ -6,6 +6,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, IconName, Sizable};
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::debug;
 
 use super::code_block_component::CodeBlockComponent;
@@ -18,6 +19,7 @@ use super::parsed_cache::{
     ParsedContentCache, StreamingParseState,
 };
 use super::trace_components::SystemTraceView;
+use crate::feature_flags::subtle_guidance_v1_enabled;
 
 /// Message role indicator
 #[derive(Clone, Debug)]
@@ -225,6 +227,37 @@ fn render_waiting_status(status: &str, cx: &App) -> Div {
                 .bg(cx.theme().primary.opacity(0.75)),
         )
         .child(status.to_string())
+}
+
+fn render_subtle_guidance_slot(index: usize, cx: &App) -> Div {
+    let accent = cx.theme().primary;
+
+    div()
+        .id(ElementId::Name(format!("assistant-guidance-slot-{index}").into()))
+        .w_full()
+        .min_h(px(38.0))
+        .px_3()
+        .py_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(cx.theme().foreground.opacity(0.06))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .id(ElementId::Name(format!("assistant-guidance-caret-{index}").into()))
+                .w(px(2.0))
+                .h(px(18.0))
+                .rounded_full()
+                .bg(accent)
+                .with_animation(
+                    ElementId::Name(format!("assistant-caret-breathe-{index}").into()),
+                    Animation::new(Duration::from_millis(600))
+                        .repeat()
+                        .with_easing(pulsating_between(0.3, 1.0)),
+                    |el, delta| el.opacity(delta),
+                ),
+        )
 }
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
@@ -727,12 +760,19 @@ where
         && msg.content.is_empty()
         && !should_interleave
     {
-        return container
-            .child(render_waiting_status(
-                msg.status_message.as_deref().unwrap_or("Digesting…"),
-                cx,
-            ))
-            .into_any_element();
+        return if subtle_guidance_v1_enabled() {
+            container
+                .p_0()
+                .child(render_subtle_guidance_slot(index, cx))
+                .into_any_element()
+        } else {
+            container
+                .child(render_waiting_status(
+                    msg.status_message.as_deref().unwrap_or("Digesting…"),
+                    cx,
+                ))
+                .into_any_element()
+        };
     }
 
     // Render attachments (images/PDFs) if present.

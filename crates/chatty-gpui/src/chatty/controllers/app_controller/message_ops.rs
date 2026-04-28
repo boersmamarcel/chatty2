@@ -1,4 +1,5 @@
 use super::*;
+use crate::feature_flags::subtle_guidance_v1_enabled;
 
 impl ChattyApp {
     /// Send a message to the LLM and stream the response.
@@ -30,10 +31,31 @@ impl ChattyApp {
         let sidebar = self.sidebar_view.clone();
         let app_entity = cx.entity();
 
+        if subtle_guidance_v1_enabled() {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, cx| {
+                    input.set_streaming(true, cx);
+                    input.set_awaiting_first_token(true, cx);
+                });
+            });
+        }
+
         // Get the conversation ID for task tracking
         // If no conversation exists, we'll create one inside the async block
         let conv_id_for_task = cx.global::<ConversationsStore>().active_id().cloned();
         let needs_conversation_creation = conv_id_for_task.is_none();
+        let optimistic_ui_inserted = subtle_guidance_v1_enabled() && conv_id_for_task.is_some();
+
+        if optimistic_ui_inserted
+            && let Some(conv_id) = conv_id_for_task.clone()
+        {
+            chat_view.update(cx, |view, cx| {
+                view.set_conversation_id(conv_id, cx);
+                view.add_user_message(message.clone(), attachments.clone(), cx);
+                view.start_assistant_message(cx);
+                cx.notify();
+            });
+        }
 
         // Get pending artifacts handle for existing conversations (for stream registration)
         let pending_artifacts_for_registration = conv_id_for_task.as_ref().and_then(|id| {
@@ -127,16 +149,18 @@ impl ChattyApp {
 
                 // PHASE 2: Initialize UI with user and assistant messages
                 // and add the user/assistant messages AFTER conversation exists
-                chat_view.update(cx, |view, cx| {
-                    view.set_conversation_id(conv_id.clone(), cx);
-                    // Add user message to UI
-                    view.add_user_message(message.clone(), attachments.clone(), cx);
-                    debug!("User message added to UI");
-                    // Start assistant message in UI
-                    view.start_assistant_message(cx);
-                    debug!("Assistant message started");
-                    cx.notify();
-                }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                if !optimistic_ui_inserted {
+                    chat_view.update(cx, |view, cx| {
+                        view.set_conversation_id(conv_id.clone(), cx);
+                        // Add user message to UI
+                        view.add_user_message(message.clone(), attachments.clone(), cx);
+                        debug!("User message added to UI");
+                        // Start assistant message in UI
+                        view.start_assistant_message(cx);
+                        debug!("Assistant message started");
+                        cx.notify();
+                    }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                }
                 debug!(conv_id = %conv_id, "Set conversation ID on chat view");
 
                 // Force sidebar to re-render by notifying it explicitly
@@ -319,6 +343,9 @@ impl ChattyApp {
                         {
                             view.chat_input_state().update(cx, |input, cx| {
                                 input.set_streaming(true, cx);
+                                if subtle_guidance_v1_enabled() {
+                                    input.set_awaiting_first_token(true, cx);
+                                }
                             });
                         }
                     });
@@ -331,6 +358,11 @@ impl ChattyApp {
                 let text = text.clone();
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
+                        if subtle_guidance_v1_enabled() {
+                            view.chat_input_state().update(cx, |input, cx| {
+                                input.set_awaiting_first_token(false, cx);
+                            });
+                        }
                         view.append_assistant_text(&text, cx);
                     }
                 });
