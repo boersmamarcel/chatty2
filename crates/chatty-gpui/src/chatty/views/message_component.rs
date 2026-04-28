@@ -229,7 +229,7 @@ fn render_waiting_status(status: &str, cx: &App) -> Div {
         .child(status.to_string())
 }
 
-fn render_subtle_guidance_slot(index: usize, cx: &App) -> Div {
+fn render_subtle_guidance_slot(index: usize, cx: &App) -> impl IntoElement {
     let accent = cx.theme().primary;
 
     div()
