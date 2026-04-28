@@ -122,7 +122,6 @@ pub fn update_or_create_azure(cx: &mut App, api_key: String, endpoint_url: Strin
     }
 }
 
-/// Update or create Ollama provider (doesn't require API key)
 pub fn update_or_create_ollama(cx: &mut App, base_url: String) {
     // 1. Apply update immediately (optimistic update)
     let model = cx.global_mut::<ProviderModel>();

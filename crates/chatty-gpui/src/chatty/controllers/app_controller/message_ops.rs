@@ -1730,9 +1730,12 @@ async fn attachment_to_user_content(path: &Path) -> anyhow::Result<rig::message:
             Some(rig::completion::message::ImageMediaType::SVG),
             Some(rig::completion::message::ImageDetail::Auto),
         )),
-        "pdf" => Ok(rig::message::UserContent::document(
-            b64,
-            Some(rig::completion::message::DocumentMediaType::PDF),
+        "pdf" => Ok(rig::message::UserContent::Document(
+            rig::completion::message::Document {
+                data: rig::completion::message::DocumentSourceKind::Base64(b64),
+                media_type: Some(rig::completion::message::DocumentMediaType::PDF),
+                additional_params: None,
+            },
         )),
         _ => Err(anyhow::anyhow!("Unsupported file type: {}", ext)),
     }

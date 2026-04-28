@@ -255,25 +255,13 @@ pub(super) fn build_preamble(
 fn default_system_prompt(provider_type: &ProviderType) -> String {
     let provider_name = provider_type.display_name();
     let provider_specific_guidance = match provider_type {
-        ProviderType::Anthropic => {
-            "Use `<thinking>` or `<thought>` blocks for multi-step reasoning — they render as \
-             collapsible sections in the UI. Prefer XML-tagged sections when structuring complex \
-             multi-part answers. Extended thinking is rendered natively; use it freely for hard problems."
+        ProviderType::OpenRouter | ProviderType::AzureOpenAI => {
+            "Prefer concise structured markdown and explicit assumptions for technical tasks. \
+             For multi-step tasks, state a brief numbered plan before executing it."
         }
-        ProviderType::OpenAI | ProviderType::AzureOpenAI => {
-            "Prefer flat markdown over nested bullets. For multi-step tasks, state a brief numbered \
-             plan before executing it. Be explicit about assumptions in technical work rather than \
-             inferring silently."
-        }
-        ProviderType::Gemini => {
-            "Lead with the direct answer, then elaborate. Use numbered steps for procedures and \
-             workflows. Explicitly signal uncertainty when you are not sure — avoid overstating \
-             confidence in facts that may have changed since your training cutoff."
-        }
-        ProviderType::Mistral | ProviderType::Ollama => {
-            "Keep instructions short and concrete. Prefer explicit step-by-step prose over \
-             open-ended descriptions. When in doubt, use available tools to verify rather than \
-             answering from memory."
+        ProviderType::Ollama => {
+            "Keep responses direct and efficient, and verify important details with tools \
+             when available. Prefer explicit step-by-step prose over open-ended descriptions."
         }
     };
 
@@ -360,7 +348,7 @@ mod tests {
         Vec<String>,
     ) {
         (
-            ProviderType::OpenAI,
+            ProviderType::OpenRouter,
             ToolAvailability::default(),
             None,
             McpTools::none(),
@@ -394,7 +382,7 @@ mod tests {
         tools.shell = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -414,7 +402,7 @@ mod tests {
         tools.fs_write = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -432,7 +420,7 @@ mod tests {
         tools.git = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -450,7 +438,7 @@ mod tests {
         tools.memory = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -468,7 +456,7 @@ mod tests {
         let tools = ToolAvailability::default();
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -484,7 +472,7 @@ mod tests {
         let secrets = vec!["API_KEY".to_string(), "DB_PASSWORD".to_string()];
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -501,7 +489,7 @@ mod tests {
         let tools = ToolAvailability::default();
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -521,7 +509,7 @@ mod tests {
         )];
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -539,7 +527,7 @@ mod tests {
         tools.excel_read = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -557,7 +545,7 @@ mod tests {
         tools.excel_write = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -576,7 +564,7 @@ mod tests {
         tools.pdf_extract_text = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -593,7 +581,7 @@ mod tests {
         tools.data_query = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -610,7 +598,7 @@ mod tests {
         tools.sub_agent = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -626,7 +614,7 @@ mod tests {
         let tools = ToolAvailability::default();
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -644,7 +632,7 @@ mod tests {
         tools.search_web = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -661,7 +649,7 @@ mod tests {
         tools.compile_typst = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -678,7 +666,7 @@ mod tests {
         tools.execute_code = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -695,7 +683,7 @@ mod tests {
         tools.browser_use = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -711,7 +699,7 @@ mod tests {
         tools.daytona = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -727,7 +715,7 @@ mod tests {
         tools.publish_module = true;
         let result = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -742,7 +730,7 @@ mod tests {
         let tools = ToolAvailability::default();
         let result = build_preamble(
             "",
-            &ProviderType::Anthropic,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
@@ -750,31 +738,31 @@ mod tests {
             &[],
         );
         assert!(result.contains("<identity>"));
-        assert!(result.contains("Current model provider: Anthropic."));
+        assert!(result.contains("Current model provider: OpenRouter."));
     }
 
     #[test]
     fn default_prompt_is_dynamic_for_provider() {
         let tools = ToolAvailability::default();
-        let anthropic = build_preamble(
+        let openrouter = build_preamble(
             "",
-            &ProviderType::Anthropic,
+            &ProviderType::OpenRouter,
             &tools,
             &None,
             &McpTools::none(),
             &[],
             &[],
         );
-        let openai = build_preamble(
+        let ollama = build_preamble(
             "",
-            &ProviderType::OpenAI,
+            &ProviderType::Ollama,
             &tools,
             &None,
             &McpTools::none(),
             &[],
             &[],
         );
-        assert!(anthropic.contains("XML-tagged sections"));
-        assert!(openai.contains("flat markdown"));
+        assert!(openrouter.contains("concise structured markdown"));
+        assert!(ollama.contains("direct and efficient"));
     }
 }

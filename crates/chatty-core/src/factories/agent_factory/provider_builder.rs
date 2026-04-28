@@ -38,109 +38,35 @@ pub(super) async fn build_provider_agent(
     let base_url = provider_config.base_url.clone();
 
     match &provider_config.provider_type {
-        ProviderType::Anthropic => {
+        ProviderType::OpenRouter => {
             let key =
-                api_key.ok_or_else(|| anyhow!("API key not configured for Anthropic provider"))?;
+                api_key.ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
-            let client = rig::providers::anthropic::Client::new(&key)?;
-            let mut builder = client
-                .agent(&model_config.model_identifier)
-                .preamble(preamble)
-                .temperature(model_config.temperature as f64);
-
-            if let Some(max_tokens) = model_config.max_tokens {
-                builder = builder.max_tokens(max_tokens as u64);
-            }
-
-            let agent =
-                build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::Anthropic(agent))
-        }
-        ProviderType::OpenAI => {
-            let key =
-                api_key.ok_or_else(|| anyhow!("API key not configured for OpenAI provider"))?;
-
-            let is_reasoning = is_reasoning_model(&model_config.model_identifier);
-            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-
-            // When base_url is set, use the Chat Completions API for compatibility
-            // with OpenAI-compatible servers (vLLM, llama.cpp, etc.).
-            if let Some(ref url) = base_url {
-                let http_client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(600))
-                    .connect_timeout(std::time::Duration::from_secs(30))
-                    .pool_max_idle_per_host(0)
-                    .build()
-                    .context("Failed to build HTTP client for OpenAI-compatible server")?;
-                let client = rig::providers::openai::Client::builder()
+            let client = if let Some(ref url) = base_url {
+                rig::providers::openrouter::Client::builder()
                     .api_key(&key)
                     .base_url(url)
-                    .http_client(http_client)
                     .build()?
-                    .completions_api();
-                let mut builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(preamble);
-
-                if model_config.supports_temperature && !is_reasoning {
-                    builder = builder.temperature(model_config.temperature as f64);
-                }
-
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-                Ok(AgentClient::OpenAICompletions(agent))
             } else {
-                let client = rig::providers::openai::Client::new(&key)?;
-                let mut builder = client
-                    .agent(&model_config.model_identifier)
-                    .preamble(preamble);
+                rig::providers::openrouter::Client::new(&key)?
+            };
 
-                if model_config.supports_temperature && !is_reasoning {
-                    builder = builder.temperature(model_config.temperature as f64);
-                }
-
-                if is_reasoning || !model_config.supports_temperature {
-                    builder = builder.additional_params(serde_json::json!({
-                        "reasoning": { "summary": "auto" }
-                    }));
-                }
-
-                let agent =
-                    build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-                Ok(AgentClient::OpenAI(agent))
-            }
-        }
-        ProviderType::Gemini => {
-            let key =
-                api_key.ok_or_else(|| anyhow!("API key not configured for Gemini provider"))?;
-
-            let client = rig::providers::gemini::Client::new(&key)?;
-            let builder = client
-                .agent(&model_config.model_identifier)
-                .preamble(preamble)
-                .temperature(model_config.temperature as f64);
-
-            let agent =
-                build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::Gemini(agent))
-        }
-        ProviderType::Mistral => {
-            let key =
-                api_key.ok_or_else(|| anyhow!("API key not configured for Mistral provider"))?;
-
-            let client = rig::providers::mistral::Client::new(&key)?;
             let mut builder = client
                 .agent(&model_config.model_identifier)
-                .preamble(preamble)
-                .temperature(model_config.temperature as f64);
+                .preamble(preamble);
+
+            if model_config.supports_temperature {
+                builder = builder.temperature(model_config.temperature as f64);
+            }
 
             if let Some(max_tokens) = model_config.max_tokens {
                 builder = builder.max_tokens(max_tokens as u64);
             }
 
+            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
             let agent =
                 build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::Mistral(agent))
+            Ok(AgentClient::OpenRouter(agent))
         }
         ProviderType::Ollama => {
             let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -268,16 +194,8 @@ async fn build_azure_agent(
         .agent(&model_config.model_identifier)
         .preamble(preamble);
 
-    let is_reasoning = is_reasoning_model(&model_config.model_identifier);
-
-    if model_config.supports_temperature && !is_reasoning {
+    if model_config.supports_temperature {
         builder = builder.temperature(model_config.temperature as f64);
-    }
-
-    if is_reasoning || !model_config.supports_temperature {
-        builder = builder.additional_params(serde_json::json!({
-            "reasoning_effort": "medium"
-        }));
     }
 
     if let Some(max_tokens) = model_config.max_tokens {
@@ -287,15 +205,6 @@ async fn build_azure_agent(
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
     let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
     Ok(AgentClient::AzureOpenAI(agent))
-}
-
-/// Detect models that use reasoning tokens (OpenAI o-series and GPT-5).
-fn is_reasoning_model(model_identifier: &str) -> bool {
-    let is_o_series = {
-        let mut chars = model_identifier.chars();
-        chars.next() == Some('o') && chars.next().is_some_and(|c| c.is_ascii_digit())
-    };
-    is_o_series || model_identifier.starts_with("gpt-5")
 }
 
 /// Normalize Azure endpoint URL:
@@ -434,16 +343,5 @@ mod tests {
             normalize_azure_endpoint("myresource.openai.azure.com/openai"),
             "https://myresource.openai.azure.com"
         );
-    }
-
-    #[test]
-    fn test_is_reasoning_model() {
-        assert!(is_reasoning_model("o1-mini"));
-        assert!(is_reasoning_model("o3-mini"));
-        assert!(is_reasoning_model("gpt-5"));
-        assert!(is_reasoning_model("gpt-5-turbo"));
-        assert!(!is_reasoning_model("gpt-4o"));
-        assert!(!is_reasoning_model("claude-3"));
-        assert!(!is_reasoning_model("ollama"));
     }
 }

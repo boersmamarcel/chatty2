@@ -235,10 +235,10 @@ impl UsageCollector {
 
     async fn save_offline_queue(&self, events: &[UsageEvent]) {
         let path = self.queue_dir_path().await;
-        if let Ok(data) = serde_json::to_string(events) {
-            if let Err(e) = tokio::fs::write(&path, data).await {
-                tracing::warn!(error = %e, "failed to write offline usage queue");
-            }
+        if let Ok(data) = serde_json::to_string(events)
+            && let Err(e) = tokio::fs::write(&path, data).await
+        {
+            tracing::warn!(error = %e, "failed to write offline usage queue");
         }
     }
 

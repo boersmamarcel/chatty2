@@ -49,24 +49,24 @@ fn settings_models_work_together_at_startup() {
     let mut provider_model = ProviderModel::new();
 
     // Add a provider (simulating loading from disk via repository)
-    let provider = ProviderConfig::new("My Anthropic".to_string(), ProviderType::Anthropic)
-        .with_api_key("sk-ant-test-key".to_string());
+    let provider = ProviderConfig::new("My OpenRouter".to_string(), ProviderType::OpenRouter)
+        .with_api_key("sk-or-test-key".to_string());
     provider_model.add_provider(provider);
 
     // Use provider defaults to create a model (as models_controller::create_model does)
-    let provider_type = ProviderType::Anthropic;
+    let provider_type = ProviderType::OpenRouter;
     let (supports_images, supports_pdf) = provider_type.default_capabilities();
     let mut model = ModelConfig::new(
         "model-1".to_string(),
-        "Claude Sonnet".to_string(),
+        "Claude Sonnet (via OpenRouter)".to_string(),
         provider_type,
-        "claude-sonnet-4-20250514".to_string(),
+        "anthropic/claude-sonnet-4-20250514".to_string(),
     );
     model.supports_images = supports_images;
     model.supports_pdf = supports_pdf;
     models_model.add_model(model);
 
-    // Verify the Anthropic provider is configured (has a non-empty API key)
+    // Verify the OpenRouter provider is configured (has a non-empty API key)
     let configured: Vec<_> = provider_model.configured_providers().collect();
     assert_eq!(
         configured.len(),
@@ -74,13 +74,13 @@ fn settings_models_work_together_at_startup() {
         "Provider with API key should be configured"
     );
 
-    // Verify the model reflects Anthropic's default capabilities
+    // Verify the model reflects OpenRouter's default capabilities
     let model = models_model.get_model("model-1").unwrap();
     assert!(
         model.supports_images,
-        "Anthropic models should support images"
+        "OpenRouter models should support images"
     );
-    assert!(model.supports_pdf, "Anthropic models should support PDFs");
+    assert!(model.supports_pdf, "OpenRouter models should support PDFs");
 }
 
 /// Verify ModelsModel CRUD operations across all steps that chatty-gpui performs.
@@ -89,11 +89,11 @@ fn models_model_full_crud_lifecycle() {
     let mut models = ModelsModel::new();
 
     // Add models for different providers
-    let anthropic_model = ModelConfig::new(
-        "id-anthropic".to_string(),
-        "Claude Sonnet".to_string(),
-        ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+    let openrouter_model = ModelConfig::new(
+        "id-openrouter".to_string(),
+        "Claude Sonnet (via OpenRouter)".to_string(),
+        ProviderType::OpenRouter,
+        "anthropic/claude-sonnet-4-20250514".to_string(),
     );
     let ollama_model = ModelConfig::new(
         "id-ollama".to_string(),
@@ -101,22 +101,22 @@ fn models_model_full_crud_lifecycle() {
         ProviderType::Ollama,
         "llama3.2:latest".to_string(),
     );
-    models.add_model(anthropic_model);
+    models.add_model(openrouter_model);
     models.add_model(ollama_model);
     assert_eq!(models.models().len(), 2);
 
     // Filter by provider (used in chatty-gpui's settings view and message send path)
-    let anthropic_only = models.models_by_provider(&ProviderType::Anthropic);
-    assert_eq!(anthropic_only.len(), 1);
-    assert_eq!(anthropic_only[0].id, "id-anthropic");
+    let openrouter_only = models.models_by_provider(&ProviderType::OpenRouter);
+    assert_eq!(openrouter_only.len(), 1);
+    assert_eq!(openrouter_only[0].id, "id-openrouter");
 
     // Update model settings (simulating user editing settings and saving)
-    let mut updated = models.get_model("id-anthropic").unwrap().clone();
+    let mut updated = models.get_model("id-openrouter").unwrap().clone();
     updated.preamble = "You are a helpful assistant.".to_string();
     updated.temperature = 0.5;
     assert!(models.update_model(updated));
 
-    let model = models.get_model("id-anthropic").unwrap();
+    let model = models.get_model("id-openrouter").unwrap();
     assert_eq!(model.preamble, "You are a helpful assistant.");
     assert!((model.temperature - 0.5).abs() < f32::EPSILON);
 
@@ -124,8 +124,8 @@ fn models_model_full_crud_lifecycle() {
     let ghost = ModelConfig::new(
         "nonexistent".to_string(),
         "Ghost".to_string(),
-        ProviderType::OpenAI,
-        "gpt-ghost".to_string(),
+        ProviderType::OpenRouter,
+        "openrouter/ghost".to_string(),
     );
     assert!(!models.update_model(ghost));
 
@@ -140,13 +140,13 @@ fn models_model_full_crud_lifecycle() {
     // Replace all (used when loading models from disk)
     let fresh = vec![ModelConfig::new(
         "id-new".to_string(),
-        "GPT-4o".to_string(),
-        ProviderType::OpenAI,
-        "gpt-4o".to_string(),
+        "GPT-4o (via OpenRouter)".to_string(),
+        ProviderType::OpenRouter,
+        "openai/gpt-4o".to_string(),
     )];
     models.replace_all(fresh);
     assert_eq!(models.models().len(), 1);
-    assert!(models.get_model("id-anthropic").is_none());
+    assert!(models.get_model("id-openrouter").is_none());
     assert!(models.get_model("id-new").is_some());
 }
 
@@ -247,12 +247,9 @@ fn conversations_store_all_ids_ordered() {
 fn provider_default_capabilities_propagate_to_model_config() {
     // (provider, expected_images, expected_pdf)
     let cases = [
-        (ProviderType::Anthropic, true, true),
-        (ProviderType::Gemini, true, true),
-        (ProviderType::OpenAI, true, false),
+        (ProviderType::OpenRouter, true, true),
         (ProviderType::AzureOpenAI, true, false),
         (ProviderType::Ollama, false, false),
-        (ProviderType::Mistral, false, false),
     ];
 
     for (provider_type, expected_images, expected_pdf) in cases {
@@ -346,9 +343,9 @@ fn ollama_provider_always_configured() {
 fn model_config_json_roundtrip() {
     let mut model = ModelConfig::new(
         "id-gpt4o".to_string(),
-        "GPT-4o".to_string(),
-        ProviderType::OpenAI,
-        "gpt-4o".to_string(),
+        "GPT-4o (via OpenRouter)".to_string(),
+        ProviderType::OpenRouter,
+        "openai/gpt-4o".to_string(),
     );
     model.supports_images = true;
     model.supports_pdf = false;
@@ -387,9 +384,9 @@ fn model_config_json_roundtrip() {
 /// ProviderConfig must survive a JSON roundtrip — includes api_key preservation.
 #[test]
 fn provider_config_json_roundtrip() {
-    let provider = ProviderConfig::new("Anthropic Prod".to_string(), ProviderType::Anthropic)
-        .with_api_key("sk-ant-api03-abc123".to_string())
-        .with_base_url("https://api.anthropic.com".to_string());
+    let provider = ProviderConfig::new("OpenRouter Prod".to_string(), ProviderType::OpenRouter)
+        .with_api_key("sk-or-api-abc123".to_string())
+        .with_base_url("https://openrouter.ai/api/v1".to_string());
 
     let json = serde_json::to_string(&provider).expect("ProviderConfig serialization failed");
     let restored: ProviderConfig =

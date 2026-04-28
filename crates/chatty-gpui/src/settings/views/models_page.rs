@@ -1,9 +1,10 @@
 use crate::settings::controllers::models_controller;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::{ProviderModel, ProviderType};
+use crate::settings::providers::openrouter::OpenRouterCatalog;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled, Window, div,
-    prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, Styled, Window,
+    div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, IndexPath, Sizable, WindowExt as _,
@@ -24,13 +25,10 @@ pub type GlobalModelsListView = crate::global_entity::GlobalStrongEntity<ModelsL
 // Helper function to convert provider display name to ProviderType
 fn string_to_provider_type(s: &str) -> ProviderType {
     match s {
-        "OpenAI" => ProviderType::OpenAI,
-        "Anthropic" => ProviderType::Anthropic,
-        "Google Gemini" => ProviderType::Gemini,
-        "Mistral" => ProviderType::Mistral,
+        "OpenRouter" => ProviderType::OpenRouter,
         "Ollama" => ProviderType::Ollama,
         "Azure OpenAI" => ProviderType::AzureOpenAI,
-        _ => ProviderType::OpenAI, // Default fallback
+        _ => ProviderType::OpenRouter, // Default fallback
     }
 }
 
@@ -112,9 +110,19 @@ impl ModelsListView {
             .unwrap_or(false);
         let is_azure_cell = std::rc::Rc::new(std::cell::Cell::new(initial_is_azure));
 
-        // Keep is_azure_cell in sync when the user changes the provider selection.
+        // Track whether the currently selected provider is OpenRouter
+        let initial_is_openrouter = cx
+            .global::<ProviderModel>()
+            .configured_providers()
+            .next()
+            .map(|p| p.provider_type == ProviderType::OpenRouter)
+            .unwrap_or(false);
+        let is_openrouter_cell = std::rc::Rc::new(std::cell::Cell::new(initial_is_openrouter));
+
+        // Keep is_azure_cell / is_openrouter_cell in sync when the user changes the provider selection.
         cx.subscribe(&provider_select, {
             let is_azure_cell = is_azure_cell.clone();
+            let is_openrouter_cell = is_openrouter_cell.clone();
             let provider_select = provider_select.clone();
             move |_this, _entity, event: &SelectEvent<Vec<String>>, cx| {
                 if matches!(event, SelectEvent::Confirm(_)) {
@@ -123,11 +131,12 @@ impl ModelsListView {
                         .configured_providers()
                         .collect();
                     let selected = provider_select.read(cx).selected_index(cx);
-                    let is_azure = selected
+                    let provider_type = selected
                         .and_then(|idx| providers.get(idx.row))
-                        .map(|p| p.provider_type == ProviderType::AzureOpenAI)
-                        .unwrap_or(false);
-                    is_azure_cell.set(is_azure);
+                        .map(|p| p.provider_type.clone())
+                        .unwrap_or(ProviderType::OpenRouter);
+                    is_azure_cell.set(provider_type == ProviderType::AzureOpenAI);
+                    is_openrouter_cell.set(provider_type == ProviderType::OpenRouter);
                 }
             }
         })
@@ -135,7 +144,20 @@ impl ModelsListView {
 
         let view = cx.entity().clone();
 
-        window.open_dialog(cx, move |dialog, _, _| {
+        let catalog_models: Vec<
+            chatty_core::settings::providers::openrouter::discovery::OpenRouterModel,
+        > = cx
+            .try_global::<OpenRouterCatalog>()
+            .map(|c| c.models.clone())
+            .unwrap_or_default();
+        let theme_secondary = cx.theme().secondary;
+        let theme_border = cx.theme().border;
+        let muted_foreground = cx.theme().muted_foreground;
+
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search OpenRouter models..."));
+
+        window.open_dialog(cx, move |dialog, _window, cx| {
             dialog
                 .title("Add New Model")
                 .overlay(true)
@@ -168,9 +190,10 @@ impl ModelsListView {
                                 .child({
                                     let current_tab = active_tab.get();
                                     let is_azure = is_azure_cell.get();
+                                    let is_openrouter = is_openrouter_cell.get();
                                     if current_tab == 0 {
                                         // Basic tab
-                                        v_flex()
+                                        let mut root = v_flex()
                                             .gap_3()
                                             .p_2()
                                             .child(
@@ -184,15 +207,96 @@ impl ModelsListView {
                                                     .gap_1()
                                                     .child(div().text_sm().child("Provider *"))
                                                     .child(Select::new(&provider_select)),
-                                            )
-                                            .child(
-                                                v_flex()
-                                                    .gap_1()
-                                                    .child(
-                                                        div().text_sm().child("Model Identifier *"),
-                                                    )
-                                                    .child(Input::new(&model_id_input)),
-                                            )
+                                            );
+
+                                            if is_openrouter && !catalog_models.is_empty() {
+                                                let search_input = search_input.clone();
+                                                let name_input = name_input.clone();
+                                                let model_id_input = model_id_input.clone();
+                                                let max_context_window_input = max_context_window_input.clone();
+                                                let cost_input_input = cost_input_input.clone();
+                                                let cost_output_input = cost_output_input.clone();
+                                                root = root.child(
+                                                    v_flex()
+                                                        .gap_1()
+                                                        .child(div().text_sm().child("OpenRouter Catalog"))
+                                                        .child(Input::new(&search_input))
+                                                        .child({
+                                                            let query = search_input.read(cx).value().to_lowercase();
+                                                            let filtered: Vec<_> = catalog_models
+                                                                    .iter()
+                                                                    .filter(|m| {
+                                                                        query.is_empty()
+                                                                            || m.name.to_lowercase().contains(&query)
+                                                                            || m.id.to_lowercase().contains(&query)
+                                                                    })
+                                                                    .take(40)
+                                                                    .cloned()
+                                                                    .collect();
+                                                            div()
+                                                                .max_h(px(180.0))
+                                                                .overflow_y_scrollbar()
+                                                                .border_1()
+                                                                .border_color(theme_border)
+                                                                .rounded_sm()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .children(if filtered.is_empty() {
+                                                                    vec![div()
+                                                                        .px_3()
+                                                                        .py_2()
+                                                                        .text_sm()
+                                                                        .text_color(muted_foreground)
+                                                                        .child("No matches")
+                                                                        .into_any_element()]
+                                                                } else {
+                                                                    filtered.into_iter().map(|m| {
+                                                                        let model_id_val = m.id.clone();
+                                                                        let display_name_val = m.name.clone();
+                                                                        let ctx_len_val = m.context_length;
+                                                                        let prompt_cost_val = m.pricing.prompt.parse::<f64>().ok();
+                                                                        let completion_cost_val = m.pricing.completion.parse::<f64>().ok();
+                                                                        let ni = name_input.clone();
+                                                                        let mi = model_id_input.clone();
+                                                                        let mci = max_context_window_input.clone();
+                                                                        let cii = cost_input_input.clone();
+                                                                        let coi = cost_output_input.clone();
+                                                                        div()
+                                                                            .px_3()
+                                                                            .py_2()
+                                                                            .cursor_pointer()
+                                                                            .hover(|style| style.bg(theme_secondary))
+                                                                            .text_sm()
+                                                                            .child(display_name_val.clone())
+                                                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                                                ni.update(cx, |state, _cx| { state.set_value(display_name_val.clone(), _window, _cx); });
+                                                                                mi.update(cx, |state, _cx| { state.set_value(model_id_val.clone(), _window, _cx); });
+                                                                                mci.update(cx, |state, _cx| { state.set_value(ctx_len_val.to_string(), _window, _cx); });
+                                                                                if let Some(cost) = prompt_cost_val {
+                                                                                    let cost_per_million = cost * 1_000_000.0;
+                                                                                    cii.update(cx, |state, _cx| { state.set_value(format!("{:.4}", cost_per_million), _window, _cx); });
+                                                                                }
+                                                                                if let Some(cost) = completion_cost_val {
+                                                                                    let cost_per_million = cost * 1_000_000.0;
+                                                                                    coi.update(cx, |state, _cx| { state.set_value(format!("{:.4}", cost_per_million), _window, _cx); });
+                                                                                }
+                                                                            })
+                                                                            .into_any_element()
+                                                                    }).collect::<Vec<_>>()
+                                                                })
+                                                        })
+                                                );
+                                            }
+
+                                        root = root.child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div().text_sm().child("Model Identifier *"),
+                                                )
+                                                .child(Input::new(&model_id_input)),
+                                        );
+                                        root
                                     } else {
                                         // Advanced tab
                                         v_flex()
@@ -398,7 +502,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or("OpenAI");
+                                                        .unwrap_or("OpenRouter");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -828,7 +932,7 @@ impl ModelsListView {
                                                         .and_then(|idx| {
                                                             all_providers.get(idx.row).copied()
                                                         })
-                                                        .unwrap_or("OpenAI");
+                                                        .unwrap_or("OpenRouter");
                                                     let provider_type =
                                                         string_to_provider_type(provider_str);
 
@@ -966,10 +1070,7 @@ impl ModelsListDelegate {
         self.sections.clear();
 
         let provider_types = vec![
-            ProviderType::OpenAI,
-            ProviderType::Anthropic,
-            ProviderType::Gemini,
-            ProviderType::Mistral,
+            ProviderType::OpenRouter,
             ProviderType::Ollama,
             ProviderType::AzureOpenAI,
         ];

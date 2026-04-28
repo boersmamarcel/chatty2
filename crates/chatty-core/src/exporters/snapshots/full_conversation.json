@@ -6,7 +6,7 @@
     "version": "0.1.52",
     "model_name": "claude-sonnet-4-20250514",
     "extra": {
-      "provider": "anthropic"
+      "provider": "openrouter"
     }
   },
   "steps": [

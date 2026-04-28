@@ -13,10 +13,15 @@ pub enum AzureAuthMethod {
 #[serde(rename_all = "snake_case")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum ProviderType {
-    OpenAI,
-    Anthropic,
-    Gemini,
-    Mistral,
+    /// OpenRouter — gateway to 200+ models (Anthropic, Google, Mistral, Meta, etc.)
+    /// Accepts legacy JSON values from removed provider variants for backward compatibility.
+    #[serde(
+        alias = "open_ai",
+        alias = "anthropic",
+        alias = "gemini",
+        alias = "mistral"
+    )]
+    OpenRouter,
     Ollama,
     #[serde(rename = "azure_openai")]
     AzureOpenAI,
@@ -25,10 +30,7 @@ pub enum ProviderType {
 impl ProviderType {
     pub fn display_name(&self) -> &str {
         match self {
-            ProviderType::OpenAI => "OpenAI",
-            ProviderType::Anthropic => "Anthropic",
-            ProviderType::Gemini => "Google Gemini",
-            ProviderType::Mistral => "Mistral",
+            ProviderType::OpenRouter => "OpenRouter",
             ProviderType::Ollama => "Ollama",
             ProviderType::AzureOpenAI => "Azure OpenAI",
         }
@@ -37,12 +39,10 @@ impl ProviderType {
     /// Returns default (supports_images, supports_pdf) based on provider capabilities
     pub fn default_capabilities(&self) -> (bool, bool) {
         match self {
-            ProviderType::Anthropic => (true, true),
-            ProviderType::Gemini => (true, true),
-            ProviderType::OpenAI => (true, false),
+            // OpenRouter is a gateway to multimodal models (Anthropic, Google, etc.)
+            ProviderType::OpenRouter => (true, true),
             ProviderType::AzureOpenAI => (true, false),
             ProviderType::Ollama => (false, false),
-            ProviderType::Mistral => (false, false),
         }
     }
 }
@@ -275,24 +275,37 @@ mod tests {
 
     #[test]
     fn test_provider_type_default_capabilities() {
-        assert_eq!(ProviderType::Anthropic.default_capabilities(), (true, true));
-        assert_eq!(ProviderType::Gemini.default_capabilities(), (true, true));
-        assert_eq!(ProviderType::OpenAI.default_capabilities(), (true, false));
+        assert_eq!(
+            ProviderType::OpenRouter.default_capabilities(),
+            (true, true)
+        );
         assert_eq!(
             ProviderType::AzureOpenAI.default_capabilities(),
             (true, false)
         );
         assert_eq!(ProviderType::Ollama.default_capabilities(), (false, false));
-        assert_eq!(ProviderType::Mistral.default_capabilities(), (false, false));
     }
 
     #[test]
     fn test_provider_type_display_name() {
-        assert_eq!(ProviderType::OpenAI.display_name(), "OpenAI");
-        assert_eq!(ProviderType::Anthropic.display_name(), "Anthropic");
-        assert_eq!(ProviderType::Gemini.display_name(), "Google Gemini");
-        assert_eq!(ProviderType::Mistral.display_name(), "Mistral");
+        assert_eq!(ProviderType::OpenRouter.display_name(), "OpenRouter");
         assert_eq!(ProviderType::Ollama.display_name(), "Ollama");
         assert_eq!(ProviderType::AzureOpenAI.display_name(), "Azure OpenAI");
+    }
+
+    #[test]
+    fn test_provider_type_backward_compat_deserialization() {
+        // Old JSON values for removed providers should deserialize as OpenRouter
+        let openai: ProviderType = serde_json::from_str("\"open_ai\"").unwrap();
+        assert_eq!(openai, ProviderType::OpenRouter);
+
+        let anthropic: ProviderType = serde_json::from_str("\"anthropic\"").unwrap();
+        assert_eq!(anthropic, ProviderType::OpenRouter);
+
+        let gemini: ProviderType = serde_json::from_str("\"gemini\"").unwrap();
+        assert_eq!(gemini, ProviderType::OpenRouter);
+
+        let mistral: ProviderType = serde_json::from_str("\"mistral\"").unwrap();
+        assert_eq!(mistral, ProviderType::OpenRouter);
     }
 }

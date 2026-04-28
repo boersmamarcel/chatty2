@@ -6,6 +6,7 @@ mod tool_registry;
 
 use anyhow::Result;
 use rig::agent::Agent;
+use rig::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::filesystem_service::FileSystemService;
@@ -67,17 +68,25 @@ pub struct AgentBuildContext {
 /// Enum-based agent wrapper for multi-provider support
 #[derive(Clone)]
 pub enum AgentClient {
-    Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
-    OpenAI(Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
-    /// OpenAI-compatible server (vLLM, llama.cpp) using the Chat Completions API
-    OpenAICompletions(Agent<rig::providers::openai::completion::CompletionModel>),
-    Gemini(Agent<rig::providers::gemini::completion::CompletionModel>),
-    Mistral(Agent<rig::providers::mistral::completion::CompletionModel>),
+    OpenRouter(Agent<rig::providers::openrouter::CompletionModel>),
     Ollama(Agent<rig::providers::ollama::CompletionModel>),
     AzureOpenAI(Agent<rig::providers::azure::CompletionModel>),
 }
 
 impl AgentClient {
+    /// Dispatch a non-streaming prompt through the wrapped provider agent.
+    ///
+    /// This is the central hook point for future shared prompt middleware
+    /// (tracing, policy, retries, Rig hooks) that should apply consistently
+    /// across title generation, summarization, and other non-streaming calls.
+    pub async fn prompt(&self, prompt: &str) -> Result<String> {
+        match self {
+            AgentClient::OpenRouter(agent) => Ok(agent.prompt(prompt).await?),
+            AgentClient::Ollama(agent) => Ok(agent.prompt(prompt).await?),
+            AgentClient::AzureOpenAI(agent) => Ok(agent.prompt(prompt).await?),
+        }
+    }
+
     /// Create AgentClient from ModelConfig, ProviderConfig and build context
     pub async fn from_model_config_with_tools(
         model_config: &ModelConfig,
@@ -832,12 +841,8 @@ impl AgentClient {
     #[allow(dead_code)]
     pub fn provider_name(&self) -> &'static str {
         match self {
-            AgentClient::Anthropic(_) => "Anthropic",
-            AgentClient::OpenAI(_) => "OpenAI",
-            AgentClient::OpenAICompletions(_) => "OpenAI (Completions)",
-            AgentClient::Gemini(_) => "Gemini",
+            AgentClient::OpenRouter(_) => "OpenRouter",
             AgentClient::Ollama(_) => "Ollama",
-            AgentClient::Mistral(_) => "Mistral",
             AgentClient::AzureOpenAI(_) => "Azure OpenAI",
         }
     }

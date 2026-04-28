@@ -55,7 +55,7 @@ fn models_model_functional_with_gpui_globals() {
     let openai_model = ModelConfig::new(
         "gpt-4o".to_string(),
         "GPT-4o".to_string(),
-        ProviderType::OpenAI,
+        ProviderType::OpenRouter,
         "gpt-4o".to_string(),
     );
     models.add_model(openai_model);
@@ -75,15 +75,15 @@ fn provider_model_functional_with_gpui_globals() {
     let mut providers = ProviderModel::new();
     assert!(providers.providers().is_empty());
 
-    let anthropic = ProviderConfig::new("Anthropic".to_string(), ProviderType::Anthropic)
-        .with_api_key("sk-ant-key".to_string());
+    let openrouter = ProviderConfig::new("OpenRouter".to_string(), ProviderType::OpenRouter)
+        .with_api_key("sk-or-key".to_string());
     let ollama = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
-    providers.add_provider(anthropic);
+    providers.add_provider(openrouter);
     providers.add_provider(ollama);
 
     assert_eq!(providers.providers().len(), 2);
 
-    // Both Anthropic (has key) and Ollama (no key required) should be configured
+    // Both OpenRouter (has key) and Ollama (no key required) should be configured
     let configured: Vec<_> = providers.configured_providers().collect();
     assert_eq!(configured.len(), 2);
 }
@@ -117,16 +117,16 @@ fn startup_flow_models_providers_conversations_interact() {
     let mut conversations_store = ConversationsStore::new();
 
     // 2. Load providers from disk (simulated)
-    let anthropic = ProviderConfig::new("Anthropic".to_string(), ProviderType::Anthropic)
-        .with_api_key("sk-ant-api03-abc".to_string());
-    provider_model.add_provider(anthropic);
+    let openrouter = ProviderConfig::new("OpenRouter".to_string(), ProviderType::OpenRouter)
+        .with_api_key("sk-or-api03-abc".to_string());
+    provider_model.add_provider(openrouter);
 
     // 3. Create a model using provider defaults (models_controller path)
-    let (img, pdf) = ProviderType::Anthropic.default_capabilities();
+    let (img, pdf) = ProviderType::OpenRouter.default_capabilities();
     let mut model = ModelConfig::new(
         "claude-sonnet".to_string(),
         "Claude Sonnet".to_string(),
-        ProviderType::Anthropic,
+        ProviderType::OpenRouter,
         "claude-sonnet-4-20250514".to_string(),
     );
     model.supports_images = img;
@@ -192,10 +192,7 @@ fn token_budget_snapshot_usable_from_gpui_crate() {
 /// Provider display names are used in chatty-gpui's settings views.
 #[test]
 fn provider_type_display_names_accessible() {
-    assert_eq!(ProviderType::OpenAI.display_name(), "OpenAI");
-    assert_eq!(ProviderType::Anthropic.display_name(), "Anthropic");
-    assert_eq!(ProviderType::Gemini.display_name(), "Google Gemini");
-    assert_eq!(ProviderType::Mistral.display_name(), "Mistral");
+    assert_eq!(ProviderType::OpenRouter.display_name(), "OpenRouter");
     assert_eq!(ProviderType::Ollama.display_name(), "Ollama");
     assert_eq!(ProviderType::AzureOpenAI.display_name(), "Azure OpenAI");
 }

@@ -107,55 +107,6 @@ impl HostLlmProvider {
             .collect()
     }
 
-    /// Recursively clean up a JSON Schema for Gemini's function declarations.
-    ///
-    /// Gemini's API rejects schemas with empty/missing `type` on nested
-    /// items/properties, and a few fields it doesn't understand. Strip
-    /// unknown fields and inject `type: "object"` defaults where missing.
-    fn sanitize_gemini_schema(value: serde_json::Value) -> serde_json::Value {
-        use serde_json::Value;
-        const ALLOWED: &[&str] = &[
-            "type",
-            "format",
-            "description",
-            "nullable",
-            "enum",
-            "properties",
-            "required",
-            "items",
-            "minimum",
-            "maximum",
-        ];
-        match value {
-            Value::Object(mut map) => {
-                map.retain(|k, _| ALLOWED.contains(&k.as_str()));
-                if !map.contains_key("type") {
-                    if map.contains_key("properties") {
-                        map.insert("type".into(), Value::String("object".into()));
-                    } else if map.contains_key("items") {
-                        map.insert("type".into(), Value::String("array".into()));
-                    } else {
-                        map.insert("type".into(), Value::String("string".into()));
-                    }
-                }
-                if let Some(props) = map.get_mut("properties")
-                    && let Value::Object(prop_map) = props
-                {
-                    let cleaned: serde_json::Map<String, Value> = prop_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), Self::sanitize_gemini_schema(v.clone())))
-                        .collect();
-                    *prop_map = cleaned;
-                }
-                if let Some(items) = map.remove("items") {
-                    map.insert("items".into(), Self::sanitize_gemini_schema(items));
-                }
-                Value::Object(map)
-            }
-            other => other,
-        }
-    }
-
     async fn complete_openai(
         &self,
         model: &str,
@@ -168,8 +119,7 @@ impl HostLlmProvider {
             .as_deref()
             .unwrap_or(match self.config.provider_type {
                 ProviderType::Ollama => "http://localhost:11434",
-                ProviderType::Mistral => "https://api.mistral.ai",
-                _ => "https://api.openai.com",
+                _ => "https://openrouter.ai/api/v1",
             });
         let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
 
@@ -230,233 +180,6 @@ impl HostLlmProvider {
         Self::parse_openai_response(&data)
     }
 
-    async fn complete_anthropic(
-        &self,
-        model: &str,
-        messages: Vec<Message>,
-        tools: Option<String>,
-    ) -> Result<CompletionResponse, String> {
-        let base = self
-            .config
-            .base_url
-            .as_deref()
-            .unwrap_or("https://api.anthropic.com");
-        let url = format!("{}/v1/messages", base.trim_end_matches('/'));
-
-        let (system_msg, chat_msgs): (Vec<_>, Vec<_>) = messages
-            .iter()
-            .partition(|m| matches!(m.role, Role::System));
-
-        let msgs: Vec<serde_json::Value> = chat_msgs
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": Self::role_str(&m.role),
-                    "content": &m.content,
-                })
-            })
-            .collect();
-
-        let max_tokens = self.config.max_tokens.unwrap_or(4096);
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": msgs,
-            "max_tokens": max_tokens,
-            "temperature": self.config.temperature,
-        });
-
-        if let Some(sys) = system_msg.first() {
-            body["system"] = serde_json::json!(&sys.content);
-        }
-
-        if let Some(ref tools_json) = tools {
-            let normalized = Self::normalize_tools(tools_json);
-            let anthropic_tools: Vec<serde_json::Value> = normalized
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.get("name").cloned().unwrap_or(serde_json::json!("")),
-                        "description": t.get("description").cloned().unwrap_or(serde_json::json!("")),
-                        "input_schema": t.get("parameters").cloned().unwrap_or(serde_json::json!({"type": "object"})),
-                    })
-                })
-                .collect();
-            if !anthropic_tools.is_empty() {
-                body["tools"] = serde_json::json!(anthropic_tools);
-            }
-        }
-
-        let api_key = self
-            .config
-            .api_key
-            .as_deref()
-            .ok_or("Anthropic API key not configured")?;
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Anthropic API returned {status}: {text}"));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-        Self::parse_anthropic_response(&data)
-    }
-
-    async fn complete_gemini(
-        &self,
-        model: &str,
-        messages: Vec<Message>,
-        tools: Option<String>,
-    ) -> Result<CompletionResponse, String> {
-        let base = self
-            .config
-            .base_url
-            .as_deref()
-            .unwrap_or("https://generativelanguage.googleapis.com");
-        let api_key = self
-            .config
-            .api_key
-            .as_deref()
-            .ok_or("Gemini API key not configured")?;
-        let url = format!(
-            "{}/v1beta/models/{}:generateContent",
-            base.trim_end_matches('/'),
-            model,
-        );
-
-        let contents: Vec<serde_json::Value> = messages
-            .iter()
-            .filter(|m| !matches!(m.role, Role::System))
-            .map(|m| {
-                let role = match m.role {
-                    Role::User => "user",
-                    _ => "model",
-                };
-                serde_json::json!({
-                    "role": role,
-                    "parts": [{"text": &m.content}],
-                })
-            })
-            .collect();
-
-        let mut body = serde_json::json!({ "contents": contents });
-
-        if let Some(sys) = messages.iter().find(|m| matches!(m.role, Role::System)) {
-            body["systemInstruction"] = serde_json::json!({"parts": [{"text": &sys.content}]});
-        }
-
-        body["generationConfig"] = serde_json::json!({
-            "temperature": self.config.temperature,
-        });
-        if let Some(max) = self.config.max_tokens {
-            body["generationConfig"]["maxOutputTokens"] = serde_json::json!(max);
-        }
-
-        // Tools mapping for Gemini (simplified — function declarations only)
-        if let Some(ref tools_json) = tools {
-            let normalized = Self::normalize_tools(tools_json);
-            let decls: Vec<serde_json::Value> = normalized
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.get("name").cloned().unwrap_or(serde_json::json!("")),
-                        "description": t.get("description").cloned().unwrap_or(serde_json::json!("")),
-                        "parameters": Self::sanitize_gemini_schema(
-                            t.get("parameters").cloned().unwrap_or(serde_json::json!({"type": "object"}))
-                        ),
-                    })
-                })
-                .collect();
-            if !decls.is_empty() {
-                body["tools"] = serde_json::json!([{"functionDeclarations": decls}]);
-            }
-        }
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-goog-api-key", api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Gemini API returned {status}: {text}"));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-        // Parse Gemini response
-        let candidate = data
-            .pointer("/candidates/0/content/parts")
-            .and_then(|p| p.as_array());
-
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-
-        if let Some(parts) = candidate {
-            for part in parts {
-                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    content.push_str(text);
-                }
-                if let Some(fc) = part.get("functionCall") {
-                    tool_calls.push(ToolCall {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: fc
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        arguments: fc
-                            .get("args")
-                            .map(|a| a.to_string())
-                            .unwrap_or_else(|| "{}".to_string()),
-                    });
-                }
-            }
-        }
-
-        let usage = data.get("usageMetadata").map(|u| TokenUsage {
-            input_tokens: u
-                .get("promptTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            output_tokens: u
-                .get("candidatesTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-        });
-
-        Ok(CompletionResponse {
-            content,
-            tool_calls,
-            usage,
-        })
-    }
-
     fn parse_openai_response(data: &serde_json::Value) -> Result<CompletionResponse, String> {
         let choice = data
             .pointer("/choices/0/message")
@@ -511,56 +234,6 @@ impl HostLlmProvider {
             usage,
         })
     }
-
-    fn parse_anthropic_response(data: &serde_json::Value) -> Result<CompletionResponse, String> {
-        let blocks = data
-            .get("content")
-            .and_then(|c| c.as_array())
-            .ok_or("No content in Anthropic response")?;
-
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-
-        for block in blocks {
-            match block.get("type").and_then(|t| t.as_str()) {
-                Some("text") => {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        content.push_str(text);
-                    }
-                }
-                Some("tool_use") => {
-                    tool_calls.push(ToolCall {
-                        id: block
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        name: block
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        arguments: block
-                            .get("input")
-                            .map(|i| i.to_string())
-                            .unwrap_or_else(|| "{}".to_string()),
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        let usage = data.get("usage").map(|u| TokenUsage {
-            input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        });
-
-        Ok(CompletionResponse {
-            content,
-            tool_calls,
-            usage,
-        })
-    }
 }
 
 impl LlmProvider for HostLlmProvider {
@@ -584,21 +257,9 @@ impl LlmProvider for HostLlmProvider {
         tokio::task::block_in_place(|| {
             let handle = tokio::runtime::Handle::current();
             handle.block_on(async {
-                match self.config.provider_type {
-                    ProviderType::Anthropic => {
-                        self.complete_anthropic(&effective_model, messages, tools)
-                            .await
-                    }
-                    ProviderType::Gemini => {
-                        self.complete_gemini(&effective_model, messages, tools)
-                            .await
-                    }
-                    // OpenAI, Ollama, Mistral, AzureOpenAI all use OpenAI-compatible API
-                    _ => {
-                        self.complete_openai(&effective_model, messages, tools)
-                            .await
-                    }
-                }
+                // All providers (OpenRouter, Ollama, AzureOpenAI) use OpenAI-compatible API
+                self.complete_openai(&effective_model, messages, tools)
+                    .await
             })
         })
     }

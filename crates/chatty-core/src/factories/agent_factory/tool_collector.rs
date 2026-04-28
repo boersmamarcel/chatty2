@@ -228,8 +228,8 @@ impl NativeTools {
 
 /// Construct a `NativeTools` struct with feature-gated fields.
 ///
-/// All 6 provider branches use the same field values (cloning from shared locals),
-/// so this macro avoids repeating `#[cfg(feature = "...")]` 6×N times.
+/// All provider branches use the same field values (cloning from shared locals),
+/// so this macro avoids repeating feature-gated field initialization per provider.
 macro_rules! native_tools {
     (
         list_tools: $list_tools:expr,

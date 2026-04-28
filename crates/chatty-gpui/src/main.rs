@@ -918,6 +918,30 @@ fn main() {
                         })
                         .detach();
 
+                        // Always attempt to auto-sync curated OpenRouter models on startup
+                        let openrouter_api_key = cx
+                            .global::<settings::models::ProviderModel>()
+                            .providers()
+                            .iter()
+                            .find(|p| {
+                                matches!(
+                                    p.provider_type,
+                                    settings::models::providers_store::ProviderType::OpenRouter
+                                )
+                            })
+                            .and_then(|p| p.api_key.clone());
+
+                        if openrouter_api_key.is_some() {
+                            debug!("Attempting OpenRouter curated-model sync");
+                            cx.spawn(async move |cx: &mut AsyncApp| {
+                                settings::providers::openrouter::sync_openrouter_models(cx)
+                                    .await
+                                    .map_err(|e| warn!(error = ?e, "Failed to sync OpenRouter models"))
+                                    .ok();
+                            })
+                            .detach();
+                        }
+
                         // Refresh all chat inputs with newly loaded models
                         cx.refresh_windows();
                     })
