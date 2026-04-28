@@ -169,11 +169,19 @@ if [ "$ARCH" = "arm64" ]; then
 fi
 DMG_NAME="${APP_NAME}-macos-${ARCH}.dmg"
 echo "Creating DMG: ${DMG_NAME}..."
-hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "${DMG_NAME}" 2>/dev/null || {
+
+# Stage the DMG contents: app bundle + symlink to /Applications for drag-and-drop install
+DMG_STAGING=$(mktemp -d)
+cp -r "${APP_BUNDLE}" "${DMG_STAGING}/"
+ln -s /Applications "${DMG_STAGING}/Applications"
+
+hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_STAGING}" -ov -format UDZO "${DMG_NAME}" 2>/dev/null || {
     echo "Note: DMG creation skipped (hdiutil not available or failed)"
     echo "You can create a DMG manually with:"
     echo "  hdiutil create -volname ${APP_NAME} -srcfolder ${APP_BUNDLE} -ov -format UDZO ${DMG_NAME}"
 }
+
+rm -rf "${DMG_STAGING}"
 
 # Optional: Notarization (requires NOTARIZE_APPLE_ID and NOTARIZE_TEAM_ID env vars)
 if [ "$SIGNING_IDENTITY" != "-" ] && [ -n "$NOTARIZE_APPLE_ID" ] && [ -n "$NOTARIZE_TEAM_ID" ]; then
