@@ -1035,28 +1035,40 @@ impl RenderOnce for ChatInput {
                         )
                     })
                     .when(!models.is_empty(), |d| {
-                        d.children(models.iter().map(|(id, name)| {
-                            let id_clone = id.clone();
-                            let state_for_click = state.clone();
-                            let is_selected = selected_id.as_ref() == Some(id);
-
+                        d.child(
                             div()
-                                .px_3()
-                                .py_2()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .when(is_selected, |d| d.bg(cx.theme().secondary))
-                                .hover(|style| style.bg(cx.theme().secondary))
-                                .text_sm()
-                                .child(name.clone())
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    state_for_click.update(cx, |s, cx| {
-                                        s.selected_model_id = Some(id_clone.clone());
-                                        cx.emit(ChatInputEvent::ModelChanged(id_clone.clone()));
-                                        cx.notify();
-                                    });
-                                })
-                        }))
+                                .max_h(px(300.0))
+                                .overflow_y_scrollbar()
+                                .flex()
+                                .flex_col()
+                                .children(models.iter().map(|(id, name)| {
+                                    let id_clone = id.clone();
+                                    let state_for_click = state.clone();
+                                    let is_selected = selected_id.as_ref() == Some(id);
+
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .when(is_selected, |d| d.bg(cx.theme().secondary))
+                                        .hover(|style| style.bg(cx.theme().secondary))
+                                        .text_sm()
+                                        .child(name.clone())
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_event, _window, cx| {
+                                                state_for_click.update(cx, |s, cx| {
+                                                    s.selected_model_id = Some(id_clone.clone());
+                                                    cx.emit(ChatInputEvent::ModelChanged(
+                                                        id_clone.clone(),
+                                                    ));
+                                                    cx.notify();
+                                                });
+                                            },
+                                        )
+                                })),
+                        )
                     })
             });
 
