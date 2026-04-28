@@ -42,7 +42,7 @@ When you first launch Chatty, you'll need to connect at least one LLM provider.
 
 1. Click the **gear icon** in the title bar to open Settings
 2. Go to the **Providers** tab
-3. Click **Add Provider** and select one (e.g., OpenAI, Anthropic, Ollama)
+3. Click **Add Provider** and select one (e.g., OpenRouter, Ollama, Azure OpenAI)
 4. Paste your API key (not needed for Ollama — it connects to your local instance automatically)
 
 ### 3. Add a Model
@@ -89,11 +89,11 @@ See [Tools & MCP](#tools--mcp) below for the full list of agent tools.
 
 **Designed for agentic work.** Chatty is built from the ground up for multi-turn agents, not just chat. Your LLM can autonomously chain dozens of tool calls — read files, run shell commands, query databases, browse the web, write and execute code, generate charts and documents, spawn sub-agents for parallel subtasks — and come back with a complete answer. The app runs locally under your control; network access depends on the provider and tools you enable.
 
-**Your keys, your data.** No middleman, no subscriptions. Chatty talks directly to OpenAI, Anthropic, Google, Mistral, Azure, your local Ollama instance, and any MCP/A2A services you configure. Conversations and settings are stored locally; prompts, attachments, and tool results may still be sent to the remote providers or services you choose to use.
+**Your keys, your data.** No middleman, no subscriptions. Chatty talks directly to OpenRouter (which routes to Anthropic, OpenAI, Google, Mistral, and hundreds more), Azure OpenAI, your local Ollama instance, and any MCP/A2A services you configure. Conversations and settings are stored locally; prompts, attachments, and tool results may still be sent to the remote providers or services you choose to use.
 
 **Native Rust performance.** Not another Electron wrapper — built on [GPUI](https://crates.io/crates/gpui), the GPU-accelerated framework behind the Zed editor. Instant startup, smooth scrolling, minimal memory footprint.
 
-**One app, every model.** Switch between Claude, GPT-4, Gemini, Mistral, and Ollama models mid-conversation. Compare answers, use the right model for the job — all from a single window.
+**One app, every model.** Access hundreds of models through OpenRouter (Claude, GPT-4, Gemini, Mistral, and more), Azure OpenAI, or a local Ollama instance — all from a single window. Switch models mid-conversation, compare answers, use the right model for the job.
 
 **Real tool use, properly sandboxed.** Give your LLM filesystem access, a bash shell, and MCP servers — all within a workspace sandbox. On Linux, shell commands run inside [bubblewrap](https://github.com/containers/bubblewrap) with namespace isolation. On macOS, they use `sandbox-exec` with policy profiles that block access to `.ssh`, `.aws`, and other sensitive directories. You choose the approval mode: ask every time, auto-approve, or deny all.
 
@@ -455,10 +455,7 @@ Connect to multiple LLM providers from a single interface. Chatty auto-detects p
 
 | Provider | Image Support | PDF Support | Temperature | Notes |
 |:---------|:---:|:---:|:---:|:------|
-| **OpenAI** | Yes | Lossy | Yes | GPT-4, GPT-4 Turbo, o1, o3-mini |
-| **Anthropic** | Yes | Native | Yes | Claude 3.5 Sonnet, Claude 3 Opus/Haiku |
-| **Google Gemini** | Yes | Native | Yes | Gemini 1.5 Pro, Gemini 1.5 Flash |
-| **Mistral** | — | — | Yes | Mistral Large, Medium, Small |
+| **OpenRouter** | Per-model | Per-model | Yes | Routes to Anthropic, OpenAI, Google, Mistral, and hundreds more |
 | **Azure OpenAI** | Yes | Lossy | Yes | API Key or Entra ID auth |
 | **Ollama** | Per-model | Per-model | — | Auto-detected capabilities, fully local |
 
