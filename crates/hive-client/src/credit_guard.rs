@@ -149,10 +149,10 @@ impl CreditGuard {
     async fn get_balance(&self) -> Result<i64, ClientError> {
         {
             let cache = self.cache.lock().await;
-            if let Some(ref cached) = *cache {
-                if cached.fetched_at.elapsed() < self.ttl {
-                    return Ok(cached.balance_tokens);
-                }
+            if let Some(ref cached) = *cache
+                && cached.fetched_at.elapsed() < self.ttl
+            {
+                return Ok(cached.balance_tokens);
             }
         }
         self.refresh().await
