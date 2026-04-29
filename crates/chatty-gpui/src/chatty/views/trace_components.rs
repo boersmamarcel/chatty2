@@ -244,36 +244,42 @@ impl SystemTraceView {
                 let step_num = idx + 1;
                 let is_active = self.trace.active_tool_index == Some(idx);
 
-                let (status, name, color) = match item {
+                let (status, name, color): (&str, String, Hsla) = match item {
                     TraceItem::ToolCall(tool_call) => match &tool_call.state {
                         ToolCallState::Running => (
                             "Running",
-                            tool_call.display_name.as_str(),
+                            tool_call.display_name.clone(),
                             cx.theme().primary,
                         ),
                         ToolCallState::Success => {
-                            ("✓", tool_call.display_name.as_str(), cx.theme().accent)
+                            ("✓", tool_call.display_name.clone(), gpui::green())
                         }
                         ToolCallState::Error(_) => {
-                            ("✗", tool_call.display_name.as_str(), cx.theme().ring)
+                            ("✗", tool_call.display_name.clone(), cx.theme().ring)
                         }
                     },
-                    TraceItem::Thinking(_) => {
+                    TraceItem::Thinking(thinking) => {
                         if is_active {
-                            ("Running", "thinking", cx.theme().primary)
+                            ("Running", "Thinking…".to_string(), cx.theme().primary)
+                        } else if let Some(duration) = thinking.duration {
+                            (
+                                "✓",
+                                format!("Thought for {:.1}s", duration.as_secs_f32()),
+                                gpui::green(),
+                            )
                         } else {
-                            ("✓", "analysis", cx.theme().accent)
+                            ("✓", "analysis".to_string(), gpui::green())
                         }
                     }
                     TraceItem::ApprovalPrompt(approval) => match approval.state {
                         crate::chatty::views::message_types::ApprovalState::Pending => {
-                            ("?", "approval", cx.theme().primary)
+                            ("?", "approval needed".to_string(), cx.theme().primary)
                         }
                         crate::chatty::views::message_types::ApprovalState::Approved => {
-                            ("✓", "approved", cx.theme().accent)
+                            ("✓", "approved".to_string(), gpui::green())
                         }
                         crate::chatty::views::message_types::ApprovalState::Denied => {
-                            ("✗", "denied", cx.theme().ring)
+                            ("✗", "denied".to_string(), cx.theme().ring)
                         }
                     },
                 };
@@ -312,7 +318,7 @@ impl SystemTraceView {
                         div()
                             .text_xs()
                             .text_color(muted_text)
-                            .child(format!("({})", name)),
+                            .child(format!("({})", &name)),
                     );
 
                 // Data-egress badge for the active/last tool call
@@ -379,12 +385,20 @@ impl SystemTraceView {
         let (prefix, prefix_color) = if thinking.state.is_processing() || is_active {
             (">", cx.theme().primary)
         } else {
-            ("✓", cx.theme().accent)
+            ("✓", gpui::green())
         };
 
         let muted_text = cx.theme().muted_foreground;
         let border_color = cx.theme().border;
         let text_color = cx.theme().foreground;
+
+        let thinking_label: String = if thinking.state.is_processing() || is_active {
+            "Thinking…".to_string()
+        } else if let Some(duration) = thinking.duration {
+            format!("Thought for {:.1}s", duration.as_secs_f32())
+        } else {
+            "analysis".to_string()
+        };
 
         div()
             .flex()
@@ -404,23 +418,7 @@ impl SystemTraceView {
                             .font_weight(FontWeight::BOLD)
                             .child(prefix),
                     )
-                    .child(
-                        div()
-                            .text_color(muted_text)
-                            .child(if thinking.state.is_processing() {
-                                "thinking..."
-                            } else {
-                                "analysis"
-                            }),
-                    )
-                    .when_some(thinking.duration, |this, duration| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_text)
-                                .child(format!("({:.1}s)", duration.as_secs_f32())),
-                        )
-                    }),
+                    .child(div().text_color(muted_text).child(thinking_label)),
             )
             .child(
                 // Content with left border (terminal output style)
@@ -447,7 +445,7 @@ impl SystemTraceView {
 
         let (prefix, prefix_color, state_label) = match &tool_call.state {
             ToolCallState::Running => (">", cx.theme().primary, "running"),
-            ToolCallState::Success => ("✓", cx.theme().accent, "success"),
+            ToolCallState::Success => ("✓", gpui::green(), "success"),
             ToolCallState::Error(_) => ("✗", cx.theme().ring, "error"),
         };
 
@@ -606,7 +604,7 @@ impl SystemTraceView {
         // Error section (if error state)
         if let ToolCallState::Error(error) = &tool_call.state {
             let error_color = cx.theme().ring;
-            let error_bg = cx.theme().accent;
+            let error_bg = cx.theme().ring.opacity(0.1);
             let error_border = cx.theme().ring;
 
             container = container.child(
@@ -1044,7 +1042,7 @@ where
     // Add error section if error state
     if let ToolCallState::Error(error) = &tool_call.state {
         let error_color = cx.theme().ring;
-        let error_bg = cx.theme().accent;
+        let error_bg = cx.theme().ring.opacity(0.1);
 
         content_children.push(
             div()
