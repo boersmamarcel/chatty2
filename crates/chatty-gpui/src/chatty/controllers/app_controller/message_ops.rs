@@ -1,4 +1,5 @@
 use super::*;
+use crate::feature_flags::subtle_guidance_v1_enabled;
 
 impl ChattyApp {
     /// Send a message to the LLM and stream the response.
@@ -30,10 +31,29 @@ impl ChattyApp {
         let sidebar = self.sidebar_view.clone();
         let app_entity = cx.entity();
 
+        if subtle_guidance_v1_enabled() {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, cx| {
+                    input.set_streaming(true, cx);
+                    input.set_awaiting_first_token(true, cx);
+                });
+            });
+        }
+
         // Get the conversation ID for task tracking
         // If no conversation exists, we'll create one inside the async block
         let conv_id_for_task = cx.global::<ConversationsStore>().active_id().cloned();
         let needs_conversation_creation = conv_id_for_task.is_none();
+        let optimistic_ui_inserted = subtle_guidance_v1_enabled() && conv_id_for_task.is_some();
+
+        if optimistic_ui_inserted && let Some(conv_id) = conv_id_for_task.clone() {
+            chat_view.update(cx, |view, cx| {
+                view.set_conversation_id(conv_id, cx);
+                view.add_user_message(message.clone(), attachments.clone(), cx);
+                view.start_assistant_message_with_prompt(Some(message.clone()), cx);
+                cx.notify();
+            });
+        }
 
         // Get pending artifacts handle for existing conversations (for stream registration)
         let pending_artifacts_for_registration = conv_id_for_task.as_ref().and_then(|id| {
@@ -127,16 +147,18 @@ impl ChattyApp {
 
                 // PHASE 2: Initialize UI with user and assistant messages
                 // and add the user/assistant messages AFTER conversation exists
-                chat_view.update(cx, |view, cx| {
-                    view.set_conversation_id(conv_id.clone(), cx);
-                    // Add user message to UI
-                    view.add_user_message(message.clone(), attachments.clone(), cx);
-                    debug!("User message added to UI");
-                    // Start assistant message in UI
-                    view.start_assistant_message(cx);
-                    debug!("Assistant message started");
-                    cx.notify();
-                }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                if !optimistic_ui_inserted {
+                    chat_view.update(cx, |view, cx| {
+                        view.set_conversation_id(conv_id.clone(), cx);
+                        // Add user message to UI
+                        view.add_user_message(message.clone(), attachments.clone(), cx);
+                        debug!("User message added to UI");
+                        // Start assistant message in UI
+                        view.start_assistant_message_with_prompt(Some(message.clone()), cx);
+                        debug!("Assistant message started");
+                        cx.notify();
+                    }).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                }
                 debug!(conv_id = %conv_id, "Set conversation ID on chat view");
 
                 // Force sidebar to re-render by notifying it explicitly
@@ -319,6 +341,9 @@ impl ChattyApp {
                         {
                             view.chat_input_state().update(cx, |input, cx| {
                                 input.set_streaming(true, cx);
+                                if subtle_guidance_v1_enabled() {
+                                    input.set_awaiting_first_token(true, cx);
+                                }
                             });
                         }
                     });
@@ -331,6 +356,11 @@ impl ChattyApp {
                 let text = text.clone();
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
+                        if subtle_guidance_v1_enabled() {
+                            view.chat_input_state().update(cx, |input, cx| {
+                                input.set_awaiting_first_token(false, cx);
+                            });
+                        }
                         view.append_assistant_text(&text, cx);
                     }
                 });
@@ -1222,6 +1252,15 @@ struct LlmStreamParams {
     invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
+fn set_stream_status(chat_view: &Entity<ChatView>, status: &str, cx: &mut AsyncApp) {
+    chat_view
+        .update(cx, |view, cx| {
+            view.set_assistant_status(status, cx);
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to update assistant stream status"))
+        .ok();
+}
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:
@@ -1356,10 +1395,12 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     // to conversation history (it is only forwarded to the LLM).
     let original_user_contents = user_contents.clone();
     let llm_user_contents = {
+        set_stream_status(&chat_view, "Retrieving relevant memories…", cx);
         let memory_service = await_memory_service(cx).await;
         let embedding_service = get_embedding_service(cx);
         let skill_service = get_skill_service(cx);
 
+        set_stream_status(&chat_view, "Searching for relevant skills…", cx);
         chatty_core::services::augment_with_memory(
             user_contents,
             memory_service.as_ref(),
@@ -1371,6 +1412,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     };
 
     // 3. Call stream_prompt with augmented contents (context block included for the LLM)
+    set_stream_status(&chat_view, "Composing final request…", cx);
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _augmented_user_message) = stream_prompt(
         &agent,
@@ -1381,6 +1423,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         max_agent_turns,
     )
     .await?;
+    set_stream_status(&chat_view, "Digesting…", cx);
 
     // 4. Optionally add user message to conversation model.
     // Use the original contents (without the injected context block) so that

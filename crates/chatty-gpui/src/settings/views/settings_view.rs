@@ -131,6 +131,25 @@ impl Render for SettingsView {
                             )
                             .description("Adjust the default font size."),
                         ]),
+                        SettingGroup::new().title("Assistant Guidance").items(vec![
+                            SettingItem::new(
+                                "Show tool traces live",
+                                SettingField::switch(
+                                    |cx: &App| {
+                                        cx.global::<GeneralSettingsModel>().show_tool_traces_live
+                                    },
+                                    |val: bool, cx: &mut App| {
+                                        general_settings_controller::update_show_tool_traces_live(
+                                            cx, val,
+                                        );
+                                    },
+                                )
+                                .default_value(false),
+                            )
+                            .description(
+                                "Restore the live tool trace list during the wait instead of the subtle trace chip.",
+                            ),
+                        ]),
                     ]),
                 SettingPage::new("Models")
                     .description("Configure AI models and their parameters")

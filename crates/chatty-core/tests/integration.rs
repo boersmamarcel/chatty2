@@ -406,11 +406,13 @@ fn general_settings_model_json_roundtrip() {
     assert!((settings.font_size - 14.0).abs() < f32::EPSILON);
     assert!(settings.theme_name.is_none());
     assert!(settings.dark_mode.is_none());
+    assert!(!settings.show_tool_traces_live);
 
     // With user preferences
     settings.font_size = 16.0;
     settings.theme_name = Some("catppuccin".to_string());
     settings.dark_mode = Some(true);
+    settings.show_tool_traces_live = true;
 
     let json = serde_json::to_string(&settings).expect("GeneralSettingsModel serialization failed");
     let restored: GeneralSettingsModel =
@@ -419,6 +421,7 @@ fn general_settings_model_json_roundtrip() {
     assert!((restored.font_size - 16.0).abs() < f32::EPSILON);
     assert_eq!(restored.theme_name.as_deref(), Some("catppuccin"));
     assert_eq!(restored.dark_mode, Some(true));
+    assert!(restored.show_tool_traces_live);
 }
 
 // ── Token budget: snapshot calculations used by chatty-gpui's UI ──────────────

@@ -25,6 +25,23 @@ pub fn update_font_size(cx: &mut App, font_size: f32) {
     .detach();
 }
 
+/// Update live tool trace visibility and persist to disk.
+pub fn update_show_tool_traces_live(cx: &mut App, show: bool) {
+    cx.global_mut::<GeneralSettingsModel>()
+        .show_tool_traces_live = show;
+
+    let settings = cx.global::<GeneralSettingsModel>().clone();
+    cx.refresh_windows();
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::general_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save general settings, changes will be lost on restart");
+        }
+    })
+    .detach();
+}
+
 /// Update selected theme (persistence automatic via observer)
 pub fn update_theme(cx: &mut App, base_theme_name: SharedString) {
     // Determine full theme name based on current dark mode

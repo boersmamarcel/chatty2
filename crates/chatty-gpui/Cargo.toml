@@ -60,3 +60,7 @@ tar = "0.4"
 [features]
 default = ["mcp"]
 mcp = ["chatty-core/mcp", "rig-core/rmcp"]
+subtle_guidance_v1 = []
+subtle_guidance_skeleton = []
+subtle_guidance_traces = []
+stream_smoothing_v1 = []
