@@ -19,7 +19,11 @@ use super::parsed_cache::{
     ParsedContentCache, StreamingParseState,
 };
 use super::trace_components::SystemTraceView;
-use crate::feature_flags::subtle_guidance_v1_enabled;
+use crate::feature_flags::{
+    subtle_guidance_skeleton_enabled, subtle_guidance_traces_enabled, subtle_guidance_v1_enabled,
+};
+use crate::settings::models::GeneralSettingsModel;
+use crate::subtle_guidance;
 
 /// Message role indicator
 #[derive(Clone, Debug)]
@@ -47,6 +51,8 @@ pub struct DisplayMessage {
     pub feedback: Option<MessageFeedback>,
     // Index into the conversation's history (parallel arrays) for this message
     pub history_index: Option<usize>,
+    // Prompt seed for subtle skeleton A/B and deterministic width jitter.
+    pub guidance_prompt_seed: Option<String>,
 }
 
 impl DisplayMessage {
@@ -75,6 +81,7 @@ impl DisplayMessage {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            guidance_prompt_seed: None,
         }
     }
 }
@@ -231,7 +238,13 @@ fn render_waiting_status(status: &str, cx: &App) -> Div {
 
 fn render_subtle_guidance_slot(index: usize, cx: &App) -> impl IntoElement {
     let accent = cx.theme().primary;
+    let reduced_motion = subtle_guidance::use_reduced_motion();
 
+    /*
+     * Motion fallback: the caret normally breathes via opacity. When reduced
+     * motion is requested, it stays at static 70% opacity and keeps the same
+     * reservation box so layout and focus behavior do not change.
+     */
     div()
         .id(ElementId::Name(
             format!("assistant-guidance-slot-{index}").into(),
@@ -245,23 +258,189 @@ fn render_subtle_guidance_slot(index: usize, cx: &App) -> impl IntoElement {
         .border_color(cx.theme().foreground.opacity(0.06))
         .flex()
         .items_center()
-        .child(
-            div()
+        .child({
+            let caret = div()
                 .id(ElementId::Name(
                     format!("assistant-guidance-caret-{index}").into(),
                 ))
                 .w(px(2.0))
                 .h(px(18.0))
                 .rounded_full()
-                .bg(accent)
-                .with_animation(
-                    ElementId::Name(format!("assistant-caret-breathe-{index}").into()),
-                    Animation::new(Duration::from_millis(600))
-                        .repeat()
-                        .with_easing(pulsating_between(0.3, 1.0)),
-                    |el, delta| el.opacity(delta),
-                ),
+                .bg(accent);
+
+            if reduced_motion {
+                caret.opacity(0.7).into_any_element()
+            } else {
+                caret
+                    .with_animation(
+                        ElementId::Name(format!("assistant-caret-breathe-{index}").into()),
+                        Animation::new(Duration::from_millis(600))
+                            .repeat()
+                            .with_easing(pulsating_between(0.3, 1.0)),
+                        |el, delta| el.opacity(delta),
+                    )
+                    .into_any_element()
+            }
+        })
+}
+
+fn render_phase_whisperer(
+    msg: &DisplayMessage,
+    index: usize,
+    show_dot: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let accent = cx.theme().primary;
+    let reduced_motion = subtle_guidance::use_reduced_motion();
+    let phase = subtle_guidance::phase_for_trace(msg.live_trace.as_ref());
+
+    /*
+     * Motion fallback: the subtle dot normally breathes with the same opacity
+     * period as the composer strip. Reduced motion renders a static 65% dot and
+     * keeps the text visible without crossfade.
+     */
+    div()
+        .id(ElementId::Name(
+            format!("assistant-whisperer-{index}").into(),
+        ))
+        .flex()
+        .items_center()
+        .gap_2()
+        .when(show_dot, |this| {
+            this.child({
+                let dot = div()
+                    .id(ElementId::Name(
+                        format!("assistant-whisperer-dot-{index}").into(),
+                    ))
+                    .w(px(2.0))
+                    .h(px(2.0))
+                    .rounded_full()
+                    .bg(accent);
+                if reduced_motion {
+                    dot.opacity(0.65).into_any_element()
+                } else {
+                    dot.with_animation(
+                        ElementId::Name(format!("assistant-whisperer-dot-breathe-{index}").into()),
+                        Animation::new(subtle_guidance::GUIDANCE_BREATHE_PERIOD)
+                            .repeat()
+                            .with_easing(pulsating_between(0.10, 0.25)),
+                        |el, delta| el.opacity(delta),
+                    )
+                    .into_any_element()
+                }
+            })
+        })
+        .child(
+            div()
+                .text_xs()
+                .italic()
+                .text_color(cx.theme().muted_foreground)
+                .child(phase.copy()),
         )
+}
+
+fn render_subtle_waiting_slot(
+    msg: &DisplayMessage,
+    index: usize,
+    show_dot: bool,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_h(px(38.0))
+        .px_3()
+        .py_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(cx.theme().foreground.opacity(0.06))
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(render_subtle_guidance_slot(index, cx))
+        .child(render_phase_whisperer(msg, index, show_dot, cx))
+}
+
+fn render_skeleton_reservation(msg: &DisplayMessage, index: usize, cx: &App) -> Option<AnyElement> {
+    let seed = msg.guidance_prompt_seed.as_ref()?;
+    if !subtle_guidance_skeleton_enabled(seed)
+        || !subtle_guidance::likely_long_answer(seed, msg.attachments.len())
+    {
+        return None;
+    }
+
+    let widths = subtle_guidance::skeleton_widths(seed);
+    let reduced_motion = subtle_guidance::use_reduced_motion();
+    let color = cx.theme().muted_foreground.opacity(0.16);
+
+    /*
+     * Motion fallback: ghost lines shimmer at low opacity in full motion. With
+     * reduced motion they render as static low-contrast reservations inside the
+     * same overflow-hidden container, preserving zero-pop stream takeover.
+     */
+    let line = |line_index: usize, width: f32| {
+        let base = div()
+            .id(ElementId::Name(
+                format!("assistant-skeleton-{index}-{line_index}").into(),
+            ))
+            .h(px(10.0))
+            .w(relative(width))
+            .rounded_full()
+            .bg(color);
+        if reduced_motion {
+            base.opacity(0.45).into_any_element()
+        } else {
+            base.with_animation(
+                ElementId::Name(format!("assistant-skeleton-wave-{index}-{line_index}").into()),
+                Animation::new(subtle_guidance::SKELETON_SHIMMER_PERIOD)
+                    .repeat()
+                    .with_easing(pulsating_between(0.28, 0.55)),
+                |el, delta| el.opacity(delta),
+            )
+            .into_any_element()
+        }
+    };
+
+    Some(
+        div()
+            .overflow_hidden()
+            .w_full()
+            .child(
+                div().flex().flex_col().gap_2().children(
+                    widths
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, width)| line(i, width)),
+                ),
+            )
+            .into_any_element(),
+    )
+}
+
+fn render_trace_chip(msg: &DisplayMessage, cx: &App) -> Option<AnyElement> {
+    let trace_view = msg.system_trace_view.as_ref()?;
+    let label = subtle_guidance::tool_trace_chip(trace_view.read(cx).get_trace())?;
+
+    Some(
+        div()
+            .mt_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .bg(cx.theme().muted.opacity(0.35))
+                    .child(label),
+            )
+            .child(trace_view.clone())
+            .into_any_element(),
+    )
 }
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
@@ -756,8 +935,14 @@ where
     };
 
     // Check if we should render interleaved content (tool calls mixed with text)
-    let should_interleave =
-        matches!(msg.role, MessageRole::Assistant) && msg.system_trace_view.is_some();
+    let show_tool_traces_live = cx
+        .try_global::<GeneralSettingsModel>()
+        .map(|settings| settings.show_tool_traces_live)
+        .unwrap_or(false);
+    let subtle_trace_mode = subtle_guidance_traces_enabled() && !show_tool_traces_live;
+    let should_interleave = matches!(msg.role, MessageRole::Assistant)
+        && msg.system_trace_view.is_some()
+        && !subtle_trace_mode;
 
     if matches!(msg.role, MessageRole::Assistant)
         && msg.is_streaming
@@ -767,7 +952,12 @@ where
         return if subtle_guidance_v1_enabled() {
             container
                 .p_0()
-                .child(render_subtle_guidance_slot(index, cx))
+                .child(render_subtle_waiting_slot(
+                    msg,
+                    index,
+                    subtle_guidance::has_running_trace(msg.live_trace.as_ref()),
+                    cx,
+                ))
                 .into_any_element()
         } else {
             container
@@ -794,7 +984,7 @@ where
     // - Finalized: cache the parse result to avoid re-parsing on every render
     // - Streaming: reuse code block highlights from the previous render
     if matches!(msg.role, MessageRole::Assistant) && !should_interleave && msg.is_markdown {
-        let children = if !msg.is_streaming {
+        let mut children = if !msg.is_streaming {
             // Finalized: use cached parse result
             let cache_key = ContentCacheKey::new(&msg.content, is_dark);
             if caches.parsed.get(&cache_key).is_none() {
@@ -824,6 +1014,13 @@ where
             ]
         };
 
+        if msg.is_streaming
+            && msg.content.is_empty()
+            && let Some(skeleton) = render_skeleton_reservation(msg, index, cx)
+        {
+            children.push(skeleton);
+        }
+
         let message_with_content = container.children(children);
 
         // Wrap with action buttons for finalized assistant messages
@@ -831,6 +1028,7 @@ where
         return match msg.role {
             MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
                 .child(message_with_content)
+                .when_some(render_trace_chip(msg, cx), |this, chip| this.child(chip))
                 .child(render_assistant_actions(
                     &msg.content,
                     &msg.feedback,
@@ -894,6 +1092,7 @@ where
     match msg.role {
         MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
             .child(final_container)
+            .when_some(render_trace_chip(msg, cx), |this, chip| this.child(chip))
             .child(render_assistant_actions(
                 &msg.content,
                 &msg.feedback,

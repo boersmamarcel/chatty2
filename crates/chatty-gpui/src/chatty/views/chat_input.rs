@@ -15,6 +15,7 @@ use crate::assets::CustomIcon;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use crate::feature_flags::subtle_guidance_v1_enabled;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
+use crate::subtle_guidance;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -1227,6 +1228,7 @@ impl RenderOnce for ChatInput {
             // Main input box
             .child(
                 div()
+                    .relative()
                     .border_1()
                     .px_3()
                     .py_3()
@@ -1235,6 +1237,35 @@ impl RenderOnce for ChatInput {
                     .bg(cx.theme().secondary)
                     .when(subtle_guidance_v1_enabled() && awaiting_first_token, |d| {
                         d.opacity(0.7)
+                    })
+                    .when(subtle_guidance_v1_enabled() && awaiting_first_token, |d| {
+                        /*
+                         * Motion fallback: the ambient strip breathes with opacity
+                         * in full motion. Reduced motion keeps the same 1 px line
+                         * statically visible at low opacity.
+                         */
+                        let strip = div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(1.0))
+                            .bg(cx.theme().primary.opacity(0.18));
+                        let reduced_motion = subtle_guidance::use_reduced_motion();
+                        let strip = if reduced_motion {
+                            strip.opacity(0.16).into_any_element()
+                        } else {
+                            strip
+                                .with_animation(
+                                    "composer-ambient-strip-breathe",
+                                    Animation::new(subtle_guidance::GUIDANCE_BREATHE_PERIOD)
+                                        .repeat()
+                                        .with_easing(pulsating_between(0.10, 0.25)),
+                                    |el, delta| el.opacity(delta),
+                                )
+                                .into_any_element()
+                        };
+                        d.child(strip)
                     })
                     .child(
                         div()

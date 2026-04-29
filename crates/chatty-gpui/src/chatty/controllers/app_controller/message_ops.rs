@@ -50,7 +50,7 @@ impl ChattyApp {
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id, cx);
                 view.add_user_message(message.clone(), attachments.clone(), cx);
-                view.start_assistant_message(cx);
+                view.start_assistant_message_with_prompt(Some(message.clone()), cx);
                 cx.notify();
             });
         }
@@ -154,7 +154,7 @@ impl ChattyApp {
                         view.add_user_message(message.clone(), attachments.clone(), cx);
                         debug!("User message added to UI");
                         // Start assistant message in UI
-                        view.start_assistant_message(cx);
+                        view.start_assistant_message_with_prompt(Some(message.clone()), cx);
                         debug!("Assistant message started");
                         cx.notify();
                     }).map_err(|e| anyhow::anyhow!(e.to_string()))?;

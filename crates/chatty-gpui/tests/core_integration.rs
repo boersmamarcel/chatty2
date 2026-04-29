@@ -93,9 +93,11 @@ fn provider_model_functional_with_gpui_globals() {
 fn general_settings_model_functional_with_gpui_globals() {
     let mut settings = GeneralSettingsModel::default();
     assert!((settings.font_size - 14.0).abs() < f32::EPSILON);
+    assert!(!settings.show_tool_traces_live);
 
     settings.font_size = 18.0;
     settings.theme_name = Some("gruvbox".to_string());
+    settings.show_tool_traces_live = true;
 
     // JSON serialization must still work (settings are loaded from disk)
     let json = serde_json::to_string(&settings).expect("serialization failed");
@@ -103,6 +105,7 @@ fn general_settings_model_functional_with_gpui_globals() {
         serde_json::from_str(&json).expect("deserialization failed");
     assert!((restored.font_size - 18.0).abs() < f32::EPSILON);
     assert_eq!(restored.theme_name.as_deref(), Some("gruvbox"));
+    assert!(restored.show_tool_traces_live);
 }
 
 // ── Cross-crate type interaction (settings + conversations used together) ──────
