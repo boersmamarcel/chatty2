@@ -446,6 +446,7 @@ impl ChatEngine {
                 user_secrets: self.user_secrets.clone(),
                 theme_colors: None, // no theme colors in TUI
                 memory_service: self.memory_service.clone(),
+                skill_service: Some(self.skill_service.clone()),
                 search_settings: self.search_settings.clone(),
                 embedding_service: self.embedding_service.clone(),
                 allow_sub_agent: !self.is_sub_agent,
@@ -494,6 +495,7 @@ impl ChatEngine {
         let embedding_service = self.embedding_service.clone();
         let event_tx = self.event_tx.clone();
         let is_sub_agent = self.is_sub_agent;
+        let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
             // Gather MCP tools
@@ -530,6 +532,7 @@ impl ChatEngine {
                     user_secrets,
                     theme_colors: None, // no theme colors in TUI
                     memory_service,
+                    skill_service: Some(skill_service.clone()),
                     search_settings,
                     embedding_service,
                     allow_sub_agent: !is_sub_agent,
@@ -622,21 +625,8 @@ impl ChatEngine {
         let invoke_agent_progress_slot = conversation.invoke_agent_progress_slot();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
-        let workspace_dir = self.execution_settings.workspace_dir.clone();
-        let memory_service = self.memory_service.clone();
-        let embedding_service = self.embedding_service.clone();
-        let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
-            let contents = chatty_core::services::augment_with_memory(
-                contents,
-                memory_service.as_ref(),
-                embedding_service.as_ref(),
-                &skill_service,
-                workspace_dir.as_deref(),
-            )
-            .await;
-
             let result = streaming::run_stream(streaming::StreamParams {
                 agent,
                 history,

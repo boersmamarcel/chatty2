@@ -5,15 +5,13 @@
 //!
 //! - **External integrations**: LLM streaming (`llm_service`), MCP connections
 //!   (`mcp_service`), A2A protocol (`a2a_client`), search engines (`search_service`).
-//! - **Orchestration**: Multi-step flows like message augmentation (`message_orchestrator`),
-//!   stream lifecycle (`stream_processor`), and title generation (`title_generator`).
+//! - **Orchestration**: Stream lifecycle (`stream_processor`) and title generation (`title_generator`).
 //! - **System operations**: Shell execution (`shell_service`), filesystem access
 //!   (`filesystem_service`), path validation (`path_validator`), git operations (`git_service`).
 //! - **Rendering**: Math/LaTeX (`math_renderer_service`), Mermaid diagrams
 //!   (`mermaid_renderer_service`), chart SVGs (`chart_svg_renderer`), PDF thumbnails
 //!   (`pdf_thumbnail`).
-//! - **Memory & context**: Agent memory (`memory_service`), auto-context enrichment
-//!   (`auto_context`), skill persistence (`skill_service`).
+//! - **Memory & context**: Agent memory (`memory_service`), skill persistence (`skill_service`).
 //!
 //! ## When to use services vs tools vs repositories
 //!
@@ -24,7 +22,6 @@
 //! | **Repository** | Data persistence (load/save to disk) | `ConversationRepository` |
 
 pub mod a2a_client;
-pub mod auto_context;
 pub mod chart_svg_renderer;
 pub mod embedding_service;
 pub mod error_collector_layer;
@@ -55,10 +52,9 @@ pub mod title_generator;
 pub mod typst_compiler_service;
 
 pub use a2a_client::{A2aClient, A2aStreamEvent};
-pub use auto_context::{AutoContextRequest, load_auto_context_block};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
-pub use llm_service::{StreamChunk, stream_prompt};
+pub use llm_service::{stream_prompt, StreamChunk};
 #[cfg(feature = "math-render")]
 pub use math_renderer_service::MathRendererService;
 pub use mcp_service::McpService;
@@ -66,7 +62,7 @@ pub use memory_query::simplify_memory_query;
 pub use memory_service::MemoryService;
 #[cfg(feature = "mermaid")]
 pub use mermaid_renderer_service::MermaidRendererService;
-pub use message_orchestrator::{augment_with_memory, extract_user_text, gather_mcp_tools};
+pub use message_orchestrator::{extract_user_text, gather_mcp_tools};
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;

@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 use gpui::{EventEmitter, Task};
 use tracing::{debug, warn};
 
-/// Minimum interval between batched TextChunk events (~30fps).
-/// At 33ms each flush triggers one re-render cycle (markdown parse, syntax
-/// highlight, layout) — smooth enough for streaming text while avoiding the
-/// layout thrashing that a 4ms interval caused.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
+/// Minimum interval between batched TextChunk events (~200fps).
+/// At 5ms each flush triggers one re-render cycle — fast enough for
+/// responsive sustained streaming while avoiding per-character layout
+/// thrashing. The *first* text chunk in a stream is always emitted
+/// immediately (see `has_emitted_first_chunk`) so time-to-first-token
+/// is not delayed by this interval.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 
 use crate::chatty::services::StreamChunk;
 use crate::chatty::tools::PendingArtifacts;
@@ -40,6 +42,9 @@ pub struct StreamState {
     /// Shared reference to artifacts queued by AddAttachmentTool during this stream.
     /// Drained on finalization to include in StreamEnded event.
     pending_artifacts: Option<PendingArtifacts>,
+    /// When `true`, the first text chunk has already been emitted immediately.
+    /// Subsequent chunks are batched with `FLUSH_INTERVAL`.
+    has_emitted_first_chunk: bool,
     /// Text accumulated since the last TextChunk event emission (batching buffer).
     pending_text: String,
     /// When the last TextChunk event was emitted (used for flush interval check).
@@ -151,13 +156,7 @@ impl StreamManager {
         // (app_controller) can transition Running tool calls to Cancelled.
         if let Some(mut existing) = self.streams.remove(&conv_id) {
             // Flush any buffered text
-            if !existing.pending_text.is_empty() {
-                let batch = std::mem::take(&mut existing.pending_text);
-                cx.emit(StreamManagerEvent::TextChunk {
-                    conversation_id: conv_id.clone(),
-                    text: batch,
-                });
-            }
+            Self::flush_pending_text_for(&mut existing, &conv_id, cx);
 
             existing.cancel_flag.store(true, Ordering::Relaxed);
 
@@ -189,6 +188,7 @@ impl StreamManager {
                 task: Some(task),
                 cancel_flag,
                 pending_artifacts,
+                has_emitted_first_chunk: false,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
                 api_turn_count: 1,
@@ -213,13 +213,7 @@ impl StreamManager {
         // Cancel any existing pending stream — emit StreamEnded so subscribers
         // (app_controller) can transition Running tool calls to Cancelled.
         if let Some(mut existing) = self.streams.remove("__pending__") {
-            if !existing.pending_text.is_empty() {
-                let batch = std::mem::take(&mut existing.pending_text);
-                cx.emit(StreamManagerEvent::TextChunk {
-                    conversation_id: "__pending__".to_string(),
-                    text: batch,
-                });
-            }
+            Self::flush_pending_text_for(&mut existing, "__pending__", cx);
 
             existing.cancel_flag.store(true, Ordering::Relaxed);
 
@@ -250,6 +244,7 @@ impl StreamManager {
                 task: Some(task),
                 cancel_flag,
                 pending_artifacts,
+                has_emitted_first_chunk: false,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
                 api_turn_count: 1,
@@ -277,7 +272,10 @@ impl StreamManager {
     /// Set the pending artifacts handle on a promoted stream.
     /// Called after `promote_pending()` to wire up the conversation's artifact storage
     /// so that `finalize_stream()` can drain artifacts queued by `AddAttachmentTool`.
-    pub fn set_pending_artifacts(&mut self, conv_id: &str, artifacts: PendingArtifacts) {
+    pub fn set_pending_artifacts(&mut self,
+        conv_id: &str,
+        artifacts: PendingArtifacts,
+    ) {
         if let Some(state) = self.streams.get_mut(conv_id) {
             state.pending_artifacts = Some(artifacts);
         }
@@ -285,10 +283,12 @@ impl StreamManager {
 
     /// Emit any accumulated pending text for a conversation as a `TextChunk` event.
     /// No-op if there is no pending text.
-    fn flush_pending_text(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
-        if let Some(state) = self.streams.get_mut(conv_id)
-            && !state.pending_text.is_empty()
-        {
+    fn flush_pending_text_for(
+        state: &mut StreamState,
+        conv_id: &str,
+        cx: &mut gpui::Context<StreamManager>,
+    ) {
+        if !state.pending_text.is_empty() {
             let batch = std::mem::take(&mut state.pending_text);
             state.last_flush = Instant::now();
             cx.emit(StreamManagerEvent::TextChunk {
@@ -298,11 +298,23 @@ impl StreamManager {
         }
     }
 
+    fn flush_pending_text(&mut self,
+        conv_id: &str,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if let Some(state) = self.streams.get_mut(conv_id)
+            && !state.pending_text.is_empty()
+        {
+            Self::flush_pending_text_for(state, conv_id, cx);
+        }
+    }
+
     /// Process a stream chunk: update internal state and emit the corresponding event.
     ///
-    /// Text chunks are batched: text is accumulated in `pending_text` and emitted as a
-    /// single `TextChunk` event only when `FLUSH_INTERVAL` (33ms, ~30fps) has elapsed.
-    /// All other chunk types are forwarded immediately without delay.
+    /// Text chunks use a hybrid strategy: the *first* chunk is emitted immediately
+    /// (zero latency), then subsequent chunks are batched and emitted only when
+    /// `FLUSH_INTERVAL` (5ms, ~200fps) has elapsed. All other chunk types are forwarded
+    /// immediately without delay.
     pub fn handle_chunk(
         &mut self,
         conv_id: &str,
@@ -313,7 +325,17 @@ impl StreamManager {
             StreamChunk::Text(text) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.pending_text.push_str(&text);
-                    if state.last_flush.elapsed() >= FLUSH_INTERVAL {
+                    if !state.has_emitted_first_chunk {
+                        // First chunk → emit immediately for minimal time-to-first-token
+                        state.has_emitted_first_chunk = true;
+                        let batch = std::mem::take(&mut state.pending_text);
+                        state.last_flush = Instant::now();
+                        cx.emit(StreamManagerEvent::TextChunk {
+                            conversation_id: conv_id.to_string(),
+                            text: batch,
+                        });
+                    } else if state.last_flush.elapsed() >= FLUSH_INTERVAL {
+                        // Subsequent chunks → respect the flush interval to avoid thrashing
                         let batch = std::mem::take(&mut state.pending_text);
                         state.last_flush = Instant::now();
                         cx.emit(StreamManagerEvent::TextChunk {
@@ -427,7 +449,10 @@ impl StreamManager {
     /// Mark a stream as completed and emit StreamEnded.
     /// Called when the stream loop finishes normally.
     /// Flushes any pending batched text, then drains any pending artifacts queued by AddAttachmentTool.
-    pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
+    pub fn finalize_stream(&mut self,
+        conv_id: &str,
+        cx: &mut gpui::Context<Self>,
+    ) {
         // Flush any remaining buffered text before emitting StreamEnded
         self.flush_pending_text(conv_id, cx);
 
@@ -463,7 +488,11 @@ impl StreamManager {
     }
 
     /// Gracefully stop a stream using its cancellation token.
-    pub fn stop_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
+    pub fn stop_stream(
+        &mut self,
+        conv_id: &str,
+        cx: &mut gpui::Context<Self>,
+    ) {
         // Try direct key first
         let key = if self.streams.contains_key(conv_id) {
             Some(conv_id.to_string())
@@ -527,7 +556,9 @@ impl StreamManager {
     }
 
     /// Cancel any pending stream (used when creating a new conversation).
-    pub fn cancel_pending(&mut self, cx: &mut gpui::Context<Self>) {
+    pub fn cancel_pending(&mut self,
+        cx: &mut gpui::Context<Self>,
+    ) {
         if let Some(mut state) = self.streams.remove("__pending__") {
             // Flush any buffered text before the cancellation event
             if !state.pending_text.is_empty() {
@@ -574,14 +605,19 @@ impl StreamManager {
     }
 
     /// Set trace JSON on an active stream (called before finalization).
-    pub fn set_trace(&mut self, conv_id: &str, trace: Option<serde_json::Value>) {
+    pub fn set_trace(&mut self,
+        conv_id: &str,
+        trace: Option<serde_json::Value>,
+    ) {
         if let Some(state) = self.streams.get_mut(conv_id) {
             state.trace_json = trace;
         }
     }
 
     /// Stop all active streams (app shutdown).
-    pub fn stop_all(&mut self, cx: &mut gpui::Context<Self>) {
+    pub fn stop_all(&mut self,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let keys: Vec<String> = self.streams.keys().cloned().collect();
         for key in keys {
             if let Some(mut state) = self.streams.remove(&key) {
@@ -641,6 +677,7 @@ mod tests {
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
                 pending_artifacts: None,
+                has_emitted_first_chunk: false,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
                 api_turn_count: 1,
@@ -662,6 +699,7 @@ mod tests {
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
                 pending_artifacts: None,
+                has_emitted_first_chunk: false,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
                 api_turn_count: 1,
@@ -691,6 +729,7 @@ mod tests {
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
                 pending_artifacts: None,
+                has_emitted_first_chunk: false,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
                 api_turn_count: 1,

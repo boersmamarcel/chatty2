@@ -353,6 +353,7 @@ impl ChattyApp {
                             user_secrets,
                             theme_colors,
                             memory_service,
+                            skill_service: None,
                             search_settings,
                             embedding_service,
                             allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
@@ -500,6 +501,7 @@ impl ChattyApp {
                                 user_secrets,
                                 theme_colors,
                                 memory_service,
+                                skill_service: None,
                                 search_settings,
                                 embedding_service,
                                 allow_sub_agent: true,
@@ -914,6 +916,7 @@ impl ChattyApp {
                                     user_secrets,
                                     theme_colors,
                                     memory_service,
+                                    skill_service: None,
                                     search_settings,
                                     embedding_service,
                                     allow_sub_agent: true, // interactive agent: sub-agent tool is allowed

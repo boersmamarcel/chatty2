@@ -14,6 +14,7 @@ use crate::services::git_service::GitService;
 use crate::services::memory_service::MemoryService;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
+use crate::services::skill_service::SkillService;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
@@ -56,6 +57,7 @@ pub struct AgentBuildContext {
     pub user_secrets: Vec<(String, String)>,
     pub theme_colors: Option<[String; 5]>,
     pub memory_service: Option<MemoryService>,
+    pub skill_service: Option<SkillService>,
     pub search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
     pub embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
     pub allow_sub_agent: bool,
@@ -108,6 +110,7 @@ impl AgentClient {
             user_secrets,
             theme_colors,
             memory_service,
+            skill_service,
             search_settings,
             embedding_service,
             allow_sub_agent,
@@ -554,6 +557,10 @@ impl AgentClient {
         ) = if let Some(ref mem_svc) = memory_service {
             let has_embeddings = embedding_service.is_some();
             tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
+            let workspace_skills_dir = exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+                .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
             (
                 Some(RememberTool::new(
                     mem_svc.clone(),
@@ -563,7 +570,12 @@ impl AgentClient {
                     mem_svc.clone(),
                     embedding_service.clone(),
                 )),
-                Some(SearchMemoryTool::new(mem_svc.clone(), embedding_service)),
+                Some(SearchMemoryTool::new(
+                    mem_svc.clone(),
+                    embedding_service.clone(),
+                    skill_service.clone(),
+                    workspace_skills_dir,
+                )),
             )
         } else {
             tracing::info!("Memory tools disabled: no MemoryService provided");

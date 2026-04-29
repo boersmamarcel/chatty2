@@ -189,13 +189,13 @@ pub(super) fn build_preamble(
 
     // Memory recall instructions — only if memory tools are available.
     let memory_instructions = if tools.memory {
-        "\n\n## Memory\n\
+        "\n\n## Memory\
              You have persistent memory that survives across conversations and app restarts. \
-             Relevant memories are automatically injected as context before each of your responses — \
-             you do not need to call `search_memory` proactively on every message. \
-             Use `search_memory` only when you want to look up something specific that \
-             may not have appeared in the automatic context (e.g., a detail mentioned several \
-             conversations ago, or a narrow keyword search).\n\n\
+             Use `search_memory` when you need to recall facts, decisions, user preferences, \
+             or context from past conversations that is not already in the current conversation \
+             history. Call it proactively whenever a question might benefit from stored context \
+             (e.g., user preferences, prior decisions, project-specific conventions).\
+\
              When the user explicitly asks you to remember, store, note, or keep in mind \
              any information, you MUST invoke the `remember` tool with the information as \
              the content parameter. Responding with text like \"I'll remember that\" or \
@@ -204,12 +204,8 @@ pub(super) fn build_preamble(
              **Saving skills**: After successfully solving a new type of multi-step task \
              (deployment, data analysis, build process, API integration, etc.), consider \
              using `save_skill` to record the steps as a reusable procedure. Saved skills \
-             are automatically surfaced in future conversations when a similar task arises. \
-             Only save skills for tasks with clear, reproducible steps — not one-off actions. \
-             Skills created with `save_skill` live in persistent memory and can be found again \
-             with `search_memory`. User-provided `SKILL.md` files are a separate filesystem-backed \
-             source; when those appear in context, rely on the source hints in the injected skill \
-             block and use normal file-reading tools if you need to revisit the file contents.\n\n\
+             live in persistent memory and can be found again with `search_memory`. \
+             Only save skills for tasks with clear, reproducible steps — not one-off actions. \n\n\
              **Python in skills**: When following a skill that needs Python package management in \
              the shell, prefer `uv` over `pip`. If the `execute_code` tool is available and an \
              isolated environment is helpful, prefer `execute_code` for the Python run — it may \
@@ -224,12 +220,11 @@ pub(super) fn build_preamble(
     };
 
     // Skills instructions — always injected because read_skill is always available.
-    let skills_instructions = "\n\n## Skills\n\
-         When relevant skills are detected for your query, a `[Relevant skills available]` \
-         block is included in your context showing only the skill name and a \
-         one-line description — the full instructions are intentionally omitted to save \
-         context space. Call `read_skill` with the exact skill name before executing any \
-         skill procedure so you have the complete, up-to-date steps.";
+    let skills_instructions = "\n\n## Skills\
+         Use `search_memory` to discover relevant skills when a task might benefit from a \
+         saved procedure. The search results will show skill names and short descriptions. \
+         Call `read_skill` with the exact skill name before executing any skill procedure \
+         so you have the complete, up-to-date steps.";
 
     let mut p = if base_preamble.trim().is_empty() {
         default_system_prompt(provider_type)

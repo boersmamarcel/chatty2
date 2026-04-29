@@ -162,19 +162,6 @@ fn get_embedding_service(cx: &gpui::AsyncApp) -> Option<chatty_core::services::E
 /// The global is set at startup (keyword-only) and replaced with an embedding-aware
 /// version once the EmbeddingService is initialised.  Falls back to constructing a
 /// keyword-only service if the global is absent (e.g. in tests).
-fn get_skill_service(cx: &gpui::AsyncApp) -> chatty_core::services::SkillService {
-    cx.update(|cx| {
-        cx.try_global::<chatty_core::services::SkillService>()
-            .cloned()
-    })
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| {
-        warn!("SkillService global not found, falling back to keyword-only service");
-        chatty_core::services::SkillService::new(None)
-    })
-}
-
 fn normalize_workspace_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -333,6 +320,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 user_secrets,
                 theme_colors,
                 memory_service,
+                skill_service: None,
                 search_settings,
                 embedding_service,
                 allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
