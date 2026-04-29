@@ -20,12 +20,14 @@ use super::message_types::{
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
+use crate::feature_flags::stream_smoothing_v1_enabled;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::{
     DiscoveredModulesModel, ExtensionsModel, ModuleLoadStatus, ModuleSettingsModel,
     SearchSettingsModel,
 };
+use crate::subtle_guidance;
 use std::time::SystemTime;
 
 /// Main chat view component
@@ -63,6 +65,9 @@ pub struct ChatView {
     /// receives live progress lines while a sub-agent subprocess is running.
     /// `None` when no sub-agent is active.
     sub_agent_progress_msg_idx: Option<usize>,
+    /// Buffered assistant text waiting for stream smoothing paints.
+    smoothing_buffer: String,
+    smoothing_task_active: bool,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -214,6 +219,8 @@ impl ChatView {
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
             sub_agent_progress_msg_idx: None,
+            smoothing_buffer: String::new(),
+            smoothing_task_active: false,
         }
     }
 
@@ -258,6 +265,7 @@ impl ChatView {
             attachments,
             feedback: None,
             history_index: None,
+            guidance_prompt_seed: None,
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -267,6 +275,14 @@ impl ChatView {
 
     /// Start an assistant message (for streaming)
     pub fn start_assistant_message(&mut self, cx: &mut Context<Self>) {
+        self.start_assistant_message_with_prompt(None, cx);
+    }
+
+    pub fn start_assistant_message_with_prompt(
+        &mut self,
+        prompt_seed: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         debug!("Starting assistant message");
 
         self.messages.push(DisplayMessage {
@@ -280,6 +296,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            guidance_prompt_seed: prompt_seed,
         });
 
         debug!(
@@ -304,6 +321,17 @@ impl ChatView {
 
     /// Append text to the current streaming assistant message
     pub fn append_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if stream_smoothing_v1_enabled(self.conversation_id.as_deref().unwrap_or_default())
+            && !subtle_guidance::use_reduced_motion()
+        {
+            self.buffer_assistant_text(text, cx);
+            return;
+        }
+
+        self.append_assistant_text_immediate(text, cx);
+    }
+
+    fn append_assistant_text_immediate(&mut self, text: &str, cx: &mut Context<Self>) {
         debug!(
             text_len = text.len(),
             total_messages = self.messages.len(),
@@ -329,8 +357,73 @@ impl ChatView {
         }
     }
 
+    fn buffer_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.smoothing_buffer.push_str(text);
+        if let Some(last) = self.messages.last_mut()
+            && last.is_streaming
+        {
+            last.status_message = None;
+        }
+
+        if self.smoothing_task_active {
+            cx.notify();
+            return;
+        }
+
+        self.smoothing_task_active = true;
+        let entity = cx.entity();
+
+        /*
+         * Motion fallback: stream smoothing is an explicit timer-driven motion
+         * exception. Reduced motion bypasses this path entirely and writes
+         * provider chunks immediately.
+         */
+        cx.spawn(async move |_, cx| {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                let should_continue = entity
+                    .update(cx, |view, cx| view.flush_smoothing_frame(cx))
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    fn flush_smoothing_frame(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.smoothing_buffer.is_empty() {
+            self.smoothing_task_active = false;
+            cx.notify();
+            return false;
+        }
+
+        let take = subtle_guidance::smoothing_chars_per_frame(self.smoothing_buffer.len());
+        let split_at = self
+            .smoothing_buffer
+            .char_indices()
+            .nth(take)
+            .map(|(idx, _)| idx)
+            .unwrap_or(self.smoothing_buffer.len());
+        let chunk = self.smoothing_buffer.drain(..split_at).collect::<String>();
+        self.append_assistant_text_immediate(&chunk, cx);
+        true
+    }
+
+    fn flush_smoothing_buffer(&mut self, cx: &mut Context<Self>) {
+        if !self.smoothing_buffer.is_empty() {
+            let pending = std::mem::take(&mut self.smoothing_buffer);
+            self.append_assistant_text_immediate(&pending, cx);
+        }
+        self.smoothing_task_active = false;
+    }
+
     /// Finalize the current streaming assistant message
     pub fn finalize_assistant_message(&mut self, cx: &mut Context<Self>) {
+        self.flush_smoothing_buffer(cx);
         if let Some(last) = self.messages.last_mut() {
             last.is_streaming = false;
             last.status_message = None;
@@ -1035,6 +1128,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            guidance_prompt_seed: None,
         });
 
         let idx = self.messages.len() - 1;
@@ -1133,6 +1227,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            guidance_prompt_seed: None,
         });
         cx.notify();
         self.activate_sticky_scroll();
@@ -1179,6 +1274,7 @@ impl ChatView {
                             attachments,
                             feedback: None,
                             history_index: Some(idx),
+                            guidance_prompt_seed: None,
                         });
                     }
                 }
@@ -1222,6 +1318,7 @@ impl ChatView {
                             attachments,
                             feedback,
                             history_index: Some(idx),
+                            guidance_prompt_seed: None,
                         });
                     }
                 }
