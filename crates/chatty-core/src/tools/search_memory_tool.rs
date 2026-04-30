@@ -2,11 +2,13 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use tracing::warn;
 
 use super::save_skill_tool::SKILL_TITLE_PREFIX;
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::{MemoryHit, MemoryHitSource, MemoryService};
+use crate::services::skill_service::SkillService;
 use crate::tools::ToolError;
 
 /// Arguments for the search_memory tool
@@ -25,21 +27,32 @@ pub struct SearchMemoryToolOutput {
     pub results: Vec<MemoryHit>,
 }
 
-/// Tool that allows the agent to search its persistent memory.
+/// Tool that allows the agent to search its persistent memory and filesystem skills.
 ///
 /// Searches across all previously stored memories using full-text keyword search
-/// (BM25 ranking). Queries match on exact words, so use specific keywords.
+/// (BM25 ranking) and optionally scans workspace/global SKILL.md files. Queries match
+/// on exact words, so use specific keywords.
 #[derive(Clone)]
 pub struct SearchMemoryTool {
     memory_service: MemoryService,
     embedding_service: Option<EmbeddingService>,
+    /// Optional skill service for filesystem skill discovery.
+    skill_service: Option<SkillService>,
+    workspace_skills_dir: Option<PathBuf>,
 }
 
 impl SearchMemoryTool {
-    pub fn new(memory_service: MemoryService, embedding_service: Option<EmbeddingService>) -> Self {
+    pub fn new(
+        memory_service: MemoryService,
+        embedding_service: Option<EmbeddingService>,
+        skill_service: Option<SkillService>,
+        workspace_skills_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             memory_service,
             embedding_service,
+            skill_service,
+            workspace_skills_dir,
         }
     }
 }
@@ -53,21 +66,24 @@ impl Tool for SearchMemoryTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         let (description, query_description) = if self.embedding_service.is_some() {
             (
-                "Search persistent memory for previously stored information. \
+                "Search persistent memory and available skills for previously stored information. \
                  Uses hybrid search: keyword matching (BM25) + semantic similarity. \
+                 Also scans filesystem SKILL.md files so you can discover workspace/global skills. \
                  You can use natural language queries — searching 'fruits' will find \
                  memories about bananas, apples, etc.",
-                "Natural language query describing what you want to recall. \
+                "Natural language query describing what you want to recall or discover. \
                  Both specific keywords and conceptual descriptions work. \
-                 Example: 'food preferences' will find memories about specific foods.",
+                 Example: 'food preferences' will find memories about specific foods. \
+                     Example: 'deployment' may surface a saved skill.",
             )
         } else {
             (
-                "Search persistent memory for previously stored information. \
+                "Search persistent memory and available skills for previously stored information. \
                  Use this when you need to recall facts, decisions, user preferences, \
-                 or context from past conversations. Uses keyword matching (BM25), \
+                 or context from past conversations, or when you want to discover if a \
+                 reusable procedure (skill) exists for a task. Uses keyword matching (BM25), \
                  so include specific words that are likely in the stored memory.",
-                "Keyword query describing what you want to recall. \
+                "Keyword query describing what you want to recall or discover. \
                  Use concrete nouns and terms likely present in stored memories. \
                  Example: 'bananas fruit preference' rather than 'what foods does the user like'.",
             )
@@ -94,24 +110,29 @@ impl Tool for SearchMemoryTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let top_k = args.top_k.unwrap_or(5);
+
         // BM25 lexical search (always runs)
         let lex_results = self
             .memory_service
-            .search(&args.query, args.top_k)
+            .search(&args.query, Some(top_k))
             .await
             .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
 
         // Vector search (if embedding service is available)
+        let mut query_embedding_opt: Option<Vec<f32>> = None;
         let vec_results = if let Some(ref embed_svc) = self.embedding_service {
             match embed_svc.embed(&args.query).await {
-                Ok(embedding) => self
-                    .memory_service
-                    .search_vec(embedding, args.top_k)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!(error = ?e, "Vector search failed, using BM25 only");
-                        Vec::new()
-                    }),
+                Ok(embedding) => {
+                    query_embedding_opt = Some(embedding.clone());
+                    self.memory_service
+                        .search_vec(embedding, Some(top_k))
+                        .await
+                        .unwrap_or_else(|e| {
+                            warn!(error = ?e, "Vector search failed, using BM25 only");
+                            Vec::new()
+                        })
+                }
                 Err(e) => {
                     warn!(error = ?e, "Query embedding failed, using BM25 only");
                     Vec::new()
@@ -121,7 +142,22 @@ impl Tool for SearchMemoryTool {
             Vec::new()
         };
 
-        let results = merge_search_results(lex_results, vec_results, args.top_k.unwrap_or(5));
+        let memory_results = merge_search_results(lex_results, vec_results, top_k);
+
+        // Scan filesystem skills (if skill service is available)
+        let skill_results: Vec<MemoryHit> = if let Some(ref skill_svc) = self.skill_service {
+            skill_svc
+                .load_hits(
+                    &args.query,
+                    query_embedding_opt.as_deref(),
+                    self.workspace_skills_dir.as_deref(),
+                )
+                .await
+        } else {
+            Vec::new()
+        };
+
+        let results = select_context_hits(memory_results, skill_results, top_k);
 
         Ok(SearchMemoryToolOutput { results })
     }

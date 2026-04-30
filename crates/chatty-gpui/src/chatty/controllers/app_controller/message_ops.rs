@@ -1266,7 +1266,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
     // Use per-conversation workspace dir override if set, fall back to global setting
-    let workspace_dir = cx
+    let _workspace_dir = cx
         .update(|cx| {
             // Check per-conversation override first
             let per_conv = cx
@@ -1351,28 +1351,10 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         }
     }
 
-    // 2c. Auto-retrieve relevant memories and inject as context.
-    // Keep the original contents separate so the context block is never persisted
-    // to conversation history (it is only forwarded to the LLM).
-    let original_user_contents = user_contents.clone();
-    let llm_user_contents = {
-        let memory_service = await_memory_service(cx).await;
-        let embedding_service = get_embedding_service(cx);
-        let skill_service = get_skill_service(cx);
-
-        chatty_core::services::augment_with_memory(
-            user_contents,
-            memory_service.as_ref(),
-            embedding_service.as_ref(),
-            &skill_service,
-            workspace_dir.as_deref(),
-        )
-        .await
-    };
-
-    // 3. Call stream_prompt with augmented contents (context block included for the LLM)
+    // 3. Call stream_prompt with user contents directly (no auto-context injection)
+    let llm_user_contents = user_contents.clone();
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
-    let (mut stream, _augmented_user_message) = stream_prompt(
+    let (mut stream, _user_message) = stream_prompt(
         &agent,
         &history,
         llm_user_contents,
@@ -1383,11 +1365,9 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     .await?;
 
     // 4. Optionally add user message to conversation model.
-    // Use the original contents (without the injected context block) so that
-    // reopening an old conversation does not show the injected context block.
     if add_user_message_to_model {
         let user_message = rig::completion::Message::User {
-            content: rig::OneOrMany::many(original_user_contents).map_err(|e| {
+            content: rig::OneOrMany::many(user_contents).map_err(|e| {
                 anyhow::anyhow!("Failed to create user message from contents: {}", e)
             })?,
         };
