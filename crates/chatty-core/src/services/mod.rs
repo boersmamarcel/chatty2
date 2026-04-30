@@ -54,7 +54,7 @@ pub mod typst_compiler_service;
 pub use a2a_client::{A2aClient, A2aStreamEvent};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
-pub use llm_service::{stream_prompt, StreamChunk};
+pub use llm_service::{StreamChunk, stream_prompt};
 #[cfg(feature = "math-render")]
 pub use math_renderer_service::MathRendererService;
 pub use mcp_service::McpService;

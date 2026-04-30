@@ -338,6 +338,8 @@ impl ChattyApp {
                         })
                         .unwrap_or_default();
 
+                    let skill_service = get_skill_service(cx);
+
                     let mut conversation = Conversation::new(
                         conv_id.clone(),
                         title.clone(),
@@ -353,7 +355,7 @@ impl ChattyApp {
                             user_secrets,
                             theme_colors,
                             memory_service,
-                            skill_service: None,
+                            skill_service: Some(skill_service),
                             search_settings,
                             embedding_service,
                             allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
@@ -481,6 +483,8 @@ impl ChattyApp {
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
 
+                let skill_service = get_skill_service(cx);
+
                 let memory_service = await_memory_service(cx).await;
                 let search_settings = cx.update(|cx| {
                     cx.try_global::<crate::settings::models::SearchSettingsModel>().cloned()
@@ -501,7 +505,7 @@ impl ChattyApp {
                                 user_secrets,
                                 theme_colors,
                                 memory_service,
-                                skill_service: None,
+                                skill_service: Some(skill_service),
                                 search_settings,
                                 embedding_service,
                                 allow_sub_agent: true,
@@ -875,6 +879,7 @@ impl ChattyApp {
                         // Wait for memory service init to complete before building the agent
                         let memory_service = await_memory_service(cx).await;
                         let embedding_service = get_embedding_service(cx);
+                        let skill_service = get_skill_service(cx);
                         let module_agents = cx
                             .update(|cx| collect_module_agents(cx))
                             .unwrap_or_default();
@@ -916,7 +921,7 @@ impl ChattyApp {
                                     user_secrets,
                                     theme_colors,
                                     memory_service,
-                                    skill_service: None,
+                            skill_service: Some(skill_service),
                                     search_settings,
                                     embedding_service,
                                     allow_sub_agent: true, // interactive agent: sub-agent tool is allowed

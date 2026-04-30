@@ -272,10 +272,7 @@ impl StreamManager {
     /// Set the pending artifacts handle on a promoted stream.
     /// Called after `promote_pending()` to wire up the conversation's artifact storage
     /// so that `finalize_stream()` can drain artifacts queued by `AddAttachmentTool`.
-    pub fn set_pending_artifacts(&mut self,
-        conv_id: &str,
-        artifacts: PendingArtifacts,
-    ) {
+    pub fn set_pending_artifacts(&mut self, conv_id: &str, artifacts: PendingArtifacts) {
         if let Some(state) = self.streams.get_mut(conv_id) {
             state.pending_artifacts = Some(artifacts);
         }
@@ -298,10 +295,7 @@ impl StreamManager {
         }
     }
 
-    fn flush_pending_text(&mut self,
-        conv_id: &str,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    fn flush_pending_text(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
         if let Some(state) = self.streams.get_mut(conv_id)
             && !state.pending_text.is_empty()
         {

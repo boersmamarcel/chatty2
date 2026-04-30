@@ -125,8 +125,7 @@ impl Tool for SearchMemoryTool {
             match embed_svc.embed(&args.query).await {
                 Ok(embedding) => {
                     query_embedding_opt = Some(embedding.clone());
-                    self
-                        .memory_service
+                    self.memory_service
                         .search_vec(embedding, Some(top_k))
                         .await
                         .unwrap_or_else(|e| {
@@ -148,7 +147,11 @@ impl Tool for SearchMemoryTool {
         // Scan filesystem skills (if skill service is available)
         let skill_results: Vec<MemoryHit> = if let Some(ref skill_svc) = self.skill_service {
             skill_svc
-                .load_hits(&args.query, query_embedding_opt.as_deref(), self.workspace_skills_dir.as_deref())
+                .load_hits(
+                    &args.query,
+                    query_embedding_opt.as_deref(),
+                    self.workspace_skills_dir.as_deref(),
+                )
                 .await
         } else {
             Vec::new()
