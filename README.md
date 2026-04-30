@@ -331,7 +331,7 @@ Chatty includes a built-in **persistent memory system** that lets the agent accu
 
 ### How Memory Works
 
-Before each LLM call, the system automatically searches memory for context relevant to your current message and injects the top results — so the agent builds on what it already knows without you repeating yourself.
+The agent proactively calls `search_memory` when it determines that context from past conversations would help — recalling facts, user preferences, prior decisions, and project-specific conventions as needed.
 
 The agent has two memory tools:
 
@@ -358,7 +358,7 @@ Memory is enabled by default and can be toggled in **Settings > Code Execution**
 The agent can also save and recall **skills** — named, multi-step procedures for recurring tasks:
 
 - Use `save_skill` to store a procedure under a memorable name (e.g., `"deploy-to-staging"`, `"write-unit-tests"`)
-- When a skill is relevant to your query, a summary is automatically injected into context; the agent calls `read_skill` to load the full instructions before executing
+- The agent uses `search_memory` to discover relevant skills, then calls `read_skill` to load the full instructions before executing
 - Skills appear directly in the `/` slash-command picker, so you can invoke them by name without typing a full prompt
 - Workspace-specific skills can also live in `.claude/skills/` alongside your code
 
