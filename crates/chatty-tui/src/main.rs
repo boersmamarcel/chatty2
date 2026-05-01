@@ -697,6 +697,8 @@ async fn start_mcp_servers() -> Option<McpService> {
         &mut extensions,
         &mut servers,
     );
+    let curated_added =
+        chatty_core::install::ensure_curated_mcp_servers(&mut extensions, &mut servers);
 
     // Merge enabled MCP servers from extensions into the server list
     for ext_server in extensions.mcp_servers() {
@@ -705,8 +707,8 @@ async fn start_mcp_servers() -> Option<McpService> {
         }
     }
 
-    // Persist if we added the default Hive MCP entry
-    if hive_added {
+    // Persist if we added the default Hive MCP entry or any curated entries
+    if hive_added || curated_added {
         if let Err(e) = ext_repo.save(extensions).await {
             tracing::warn!(error = ?e, "Failed to persist default Hive MCP extension");
         }
