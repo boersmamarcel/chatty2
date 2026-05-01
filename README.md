@@ -319,6 +319,11 @@ Start: `npx -y @modelcontextprotocol/server-puppeteer`, then add its URL.
 Fetch and convert web pages to markdown for the agent to read.
 Start: `npx -y @modelcontextprotocol/server-fetch`, then add its URL.
 
+#### Atlassian (Jira + Confluence) — built in
+Search and update Jira issues and Confluence pages via Atlassian's hosted remote MCP server (`https://mcp.atlassian.com/v1/sse`). No local server needs to be started — the entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Atlassian's OAuth flow on first connect; you'll be redirected through your Atlassian SSO and the resulting token is cached locally. Access is scoped to whatever Jira and Confluence sites your Atlassian account can reach. Enterprise tenants may need an admin to approve the MCP app — see [Atlassian's remote MCP docs](https://www.atlassian.com/platform/remote-mcp-server) for the supported scopes and admin controls.
+
 > **Tip:** You can write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
 
 </details>

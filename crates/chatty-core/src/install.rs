@@ -382,6 +382,19 @@ fn build_module_toml(
 /// Well-known extension ID for the built-in Hive MCP server.
 pub const HIVE_MCP_EXT_ID: &str = "mcp-hive";
 
+/// Well-known extension ID for the curated Atlassian (Jira + Confluence) MCP server.
+pub const ATLASSIAN_MCP_EXT_ID: &str = "mcp-atlassian";
+
+/// MCP server name used for the curated Atlassian entry.
+pub const ATLASSIAN_MCP_SERVER_NAME: &str = "atlassian";
+
+/// Atlassian's hosted remote MCP endpoint (covers both Jira and Confluence).
+///
+/// See <https://www.atlassian.com/platform/remote-mcp-server>. Authentication is
+/// handled via OAuth on first connect — the user is redirected through their
+/// Atlassian SSO and the resulting token is cached by `mcp_token_store`.
+pub const ATLASSIAN_MCP_URL: &str = "https://mcp.atlassian.com/v1/sse";
+
 /// Ensure the built-in Hive registry MCP server exists in the extensions model
 /// and the MCP server list. Called on first launch so users can enable it once
 /// the Hive MCP endpoint is deployed (see hive issue #55).
@@ -419,6 +432,56 @@ pub fn ensure_default_hive_mcp(
     });
 
     if !mcp_servers.iter().any(|s| s.name == "hive") {
+        mcp_servers.push(config);
+    }
+
+    true
+}
+
+/// Ensure the curated Atlassian (Jira + Confluence) MCP server entry exists in
+/// the extensions model and the MCP server list. Called on first launch so the
+/// integration is discoverable from Settings → Extensions without manual config
+/// authoring.
+///
+/// The entry is added **disabled** by default. Enabling it triggers Atlassian's
+/// OAuth flow (no API key field is required); see
+/// <https://www.atlassian.com/platform/remote-mcp-server> for the supported
+/// scopes and enterprise caveats.
+///
+/// Returns `true` if a new entry was added (caller should persist both stores).
+pub fn ensure_default_atlassian_mcp(
+    extensions: &mut ExtensionsModel,
+    mcp_servers: &mut Vec<McpServerConfig>,
+) -> bool {
+    if extensions.is_installed(ATLASSIAN_MCP_EXT_ID) {
+        return false;
+    }
+
+    let config = McpServerConfig {
+        name: ATLASSIAN_MCP_SERVER_NAME.to_string(),
+        url: ATLASSIAN_MCP_URL.to_string(),
+        api_key: None,
+        enabled: false,
+        is_module: false,
+    };
+
+    extensions.add(InstalledExtension {
+        id: ATLASSIAN_MCP_EXT_ID.to_string(),
+        display_name: "Atlassian (Jira + Confluence)".to_string(),
+        description: "Search and update Jira issues and Confluence pages via Atlassian's hosted \
+                      remote MCP server. Enabling this triggers Atlassian SSO/OAuth on first \
+                      connect; access is scoped to the Atlassian sites your account can reach."
+            .to_string(),
+        kind: ExtensionKind::McpServer(config.clone()),
+        source: ExtensionSource::Custom,
+        pricing_model: None,
+        enabled: false,
+    });
+
+    if !mcp_servers
+        .iter()
+        .any(|s| s.name == ATLASSIAN_MCP_SERVER_NAME)
+    {
         mcp_servers.push(config);
     }
 
@@ -558,5 +621,55 @@ mod tests {
         let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
         assert!(!added);
         assert_eq!(ext.extensions.len(), 1);
+    }
+
+    #[test]
+    fn ensure_default_atlassian_mcp_adds_on_first_run() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        let added = ensure_default_atlassian_mcp(&mut ext, &mut servers);
+        assert!(added);
+        assert!(ext.is_installed(ATLASSIAN_MCP_EXT_ID));
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, ATLASSIAN_MCP_SERVER_NAME);
+        assert_eq!(servers[0].url, ATLASSIAN_MCP_URL);
+        // Disabled by default so users opt in (and trigger OAuth) explicitly.
+        assert!(!servers[0].enabled);
+        // No API key field — Atlassian uses OAuth, not bearer tokens.
+        assert!(servers[0].api_key.is_none());
+
+        let installed = ext.find(ATLASSIAN_MCP_EXT_ID).unwrap();
+        assert!(!installed.enabled);
+        assert!(matches!(installed.source, ExtensionSource::Custom));
+    }
+
+    #[test]
+    fn ensure_default_atlassian_mcp_idempotent() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        ensure_default_atlassian_mcp(&mut ext, &mut servers);
+        let added = ensure_default_atlassian_mcp(&mut ext, &mut servers);
+        assert!(!added);
+        assert_eq!(ext.extensions.len(), 1);
+        assert_eq!(servers.len(), 1);
+    }
+
+    #[test]
+    fn ensure_default_atlassian_mcp_preserves_existing_server_entry() {
+        // If the user (or another code path) already added an MCP server named
+        // "atlassian", we must not duplicate it in the server list.
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![McpServerConfig {
+            name: ATLASSIAN_MCP_SERVER_NAME.to_string(),
+            url: "https://example.invalid/mcp".to_string(),
+            api_key: None,
+            enabled: true,
+            is_module: false,
+        }];
+        let added = ensure_default_atlassian_mcp(&mut ext, &mut servers);
+        assert!(added);
+        assert_eq!(servers.len(), 1, "should not duplicate existing entry");
+        // Existing entry's URL is preserved (we only push when missing).
+        assert_eq!(servers[0].url, "https://example.invalid/mcp");
     }
 }

@@ -1376,9 +1376,11 @@ fn main() {
 
             // Ensure the built-in Hive MCP server extension exists
             cx.update(|cx| {
-                let added =
+                let hive_added =
                     settings::controllers::extensions_controller::ensure_default_hive_mcp(cx);
-                if added {
+                let atlassian_added =
+                    settings::controllers::extensions_controller::ensure_default_atlassian_mcp(cx);
+                if hive_added || atlassian_added {
                     // Persist the new extension and MCP server entries
                     let ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
                     let mcp_servers = cx

@@ -698,6 +698,9 @@ async fn start_mcp_servers() -> Option<McpService> {
         &mut servers,
     );
 
+    let atlassian_added =
+        chatty_core::install::ensure_default_atlassian_mcp(&mut extensions, &mut servers);
+
     // Merge enabled MCP servers from extensions into the server list
     for ext_server in extensions.mcp_servers() {
         if !servers.iter().any(|s| s.name == ext_server.name) {
@@ -706,12 +709,12 @@ async fn start_mcp_servers() -> Option<McpService> {
     }
 
     // Persist if we added the default Hive MCP entry
-    if hive_added {
+    if hive_added || atlassian_added {
         if let Err(e) = ext_repo.save(extensions).await {
-            tracing::warn!(error = ?e, "Failed to persist default Hive MCP extension");
+            tracing::warn!(error = ?e, "Failed to persist default MCP extensions");
         }
         if let Err(e) = mcp_repo.save_all(servers.clone()).await {
-            tracing::warn!(error = ?e, "Failed to persist MCP servers after adding Hive default");
+            tracing::warn!(error = ?e, "Failed to persist MCP servers after adding defaults");
         }
     }
 
