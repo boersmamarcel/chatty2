@@ -1393,6 +1393,32 @@ fn main() {
                 }
             })
             .ok();
+
+            // Seed the curated catalog of well-known external MCP servers
+            // (Hugging Face, Notion, Atlassian, …). Each entry is added
+            // disabled so users opt in explicitly from the Extensions page.
+            cx.update(|cx| {
+                let mut ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
+                let mut mcp_servers = cx
+                    .global::<settings::models::McpServersModel>()
+                    .servers()
+                    .to_vec();
+                let added = chatty_core::curated_mcp::ensure_curated_mcp_servers(
+                    &mut ext_model,
+                    &mut mcp_servers,
+                );
+                if added {
+                    cx.set_global(ext_model.clone());
+                    cx.global_mut::<settings::models::McpServersModel>()
+                        .replace_all(mcp_servers.clone());
+                    cx.spawn(|_cx: &mut AsyncApp| async move {
+                        let _ = chatty_core::extensions_repository().save(ext_model).await;
+                        let _ = chatty_core::mcp_repository().save_all(mcp_servers).await;
+                    })
+                    .detach();
+                }
+            })
+            .ok();
         })
         .detach();
 
