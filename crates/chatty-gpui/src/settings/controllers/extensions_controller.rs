@@ -36,21 +36,22 @@ pub fn ensure_default_hive_mcp(cx: &mut App) -> bool {
     added
 }
 
-/// Ensure the curated Atlassian (Jira + Confluence) MCP server entry is present
-/// in the Extensions store and in `McpServersModel`. Thin GPUI wrapper around
-/// [`chatty_core::install::ensure_default_atlassian_mcp`].
+/// Seed entries from the curated external MCP catalog (Notion, etc.) into the
+/// Extensions store and McpServersModel. Thin GPUI wrapper around
+/// [`chatty_core::install::ensure_curated_mcp_servers`].
 ///
-/// Returns `true` if a new entry was added (caller should persist).
-pub fn ensure_default_atlassian_mcp(cx: &mut App) -> bool {
+/// New entries are added disabled so the user must opt in. Returns `true` if
+/// at least one new entry was added (caller should persist).
+pub fn ensure_curated_mcp_servers(cx: &mut App) -> bool {
     let mut mcp_servers = cx.global::<McpServersModel>().servers().to_vec();
 
     let extensions = cx.global_mut::<ExtensionsModel>();
-    let added = install::ensure_default_atlassian_mcp(extensions, &mut mcp_servers);
+    let added = install::ensure_curated_mcp_servers(extensions, &mut mcp_servers);
 
     if added {
         let mcp_model = cx.global_mut::<McpServersModel>();
         mcp_model.replace_all(mcp_servers);
-        info!("Added curated Atlassian MCP server extension (disabled)");
+        info!("Seeded curated MCP catalog entries (disabled)");
     }
 
     added
