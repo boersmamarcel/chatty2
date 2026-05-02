@@ -277,6 +277,14 @@ Each installed extension displays a badge showing its type (**Agent**, **MCP**, 
 
 **Switching execution mode** — for WASM agent modules that support both local and cloud execution, a **Switch to Local** / **Switch to Cloud** button appears next to the module. Cloud execution runs the module on a Hive runner without requiring a local WASM binary. Modules marked as cloud-only do not have this toggle.
 
+**Curated MCP servers** — Chatty ships with a small built-in catalog of well-known external MCP servers, pre-seeded as disabled entries in **Settings > Extensions**. Enable any entry to connect; no manual URL configuration needed.
+
+| Server | Auth | What it does |
+|:-------|:-----|:-------------|
+| **Notion** | OAuth (browser-based) | Read and update Notion pages, databases, and search via Notion's hosted MCP server |
+
+To connect Notion: enable the **Notion** entry in **Settings > Extensions**, complete the browser-based OAuth flow, and the integration is ready. Tokens are cached locally and refreshed automatically.
+
 **Add a custom MCP server manually:**
 
 1. Start your MCP server process separately (Chatty connects to it; it does not launch it)
