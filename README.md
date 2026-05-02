@@ -328,6 +328,10 @@ This is a remote server, so there is nothing to start locally. In Chatty, go to 
 - **API key**: a Hugging Face access token (create one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)) — Chatty sends it as `Authorization: Bearer <token>`. A token is recommended for higher rate limits and access to private repos; anonymous access works for public content but is rate-limited.
 
 Once added, enable or disable it independently from any other MCP server using the toggle in the extensions list. **Common failure modes:** invalid/expired token (`401 Unauthorized`), network/firewall blocks to `huggingface.co`, or hitting anonymous rate limits — adding a token resolves the latter.
+#### Atlassian (Jira + Confluence) — built in
+Search and update Jira issues and Confluence pages via Atlassian's hosted remote MCP server (`https://mcp.atlassian.com/v1/sse`). No local server needs to be started — the entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Atlassian's OAuth flow on first connect; you'll be redirected through your Atlassian SSO and the resulting token is cached locally. Access is scoped to whatever Jira and Confluence sites your Atlassian account can reach. Enterprise tenants may need an admin to approve the MCP app — see [Atlassian's remote MCP docs](https://www.atlassian.com/platform/remote-mcp-server) for the supported scopes and admin controls.
 
 > **Tip:** You can write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
 

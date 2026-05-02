@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 pub mod auth;
+pub mod curated_mcp;
 pub mod exporters;
 pub mod factories;
 pub use hive_client as hive;
