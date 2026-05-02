@@ -382,6 +382,114 @@ fn build_module_toml(
 /// Well-known extension ID for the built-in Hive MCP server.
 pub const HIVE_MCP_EXT_ID: &str = "mcp-hive";
 
+// ── Curated external MCP catalog ──────────────────────────────────────────
+//
+// A small, hand-picked catalog of well-known external MCP servers that ship
+// with Chatty. Each entry is seeded into the user's `ExtensionsModel` and
+// `McpServersModel` on first launch as **disabled**, so the user opts in
+// explicitly. Once seeded, the entry participates in the shared MCP
+// enable/disable flow exactly like any other MCP server — including OAuth
+// discovery, persistence, and error reporting.
+//
+// To add a new curated provider, append a `CuratedMcpServer` entry to
+// `CURATED_MCP_SERVERS`. No other changes are required.
+
+/// Static metadata for one curated external MCP server.
+#[derive(Debug, Clone)]
+pub struct CuratedMcpServer {
+    /// Stable extension ID (e.g. `"mcp-notion"`). Used as the
+    /// `InstalledExtension.id` and is the primary idempotency key.
+    pub ext_id: &'static str,
+    /// Short slug used as the `McpServerConfig.name` (e.g. `"notion"`).
+    pub server_name: &'static str,
+    /// Human-readable display name shown in the UI.
+    pub display_name: &'static str,
+    /// Short, user-facing description.
+    pub description: &'static str,
+    /// Remote MCP endpoint URL the client connects to.
+    pub url: &'static str,
+    /// Documentation / setup URL surfaced in the UI for setup guidance.
+    pub docs_url: &'static str,
+    /// Notes about authentication behaviour (e.g. OAuth flow expectations,
+    /// failure modes). Surfaced to the user as setup guidance.
+    pub auth_notes: &'static str,
+}
+
+/// The curated catalog of external MCP servers seeded at first launch.
+///
+/// New entries can be added here without touching the seeding logic; the
+/// entry will appear automatically and participate in the shared
+/// enable/disable flow.
+pub const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[
+    CuratedMcpServer {
+        ext_id: "mcp-notion",
+        server_name: "notion",
+        display_name: "Notion",
+        description:
+            "Read and update Notion pages, databases, and search via Notion's hosted MCP server.",
+        url: "https://mcp.notion.com/sse",
+        docs_url: "https://developers.notion.com/docs/mcp",
+        auth_notes:
+            "Notion's hosted MCP server uses an OAuth flow. On first connect Chatty discovers the \
+             OAuth metadata from the server, opens Notion's authorization page in your browser, \
+             and caches the resulting tokens locally. If the browser flow is cancelled, the network \
+             is unavailable, or your Notion workspace administrator has not granted the integration \
+             access, the connection will report a `Failed` auth status and can be retried from the \
+             extension settings.",
+    },
+];
+
+/// Ensure every entry in [`CURATED_MCP_SERVERS`] is present in the
+/// `ExtensionsModel` and `McpServersModel`.
+///
+/// New entries are added **disabled** so users must opt in explicitly. The
+/// function is idempotent: existing entries (including the user's
+/// enabled/disabled choice and any cached API key) are left untouched, so
+/// it is safe to call on every launch.
+///
+/// Returns `true` if at least one new entry was added (caller should
+/// persist both stores).
+pub fn ensure_curated_mcp_servers(
+    extensions: &mut ExtensionsModel,
+    mcp_servers: &mut Vec<McpServerConfig>,
+) -> bool {
+    let mut added_any = false;
+
+    for entry in CURATED_MCP_SERVERS {
+        if extensions.is_installed(entry.ext_id) {
+            continue;
+        }
+
+        let config = McpServerConfig {
+            name: entry.server_name.to_string(),
+            url: entry.url.to_string(),
+            api_key: None,
+            enabled: false,
+            is_module: false,
+        };
+
+        extensions.add(InstalledExtension {
+            id: entry.ext_id.to_string(),
+            display_name: entry.display_name.to_string(),
+            description: entry.description.to_string(),
+            kind: ExtensionKind::McpServer(config.clone()),
+            source: ExtensionSource::Custom,
+            pricing_model: None,
+            enabled: false,
+        });
+
+        // Mirror into the legacy McpServersModel only if no entry with this
+        // name already exists (preserves any user-managed override).
+        if !mcp_servers.iter().any(|s| s.name == entry.server_name) {
+            mcp_servers.push(config);
+        }
+
+        added_any = true;
+    }
+
+    added_any
+}
+
 /// Ensure the built-in Hive registry MCP server exists in the extensions model
 /// and the MCP server list. Called on first launch so users can enable it once
 /// the Hive MCP endpoint is deployed (see hive issue #55).
@@ -558,5 +666,109 @@ mod tests {
         let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
         assert!(!added);
         assert_eq!(ext.extensions.len(), 1);
+    }
+
+    #[test]
+    fn curated_catalog_includes_notion() {
+        let notion = CURATED_MCP_SERVERS
+            .iter()
+            .find(|c| c.ext_id == "mcp-notion")
+            .expect("Notion entry must exist in the curated catalog");
+        assert_eq!(notion.server_name, "notion");
+        assert_eq!(notion.display_name, "Notion");
+        assert_eq!(notion.url, "https://mcp.notion.com/sse");
+        assert!(!notion.docs_url.is_empty());
+        assert!(notion.auth_notes.to_lowercase().contains("oauth"));
+    }
+
+    #[test]
+    fn curated_catalog_entries_are_unique() {
+        // Both ext_id and server_name must be unique across the catalog,
+        // otherwise seeding would create duplicates or silently skip entries.
+        let mut ext_ids = std::collections::HashSet::new();
+        let mut server_names = std::collections::HashSet::new();
+        for entry in CURATED_MCP_SERVERS {
+            assert!(
+                ext_ids.insert(entry.ext_id),
+                "duplicate ext_id: {}",
+                entry.ext_id
+            );
+            assert!(
+                server_names.insert(entry.server_name),
+                "duplicate server_name: {}",
+                entry.server_name
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_curated_mcp_servers_seeds_disabled() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        let added = ensure_curated_mcp_servers(&mut ext, &mut servers);
+        assert!(added);
+
+        let notion_ext = ext
+            .find("mcp-notion")
+            .expect("Notion extension should be installed");
+        assert!(
+            !notion_ext.enabled,
+            "curated entries must be seeded as disabled"
+        );
+
+        let notion_server = servers
+            .iter()
+            .find(|s| s.name == "notion")
+            .expect("Notion MCP server should be present");
+        assert!(!notion_server.enabled);
+        assert_eq!(notion_server.url, "https://mcp.notion.com/sse");
+        assert!(notion_server.api_key.is_none());
+    }
+
+    #[test]
+    fn ensure_curated_mcp_servers_idempotent() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        ensure_curated_mcp_servers(&mut ext, &mut servers);
+        let added = ensure_curated_mcp_servers(&mut ext, &mut servers);
+        assert!(!added, "second call must not add duplicates");
+        assert_eq!(ext.extensions.len(), CURATED_MCP_SERVERS.len());
+        assert_eq!(servers.len(), CURATED_MCP_SERVERS.len());
+    }
+
+    #[test]
+    fn ensure_curated_mcp_servers_preserves_user_state() {
+        let mut ext = ExtensionsModel::default();
+        let mut servers = vec![];
+        ensure_curated_mcp_servers(&mut ext, &mut servers);
+
+        // Simulate the user enabling Notion and providing an API key.
+        if let Some(installed) = ext.find_mut("mcp-notion") {
+            installed.enabled = true;
+            if let ExtensionKind::McpServer(ref mut cfg) = installed.kind {
+                cfg.enabled = true;
+                cfg.api_key = Some("user-token".to_string());
+            }
+        }
+        if let Some(server) = servers.iter_mut().find(|s| s.name == "notion") {
+            server.enabled = true;
+            server.api_key = Some("user-token".to_string());
+        }
+
+        // Subsequent seeding must not clobber the user's choices.
+        let added = ensure_curated_mcp_servers(&mut ext, &mut servers);
+        assert!(!added);
+
+        let notion_ext = ext.find("mcp-notion").unwrap();
+        assert!(notion_ext.enabled, "user enabled state must be preserved");
+        if let ExtensionKind::McpServer(ref cfg) = notion_ext.kind {
+            assert_eq!(cfg.api_key.as_deref(), Some("user-token"));
+        } else {
+            panic!("expected McpServer kind");
+        }
+
+        let notion_server = servers.iter().find(|s| s.name == "notion").unwrap();
+        assert!(notion_server.enabled);
+        assert_eq!(notion_server.api_key.as_deref(), Some("user-token"));
     }
 }

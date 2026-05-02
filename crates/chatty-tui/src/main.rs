@@ -697,6 +697,8 @@ async fn start_mcp_servers() -> Option<McpService> {
         &mut extensions,
         &mut servers,
     );
+    let curated_added =
+        chatty_core::install::ensure_curated_mcp_servers(&mut extensions, &mut servers);
 
     // Seed the curated catalog of well-known external MCP servers
     // (Hugging Face, Notion, Atlassian, …). Entries default to disabled.

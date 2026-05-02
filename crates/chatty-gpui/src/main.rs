@@ -1374,11 +1374,15 @@ fn main() {
             })
             .ok();
 
-            // Ensure the built-in Hive MCP server extension exists
+            // Ensure the built-in Hive MCP server extension exists, and seed
+            // any curated external MCP catalog entries (e.g. Notion) that
+            // haven't been added yet.
             cx.update(|cx| {
-                let added =
+                let hive_added =
                     settings::controllers::extensions_controller::ensure_default_hive_mcp(cx);
-                if added {
+                let curated_added =
+                    settings::controllers::extensions_controller::ensure_curated_mcp_servers(cx);
+                if hive_added || curated_added {
                     // Persist the new extension and MCP server entries
                     let ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
                     let mcp_servers = cx
