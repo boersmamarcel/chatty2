@@ -111,11 +111,9 @@ const CURATED_CATALOG: &[CuratedMcpEntry] = &[
         display_name: "Hugging Face",
         url: "https://hf.co/mcp",
         transport: CuratedMcpTransport::StreamableHttp,
-        description:
-            "Access Hugging Face Hub models, datasets, and Spaces via the official MCP server.",
+        description: "Access Hugging Face Hub models, datasets, and Spaces via the official MCP server.",
         docs_url: "https://huggingface.co/docs/hub/agents-mcp",
-        auth_notes:
-            "Optional. Provide a Hugging Face access token as the API key to access private \
+        auth_notes: "Optional. Provide a Hugging Face access token as the API key to access private \
              repositories or higher rate limits.",
         default_enabled: false,
     },
@@ -142,10 +140,45 @@ const CURATED_CATALOG: &[CuratedMcpEntry] = &[
         description: "Search issues, comment on tickets, and read Confluence pages via \
              Atlassian's official Remote MCP server.",
         docs_url: "https://www.atlassian.com/platform/remote-mcp-server",
-        auth_notes:
-            "OAuth — Atlassian Cloud sign-in is performed in the browser on first connect. \
+        auth_notes: "OAuth — Atlassian Cloud sign-in is performed in the browser on first connect. \
              The hosted endpoint serves Server-Sent Events (SSE); pair with an SSE-capable \
              transport bridge if the built-in streamable-HTTP client cannot reach it directly.",
+        default_enabled: false,
+    },
+    CuratedMcpEntry {
+        id: "mcp-google-calendar",
+        slug: "google-calendar",
+        display_name: "Google Calendar",
+        url: "https://calendarmcp.googleapis.com/mcp/v1",
+        transport: CuratedMcpTransport::StreamableHttp,
+        description: "Read and manage Google Calendar events via Google's official MCP server.",
+        docs_url: "https://developers.google.com/calendar",
+        auth_notes: "OAuth — sign in with your Google account when prompted. The server uses Google \
+             OAuth 2.0; ensure the Calendar API scope is granted.",
+        default_enabled: false,
+    },
+    CuratedMcpEntry {
+        id: "mcp-gmail",
+        slug: "gmail",
+        display_name: "Gmail",
+        url: "https://gmailmcp.googleapis.com/mcp/v1",
+        transport: CuratedMcpTransport::StreamableHttp,
+        description: "Read, search, and send Gmail messages via Google's official MCP server.",
+        docs_url: "https://developers.google.com/gmail",
+        auth_notes: "OAuth — sign in with your Google account when prompted. The server uses Google \
+             OAuth 2.0; ensure the Gmail API scope is granted.",
+        default_enabled: false,
+    },
+    CuratedMcpEntry {
+        id: "mcp-google-drive",
+        slug: "google-drive",
+        display_name: "Google Drive",
+        url: "https://drivemcp.googleapis.com/mcp/v1",
+        transport: CuratedMcpTransport::StreamableHttp,
+        description: "Browse, search, and manage files in Google Drive via Google's official MCP server.",
+        docs_url: "https://developers.google.com/drive",
+        auth_notes: "OAuth — sign in with your Google account when prompted. The server uses Google \
+             OAuth 2.0; ensure the Drive API scope is granted.",
         default_enabled: false,
     },
 ];
@@ -203,6 +236,9 @@ mod tests {
         assert!(ids.contains(&"mcp-huggingface"));
         assert!(ids.contains(&"mcp-notion"));
         assert!(ids.contains(&"mcp-atlassian"));
+        assert!(ids.contains(&"mcp-google-calendar"));
+        assert!(ids.contains(&"mcp-gmail"));
+        assert!(ids.contains(&"mcp-google-drive"));
     }
 
     #[test]
