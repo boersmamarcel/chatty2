@@ -319,6 +319,15 @@ Start: `npx -y @modelcontextprotocol/server-puppeteer`, then add its URL.
 Fetch and convert web pages to markdown for the agent to read.
 Start: `npx -y @modelcontextprotocol/server-fetch`, then add its URL.
 
+#### Hugging Face (`https://huggingface.co/mcp`)
+Hosted MCP server from Hugging Face — search and explore models, datasets, Spaces, papers, documentation, and selected community tools on the [Hugging Face Hub](https://huggingface.co). See the [official docs](https://huggingface.co/docs/hub/agents-mcp).
+
+This is a remote server, so there is nothing to start locally. In Chatty, go to **Settings > Extensions → Add Custom Extension → Add MCP Server** and enter:
+
+- **URL**: `https://huggingface.co/mcp`
+- **API key**: a Hugging Face access token (create one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)) — Chatty sends it as `Authorization: Bearer <token>`. A token is recommended for higher rate limits and access to private repos; anonymous access works for public content but is rate-limited.
+
+Once added, enable or disable it independently from any other MCP server using the toggle in the extensions list. **Common failure modes:** invalid/expired token (`401 Unauthorized`), network/firewall blocks to `huggingface.co`, or hitting anonymous rate limits — adding a token resolves the latter.
 #### Atlassian (Jira + Confluence) — built in
 Search and update Jira issues and Confluence pages via Atlassian's hosted remote MCP server (`https://mcp.atlassian.com/v1/sse`). No local server needs to be started — the entry is preconfigured in **Settings > Extensions** but **disabled by default**.
 
