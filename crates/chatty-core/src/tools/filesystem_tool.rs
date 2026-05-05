@@ -21,7 +21,11 @@ pub struct ReadFileOutput {
     pub path: String,
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
+    pub returned_start_line: Option<usize>,
+    pub returned_end_line: Option<usize>,
     pub total_lines: usize,
+    pub truncated: bool,
+    pub next_start_line: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -45,15 +49,18 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description: "Read the contents of a text file within the workspace. \
-                         Returns the file contents as a string. \
-                         Files must be within the workspace directory and under 10MB. \
-                         Optionally provide start_line and end_line (1-based, inclusive) to read \
-                         only part of a file, which is useful for large files. \
-                         For binary files (images, PDFs), use read_binary instead.\n\
-                         \n\
-                         Examples:\n\
-                         - Read source code: {\"path\": \"src/main.rs\"}\n\
-                         - Read config: {\"path\": \"config.json\"}\n\
+                          Returns the file contents as a string. \
+                          Files must be within the workspace directory and under 10MB. \
+                          Optionally provide start_line and end_line (1-based, inclusive) to read \
+                          only part of a file, which is useful for large files. Large reads are \
+                          automatically chunked to at most 200 lines per call; when that happens, \
+                          the output includes returned_start_line / returned_end_line plus \
+                          next_start_line so you can continue with another ranged read. \
+                          For binary files (images, PDFs), use read_binary instead.\n\
+                          \n\
+                          Examples:\n\
+                          - Read source code: {\"path\": \"src/main.rs\"}\n\
+                          - Read config: {\"path\": \"config.json\"}\n\
                          - Read nested file: {\"path\": \"src/utils/helpers.rs\"}\n\
                          - Read a range: {\"path\": \"src/main.rs\", \"start_line\": 40, \"end_line\": 80}"
                 .to_string(),
@@ -81,16 +88,20 @@ impl Tool for ReadFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let (content, total_lines) = self
+        let result = self
             .service
             .read_file_range(&args.path, args.start_line, args.end_line)
             .await?;
         Ok(ReadFileOutput {
-            content,
+            content: result.content,
             path: args.path,
             start_line: args.start_line,
             end_line: args.end_line,
-            total_lines,
+            returned_start_line: result.returned_start_line,
+            returned_end_line: result.returned_end_line,
+            total_lines: result.total_lines,
+            truncated: result.truncated,
+            next_start_line: result.next_start_line,
         })
     }
 }

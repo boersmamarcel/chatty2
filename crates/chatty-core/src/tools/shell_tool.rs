@@ -87,7 +87,9 @@ impl Tool for ShellExecuteTool {
                          \
                          For multi-line Python or shell logic, prefer writing a script with a here-doc or \
                          temp file and then running it, instead of very large `python -c '...'` or \
-                         `bash -c '...'` one-liners. \
+                         `bash -c '...'` one-liners. For verbose commands, prefer quiet flags and \
+                         targeted output (`curl -fsSL`, `head`, `sed -n`, etc.) rather than dumping \
+                         large logs into the session. \
                          \
                          Use this when you need to:\n\
                          - Build up environment state across multiple commands\n\

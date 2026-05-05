@@ -65,7 +65,7 @@ impl ListToolsTool {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "read_file".to_string(),
-                    description: "Read the contents of a text file within the workspace. Supports optional start_line and end_line for range-based reads, which are useful for larger files."
+                    description: "Read the contents of a text file within the workspace. Supports optional start_line and end_line for range-based reads; large reads are auto-chunked and return next_start_line so you can continue incrementally."
                         .to_string(),
                     source: "native".to_string(),
                 },
@@ -430,8 +430,8 @@ impl Tool for ListToolsTool {
         }
 
         let note = match (has_shell, has_mcp) {
-            (true, true) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. For multi-line Python or shell logic, prefer writing a script via here-doc or a temp file and then running it, instead of large `python -c '...'` one-liners. MCP tools from connected servers are also listed above — use them by name.".to_string(),
-            (true, false) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. For multi-line Python or shell logic, prefer writing a script via here-doc or a temp file and then running it, instead of large `python -c '...'` one-liners.".to_string(),
+            (true, true) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. For multi-line Python or shell logic, prefer writing a script via here-doc or a temp file and then running it, instead of large `python -c '...'` one-liners. For verbose commands, prefer quiet flags and targeted slices (for example `curl -fsSL`, `head`, or `sed -n`) so you do not flood the context window. MCP tools from connected servers are also listed above — use them by name.".to_string(),
+            (true, false) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. For multi-line Python or shell logic, prefer writing a script via here-doc or a temp file and then running it, instead of large `python -c '...'` one-liners. For verbose commands, prefer quiet flags and targeted slices (for example `curl -fsSL`, `head`, or `sed -n`) so you do not flood the context window.".to_string(),
             (false, true) => "These are the available tools. MCP tools from connected servers are also listed — use them by name.".to_string(),
             (false, false) => "These are the native tools available.".to_string(),
         };

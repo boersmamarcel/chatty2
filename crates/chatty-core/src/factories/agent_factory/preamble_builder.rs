@@ -39,14 +39,14 @@ pub(super) fn build_preamble(
     if tools.shell {
         tool_sections.push(
             "- **shell_execute / shell_cd / shell_set_env / shell_status** \
-             (persistent session; prefer over asking the user to run commands; for multi-line Python or shell logic, prefer writing a script via here-doc / temp file and running it instead of `python -c '...'` one-liners)"
+             (persistent session; prefer over asking the user to run commands; for multi-line Python or shell logic, prefer writing a script via here-doc / temp file and running it instead of `python -c '...'` one-liners; for verbose commands, prefer quiet flags and targeted output like `curl -fsSL`, `head`, or `sed -n`)"
                 .to_string(),
         );
     }
     if tools.fs_read {
         tool_sections.push(
             "- **read_file / read_binary / list_directory / glob_search** \
-             (for large files, prefer `read_file` with `start_line` / `end_line` instead of reading the whole file)"
+             (`read_file` supports `start_line` / `end_line`; large reads are auto-chunked and return `next_start_line`, so continue incrementally instead of rereading the whole file)"
                 .to_string(),
         );
     }

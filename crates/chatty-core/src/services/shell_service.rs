@@ -145,6 +145,10 @@ impl ShellSession {
         status.code().unwrap_or(-1)
     }
 
+    fn decode_output_line(line: &[u8]) -> String {
+        String::from_utf8_lossy(line).into_owned()
+    }
+
     /// Check if the current session process is running inside a sandbox
     pub async fn is_sandboxed(&self) -> bool {
         let process = self.process.lock().await;
@@ -529,10 +533,10 @@ impl ShellSession {
 
         let read_result = tokio::time::timeout(timeout_duration, async {
             loop {
-                let mut line = String::new();
+                let mut line = Vec::new();
                 let bytes_read = proc
                     .reader
-                    .read_line(&mut line)
+                    .read_until(b'\n', &mut line)
                     .await
                     .map_err(|e| anyhow!("Failed to read from shell stdout: {}", e))?;
 
@@ -549,6 +553,8 @@ impl ShellSession {
                         )),
                     };
                 }
+
+                let line = Self::decode_output_line(&line);
 
                 if line.starts_with(&marker_prefix) {
                     // Parse exit code from marker line
@@ -963,6 +969,12 @@ mod tests {
         assert!(output.stdout.contains("line1"));
         assert!(output.stdout.contains("line2"));
         assert!(output.stdout.contains("line3"));
+    }
+
+    #[test]
+    fn test_decode_output_line_lossy_decodes_non_utf8() {
+        let decoded = ShellSession::decode_output_line(b"\xff\xfeabc\n");
+        assert!(decoded.contains("abc"));
     }
 
     #[test]
