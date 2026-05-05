@@ -277,6 +277,16 @@ Each installed extension displays a badge showing its type (**Agent**, **MCP**, 
 
 **Switching execution mode** — for WASM agent modules that support both local and cloud execution, a **Switch to Local** / **Switch to Cloud** button appears next to the module. Cloud execution runs the module on a Hive runner without requiring a local WASM binary. Modules marked as cloud-only do not have this toggle.
 
+**Built-in external integrations** — Chatty ships a curated catalog of well-known external MCP servers pre-loaded into the **Installed** section. All entries are disabled by default; click **Enable** to connect.
+
+| Integration | What it provides | Auth |
+|:------------|:-----------------|:-----|
+| **Hugging Face** | Models, datasets, and Spaces via the Hub MCP server | Optional access token for private repos / higher rate limits |
+| **Notion** | Search and edit pages, databases, and comments | OAuth — sign in with your Notion workspace |
+| **Atlassian** | Search Jira issues and Confluence pages | OAuth — Atlassian Cloud sign-in in the browser |
+
+> **Note:** Notion and Atlassian use Server-Sent Events (SSE). The built-in MCP client speaks streamable HTTP; connecting to those endpoints may require an SSE-capable transport bridge until native SSE support is added.
+
 **Add a custom MCP server manually:**
 
 1. Start your MCP server process separately (Chatty connects to it; it does not launch it)
