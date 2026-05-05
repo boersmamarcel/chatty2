@@ -17,6 +17,7 @@ pub enum ProviderType {
     /// Accepts legacy JSON values from removed provider variants for backward compatibility.
     #[serde(
         alias = "open_ai",
+        alias = "open_a_i",
         alias = "anthropic",
         alias = "gemini",
         alias = "mistral"
@@ -298,6 +299,9 @@ mod tests {
         // Old JSON values for removed providers should deserialize as OpenRouter
         let openai: ProviderType = serde_json::from_str("\"open_ai\"").unwrap();
         assert_eq!(openai, ProviderType::OpenRouter);
+
+        let legacy_openai: ProviderType = serde_json::from_str("\"open_a_i\"").unwrap();
+        assert_eq!(legacy_openai, ProviderType::OpenRouter);
 
         let anthropic: ProviderType = serde_json::from_str("\"anthropic\"").unwrap();
         assert_eq!(anthropic, ProviderType::OpenRouter);

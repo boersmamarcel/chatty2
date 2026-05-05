@@ -47,6 +47,44 @@ pub struct FileSystemService {
 }
 
 impl FileSystemService {
+    fn slice_lines(
+        content: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<(String, usize)> {
+        let start_line = start_line.unwrap_or(1);
+        if start_line == 0 {
+            return Err(anyhow!("start_line must be 1 or greater"));
+        }
+
+        if let Some(end_line) = end_line
+            && end_line < start_line
+        {
+            return Err(anyhow!(
+                "end_line must be greater than or equal to start_line"
+            ));
+        }
+
+        let lines: Vec<&str> = content.split_inclusive('\n').collect();
+        let total_lines = lines.len();
+
+        if total_lines == 0 {
+            return Ok((String::new(), 0));
+        }
+
+        if start_line > total_lines {
+            return Err(anyhow!(
+                "start_line {} is beyond the end of the file ({} lines)",
+                start_line,
+                total_lines
+            ));
+        }
+
+        let end_line = end_line.unwrap_or(total_lines).min(total_lines);
+        let selected = lines[start_line - 1..end_line].concat();
+        Ok((selected, total_lines))
+    }
+
     /// Create a new FileSystemService with the given workspace root.
     pub async fn new(workspace_root: &str) -> Result<Self> {
         let validator = PathValidator::new(workspace_root).await?;
@@ -79,6 +117,19 @@ impl FileSystemService {
                 e
             )
         })
+    }
+
+    /// Read a text file and optionally return only a line range.
+    ///
+    /// Line numbers are 1-based and inclusive.
+    pub async fn read_file_range(
+        &self,
+        path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<(String, usize)> {
+        let content = self.read_file(path).await?;
+        Self::slice_lines(&content, start_line, end_line)
     }
 
     /// Read a binary file and return its contents as base64-encoded data.
@@ -381,6 +432,38 @@ mod tests {
             .unwrap();
         let content = service.read_file("subdir/test.txt").await.unwrap();
         assert_eq!(content, "nested content");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("test.txt");
+        fs::write(&test_file, "one\ntwo\nthree\nfour\n").unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let (content, total_lines) = service
+            .read_file_range("test.txt", Some(2), Some(3))
+            .await
+            .unwrap();
+
+        assert_eq!(content, "two\nthree\n");
+        assert_eq!(total_lines, 4);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_rejects_invalid_bounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("test.txt");
+        fs::write(&test_file, "one\ntwo\n").unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service.read_file_range("test.txt", Some(3), Some(2)).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

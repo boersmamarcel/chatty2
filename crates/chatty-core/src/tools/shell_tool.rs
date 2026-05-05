@@ -85,6 +85,10 @@ impl Tool for ShellExecuteTool {
                          access them via standard environment variable lookups (e.g. os.environ in Python). \
                          Use shell_status to see which secret variables are available (values are masked). \
                          \
+                         For multi-line Python or shell logic, prefer writing a script with a here-doc or \
+                         temp file and then running it, instead of very large `python -c '...'` or \
+                         `bash -c '...'` one-liners. \
+                         \
                          Use this when you need to:\n\
                          - Build up environment state across multiple commands\n\
                          - Run commands that depend on previous shell state\n\

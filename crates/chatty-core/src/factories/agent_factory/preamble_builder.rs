@@ -39,18 +39,21 @@ pub(super) fn build_preamble(
     if tools.shell {
         tool_sections.push(
             "- **shell_execute / shell_cd / shell_set_env / shell_status** \
-             (persistent session; prefer over asking the user to run commands)"
+             (persistent session; prefer over asking the user to run commands; for multi-line Python or shell logic, prefer writing a script via here-doc / temp file and running it instead of `python -c '...'` one-liners)"
                 .to_string(),
         );
     }
     if tools.fs_read {
-        tool_sections
-            .push("- **read_file / read_binary / list_directory / glob_search**".to_string());
+        tool_sections.push(
+            "- **read_file / read_binary / list_directory / glob_search** \
+             (for large files, prefer `read_file` with `start_line` / `end_line` instead of reading the whole file)"
+                .to_string(),
+        );
     }
     if tools.fs_write {
         tool_sections.push(
             "- **write_file / apply_diff / create_directory / delete_file / move_file** \
-             (use apply_diff for targeted edits)"
+             (use apply_diff for targeted edits; avoid huge full-file rewrites in tool arguments when a targeted diff or in-place shell script will do)"
                 .to_string(),
         );
     }
@@ -159,6 +162,9 @@ pub(super) fn build_preamble(
              Use tools proactively instead of asking the user to do things manually. \
              When a task requires multiple steps, execute them yourself by chaining \
              tool calls rather than listing instructions for the user. \
+             For large file edits, prefer targeted diffs or shell scripts that edit \
+             files in place instead of emitting very large inline file contents in a \
+             tool call. \
              Each tool's full schema is provided separately; here is a quick reference:\n\n{}",
             tool_sections.join("\n")
         )

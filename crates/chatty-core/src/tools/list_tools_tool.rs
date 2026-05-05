@@ -65,7 +65,7 @@ impl ListToolsTool {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "read_file".to_string(),
-                    description: "Read the contents of a text file within the workspace"
+                    description: "Read the contents of a text file within the workspace. Supports optional start_line and end_line for range-based reads, which are useful for larger files."
                         .to_string(),
                     source: "native".to_string(),
                 },
@@ -93,7 +93,7 @@ impl ListToolsTool {
             native_tools.extend(vec![
                 ToolInfo {
                     name: "write_file".to_string(),
-                    description: "Create or overwrite a file within the workspace".to_string(),
+                    description: "Create or overwrite a file within the workspace. Best for new files or small rewrites; for large existing files, prefer apply_diff or an in-place shell edit to avoid very large tool payloads.".to_string(),
                     source: "native".to_string(),
                 },
                 ToolInfo {
@@ -113,7 +113,7 @@ impl ListToolsTool {
                 },
                 ToolInfo {
                     name: "apply_diff".to_string(),
-                    description: "Apply a targeted edit to a file by replacing specific content"
+                    description: "Apply a targeted edit to a file by replacing specific content. Prefer this over write_file when changing only part of a larger file."
                         .to_string(),
                     source: "native".to_string(),
                 },
@@ -430,8 +430,8 @@ impl Tool for ListToolsTool {
         }
 
         let note = match (has_shell, has_mcp) {
-            (true, true) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. MCP tools from connected servers are also listed above — use them by name.".to_string(),
-            (true, false) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations.".to_string(),
+            (true, true) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. For multi-line Python or shell logic, prefer writing a script via here-doc or a temp file and then running it, instead of large `python -c '...'` one-liners. MCP tools from connected servers are also listed above — use them by name.".to_string(),
+            (true, false) => "IMPORTANT: The 'shell_execute' tool listed above can execute ANY shell/terminal command (ls, pwd, cd, grep, find, cat, curl, git, npm, cargo, etc.) in a persistent session. Use it for all command-line operations. For multi-line Python or shell logic, prefer writing a script via here-doc or a temp file and then running it, instead of large `python -c '...'` one-liners.".to_string(),
             (false, true) => "These are the available tools. MCP tools from connected servers are also listed — use them by name.".to_string(),
             (false, false) => "These are the native tools available.".to_string(),
         };

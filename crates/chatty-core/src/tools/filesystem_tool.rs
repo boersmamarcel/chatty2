@@ -11,12 +11,17 @@ use crate::tools::ToolError;
 #[derive(Deserialize, Serialize)]
 pub struct ReadFileArgs {
     pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ReadFileOutput {
     pub content: String,
     pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub total_lines: usize,
 }
 
 #[derive(Clone)]
@@ -42,12 +47,15 @@ impl Tool for ReadFileTool {
             description: "Read the contents of a text file within the workspace. \
                          Returns the file contents as a string. \
                          Files must be within the workspace directory and under 10MB. \
+                         Optionally provide start_line and end_line (1-based, inclusive) to read \
+                         only part of a file, which is useful for large files. \
                          For binary files (images, PDFs), use read_binary instead.\n\
                          \n\
                          Examples:\n\
                          - Read source code: {\"path\": \"src/main.rs\"}\n\
                          - Read config: {\"path\": \"config.json\"}\n\
-                         - Read nested file: {\"path\": \"src/utils/helpers.rs\"}"
+                         - Read nested file: {\"path\": \"src/utils/helpers.rs\"}\n\
+                         - Read a range: {\"path\": \"src/main.rs\", \"start_line\": 40, \"end_line\": 80}"
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -55,6 +63,16 @@ impl Tool for ReadFileTool {
                     "path": {
                         "type": "string",
                         "description": "Path to the file to read, relative to the workspace root or absolute within workspace"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based starting line number"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based ending line number, inclusive"
                     }
                 },
                 "required": ["path"]
@@ -63,10 +81,16 @@ impl Tool for ReadFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let content = self.service.read_file(&args.path).await?;
+        let (content, total_lines) = self
+            .service
+            .read_file_range(&args.path, args.start_line, args.end_line)
+            .await?;
         Ok(ReadFileOutput {
             content,
             path: args.path,
+            start_line: args.start_line,
+            end_line: args.end_line,
+            total_lines,
         })
     }
 }
