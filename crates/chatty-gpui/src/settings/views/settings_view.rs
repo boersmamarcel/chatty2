@@ -20,6 +20,22 @@ use gpui_component::{
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
 
+#[cfg(not(target_os = "macos"))]
+fn cli_group() -> SettingGroup {
+    SettingGroup::new()
+        .title("CLI Tool")
+        .description("Install the chatty-tui command-line interface so you can use Chatty from your terminal.")
+        .items(vec![SettingItem::render(|_options, _window, _cx| {
+            Button::new("install-cli")
+                .label("Install CLI\u{2026}")
+                .outline()
+                .on_click(|_event, _window, cx| {
+                    crate::cli_installer::install_cli(cx);
+                })
+                .into_any_element()
+        })])
+}
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Use cached theme options instead of recomputing on every render
@@ -131,6 +147,8 @@ impl Render for SettingsView {
                             )
                             .description("Adjust the default font size."),
                         ]),
+                        #[cfg(not(target_os = "macos"))]
+                        cli_group(),
                     ]),
                 SettingPage::new("Models")
                     .description("Configure AI models and their parameters")

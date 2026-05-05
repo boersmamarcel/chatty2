@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 mod assets;
 mod auto_updater;
 mod chatty;
-mod cli_installer;
+pub mod cli_installer;
 pub mod global_entity;
 mod settings;
 
@@ -301,6 +301,7 @@ fn register_actions(cx: &mut App) {
     });
 }
 
+#[cfg(target_os = "macos")]
 fn set_app_menus(cx: &mut App) {
     cx.set_menus(vec![Menu {
         name: "Chatty".into(),
@@ -1429,7 +1430,8 @@ fn main() {
         // register actions
         register_actions(cx);
 
-        // Set up native macOS menu bar
+        // Set up native macOS menu bar (macOS only)
+        #[cfg(target_os = "macos")]
         set_app_menus(cx);
 
         // Get platform-specific window options for main window
