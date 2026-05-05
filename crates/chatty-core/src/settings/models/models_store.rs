@@ -41,6 +41,12 @@ pub struct ModelConfig {
     /// Max context window in tokens (used for the footer fill indicator)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_window: Option<i32>,
+    /// Whether this model supports thinking/reasoning mode (detected from Ollama capabilities)
+    #[serde(default)]
+    pub supports_thinking: bool,
+    /// Whether thinking mode is enabled for this model (user-controlled toggle)
+    #[serde(default)]
+    pub enable_thinking: bool,
 }
 
 fn default_temperature() -> f32 {
@@ -74,6 +80,8 @@ impl ModelConfig {
             supports_pdf: false,
             supports_temperature: true,
             max_context_window: None,
+            supports_thinking: false,
+            enable_thinking: false,
         }
     }
 }

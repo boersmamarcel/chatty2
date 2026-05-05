@@ -182,26 +182,35 @@ fn detect_incomplete_code_block(text: &str) -> Option<(usize, Option<String>, St
 
 /// Parse content to extract thinking blocks and regular text segments.
 ///
-/// Supports `<think>...</think>`, `<thinking>...</thinking>`, and
-/// `<thought>...</thought>` patterns. Unclosed tags (common during streaming)
-/// are treated as incomplete thinking blocks.
+/// Supports `<think>...</think>`, `<thinking>...</thinking>`, `<thought>...</thought>`,
+/// and the Gemma4 `<|channel>thought\n...<|channel>model\n` format.
+/// Unclosed tags (common during streaming) are treated as incomplete thinking blocks.
 pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
     let mut segments = Vec::new();
     let mut remaining = content;
 
     while !remaining.is_empty() {
-        // Find the earliest opening tag among <thinking>, <thought>, <think>
+        // Find the earliest opening tag among <thinking>, <thought>, <think>, and Gemma4 <|channel>thought
         let find_thinking = remaining.find("<thinking>").map(|i| (i, 10usize));
         let find_thought = remaining.find("<thought>").map(|i| (i, 9usize));
         // <think> must not be the start of <thinking> (different prefix check isn't needed
         // since <thinking> starts with <think but is longer; find("<think>") won't match
         // inside "<thinking>" because the 8th char is 'i' not '>')
         let find_think = remaining.find("<think>").map(|i| (i, 7usize));
+        // Gemma4 thinking channel: <|channel>thought\n
+        let find_channel_thought = remaining
+            .find("<|channel>thought\n")
+            .map(|i| (i, "<|channel>thought\n".len()));
 
-        let result = [find_thinking, find_thought, find_think]
-            .into_iter()
-            .flatten()
-            .min_by_key(|(idx, _)| *idx);
+        let result = [
+            find_thinking,
+            find_thought,
+            find_think,
+            find_channel_thought,
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(idx, _)| *idx);
 
         let (start_idx, tag_len) = if let Some(r) = result {
             r
@@ -222,13 +231,15 @@ pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
             }
         }
 
-        // Find the closing tag - support </think>, </thinking>, and </thought>
+        // Find the closing tag - support </think>, </thinking>, </thought>, and <|channel> (Gemma4)
         let after_open = &remaining[start_idx + tag_len..];
         let end_tag_and_len = after_open
             .find("</think>")
             .map(|idx| (idx, 8)) // "</think>" is 8 chars
             .or_else(|| after_open.find("</thinking>").map(|idx| (idx, 11)))
-            .or_else(|| after_open.find("</thought>").map(|idx| (idx, 10)));
+            .or_else(|| after_open.find("</thought>").map(|idx| (idx, 10)))
+            // Gemma4: thinking ends when another <|channel> token starts
+            .or_else(|| after_open.find("<|channel>").map(|idx| (idx, 0)));
 
         if let Some((end_idx, close_tag_len)) = end_tag_and_len {
             let thinking_content = after_open[..end_idx].trim().to_string();

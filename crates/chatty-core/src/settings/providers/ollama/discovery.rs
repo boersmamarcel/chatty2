@@ -26,14 +26,14 @@ struct OllamaShowResponse {
 /// * `base_url` - The base URL of the Ollama API (e.g., "http://localhost:11434")
 ///
 /// # Returns
-/// A vector of tuples containing (model_identifier, display_name, supports_vision)
+/// A vector of tuples containing (model_identifier, display_name, supports_vision, supports_thinking)
 ///
 /// # Errors
 /// Returns an error if:
 /// - The HTTP request fails
 /// - The API returns a non-success status
 /// - The response cannot be deserialized
-pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, String, bool)>> {
+pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, String, bool, bool)>> {
     // Build the API endpoint URL
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
 
@@ -76,17 +76,22 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
             format!("{} {}", base_name, tag)
         };
 
-        // Query /api/show to check for vision capability
-        let supports_vision = check_model_vision(&client, base_url, &identifier).await;
+        // Query /api/show to check for vision and thinking capabilities
+        let (supports_vision, supports_thinking) =
+            check_model_capabilities(&client, base_url, &identifier).await;
 
-        models.push((identifier, display_name, supports_vision));
+        models.push((identifier, display_name, supports_vision, supports_thinking));
     }
 
     Ok(models)
 }
 
-/// Check if an Ollama model supports vision by querying /api/show
-async fn check_model_vision(client: &reqwest::Client, base_url: &str, model_name: &str) -> bool {
+/// Check Ollama model capabilities (vision and thinking) by querying /api/show
+async fn check_model_capabilities(
+    client: &reqwest::Client,
+    base_url: &str,
+    model_name: &str,
+) -> (bool, bool) {
     let url = format!("{}/api/show", base_url.trim_end_matches('/'));
 
     let response = client
@@ -99,23 +104,27 @@ async fn check_model_vision(client: &reqwest::Client, base_url: &str, model_name
         Ok(resp) if resp.status().is_success() => match resp.json::<OllamaShowResponse>().await {
             Ok(show) => {
                 let has_vision = show.capabilities.iter().any(|c| c == "vision");
+                let has_thinking = show.capabilities.iter().any(|c| c == "thinking");
                 if has_vision {
                     debug!(model = %model_name, "Ollama model supports vision");
                 }
-                has_vision
+                if has_thinking {
+                    debug!(model = %model_name, "Ollama model supports thinking");
+                }
+                (has_vision, has_thinking)
             }
             Err(e) => {
                 warn!(model = %model_name, error = ?e, "Failed to parse /api/show response");
-                false
+                (false, false)
             }
         },
         Ok(resp) => {
             warn!(model = %model_name, status = %resp.status(), "Ollama /api/show returned error");
-            false
+            (false, false)
         }
         Err(e) => {
             warn!(model = %model_name, error = ?e, "Failed to query Ollama /api/show");
-            false
+            (false, false)
         }
     }
 }

@@ -335,6 +335,67 @@ impl ChattyApp {
                     }
                 });
             }
+            StreamManagerEvent::ThinkingStarted { conversation_id } => {
+                // Update ConversationsStore for background tracking
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
+                        let thinking = chatty_core::models::message_types::ThinkingBlock {
+                            content: String::new(),
+                            summary: String::new(),
+                            duration: None,
+                            state: chatty_core::models::message_types::ThinkingState::Processing,
+                        };
+                        let trace = conv.ensure_streaming_trace();
+                        let index = trace.items.len();
+                        trace.add_thinking(thinking);
+                        trace.set_active_tool(index);
+                    }
+                });
+
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_thinking_started(cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ThinkingDelta {
+                conversation_id,
+                delta,
+            } => {
+                let delta = delta.clone();
+
+                // Update ConversationsStore for background tracking
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id)
+                        && let Some(trace) = conv.streaming_trace_mut()
+                    {
+                        trace.append_thinking_delta(&delta);
+                    }
+                });
+
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_thinking_delta(&delta, cx);
+                    }
+                });
+            }
+            StreamManagerEvent::ThinkingEnded { conversation_id } => {
+                // Update ConversationsStore for background tracking
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id)
+                        && let Some(trace) = conv.streaming_trace_mut()
+                    {
+                        trace.finalize_last_thinking();
+                        trace.clear_active_tool();
+                    }
+                });
+
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_thinking_ended(cx);
+                    }
+                });
+            }
             StreamManagerEvent::ToolCallStarted {
                 conversation_id,
                 id,
