@@ -343,6 +343,21 @@ Search and update Jira issues and Confluence pages via Atlassian's hosted remote
 
 Enable it to trigger Atlassian's OAuth flow on first connect; you'll be redirected through your Atlassian SSO and the resulting token is cached locally. Access is scoped to whatever Jira and Confluence sites your Atlassian account can reach. Enterprise tenants may need an admin to approve the MCP app — see [Atlassian's remote MCP docs](https://www.atlassian.com/platform/remote-mcp-server) for the supported scopes and admin controls.
 
+#### Google Calendar — built in
+Read and manage Google Calendar events via Google's official MCP server. The entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Google OAuth on first connect; sign in with your Google account and grant the Calendar API scope when prompted. See [Google Calendar API docs](https://developers.google.com/calendar) for scope details.
+
+#### Gmail — built in
+Read, search, and send Gmail messages via Google's official MCP server. The entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Google OAuth on first connect; sign in with your Google account and grant the Gmail API scope when prompted. See [Gmail API docs](https://developers.google.com/gmail) for scope details.
+
+#### Google Drive — built in
+Browse, search, and manage files in Google Drive via Google's official MCP server. The entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Google OAuth on first connect; sign in with your Google account and grant the Drive API scope when prompted. See [Google Drive API docs](https://developers.google.com/drive) for scope details.
+
 > **Tip:** You can write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
 
 </details>
