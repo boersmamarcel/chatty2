@@ -555,6 +555,9 @@ fn main() {
         // Initialize write approval store for tracking filesystem write approvals
         cx.set_global(chatty::models::WriteApprovalStore::new());
 
+        // Initialize CLI install state tracking for settings UI feedback
+        cx.set_global(cli_installer::CliInstallState::default());
+
         // Initialize SkillService global (no embedding initially — keyword-only scoring).
         // Replaced by a version with embedding once EmbeddingService is initialised above.
         cx.set_global(chatty_core::services::SkillService::new(None));

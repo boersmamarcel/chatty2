@@ -66,6 +66,14 @@ jobs:
         # parallel on GitHub-hosted runners; serialize tests for stability.
         run: cargo test --all-features -- --test-threads=1
 
+      - name: Build chatty-tui
+        run: cargo build -p chatty-tui
+
+      - name: Smoke test chatty-tui (--help exits 0)
+        # Verifies the binary starts and clap argument parsing works.
+        # Does not require a configured provider or LLM access.
+        run: ./target/debug/chatty-tui --help
+
       - name: Check formatting
         run: cargo fmt --check
 
