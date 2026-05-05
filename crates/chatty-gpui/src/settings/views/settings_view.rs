@@ -27,7 +27,7 @@ fn cli_group() -> SettingGroup {
         .description("Install the chatty-tui command-line interface so you can use Chatty from your terminal.")
         .items(vec![SettingItem::render(|_options, _window, _cx| {
             Button::new("install-cli")
-                .label("Install CLI\u{2026}")
+                .label("Install CLI…")
                 .outline()
                 .on_click(|_event, _window, cx| {
                     crate::cli_installer::install_cli(cx);
