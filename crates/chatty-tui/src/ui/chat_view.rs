@@ -285,10 +285,10 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
 }
 
 fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
-    let (icon, tc_style) = match &tc.state {
-        ToolCallState::Running => ("⟳", theme::warning()),
-        ToolCallState::Success => ("✓", theme::success()),
-        ToolCallState::Error => ("✗", theme::error()),
+    let (icon, tc_style, status) = match &tc.state {
+        ToolCallState::Running => ("⟳", theme::warning(), "running"),
+        ToolCallState::Success => ("✓", theme::success(), "completed"),
+        ToolCallState::Error => ("✗", theme::error(), "failed"),
     };
 
     let mut header = vec![Span::styled(
@@ -303,21 +303,57 @@ fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
     header.extend([
         Span::styled(icon, tc_style),
         Span::raw(" "),
-        Span::styled(truncate(&tc.input, 60), theme::muted()),
+        Span::styled(status, tc_style),
     ]);
     lines.push(Line::from(header));
 
+    render_tool_payload(lines, "input", &tc.input, theme::text_subtle());
+
     if let Some(ref output) = tc.output {
-        let preview = truncate(output, 80);
-        let out_style = match &tc.state {
-            ToolCallState::Error => theme::error(),
-            _ => theme::muted(),
+        let (label, out_style) = match &tc.state {
+            ToolCallState::Error => ("error", theme::error()),
+            _ => ("output", theme::text_subtle()),
         };
-        lines.push(Line::from(Span::styled(
-            format!("    → {}", preview),
-            out_style,
-        )));
+        render_tool_payload(lines, label, output, out_style);
     }
+}
+
+fn render_tool_payload(
+    lines: &mut Vec<Line>,
+    label: &str,
+    content: &str,
+    content_style: ratatui::style::Style,
+) {
+    let payload_lines = tool_payload_lines(content);
+    if payload_lines.is_empty() {
+        return;
+    }
+
+    lines.push(Line::from(vec![
+        Span::raw("    "),
+        Span::styled(label.to_string(), theme::muted()),
+    ]));
+
+    for payload_line in payload_lines {
+        lines.push(Line::from(vec![
+            Span::raw("      "),
+            Span::styled(payload_line, content_style),
+        ]));
+    }
+}
+
+fn tool_payload_lines(content: &str) -> Vec<String> {
+    let content = content.trim_matches('\n');
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let pretty = serde_json::from_str::<serde_json::Value>(content.trim())
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok());
+    let display = pretty.as_deref().unwrap_or(content);
+
+    display.lines().map(str::to_string).collect()
 }
 
 fn source_badge_span(source: &chatty_core::models::message_types::ToolSource) -> Span<'static> {
@@ -367,15 +403,6 @@ fn wrapped_line_count(lines: &[Line], wrap_width: u16) -> u16 {
             }
         })
         .sum()
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() > max_len {
-        format!("{}...", &first_line[..max_len])
-    } else {
-        first_line.to_string()
-    }
 }
 
 fn welcome_line(label: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
@@ -428,5 +455,69 @@ fn format_count(count: u32) -> String {
         format!("{:.0}k", count as f64 / 1_000.0)
     } else {
         count.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+
+    #[test]
+    fn tool_payload_lines_pretty_print_json() {
+        assert_eq!(
+            tool_payload_lines(r#"{"command":"pwd","cwd":"/tmp"}"#),
+            vec![
+                "{".to_string(),
+                r#"  "command": "pwd","#.to_string(),
+                r#"  "cwd": "/tmp""#.to_string(),
+                "}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_payload_lines_keep_plain_text_lines() {
+        assert_eq!(
+            tool_payload_lines("stdout line 1\nstderr line 2\n"),
+            vec!["stdout line 1".to_string(), "stderr line 2".to_string(),]
+        );
+    }
+
+    #[test]
+    fn render_tool_call_shows_input_and_error_blocks() {
+        let tc = ToolCallInfo {
+            id: "call-1".to_string(),
+            name: "shell_execute".to_string(),
+            input: r#"{"command":"pwd"}"#.to_string(),
+            output: Some("Failed to spawn shell process".to_string()),
+            state: ToolCallState::Error,
+            source: ToolSource::Local,
+            execution_engine: Some(ExecutionEngine::Shell),
+        };
+        let mut lines = Vec::new();
+
+        render_tool_call(&mut lines, &tc);
+
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "  [tool: shell_execute] [shell (local)] ✗ failed".to_string(),
+                "    input".to_string(),
+                "      {".to_string(),
+                r#"        "command": "pwd""#.to_string(),
+                "      }".to_string(),
+                "    error".to_string(),
+                "      Failed to spawn shell process".to_string(),
+            ]
+        );
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 }
