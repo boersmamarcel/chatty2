@@ -92,6 +92,10 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                 let _ = self.event_tx.send(AppEvent::StreamError(e));
                 Ok(ChunkAction::Break)
             }
+            // Thinking chunks are not rendered in the TUI; they're silently discarded.
+            StreamChunk::ThinkingStarted
+            | StreamChunk::ThinkingDelta(_)
+            | StreamChunk::ThinkingEnded => Ok(ChunkAction::Continue),
         }
     }
 
