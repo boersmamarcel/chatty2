@@ -4,12 +4,13 @@ use rig::tool::ToolDyn;
 use crate::tools::CompileTypstTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool,
-    ListToolsTool, MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
-    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
+    DABStepReferenceTool, DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool,
+    FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
+    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
+    ListAgentsTool, ListDirectoryTool, ListToolsTool, MoveFileTool, PublishModuleTool,
+    ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool,
+    SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
+    ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, QueryDataTool};
@@ -97,6 +98,7 @@ pub(super) struct NativeTools {
     pub chart_tool: Option<CreateChartTool>,
     #[cfg(feature = "math-render")]
     pub typst_tool: Option<CompileTypstTool>,
+    pub dabstep_reference_tool: Option<DABStepReferenceTool>,
     pub execute_code_tool: Option<ExecuteCodeTool>,
     pub remember_tool: Option<RememberTool>,
     pub save_skill_tool: Option<SaveSkillTool>,
@@ -194,6 +196,9 @@ impl NativeTools {
         if let Some(t) = self.typst_tool {
             tools.push(Box::new(t));
         }
+        if let Some(t) = self.dabstep_reference_tool {
+            tools.push(Box::new(t));
+        }
         if let Some(t) = self.execute_code_tool {
             tools.push(Box::new(t));
         }
@@ -249,6 +254,7 @@ macro_rules! native_tools {
         data_query: $data_query:expr,
         chart_tool: $chart_tool:expr,
         typst_tool: $typst_tool:expr,
+        dabstep_reference_tool: $dabstep_reference_tool:expr,
         execute_code_tool: $execute_code_tool:expr,
         remember_tool: $remember_tool:expr,
         save_skill_tool: $save_skill_tool:expr,
@@ -287,6 +293,7 @@ macro_rules! native_tools {
             chart_tool: $chart_tool,
             #[cfg(feature = "math-render")]
             typst_tool: $typst_tool,
+            dabstep_reference_tool: $dabstep_reference_tool,
             execute_code_tool: $execute_code_tool,
             remember_tool: $remember_tool,
             save_skill_tool: $save_skill_tool,

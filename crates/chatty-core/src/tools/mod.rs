@@ -15,6 +15,7 @@ impl From<anyhow::Error> for ToolError {
 pub mod add_attachment_tool;
 pub mod browser_use_tool;
 pub mod chart_tool;
+pub mod dabstep_reference_tool;
 #[cfg(feature = "duckdb")]
 pub mod data_query_tool;
 pub mod daytona_tool;
@@ -53,6 +54,7 @@ pub mod typst_tool;
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
+pub use dabstep_reference_tool::DABStepReferenceTool;
 #[cfg(feature = "duckdb")]
 pub use data_query_tool::{DescribeDataTool, QueryDataTool};
 pub use daytona_tool::DaytonaTool;

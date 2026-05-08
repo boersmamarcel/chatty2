@@ -21,13 +21,13 @@ use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::CompileTypstTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool,
-    ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool, PendingArtifacts,
-    PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
-    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
+    DABStepReferenceTool, DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool,
+    FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
+    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
+    ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
+    MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
+    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, QueryDataTool};
@@ -214,6 +214,7 @@ impl AgentClient {
         let mut excel_write_tools: Option<ExcelWriteTools> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
+        let mut dabstep_reference_tool: Option<DABStepReferenceTool> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
             .as_ref()
             .and_then(|s| s.workspace_dir.as_ref())
@@ -321,6 +322,13 @@ impl AgentClient {
                             QueryDataTool::new(service.clone()),
                             DescribeDataTool::new(service.clone()),
                         ));
+                    }
+
+                    if read_tools.is_some()
+                        && DABStepReferenceTool::is_available(service.as_ref()).await
+                    {
+                        tracing::info!(workspace = %workspace_dir, "DABStep reference tool enabled");
+                        dabstep_reference_tool = Some(DABStepReferenceTool::new());
                     }
 
                     (read_tools, write_tools)
@@ -611,13 +619,13 @@ impl AgentClient {
             None
         };
 
-        // Docker code execution tool
+        // Code execution tool (Monty and optional Docker fallback)
         let execute_code_tool: Option<ExecuteCodeTool> = if exec_settings
             .as_ref()
-            .map(|s| s.docker_code_execution_enabled)
+            .map(|s| s.execute_code_enabled)
             .unwrap_or(false)
         {
-            tracing::info!("Docker code execution tool enabled");
+            tracing::info!("Code execution tool enabled");
             let sandbox_config = SandboxConfig {
                 timeout_secs: exec_settings
                     .as_ref()
@@ -629,12 +637,16 @@ impl AgentClient {
                     .unwrap_or(true),
                 workspace_path: exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
                 docker_host: exec_settings.as_ref().and_then(|s| s.docker_host.clone()),
+                allow_docker_fallback: exec_settings
+                    .as_ref()
+                    .map(|s| s.docker_code_execution_enabled)
+                    .unwrap_or(false),
                 ..SandboxConfig::default()
             };
             let manager = std::sync::Arc::new(SandboxManager::new(sandbox_config));
             Some(ExecuteCodeTool::new(manager))
         } else {
-            tracing::info!("Docker code execution tool disabled by execution settings");
+            tracing::info!("Code execution tool disabled by execution settings");
             None
         };
 
@@ -735,6 +747,7 @@ impl AgentClient {
                     false
                 }
             },
+            dabstep_reference: dabstep_reference_tool.is_some(),
             compile_typst: {
                 #[cfg(feature = "math-render")]
                 {
@@ -821,6 +834,7 @@ impl AgentClient {
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,
+            dabstep_reference_tool: dabstep_reference_tool,
             execute_code_tool: execute_code_tool,
             remember_tool: remember_tool,
             save_skill_tool: save_skill_tool,

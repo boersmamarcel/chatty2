@@ -275,6 +275,15 @@ impl ListToolsTool {
             ]);
         }
 
+        if tools.dabstep_reference {
+            native_tools.push(ToolInfo {
+                name: "dabstep_reference".to_string(),
+                description: "Return a compact DABStep benchmark reference with file roles, payments schema, merchant-profile fields, fee-rule dimensions, month/day mapping, and a short closure checklist. Use this before reading the large manual."
+                    .to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         if tools.compile_typst {
             native_tools.push(ToolInfo {
                 name: "compile_typst".to_string(),
@@ -392,6 +401,7 @@ impl Tool for ListToolsTool {
                          - add_attachment: Display images or PDFs inline in chat responses\n\
                          - PDF tools: pdf_info, pdf_extract_text, pdf_to_image\n\
                          - Data query tools: query_data, describe_data (SQL on Parquet/CSV/JSON via DuckDB)\n\
+                         - DABStep benchmark helper: dabstep_reference (compact fee-task reference)\n\
                          - MCP tools: External tools from connected servers\n\
                          \n\
                          Use this to discover what capabilities you have for task execution. \
@@ -470,6 +480,7 @@ mod tests {
             pdf_info: false,
             pdf_extract_text: false,
             data_query: false,
+            dabstep_reference: false,
             compile_typst: false,
             execute_code: false,
             memory: false,
@@ -497,6 +508,7 @@ mod tests {
             pdf_info: true,
             pdf_extract_text: true,
             data_query: true,
+            dabstep_reference: true,
             compile_typst: true,
             execute_code: true,
             memory: true,

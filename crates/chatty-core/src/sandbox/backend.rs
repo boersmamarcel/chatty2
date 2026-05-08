@@ -37,6 +37,8 @@ pub struct SandboxConfig {
     pub expose_ports: Vec<u16>,
     /// Custom Docker host URI or socket path. When None, fallback discovery is used.
     pub docker_host: Option<String>,
+    /// Allow Docker fallback when Monty cannot handle the request.
+    pub allow_docker_fallback: bool,
 }
 
 impl Default for SandboxConfig {
@@ -50,6 +52,7 @@ impl Default for SandboxConfig {
             workspace_path: None,
             expose_ports: vec![],
             docker_host: None,
+            allow_docker_fallback: true,
         }
     }
 }

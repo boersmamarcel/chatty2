@@ -7,6 +7,10 @@ use tracing::{info, warn};
 
 use crate::services::filesystem_service::FileSystemService;
 
+const DEFAULT_QUERY_MAX_ROWS: u32 = 20;
+const MAX_QUERY_MAX_ROWS: u32 = 10_000;
+const MAX_MARKDOWN_CELL_CHARS: usize = 120;
+
 // ─── shared types ───
 
 /// Column metadata returned by both tools.
@@ -66,7 +70,7 @@ fn results_to_markdown(
     conn: &Connection,
     sql: &str,
     max_rows: u32,
-) -> Result<(String, Vec<ColumnInfo>, usize, bool), DataQueryError> {
+) -> Result<(String, Vec<ColumnInfo>, usize, bool, bool), DataQueryError> {
     // Use DESCRIBE to get column metadata before executing the query.
     // Calling column_type() before query() panics for dynamic queries like
     // SELECT * FROM read_parquet(...) because DuckDB needs to scan the file
@@ -142,7 +146,7 @@ fn results_to_markdown(
     // Build markdown table
     let mut md = String::new();
     if columns.is_empty() {
-        return Ok((String::from("(no columns)"), columns, 0, false));
+        return Ok((String::from("(no columns)"), columns, 0, false, false));
     }
 
     // Header row
@@ -160,16 +164,19 @@ fn results_to_markdown(
     md.push('\n');
 
     // Data rows
+    let mut shortened_values = false;
     for row in &rows_data {
         md.push('|');
         for (i, _col) in columns.iter().enumerate() {
             let val = row.get(i).map(|s| s.as_str()).unwrap_or("");
-            md.push_str(&format!(" {} |", val));
+            let (display, shortened) = format_markdown_cell(val);
+            shortened_values |= shortened;
+            md.push_str(&format!(" {} |", display));
         }
         md.push('\n');
     }
 
-    Ok((md, columns, total_rows, truncated))
+    Ok((md, columns, total_rows, truncated, shortened_values))
 }
 
 /// Convert a DuckDB Value to a display string.
@@ -194,6 +201,23 @@ fn value_to_string(val: &duckdb::types::Value) -> String {
     }
 }
 
+fn format_markdown_cell(value: &str) -> (String, bool) {
+    let mut normalized = value
+        .replace('\r', " ")
+        .replace('\n', " ")
+        .replace('\t', " ");
+    let shortened = normalized.chars().count() > MAX_MARKDOWN_CELL_CHARS;
+    if shortened {
+        normalized = normalized
+            .chars()
+            .take(MAX_MARKDOWN_CELL_CHARS)
+            .collect::<String>();
+        normalized.push_str("...");
+    }
+
+    (normalized.replace('|', "\\|"), shortened)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // QueryDataTool — Run SQL queries against local data files
 // ═══════════════════════════════════════════════════════════════════
@@ -202,7 +226,7 @@ fn value_to_string(val: &duckdb::types::Value) -> String {
 pub struct QueryDataArgs {
     /// SQL query to execute. File paths in the query are relative to the workspace.
     pub query: String,
-    /// Maximum number of result rows to return (default: 100).
+    /// Maximum number of result rows to return (default: 20).
     pub max_rows: Option<u32>,
 }
 
@@ -244,26 +268,28 @@ impl Tool for QueryDataTool {
             name: "query_data".to_string(),
             description:
                 "Run a SQL query against local Parquet, CSV, or JSON files using DuckDB.\n\
-                         \n\
-                         DuckDB can query files directly by path in SQL:\n\
-                         - SELECT * FROM 'data.parquet' WHERE year > 2023\n\
-                         - SELECT * FROM read_csv('sales.csv', header=true)\n\
-                         - SELECT * FROM read_parquet('*.parquet')\n\
-                         - SELECT COUNT(*), category FROM 'data.parquet' GROUP BY category\n\
-                         \n\
-                         File paths are relative to the workspace directory. \
-                         Supports aggregations, joins, window functions, and all standard SQL."
+                          \n\
+                          DuckDB can query files directly by path in SQL:\n\
+                          - SELECT * FROM 'data/payments.csv' WHERE year = 2023 LIMIT 5\n\
+                          - SELECT * FROM read_csv('/app/data/payments.csv', header=true) LIMIT 5\n\
+                          - SELECT * FROM read_parquet('*.parquet')\n\
+                          - SELECT COUNT(*), category FROM 'data/payments.csv' GROUP BY category\n\
+                          \n\
+                          File paths are relative to the workspace directory unless you use an explicit absolute path. \
+                          Prefer aggregate queries and small LIMITs for previews. \
+                          For benchmark tasks with `/app/data`, use `/app/data/<file>` or `data/<file>`, not bare file names like `payments.csv`. \
+                          Supports aggregations, joins, window functions, and all standard SQL."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "SQL query to execute. Reference files by relative path, e.g. SELECT * FROM 'data/sales.parquet'"
+                        "description": "SQL query to execute. Reference files by `data/<file>` or explicit workspace paths such as `/app/data/payments.csv`; avoid bare file names."
                     },
                     "max_rows": {
                         "type": "integer",
-                        "description": "Maximum number of result rows to return. Default: 100. Max: 10000."
+                        "description": "Maximum number of preview rows to return. Default: 20. Max: 10000."
                     }
                 },
                 "required": ["query"]
@@ -272,13 +298,16 @@ impl Tool for QueryDataTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let max_rows = args.max_rows.unwrap_or(100).min(10000);
+        let max_rows = args
+            .max_rows
+            .unwrap_or(DEFAULT_QUERY_MAX_ROWS)
+            .clamp(1, MAX_QUERY_MAX_ROWS);
         let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
         let query = args.query.clone();
 
         info!(query = %args.query, max_rows, "Executing data query");
 
-        let (markdown_table, columns, row_count, truncated) =
+        let (markdown_table, columns, row_count, truncated, shortened_values) =
             tokio::task::spawn_blocking(move || {
                 let conn = sandboxed_connection(&workspace_root)?;
                 results_to_markdown(&conn, &query, max_rows)
@@ -286,13 +315,20 @@ impl Tool for QueryDataTool {
             .await
             .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
 
-        let note = if truncated {
-            Some(format!(
-                "Results truncated to {} rows. Use LIMIT or more specific WHERE clauses to narrow results.",
+        let note = match (truncated, shortened_values) {
+            (true, true) => Some(format!(
+                "Results truncated to {} preview rows and long cell values were shortened for display. Use LIMIT, aggregate queries, or more specific WHERE clauses to narrow results.",
                 max_rows
-            ))
-        } else {
-            None
+            )),
+            (true, false) => Some(format!(
+                "Results truncated to {} preview rows. Use LIMIT, aggregate queries, or more specific WHERE clauses to narrow results.",
+                max_rows
+            )),
+            (false, true) => Some(
+                "Long cell values were shortened for display. Narrow the query or select fewer text-heavy columns for a more detailed preview."
+                    .to_string(),
+            ),
+            (false, false) => None,
         };
 
         info!(

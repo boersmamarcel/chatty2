@@ -20,6 +20,7 @@ pub struct ToolAvailability {
     pub pdf_info: bool,
     pub pdf_extract_text: bool,
     pub data_query: bool,
+    pub dabstep_reference: bool,
     pub compile_typst: bool,
     pub execute_code: bool,
     pub memory: bool,
@@ -117,6 +118,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
                 .into_iter()
                 .map(String::from),
         );
+    }
+    if tools.dabstep_reference {
+        names.insert(String::from("dabstep_reference"));
     }
     if tools.compile_typst {
         names.insert(String::from("compile_typst"));
@@ -286,6 +290,15 @@ mod tests {
     }
 
     #[test]
+    fn includes_dabstep_reference_tool() {
+        let names = active_native_tool_names(&ToolAvailability {
+            dabstep_reference: true,
+            ..Default::default()
+        });
+        assert!(names.contains("dabstep_reference"));
+    }
+
+    #[test]
     fn includes_memory_tools() {
         let names = active_native_tool_names(&ToolAvailability {
             memory: true,
@@ -350,6 +363,7 @@ mod tests {
             pdf_info: true,
             pdf_extract_text: true,
             data_query: true,
+            dabstep_reference: true,
             compile_typst: true,
             execute_code: true,
             memory: true,

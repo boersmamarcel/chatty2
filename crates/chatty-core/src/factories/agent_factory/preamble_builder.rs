@@ -103,6 +103,12 @@ pub(super) fn build_preamble(
             "- **query_data / describe_data** (SQL via DuckDB on Parquet/CSV/JSON)".to_string(),
         );
     }
+    if tools.dabstep_reference {
+        tool_sections.push(
+            "- **dabstep_reference** (compact DABStep file/schema/rule/month summary; use before opening the large manual)"
+                .to_string(),
+        );
+    }
     if mcp_mgmt_tools.is_enabled() {
         tool_sections.push("- **list_mcp_services**".to_string());
     }

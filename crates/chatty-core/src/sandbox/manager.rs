@@ -55,18 +55,39 @@ impl SandboxManager {
         language: &Language,
         expose_port: Option<u16>,
     ) -> Result<ExecutionResult> {
-        // ── Monty fast path (Python only, no port publishing) ────────────────
-        if *language == Language::Python && expose_port.is_none() && MontySandbox::can_handle(code)
-        {
-            match self.try_monty(code).await {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    info!(
-                        error = %e,
-                        "MontySandbox unavailable or failed; falling back to Docker"
-                    );
-                }
+        if *language == Language::Python {
+            if expose_port.is_some() && !self.config.allow_docker_fallback {
+                anyhow::bail!(
+                    "Monty-only mode cannot expose ports. Enable Docker fallback or remove expose_port."
+                );
             }
+
+            if expose_port.is_none() && MontySandbox::can_handle(code) {
+                match self.try_monty(code).await {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        if !self.config.allow_docker_fallback {
+                            anyhow::bail!(
+                                "Monty-only mode could not execute this Python snippet: {}",
+                                e
+                            );
+                        }
+                        info!(
+                            error = %e,
+                            "MontySandbox unavailable or failed; falling back to Docker"
+                        );
+                    }
+                }
+            } else if !self.config.allow_docker_fallback {
+                anyhow::bail!(
+                    "Monty-only mode supports stdlib Python snippets only. Avoid third-party imports, subprocess/socket usage, and features that require Docker fallback."
+                );
+            }
+        } else if !self.config.allow_docker_fallback {
+            anyhow::bail!(
+                "Monty-only mode only supports Python. Enable Docker fallback to run {:?} code.",
+                language
+            );
         }
 
         // ── Docker path ───────────────────────────────────────────────────────
@@ -90,10 +111,17 @@ impl SandboxManager {
         // and print them to stdout instead of letting them propagate to stderr.
         let combined = format!("{}\n{}", result.stderr, result.stdout);
         if result.exit_code != 0 && Self::is_monty_limitation(&combined) {
-            anyhow::bail!(
-                "Monty limitation detected (stderr: {}); retrying with Docker",
-                result.stderr
-            );
+            if self.config.allow_docker_fallback {
+                anyhow::bail!(
+                    "Monty limitation detected (stderr: {}); retrying with Docker",
+                    result.stderr
+                );
+            } else {
+                anyhow::bail!(
+                    "Monty-only mode detected an unsupported Python feature: {}",
+                    result.stderr
+                );
+            }
         }
 
         Ok(result)

@@ -180,6 +180,7 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
                 badge("fs-read", engine.execution_settings.filesystem_read_enabled),
                 badge("fs-write", engine.execution_settings.filesystem_write_enabled),
                 badge("git", engine.execution_settings.git_enabled),
+                badge("code", engine.execution_settings.execute_code_enabled),
                 badge("docker", engine.execution_settings.docker_code_execution_enabled),
             ]),
         ),

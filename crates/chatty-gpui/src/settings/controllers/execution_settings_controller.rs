@@ -201,13 +201,35 @@ pub fn set_docker_host(host: Option<String>, cx: &mut App) {
 }
 
 /// Toggle Docker code execution enabled/disabled and persist to disk.
+pub fn toggle_execute_code(cx: &mut App) {
+    let new_enabled = !cx.global::<ExecutionSettingsModel>().execute_code_enabled;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .execute_code_enabled = new_enabled;
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Toggle Docker fallback for code execution enabled/disabled and persist to disk.
 pub fn toggle_docker_code_execution(cx: &mut App) {
     // 1. Apply update immediately (optimistic update)
     let new_enabled = !cx
         .global::<ExecutionSettingsModel>()
         .docker_code_execution_enabled;
-    cx.global_mut::<ExecutionSettingsModel>()
-        .docker_code_execution_enabled = new_enabled;
+    let settings = cx.global_mut::<ExecutionSettingsModel>();
+    settings.docker_code_execution_enabled = new_enabled;
+    if new_enabled {
+        settings.execute_code_enabled = true;
+    }
 
     // 2. Get updated state for async save
     let settings = cx.global::<ExecutionSettingsModel>().clone();
