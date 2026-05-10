@@ -348,10 +348,12 @@ pub(super) fn build_streaming_parse_result(
     let content_segments = parse_content_segments(content);
     let content_segment_count = content_segments.len();
 
-    // Check if we can reuse the stable prefix from the previous render
-    let can_reuse_prefix = prev.is_some_and(|p| {
-        content.len() >= p.content_len && content_segment_count == p.content_segment_count
-    });
+    // Check if we can reuse the stable prefix from the previous render.
+    // content_segment_count > 0 guards the later `last().unwrap()` call.
+    let can_reuse_prefix = content_segment_count > 0
+        && prev.is_some_and(|p| {
+            content.len() >= p.content_len && content_segment_count == p.content_segment_count
+        });
 
     let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
         // SAFETY: can_reuse_prefix checks prev.is_some_and(...)
@@ -367,8 +369,8 @@ pub(super) fn build_streaming_parse_result(
             segments.push(seg.clone());
         }
 
-        // Re-parse only the last content segment
-        // SAFETY: content_segment_count > 0 (checked by can_reuse_prefix)
+        // Re-parse only the last content segment.
+        // `content_segment_count > 0` in `can_reuse_prefix` guarantees this is non-empty.
         let last = content_segments.into_iter().last().unwrap();
         segments.push(parse_content_segment_streaming(last, prev_state, cx));
 
