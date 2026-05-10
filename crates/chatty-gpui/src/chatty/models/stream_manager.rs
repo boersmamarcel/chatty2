@@ -443,10 +443,7 @@ impl StreamManager {
     /// Mark a stream as completed and emit StreamEnded.
     /// Called when the stream loop finishes normally.
     /// Flushes any pending batched text, then drains any pending artifacts queued by AddAttachmentTool.
-    pub fn finalize_stream(&mut self,
-        conv_id: &str,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
         // Flush any remaining buffered text before emitting StreamEnded
         self.flush_pending_text(conv_id, cx);
 
@@ -482,11 +479,7 @@ impl StreamManager {
     }
 
     /// Gracefully stop a stream using its cancellation token.
-    pub fn stop_stream(
-        &mut self,
-        conv_id: &str,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    pub fn stop_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
         // Try direct key first
         let key = if self.streams.contains_key(conv_id) {
             Some(conv_id.to_string())
@@ -550,9 +543,7 @@ impl StreamManager {
     }
 
     /// Cancel any pending stream (used when creating a new conversation).
-    pub fn cancel_pending(&mut self,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    pub fn cancel_pending(&mut self, cx: &mut gpui::Context<Self>) {
         if let Some(mut state) = self.streams.remove("__pending__") {
             // Flush any buffered text before the cancellation event
             if !state.pending_text.is_empty() {
@@ -599,19 +590,14 @@ impl StreamManager {
     }
 
     /// Set trace JSON on an active stream (called before finalization).
-    pub fn set_trace(&mut self,
-        conv_id: &str,
-        trace: Option<serde_json::Value>,
-    ) {
+    pub fn set_trace(&mut self, conv_id: &str, trace: Option<serde_json::Value>) {
         if let Some(state) = self.streams.get_mut(conv_id) {
             state.trace_json = trace;
         }
     }
 
     /// Stop all active streams (app shutdown).
-    pub fn stop_all(&mut self,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    pub fn stop_all(&mut self, cx: &mut gpui::Context<Self>) {
         let keys: Vec<String> = self.streams.keys().cloned().collect();
         for key in keys {
             if let Some(mut state) = self.streams.remove(&key) {

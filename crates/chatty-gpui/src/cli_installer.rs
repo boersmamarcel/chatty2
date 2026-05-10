@@ -7,21 +7,64 @@
 //! - Linux: Copy binary to ~/.local/bin/ (AppImage mount path is ephemeral)
 //! - Windows: Add install directory to user PATH
 
-use gpui::App;
+use gpui::{App, BorrowAppContext, Global};
 use std::path::PathBuf;
 use tracing::{debug, error, info};
+
+/// Tracks the current state of the CLI installation.
+#[derive(Clone, Debug, Default)]
+pub enum CliInstallStatus {
+    /// No installation has been attempted yet (or state is unknown).
+    #[default]
+    Idle,
+    /// Installation is in progress.
+    Installing,
+    /// Installation completed successfully. Contains the success message.
+    Installed(String),
+    /// Installation failed. Contains the error message.
+    Failed(String),
+}
+
+/// Global that holds the current CLI install status so the settings UI can
+/// reactively display progress and results.
+#[derive(Default)]
+pub struct CliInstallState {
+    pub status: CliInstallStatus,
+}
+
+impl Global for CliInstallState {}
 
 /// Install the CLI tool. Called from the InstallCli action handler.
 ///
 /// Uses `cx.spawn()` because macOS `osascript` may block waiting for the
 /// admin password dialog — we must not freeze the UI thread.
+///
+/// Updates `CliInstallState` global before and after installation so the
+/// settings UI can reflect progress.
 pub fn install_cli(cx: &mut App) {
-    cx.spawn(async move |_cx: &mut gpui::AsyncApp| {
+    cx.update_global::<CliInstallState, _>(|state, _cx| {
+        state.status = CliInstallStatus::Installing;
+    });
+    cx.refresh_windows();
+
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
         let result = do_install().await;
         match &result {
             Ok(msg) => info!("{}", msg),
             Err(e) => error!("CLI installation failed: {}", e),
         }
+        let new_status = match result {
+            Ok(msg) => CliInstallStatus::Installed(msg),
+            Err(e) => CliInstallStatus::Failed(e),
+        };
+        cx.update_global::<CliInstallState, _>(|state, _cx| {
+            state.status = new_status;
+        })
+        .map_err(|e| tracing::warn!(error = ?e, "Failed to update CLI install state"))
+        .ok();
+        cx.update(|cx| cx.refresh_windows())
+            .map_err(|e| tracing::warn!(error = ?e, "Failed to refresh windows after CLI install"))
+            .ok();
     })
     .detach();
 }

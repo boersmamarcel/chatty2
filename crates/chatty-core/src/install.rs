@@ -420,24 +420,20 @@ pub struct CuratedMcpServer {
 /// New entries can be added here without touching the seeding logic; the
 /// entry will appear automatically and participate in the shared
 /// enable/disable flow.
-pub const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[
-    CuratedMcpServer {
-        ext_id: "mcp-notion",
-        server_name: "notion",
-        display_name: "Notion",
-        description:
-            "Read and update Notion pages, databases, and search via Notion's hosted MCP server.",
-        url: "https://mcp.notion.com/sse",
-        docs_url: "https://developers.notion.com/docs/mcp",
-        auth_notes:
-            "Notion's hosted MCP server uses an OAuth flow. On first connect Chatty discovers the \
+pub const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[CuratedMcpServer {
+    ext_id: "mcp-notion",
+    server_name: "notion",
+    display_name: "Notion",
+    description: "Read and update Notion pages, databases, and search via Notion's hosted MCP server.",
+    url: "https://mcp.notion.com/sse",
+    docs_url: "https://developers.notion.com/docs/mcp",
+    auth_notes: "Notion's hosted MCP server uses an OAuth flow. On first connect Chatty discovers the \
              OAuth metadata from the server, opens Notion's authorization page in your browser, \
              and caches the resulting tokens locally. If the browser flow is cancelled, the network \
              is unavailable, or your Notion workspace administrator has not granted the integration \
              access, the connection will report a `Failed` auth status and can be retried from the \
              extension settings.",
-    },
-];
+}];
 
 /// Ensure every entry in [`CURATED_MCP_SERVERS`] is present in the
 /// `ExtensionsModel` and `McpServersModel`.

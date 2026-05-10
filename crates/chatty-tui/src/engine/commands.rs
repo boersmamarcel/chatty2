@@ -34,6 +34,8 @@ pub enum Command {
     Update,
     /// /cwd, /cd [directory] — show or change working directory
     Cwd(Option<String>),
+    /// /quit, /exit — quit the application
+    Quit,
 }
 
 impl ChatEngine {
@@ -64,6 +66,7 @@ impl ChatEngine {
             "/copy" => Some(Command::Copy),
             "/update" => Some(Command::Update),
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
+            "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }
     }
