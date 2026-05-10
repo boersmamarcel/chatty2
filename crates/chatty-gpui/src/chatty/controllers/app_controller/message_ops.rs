@@ -1283,6 +1283,200 @@ struct LlmStreamParams {
     invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
+/// GPUI adapter for the shared stream loop.
+///
+/// The shared loop owns cancellation/progress/channel polling. This handler owns
+/// frontend-specific effects: updating the conversation model, forwarding chunks
+/// to StreamManager, and reflecting sub-agent progress in ChatView.
+struct GpuiStreamHandler<'a> {
+    conv_id: String,
+    chat_view: Entity<ChatView>,
+    stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
+    cx: &'a mut AsyncApp,
+    azure_auth_error_seen: bool,
+}
+
+impl GpuiStreamHandler<'_> {
+    fn forward_chunk_to_stream_manager(&mut self, chunk: StreamChunk) {
+        if let Some(ref sm) = self.stream_manager {
+            sm.update(
+                &mut *self.cx,
+                |sm: &mut crate::chatty::models::StreamManager, cx| {
+                    sm.handle_chunk(&self.conv_id, chunk, cx)
+                },
+            )
+            .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
+            .ok();
+        }
+    }
+
+    fn handle_sub_agent_started(
+        &mut self,
+        agent_name: String,
+        prompt: String,
+        source: chatty_core::models::message_types::ToolSource,
+    ) {
+        let label = format!("[Agent: {agent_name}] {prompt}");
+        self.cx
+            .update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&self.conv_id) {
+                    conv.start_sub_agent_progress(&label, source.clone());
+                }
+            })
+            .map_err(
+                |e| warn!(error = ?e, conv_id = %self.conv_id, "Failed to persist sub-agent start"),
+            )
+            .ok();
+        self.chat_view
+            .update(&mut *self.cx, |view, cx| {
+                if view.conversation_id().map(|id| id.as_str()) == Some(self.conv_id.as_str()) {
+                    view.start_sub_agent_progress(&label, source, cx);
+                }
+            })
+            .map_err(|e| warn!(error = ?e, conv_id = %self.conv_id, "Failed to update sub-agent start in ChatView"))
+            .ok();
+    }
+
+    fn handle_sub_agent_text(&mut self, text: String) {
+        self.cx
+            .update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&self.conv_id) {
+                    conv.append_sub_agent_progress(&text);
+                }
+            })
+            .map_err(|e| warn!(error = ?e, conv_id = %self.conv_id, "Failed to persist sub-agent progress"))
+            .ok();
+        self.chat_view
+            .update(&mut *self.cx, |view, cx| {
+                if view.conversation_id().map(|id| id.as_str()) == Some(self.conv_id.as_str()) {
+                    view.append_sub_agent_progress(&text, cx);
+                }
+            })
+            .map_err(|e| warn!(error = ?e, conv_id = %self.conv_id, "Failed to update sub-agent progress in ChatView"))
+            .ok();
+    }
+
+    fn handle_sub_agent_finished(&mut self, success: bool, result: Option<String>) {
+        self.cx
+            .update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&self.conv_id) {
+                    conv.finalize_sub_agent_progress(success, result.clone());
+                }
+            })
+            .map_err(|e| warn!(error = ?e, conv_id = %self.conv_id, "Failed to persist sub-agent final state"))
+            .ok();
+        self.chat_view
+            .update(&mut *self.cx, |view, cx| {
+                if view.conversation_id().map(|id| id.as_str()) == Some(self.conv_id.as_str()) {
+                    view.finalize_sub_agent_progress(success, result, cx);
+                }
+            })
+            .map_err(|e| warn!(error = ?e, conv_id = %self.conv_id, "Failed to update sub-agent final state in ChatView"))
+            .ok();
+    }
+}
+
+impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler<'_> {
+    fn on_stream_started(&mut self) {
+        debug!(conv_id = %self.conv_id, "Entering shared stream processing loop");
+    }
+
+    fn on_chunk(
+        &mut self,
+        chunk: anyhow::Result<StreamChunk>,
+    ) -> anyhow::Result<chatty_core::services::ChunkAction> {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                error!(error = %e, conv_id = %self.conv_id, "Stream error");
+                self.forward_chunk_to_stream_manager(StreamChunk::Error(e.to_string()));
+                return Ok(chatty_core::services::ChunkAction::Break);
+            }
+        };
+
+        let should_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+
+        match &chunk {
+            StreamChunk::Text(text) => {
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&self.conv_id) {
+                            conv.append_streaming_content(text);
+                        }
+                    })
+                    .map_err(
+                        |e| warn!(error = ?e, "Failed to update conversation streaming content"),
+                    )
+                    .ok();
+            }
+            StreamChunk::Done => {
+                debug!(conv_id = %self.conv_id, "Received Done chunk");
+            }
+            StreamChunk::Error(err) => {
+                error!(error = %err, conv_id = %self.conv_id, "Stream error");
+                self.azure_auth_error_seen = err.contains("401") || err.contains("Unauthorized");
+            }
+            StreamChunk::TokenUsage { .. } => {
+                // Token usage is tracked by StreamManager.
+            }
+            _ => {
+                // ToolCall*, Approval*, and Thinking* chunks are forwarded to StreamManager.
+            }
+        }
+
+        self.forward_chunk_to_stream_manager(chunk);
+
+        if should_break {
+            Ok(chatty_core::services::ChunkAction::Break)
+        } else {
+            Ok(chatty_core::services::ChunkAction::Continue)
+        }
+    }
+
+    fn on_progress(
+        &mut self,
+        progress: chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+    ) {
+        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+
+        match progress {
+            InvokeAgentProgress::Started {
+                agent_name,
+                prompt,
+                source,
+            } => self.handle_sub_agent_started(agent_name, prompt, source),
+            InvokeAgentProgress::Text(text) => self.handle_sub_agent_text(text),
+            InvokeAgentProgress::Finished { success, result } => {
+                self.handle_sub_agent_finished(success, result);
+            }
+        }
+    }
+
+    fn on_cancelled(&mut self) {
+        debug!(conv_id = %self.conv_id, "Stream cancelled via cancellation token");
+    }
+
+    fn on_stream_ended(&mut self) {}
+}
+
+async fn refresh_azure_token_after_stream_error(cx: &mut AsyncApp) {
+    tracing::warn!("Detected Azure auth error - token likely expired");
+    if let Some(cache) = cx
+        .update(|cx| {
+            cx.try_global::<crate::chatty::auth::AzureTokenCache>()
+                .cloned()
+        })
+        .ok()
+        .flatten()
+    {
+        if let Err(e) = cache.refresh_token().await {
+            error!(error = ?e, "Failed to refresh Azure token after 401 error");
+        } else {
+            tracing::info!("Azure token refreshed successfully.");
+        }
+    }
+}
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:
@@ -1444,209 +1638,30 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     let mut progress_rx =
         chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
 
-    // 6. Stream processing loop
-    debug!(conv_id = %conv_id, "Entering stream processing loop");
-    use futures::StreamExt;
+    // 6. Stream processing loop. The shared loop owns polling/cancellation;
+    // GpuiStreamHandler owns GPUI-specific side effects for each event.
+    let azure_auth_error_seen = {
+        let mut handler = GpuiStreamHandler {
+            conv_id: conv_id.clone(),
+            chat_view: chat_view.clone(),
+            stream_manager: stream_manager.clone(),
+            cx,
+            azure_auth_error_seen: false,
+        };
 
-    loop {
-        // Check cancellation before each iteration
-        if cancel_flag.load(Ordering::Relaxed) {
-            debug!(conv_id = %conv_id, "Stream cancelled via cancellation token");
-            break;
-        }
+        chatty_core::services::run_stream_loop(
+            &mut stream,
+            &mut progress_rx,
+            &cancel_flag,
+            &mut handler,
+        )
+        .await?;
 
-        tokio::select! {
-            biased;
-            // Handle invoke_agent progress events first (sub-agent visualisation)
-            Some(progress) = progress_rx.recv() => {
-                use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
-                match progress {
-                    InvokeAgentProgress::Started {
-                        agent_name,
-                        prompt,
-                        source,
-                    } => {
-                        let label = format!("[Agent: {}] {}", agent_name, prompt);
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.start_sub_agent_progress(&label, source.clone());
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent start"))
-                        .ok();
-                        chat_view
-                            .update(cx, |view, cx| {
-                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                                    view.start_sub_agent_progress(&label, source, cx);
-                                }
-                            })
-                            .ok();
-                    }
-                    InvokeAgentProgress::Text(text) => {
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.append_sub_agent_progress(&text);
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent progress"))
-                        .ok();
-                        chat_view
-                            .update(cx, |view, cx| {
-                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                                    view.append_sub_agent_progress(&text, cx);
-                                }
-                            })
-                            .ok();
-                    }
-                    InvokeAgentProgress::Finished { success, result } => {
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.finalize_sub_agent_progress(success, result.clone());
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent final state"))
-                        .ok();
-                        chat_view
-                            .update(cx, |view, cx| {
-                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                                    view.finalize_sub_agent_progress(success, result, cx);
-                                }
-                            })
-                            .ok();
-                    }
-                }
-                continue;
-            }
-            // Process LLM stream chunks
-            chunk_result = stream.next() => {
-                let chunk_result = match chunk_result {
-                    Some(r) => r,
-                    None => break,
-                };
+        handler.azure_auth_error_seen
+    };
 
-                match chunk_result {
-                    Ok(StreamChunk::Text(ref text)) => {
-                        // Update the Conversation model (source of truth for background streams)
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.append_streaming_content(text);
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
-                        .ok();
-                    }
-                    Ok(StreamChunk::TokenUsage { .. }) => {
-                        // Token usage tracked by StreamManager
-                    }
-                    Ok(StreamChunk::Done) => {
-                        debug!(conv_id = %conv_id, "Received Done chunk");
-                        // Forward to StreamManager before breaking
-                        if let Some(ref sm) = stream_manager {
-                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.handle_chunk(&conv_id, StreamChunk::Done, cx)
-                            })
-                            .ok();
-                        }
-                        break;
-                    }
-                    Ok(StreamChunk::Error(ref err)) => {
-                        error!(error = %err, conv_id = %conv_id, "Stream error");
-
-                        // Detect authentication errors (401/Unauthorized)
-                        if err.contains("401") || err.contains("Unauthorized") {
-                            tracing::warn!("Detected Azure auth error - token likely expired");
-                            if let Some(cache) = cx
-                                .update(|cx| {
-                                    cx.try_global::<crate::chatty::auth::AzureTokenCache>()
-                                        .cloned()
-                                })
-                                .ok()
-                                .flatten()
-                            {
-                                if let Err(e) = cache.refresh_token().await {
-                                    error!(error = ?e, "Failed to refresh Azure token after 401 error");
-                                } else {
-                                    tracing::info!("Azure token refreshed successfully.");
-                                }
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        // ToolCall*, Approval* chunks: no local state update needed
-                    }
-                    Err(ref e) => {
-                        error!(error = %e, conv_id = %conv_id, "Stream error");
-                    }
-                }
-
-                // Forward ALL chunks to StreamManager (emits events for UI subscription)
-                match chunk_result {
-                    Ok(chunk) => {
-                        let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
-                        if let Some(ref sm) = stream_manager {
-                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.handle_chunk(&conv_id, chunk, cx)
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
-                            .ok();
-                        }
-                        if is_break {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(ref sm) = stream_manager {
-                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
-                            .ok();
-                        }
-                        break;
-                    }
-                }
-            } // end of stream.next() branch
-        } // end of tokio::select!
-    } // end of loop
-
-    // Drain remaining progress events after stream ends
-    while let Ok(progress) = progress_rx.try_recv() {
-        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
-        match progress {
-            InvokeAgentProgress::Text(text) => {
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.append_sub_agent_progress(&text);
-                    }
-                })
-                .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist drained sub-agent progress"))
-                .ok();
-                chat_view
-                    .update(cx, |view, cx| {
-                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.append_sub_agent_progress(&text, cx);
-                        }
-                    })
-                    .ok();
-            }
-            InvokeAgentProgress::Finished { success, result } => {
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.finalize_sub_agent_progress(success, result.clone());
-                    }
-                })
-                .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist drained sub-agent final state"))
-                .ok();
-                chat_view
-                    .update(cx, |view, cx| {
-                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.finalize_sub_agent_progress(success, result, cx);
-                        }
-                    })
-                    .ok();
-            }
-            _ => {}
-        }
+    if azure_auth_error_seen {
+        refresh_azure_token_after_stream_error(cx).await;
     }
 
     // Clear the progress slot sender so stale references don't accumulate

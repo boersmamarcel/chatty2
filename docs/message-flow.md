@@ -276,9 +276,10 @@ chunk_result = stream.next()
 - `StreamManager` receives the same chunk for event fan-out to the UI.
   StreamManager does NOT store the text.
 
-**Note on TUI divergence:** The TUI frontend uses the shared `StreamChunkHandler` trait
-and `run_stream_loop` from `stream_processor.rs`. The GPUI frontend does NOT — it has
-its own inline loop here. See [Technical Debt](#technical-debt).
+**Shared loop:** Both the TUI and GPUI frontends use the shared `StreamChunkHandler` trait
+and `run_stream_loop` from `stream_processor.rs`. Frontend-specific handlers decide how to
+forward chunks: the TUI maps chunks to `AppEvent`s; GPUI updates `ConversationsStore` and
+forwards chunks to `StreamManager`.
 
 ---
 
@@ -529,21 +530,20 @@ sequenceDiagram
 The following issues have been identified through code inspection. They are ordered roughly
 by severity (impact × likelihood of causing bugs).
 
-### TD-1 — Dual stream loops: GPUI doesn't use `StreamChunkHandler`
+### TD-1 — Resolved: GPUI now uses `StreamChunkHandler`
 
-**Where:** `stream_processor.rs` (shared trait), `message_ops.rs` (GPUI inline loop), `chatty-tui/engine/streaming.rs` (TUI implementation)
+**Where:** `stream_processor.rs` (shared trait), `message_ops.rs` (`GpuiStreamHandler`), `chatty-tui/engine/streaming.rs` (`TuiStreamHandler`)
 
 `stream_processor.rs` defines `StreamChunkHandler` trait + `run_stream_loop()`, explicitly
-designed to be shared between GPUI and TUI. The TUI uses it correctly via
-`TuiStreamHandler`. The GPUI frontend has its own 200-line inline loop in `run_llm_stream`
-that duplicates the `tokio::select!` / cancel-flag / progress-drain logic.
+designed to be shared between GPUI and TUI. Both frontends now use it:
+`TuiStreamHandler` maps chunks to terminal `AppEvent`s, while `GpuiStreamHandler` performs
+GPUI-specific effects (`ConversationsStore`, `StreamManager`, and `ChatView` updates).
 
-**Consequence:** Bug fixes in loop control (e.g., EOF handling, cancellation) must be
-applied in two places. The shared abstraction provides no value if only one frontend uses it.
+**Impact:** Bug fixes in loop control (progress draining, cancellation checks, stream break
+conditions) now apply to both frontends in one place.
 
-**Fix opportunity:** Implement `StreamChunkHandler` for a GPUI-side handler type and
-migrate `run_llm_stream`'s loop to call `run_stream_loop`. The handler's `on_chunk()`
-would dual-write to `ConversationsStore` and `StreamManager` instead of doing it inline.
+**Remaining opportunity:** Route sub-agent progress through `StreamManagerEvent` as well,
+so progress visualization follows the same event path as ordinary stream chunks.
 
 ---
 
@@ -566,7 +566,7 @@ interleaves approval events with the LLM stream before the single processing pas
 
 **Where:** `run_llm_stream()` lines ~1461–1517 (progress branch inside `tokio::select!`)
 
-`InvokeAgentProgress` events are handled directly in the inline loop: they call
+`InvokeAgentProgress` events are handled directly in `GpuiStreamHandler`: they call
 `cx.update_global::<ConversationsStore, _>` and `chat_view.update()` without going through
 `StreamManager`. This couples sub-agent visualization to the active conversation view
 (the `view.conversation_id() == conv_id` guard fails silently for background conversations).
