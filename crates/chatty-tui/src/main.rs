@@ -776,14 +776,12 @@ async fn discover_ollama(base_url: &str) -> Result<Vec<DiscoveredModel>> {
 
     Ok(models
         .into_iter()
-        .map(
-            |(identifier, display_name, supports_vision, supports_thinking)| DiscoveredModel {
-                identifier,
-                display_name,
-                supports_vision,
-                supports_thinking,
-            },
-        )
+        .map(|m| DiscoveredModel {
+            identifier: m.identifier,
+            display_name: m.display_name,
+            supports_vision: m.supports_vision,
+            supports_thinking: m.supports_thinking,
+        })
         .collect())
 }
 

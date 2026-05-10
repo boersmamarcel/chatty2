@@ -31,22 +31,20 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
             // Create ModelConfig for each discovered model, with vision and thinking capability
             let new_model_configs: Vec<ModelConfig> = discovered_models
                 .iter()
-                .map(
-                    |(identifier, display_name, supports_vision, supports_thinking)| {
-                        let id = format!("ollama-{}", identifier.replace(':', "-"));
-                        let mut config = ModelConfig::new(
-                            id,
-                            display_name.clone(),
-                            ProviderType::Ollama,
-                            identifier.clone(),
-                        );
-                        config.supports_images = *supports_vision;
-                        config.supports_thinking = *supports_thinking;
-                        // Auto-enable thinking for models that report thinking capability
-                        config.enable_thinking = *supports_thinking;
-                        config
-                    },
-                )
+                .map(|m| {
+                    let id = format!("ollama-{}", m.identifier.replace(':', "-"));
+                    let mut config = ModelConfig::new(
+                        id,
+                        m.display_name.clone(),
+                        ProviderType::Ollama,
+                        m.identifier.clone(),
+                    );
+                    config.supports_images = m.supports_vision;
+                    config.supports_thinking = m.supports_thinking;
+                    // Auto-enable thinking for models that report thinking capability
+                    config.enable_thinking = m.supports_thinking;
+                    config
+                })
                 .collect();
 
             // Sync Ollama models: remove old ones, add new ones
