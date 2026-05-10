@@ -179,7 +179,22 @@ macro_rules! process_agent_stream {
                         });
                     }
                     Err(e) => {
-                        yield Ok(StreamChunk::Error(e.to_string()));
+                        // Close any open thinking block before exiting.
+                        if in_thinking {
+                            yield Ok(StreamChunk::ThinkingEnded);
+                        }
+                        let err_str = e.to_string();
+                        // "EOF while parsing" means the SSE stream ended mid-JSON chunk —
+                        // this is a transient provider/network condition, not a real
+                        // failure. Treat it as a clean end-of-stream so the response
+                        // finalises gracefully with whatever text was already received.
+                        if err_str.contains("EOF while parsing") {
+                            use tracing::warn;
+                            warn!("Stream ended with truncated JSON chunk; treating as Done");
+                            yield Ok(StreamChunk::Done);
+                        } else {
+                            yield Ok(StreamChunk::Error(err_str));
+                        }
                         return;
                     }
                     _ => {}
@@ -323,7 +338,20 @@ macro_rules! process_agent_stream_with_approvals {
                                 });
                             }
                             Some(Err(e)) => {
-                                yield Ok(StreamChunk::Error(e.to_string()));
+                                // Close any open thinking block before exiting.
+                                if in_thinking {
+                                    yield Ok(StreamChunk::ThinkingEnded);
+                                }
+                                let err_str = e.to_string();
+                                // "EOF while parsing" means the SSE stream ended mid-JSON chunk —
+                                // treat as a clean end-of-stream.
+                                if err_str.contains("EOF while parsing") {
+                                    use tracing::warn;
+                                    warn!("Stream ended with truncated JSON chunk; treating as Done");
+                                    yield Ok(StreamChunk::Done);
+                                } else {
+                                    yield Ok(StreamChunk::Error(err_str));
+                                }
                                 return;
                             }
                             None => {
