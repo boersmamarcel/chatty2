@@ -262,6 +262,36 @@ pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
 
 // ── Cache-Building Pipeline ───────────────────────────────────────────────
 
+/// Parse thinking block content through the markdown + math pipeline.
+///
+/// Thinking content is treated identically to regular text for rendering
+/// purposes — code blocks, math expressions, and regular text are all parsed.
+/// This ensures the rendered thinking block is as readable as the main message.
+fn parse_thinking_content(text: &str, cx: &App) -> Vec<CachedMarkdownSegment> {
+    parse_markdown_segments(text, false)
+        .into_iter()
+        .map(|ms| match ms {
+            MarkdownSegment::CodeBlock { language, code } => {
+                let styles = syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
+                CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
+                    language,
+                    code,
+                    styles,
+                })
+            }
+            MarkdownSegment::Text(t) => {
+                CachedMarkdownSegment::TextWithMath(parse_math_segments(&t))
+            }
+            MarkdownSegment::IncompleteCodeBlock { .. } => {
+                unreachable!("IncompleteCodeBlock should not appear in non-streaming parse")
+            }
+            MarkdownSegment::UnclosedCodeBlock { language, code } => {
+                CachedMarkdownSegment::UnclosedCodeBlock { language, code }
+            }
+        })
+        .collect()
+}
+
 /// Run the full three-stage parsing pipeline and return a cacheable result.
 ///
 /// Phases:
@@ -275,7 +305,10 @@ pub(super) fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseR
     let cached_segments: Vec<CachedContentSegment> = content_segments
         .into_iter()
         .map(|segment| match segment {
-            ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+            ContentSegment::Thinking(text) => {
+                let cached_md = parse_thinking_content(&text, cx);
+                CachedContentSegment::Thinking(cached_md)
+            }
             ContentSegment::Text(text) => {
                 let markdown_segs = parse_markdown_segments(&text, false);
                 let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
@@ -415,7 +448,9 @@ fn parse_content_segment_streaming(
     cx: &App,
 ) -> CachedContentSegment {
     match segment {
-        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Thinking(text) => {
+            CachedContentSegment::Thinking(parse_thinking_content(&text, cx))
+        }
         ContentSegment::Text(text) => {
             let markdown_segs = parse_markdown_segments(&text, true);
             let md_count = markdown_segs.len();
@@ -482,7 +517,9 @@ fn parse_content_segment_streaming_fresh(
     cx: &App,
 ) -> CachedContentSegment {
     match segment {
-        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Thinking(text) => {
+            CachedContentSegment::Thinking(parse_thinking_content(&text, cx))
+        }
         ContentSegment::Text(text) => {
             let markdown_segs = parse_markdown_segments(&text, true);
             let cached_md: Vec<CachedMarkdownSegment> = markdown_segs

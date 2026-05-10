@@ -63,8 +63,8 @@ pub enum CachedMarkdownSegment {
 pub enum CachedContentSegment {
     /// Regular text content, parsed through markdown + math layers
     Text(Vec<CachedMarkdownSegment>),
-    /// A thinking block (content is plain text, no further parsing needed)
-    Thinking(String),
+    /// A thinking block whose body has been parsed through the same markdown + math pipeline
+    Thinking(Vec<CachedMarkdownSegment>),
 }
 
 /// The fully cached parse result for one message
@@ -153,7 +153,9 @@ mod tests {
 
     fn dummy_result() -> CachedParseResult {
         CachedParseResult {
-            segments: vec![CachedContentSegment::Thinking("test".to_string())],
+            segments: vec![CachedContentSegment::Thinking(vec![
+                CachedMarkdownSegment::TextWithMath(vec![]),
+            ])],
         }
     }
 

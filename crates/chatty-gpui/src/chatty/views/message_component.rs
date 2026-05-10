@@ -158,7 +158,7 @@ fn render_cached_markdown_segments(
 
 /// Render a thinking block with special styling
 fn render_thinking_block(
-    content: &str,
+    content: &[CachedMarkdownSegment],
     index: usize,
     segment_index: usize,
     cx: &App,
@@ -192,12 +192,11 @@ fn render_thinking_block(
                         .child("Thinking"),
                 ),
         )
-        .child(
-            div()
-                .text_sm()
-                .text_color(muted_text)
-                .child(content.to_string()),
-        )
+        .children(render_cached_markdown_segments(
+            content,
+            index * 100 + segment_index,
+            cx,
+        ))
 }
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
