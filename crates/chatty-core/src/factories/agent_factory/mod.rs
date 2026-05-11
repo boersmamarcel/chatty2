@@ -641,6 +641,10 @@ impl AgentClient {
                     .as_ref()
                     .map(|s| s.docker_code_execution_enabled)
                     .unwrap_or(false),
+                max_output_bytes: exec_settings
+                    .as_ref()
+                    .map(|s| s.max_output_bytes.min(4096))
+                    .unwrap_or(4096),
                 ..SandboxConfig::default()
             };
             let manager = std::sync::Arc::new(SandboxManager::new(sandbox_config));

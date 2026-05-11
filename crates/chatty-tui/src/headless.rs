@@ -1,9 +1,13 @@
 use anyhow::Result;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 use crate::engine::{ChatEngine, ToolCallInfo, ToolCallState};
 use crate::events::AppEvent;
+
+const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 2;
+const STREAM_ERROR_RECOVERY_PROMPT: &str = "The previous provider response failed to parse after partial progress. Continue from the existing conversation and prior tool results. Do not repeat earlier analysis. If the answer is ready, write /app/answer.txt now. Otherwise use at most one compact tool call and keep any execute_code output short.";
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
 pub async fn run_headless(
@@ -16,10 +20,12 @@ pub async fn run_headless(
 
     // Collect response
     let mut response = String::new();
+    let mut recovery_attempts = 0usize;
 
     while let Some(event) = event_rx.recv().await {
         match event {
             AppEvent::TextChunk(text) => {
+                engine.handle_event(AppEvent::TextChunk(text.clone()));
                 // Stream text chunks to stderr so parent process can show live progress.
                 eprint!("{}", text);
                 response.push_str(&text);
@@ -71,12 +77,39 @@ pub async fn run_headless(
                     }
                 }
             }
-            AppEvent::StreamCompleted => break,
-            AppEvent::StreamError(error) => {
-                eprintln!("Error: {}", error);
-                std::process::exit(1);
+            AppEvent::StreamCompleted => {
+                engine.handle_event(AppEvent::StreamCompleted);
+                break;
             }
-            AppEvent::StreamCancelled => break,
+            AppEvent::StreamError(error) => {
+                engine.handle_event(AppEvent::StreamError(error.clone()));
+                eprintln!("Error: {}", error);
+
+                if answer_file_exists(&engine) {
+                    eprintln!(
+                        "Answer file already exists; keeping the run for verifier evaluation."
+                    );
+                    break;
+                }
+
+                if is_retryable_stream_error(&error)
+                    && recovery_attempts < MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                {
+                    recovery_attempts += 1;
+                    eprintln!(
+                        "Retrying after stream error ({}/{}) with a compact continuation prompt.",
+                        recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                    );
+                    engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                    continue;
+                }
+
+                break;
+            }
+            AppEvent::StreamCancelled => {
+                engine.handle_event(AppEvent::StreamCancelled);
+                break;
+            }
             // Handle other events silently
             _ => {
                 engine.handle_event(event);
@@ -185,6 +218,42 @@ fn engine_location_label(engine: ExecutionEngine) -> &'static str {
     }
 }
 
+fn is_retryable_stream_error(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("jsonerror")
+        || lowered.contains("eof while parsing")
+        || lowered.contains("failed to parse")
+}
+
+fn answer_file_exists(engine: &ChatEngine) -> bool {
+    answer_file_candidates(engine)
+        .into_iter()
+        .any(|path| file_has_content(&path))
+}
+
+fn answer_file_candidates(engine: &ChatEngine) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(workspace_dir) = engine.execution_settings.workspace_dir.as_deref() {
+        candidates.push(PathBuf::from(workspace_dir).join("answer.txt"));
+    } else if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join("answer.txt"));
+    }
+
+    let app_answer = PathBuf::from("/app/answer.txt");
+    if !candidates.iter().any(|path| path == &app_answer) {
+        candidates.push(app_answer);
+    }
+
+    candidates
+}
+
+fn file_has_content(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|contents| !contents.trim().is_empty())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use chatty_core::models::message_types::ExecutionEngine;
@@ -223,5 +292,13 @@ mod tests {
             tool_payload_lines("stdout line 1\nstderr line 2\n"),
             vec!["stdout line 1".to_string(), "stderr line 2".to_string(),]
         );
+    }
+
+    #[test]
+    fn detects_retryable_json_errors() {
+        assert!(is_retryable_stream_error(
+            "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563"
+        ));
+        assert!(!is_retryable_stream_error("network timeout"));
     }
 }

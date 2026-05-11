@@ -755,9 +755,8 @@ impl ChatEngine {
                     last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
                 }
-                self.is_streaming = false;
-                self.cancel_flag = None;
-                self.pending_approval = None;
+                self.finalize_partial_response();
+                self.reset_stream_state();
                 EngineAction::Redraw
             }
             AppEvent::StreamCancelled => {
@@ -765,15 +764,8 @@ impl ChatEngine {
                     last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
-                self.is_streaming = false;
-                self.cancel_flag = None;
-                self.pending_approval = None;
-                // Finalize whatever we got
-                if let Some(conv) = self.conversation.as_mut() {
-                    let response = conv.streaming_message().cloned().unwrap_or_default();
-                    conv.finalize_response(response, vec![], None);
-                    conv.set_streaming_message(None);
-                }
+                self.finalize_partial_response();
+                self.reset_stream_state();
                 EngineAction::Redraw
             }
             AppEvent::TitleGenerated(title) => {
@@ -896,16 +888,8 @@ impl ChatEngine {
             last.is_streaming = false;
         }
 
-        // Finalize conversation
-        if let Some(conv) = self.conversation.as_mut() {
-            let response = conv.streaming_message().cloned().unwrap_or_default();
-            conv.finalize_response(response, vec![], None);
-            conv.set_streaming_message(None);
-        }
-
-        self.is_streaming = false;
-        self.cancel_flag = None;
-        self.pending_approval = None;
+        self.finalize_partial_response();
+        self.reset_stream_state();
 
         // Generate title after first exchange
         if self.messages.len() == 2 && self.title == "New Chat" {
@@ -925,6 +909,20 @@ impl ChatEngine {
                 });
             }
         }
+    }
+
+    fn finalize_partial_response(&mut self) {
+        if let Some(conv) = self.conversation.as_mut() {
+            let response = conv.streaming_message().cloned().unwrap_or_default();
+            conv.finalize_response(response, vec![], None);
+            conv.set_streaming_message(None);
+        }
+    }
+
+    fn reset_stream_state(&mut self) {
+        self.is_streaming = false;
+        self.cancel_flag = None;
+        self.pending_approval = None;
     }
 }
 

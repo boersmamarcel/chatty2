@@ -64,7 +64,10 @@ impl SandboxManager {
 
             if expose_port.is_none() && MontySandbox::can_handle(code) {
                 match self.try_monty(code).await {
-                    Ok(result) => return Ok(result),
+                    Ok(mut result) => {
+                        result.clamp_output(self.config.max_output_bytes);
+                        return Ok(result);
+                    }
                     Err(e) => {
                         if !self.config.allow_docker_fallback {
                             anyhow::bail!(
@@ -91,7 +94,9 @@ impl SandboxManager {
         }
 
         // ── Docker path ───────────────────────────────────────────────────────
-        self.execute_docker(code, language, expose_port).await
+        let mut result = self.execute_docker(code, language, expose_port).await?;
+        result.clamp_output(self.config.max_output_bytes);
+        Ok(result)
     }
 
     /// Attempt to run Python code via [`MontySandbox`].
