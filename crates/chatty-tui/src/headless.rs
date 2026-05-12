@@ -8,12 +8,12 @@ use crate::engine::{ChatEngine, ToolCallInfo, ToolCallState};
 use crate::events::AppEvent;
 
 const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 2;
-const MAX_FINALIZATION_ATTEMPTS: usize = 1;
-const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 12;
-const FINALIZATION_MAX_AGENT_TURNS: u32 = 4;
-const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 1_800;
-const FINALIZATION_EVIDENCE_CHARS: usize = 4_000;
-const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 500;
+const MAX_FINALIZATION_ATTEMPTS: usize = 2;
+const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 25;
+const FINALIZATION_MAX_AGENT_TURNS: u32 = 12;
+const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 2_400;
+const FINALIZATION_EVIDENCE_CHARS: usize = 8_000;
+const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 800;
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "The previous provider response failed after partial progress. Continue from the existing conversation and prior tool results. Do not repeat earlier analysis. If the answer is ready, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep any execute_code output short.";
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
@@ -811,9 +811,12 @@ fn truncate_middle(text: &str, max_chars: usize) -> String {
 }
 
 fn answer_file_exists(engine: &ChatEngine) -> bool {
+    // Treat any existing file (even empty) as a valid answer — empty string is a valid
+    // answer for "empty list" questions.  We use metadata instead of content so we don't
+    // accidentally overwrite an intentionally-empty answer in the salvage path.
     answer_file_candidates(engine)
         .into_iter()
-        .any(|path| file_has_content(&path))
+        .any(|path| path.exists())
 }
 
 fn answer_file_candidates(engine: &ChatEngine) -> Vec<PathBuf> {
