@@ -287,7 +287,7 @@ fn normalize_final_answer(
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
-            .join(",");
+            .join(", ");
         if normalized != answer {
             answer = normalized;
             notes.push("normalized comma-separated spacing".to_string());

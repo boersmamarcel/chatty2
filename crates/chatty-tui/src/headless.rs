@@ -7,11 +7,11 @@ use tokio::sync::mpsc;
 use crate::engine::{ChatEngine, ToolCallInfo, ToolCallState};
 use crate::events::AppEvent;
 
-const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 2;
-const MAX_FINALIZATION_ATTEMPTS: usize = 2;
+const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;
+const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 25;
 const FINALIZATION_MAX_AGENT_TURNS: u32 = 12;
-const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 2_400;
+const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 6_000;
 const FINALIZATION_EVIDENCE_CHARS: usize = 8_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 800;
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "The previous provider response failed after partial progress. Continue from the existing conversation and prior tool results. Do not repeat earlier analysis. If the answer is ready, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep any execute_code output short.";
@@ -125,10 +125,12 @@ pub async fn run_headless(
                     recovery_pending_after_error = false;
                     tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
+                    let delay_secs = 10u64 * recovery_attempts as u64;
                     eprintln!(
-                        "Retrying after stream error ({}/{}) with a compact continuation prompt.",
-                        recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                        "Retrying after stream error ({}/{}) in {}s with a compact continuation prompt.",
+                        recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS, delay_secs
                     );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                     engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
                     continue;
                 }
@@ -137,9 +139,12 @@ pub async fn run_headless(
                     finalization_attempts += 1;
                     tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
+                    let delay_secs = 15u64 * finalization_attempts as u64;
                     eprintln!(
-                        "Answer file was not created after stopping exploration; requesting a compact finalization pass."
+                        "Answer file was not created after stopping exploration; requesting finalization in {}s.",
+                        delay_secs
                     );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                     send_answer_file_finalization_prompt(&mut engine, &message);
                     continue;
                 }
@@ -409,7 +414,7 @@ fn build_answer_file_finalization_prompt(engine: &ChatEngine, original_prompt: &
     format!(
         "Finalize this answer-file task using only the compact context below.\n\
           If the evidence contains a final answer candidate, immediately call final_answer with exactly that answer and output_path=/app/answer.txt.\n\
-          Do not keep researching. Do not read reference notes or manuals during finalization. If no answer candidate is present, use at most one compact tool call to compute it. If that tool is execute_code, the code MUST write the computed answer to /app/answer.txt itself and print only the answer.\n\
+          Do not keep researching. If no answer candidate is present, use at most one compact tool call to compute it. If that tool is execute_code, the code MUST write the computed answer to /app/answer.txt itself and print only the answer. IMPORTANT: If computing fees, the code MUST start with exec(open('/app/helpers.py').read()) to load correct functions.\n\
           Use exact file paths from the evidence; never invent alternate file names. If exact paths are absent, call file_structure_detector before executing code.\n\n\
           Original task:\n{}\n\n\
           Recent compact tool evidence:\n{}\n",
