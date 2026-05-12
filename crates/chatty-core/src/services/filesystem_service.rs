@@ -64,7 +64,8 @@ pub struct FileSystemService {
 }
 
 impl FileSystemService {
-    const MAX_READ_FILE_LINES: usize = 200;
+    const MAX_READ_FILE_LINES: usize = 30;
+    const MAX_READ_FILE_CHARS: usize = 6_000;
 
     fn slice_lines(
         content: &str,
@@ -110,7 +111,9 @@ impl FileSystemService {
         let returned_end_line = requested_end_line
             .min(start_line.saturating_add(Self::MAX_READ_FILE_LINES.saturating_sub(1)));
         let selected = lines[start_line - 1..returned_end_line].concat();
-        let truncated = returned_end_line < requested_end_line;
+        let (selected, char_truncated) = truncate_text_chars(&selected, Self::MAX_READ_FILE_CHARS);
+        let line_truncated = returned_end_line < requested_end_line;
+        let truncated = line_truncated || char_truncated;
 
         Ok(FileReadResult {
             content: selected,
@@ -118,7 +121,7 @@ impl FileSystemService {
             returned_start_line: Some(start_line),
             returned_end_line: Some(returned_end_line),
             truncated,
-            next_start_line: truncated.then_some(returned_end_line + 1),
+            next_start_line: line_truncated.then_some(returned_end_line + 1),
         })
     }
 
@@ -438,6 +441,17 @@ impl FileSystemService {
     }
 }
 
+fn truncate_text_chars(text: &str, max_chars: usize) -> (String, bool) {
+    if text.chars().count() <= max_chars {
+        return (text.to_string(), false);
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push_str(
+        "\n... [read_file output truncated; use targeted ranges, profile_data, describe_data, or query_data for large docs/data] ...\n",
+    );
+    (truncated, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,11 +538,30 @@ mod tests {
 
         assert_eq!(result.total_lines, 250);
         assert_eq!(result.returned_start_line, Some(1));
-        assert_eq!(result.returned_end_line, Some(200));
+        assert_eq!(result.returned_end_line, Some(30));
         assert!(result.truncated);
-        assert_eq!(result.next_start_line, Some(201));
+        assert_eq!(result.next_start_line, Some(31));
         assert!(result.content.starts_with("line 1\n"));
-        assert!(result.content.ends_with("line 200\n"));
+        assert!(result.content.ends_with("line 30\n"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_caps_large_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("large.json");
+        fs::write(&test_file, format!("{}\n", "x".repeat(10_000))).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service
+            .read_file_range("large.json", None, None)
+            .await
+            .unwrap();
+
+        assert!(result.truncated);
+        assert!(result.content.chars().count() < 6_200);
+        assert!(result.content.contains("read_file output truncated"));
     }
 
     #[tokio::test]

@@ -62,6 +62,13 @@ impl ListToolsTool {
         }
 
         if tools.fs_read {
+            if tools.doc_retriever {
+                native_tools.push(ToolInfo {
+                    name: "doc_retriever".to_string(),
+                    description: "Search local Markdown/text documentation with BM25 and return top matching chunks with file paths, section titles, line spans, scores, and compact text. Use only when you need exact rules, definitions, or formulas. Do not use for merchant-specific facts or table values; use profile_data/query_data for those.".to_string(),
+                    source: "native".to_string(),
+                });
+            }
             native_tools.extend(vec![
                 ToolInfo {
                     name: "read_file".to_string(),
@@ -91,6 +98,11 @@ impl ListToolsTool {
 
         if tools.fs_write {
             native_tools.extend(vec![
+                ToolInfo {
+                    name: "final_answer".to_string(),
+                    description: "Normalize and write a final answer to a workspace file. Use this instead of write_file for benchmark or factoid tasks once you have the answer candidate; defaults to answer.txt and supports optional formatting guidance.".to_string(),
+                    source: "native".to_string(),
+                },
                 ToolInfo {
                     name: "write_file".to_string(),
                     description: "Create or overwrite a file within the workspace. Best for new files or small rewrites; for large existing files, prefer apply_diff or an in-place shell edit to avoid very large tool payloads.".to_string(),
@@ -263,6 +275,11 @@ impl ListToolsTool {
         if tools.data_query {
             native_tools.extend(vec![
                 ToolInfo {
+                    name: "file_structure_detector".to_string(),
+                    description: "Inspect a workspace or subdirectory and return a compact map of files, data schemas, tiny previews, JSON shapes, and Markdown heading outlines. Use first for data-analysis tasks.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
                     name: "query_data".to_string(),
                     description: "Run SQL queries against local Parquet, CSV, or JSON files using DuckDB. Supports aggregations, joins, window functions, and all standard SQL.".to_string(),
                     source: "native".to_string(),
@@ -272,16 +289,12 @@ impl ListToolsTool {
                     description: "Inspect the schema and statistics of a local data file (Parquet, CSV, JSON). Returns column names, types, row count, and file size.".to_string(),
                     source: "native".to_string(),
                 },
+                ToolInfo {
+                    name: "profile_data".to_string(),
+                    description: "Profile a local data file generically. Returns schema, row count, compact sample rows, numeric stats, categorical top values, null counts, likely important low-cardinality columns, and notes. Use early for data-analysis tasks before writing custom code or many SQL queries.".to_string(),
+                    source: "native".to_string(),
+                },
             ]);
-        }
-
-        if tools.dabstep_reference {
-            native_tools.push(ToolInfo {
-                name: "dabstep_reference".to_string(),
-                description: "Return a compact DABStep benchmark reference with file roles, payments schema, merchant-profile fields, fee-rule dimensions, month/day mapping, and a short closure checklist. Use this before reading the large manual."
-                    .to_string(),
-                source: "native".to_string(),
-            });
         }
 
         if tools.compile_typst {
@@ -396,12 +409,11 @@ impl Tool for ListToolsTool {
             description: "List all available tools including:\n\
                          - fetch: Fetch web URLs and return readable text content\n\
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
-                         - Filesystem tools: read_file, write_file, list_directory, etc.\n\
+                         - Filesystem tools: read_file, final_answer, write_file, list_directory, optional doc_retriever, etc.\n\
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit\n\
                          - add_attachment: Display images or PDFs inline in chat responses\n\
                          - PDF tools: pdf_info, pdf_extract_text, pdf_to_image\n\
-                         - Data query tools: query_data, describe_data (SQL on Parquet/CSV/JSON via DuckDB)\n\
-                         - DABStep benchmark helper: dabstep_reference (compact fee-task reference)\n\
+                         - Data query tools: file_structure_detector, profile_data, query_data, describe_data (workspace/data map and SQL/profile CSV/JSON/Parquet via DuckDB)\n\
                          - MCP tools: External tools from connected servers\n\
                          \n\
                          Use this to discover what capabilities you have for task execution. \
@@ -467,6 +479,7 @@ mod tests {
     fn no_tools() -> ToolAvailability {
         ToolAvailability {
             fs_read: false,
+            doc_retriever: false,
             fs_write: false,
             list_mcp: false,
             fetch: false,
@@ -480,7 +493,6 @@ mod tests {
             pdf_info: false,
             pdf_extract_text: false,
             data_query: false,
-            dabstep_reference: false,
             compile_typst: false,
             execute_code: false,
             memory: false,
@@ -495,6 +507,7 @@ mod tests {
     fn all_tools() -> ToolAvailability {
         ToolAvailability {
             fs_read: true,
+            doc_retriever: true,
             fs_write: true,
             list_mcp: true,
             fetch: true,
@@ -508,7 +521,6 @@ mod tests {
             pdf_info: true,
             pdf_extract_text: true,
             data_query: true,
-            dabstep_reference: true,
             compile_typst: true,
             execute_code: true,
             memory: true,
@@ -554,8 +566,20 @@ mod tests {
         for expected in &["read_file", "read_binary", "list_directory", "glob_search"] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+        assert!(!names.contains(&"doc_retriever".to_string()));
         // 2 always-present + 4 fs_read
         assert_eq!(names.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_doc_retriever_is_separate_from_fs_read() {
+        let mut avail = no_tools();
+        avail.fs_read = true;
+        avail.doc_retriever = true;
+        let tool = ListToolsTool::new_with_config(&avail, Vec::new());
+        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let names = tool_names(&output);
+        assert!(names.contains(&"doc_retriever".to_string()));
     }
 
     #[tokio::test]
@@ -582,10 +606,12 @@ mod tests {
             "read_skill",
             "list_mcp_services",
             "fetch",
+            "doc_retriever",
             "read_file",
             "read_binary",
             "list_directory",
             "glob_search",
+            "final_answer",
             "write_file",
             "create_directory",
             "delete_file",
@@ -612,8 +638,10 @@ mod tests {
             "pdf_to_image",
             "pdf_info",
             "pdf_extract_text",
+            "file_structure_detector",
             "query_data",
             "describe_data",
+            "profile_data",
             "compile_typst",
             "execute_code",
             "remember",

@@ -15,14 +15,16 @@ impl From<anyhow::Error> for ToolError {
 pub mod add_attachment_tool;
 pub mod browser_use_tool;
 pub mod chart_tool;
-pub mod dabstep_reference_tool;
 #[cfg(feature = "duckdb")]
 pub mod data_query_tool;
 pub mod daytona_tool;
+pub mod doc_retriever_tool;
 #[cfg(feature = "excel")]
 pub mod excel_tool;
 pub mod execute_code_tool;
 pub mod fetch_tool;
+#[cfg(feature = "duckdb")]
+pub mod file_structure_tool;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod git_tool;
@@ -54,17 +56,20 @@ pub mod typst_tool;
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
-pub use dabstep_reference_tool::DABStepReferenceTool;
 #[cfg(feature = "duckdb")]
-pub use data_query_tool::{DescribeDataTool, QueryDataTool};
+pub use data_query_tool::{DescribeDataTool, ProfileDataTool, QueryDataTool};
 pub use daytona_tool::DaytonaTool;
+pub use doc_retriever_tool::DocRetrieverTool;
 #[cfg(feature = "excel")]
 pub use excel_tool::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 pub use execute_code_tool::ExecuteCodeTool;
 pub use fetch_tool::FetchTool;
+#[cfg(feature = "duckdb")]
+pub use file_structure_tool::FileStructureTool;
 pub use filesystem_tool::{GlobSearchTool, ListDirectoryTool, ReadBinaryTool, ReadFileTool};
 pub use filesystem_write_tool::{
-    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, MoveFileTool, WriteFileTool,
+    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, FinalAnswerTool, MoveFileTool,
+    WriteFileTool,
 };
 pub use git_tool::{
     GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,

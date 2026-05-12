@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -7,7 +8,13 @@ use crate::engine::{ChatEngine, ToolCallInfo, ToolCallState};
 use crate::events::AppEvent;
 
 const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 2;
-const STREAM_ERROR_RECOVERY_PROMPT: &str = "The previous provider response failed to parse after partial progress. Continue from the existing conversation and prior tool results. Do not repeat earlier analysis. If the answer is ready, write /app/answer.txt now. Otherwise use at most one compact tool call and keep any execute_code output short.";
+const MAX_FINALIZATION_ATTEMPTS: usize = 1;
+const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 12;
+const FINALIZATION_MAX_AGENT_TURNS: u32 = 4;
+const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 1_800;
+const FINALIZATION_EVIDENCE_CHARS: usize = 4_000;
+const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 500;
+const STREAM_ERROR_RECOVERY_PROMPT: &str = "The previous provider response failed after partial progress. Continue from the existing conversation and prior tool results. Do not repeat earlier analysis. If the answer is ready, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep any execute_code output short.";
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
 pub async fn run_headless(
@@ -15,12 +22,19 @@ pub async fn run_headless(
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
     message: String,
 ) -> Result<()> {
+    let answer_file_required = prompt_requires_answer_file(&message);
+
     // Send message
-    engine.send_message(message);
+    engine.send_message(message.clone());
 
     // Collect response
     let mut response = String::new();
     let mut recovery_attempts = 0usize;
+    let mut finalization_attempts = 0usize;
+    let mut tool_results_since_finalization = 0usize;
+    let mut tool_budget_stop_requested = false;
+    let mut finalization_pending_after_cancel = false;
+    let mut recovery_pending_after_error = false;
 
     while let Some(event) = event_rx.recv().await {
         match event {
@@ -60,6 +74,20 @@ pub async fn run_headless(
                         eprintln!("{line}");
                     }
                 }
+                tool_results_since_finalization += 1;
+                if should_stop_for_answer_file_tool_budget(
+                    answer_file_required,
+                    tool_results_since_finalization,
+                    finalization_attempts,
+                    tool_budget_stop_requested,
+                    &engine,
+                ) {
+                    tool_budget_stop_requested = true;
+                    eprintln!(
+                        "Answer file was not created after many tool calls; stopping exploration for a compact finalization pass."
+                    );
+                    engine.stop_stream();
+                }
             }
             AppEvent::ToolCallError { ref id, .. } => {
                 let id_str = id.clone();
@@ -76,9 +104,59 @@ pub async fn run_headless(
                         eprintln!("{line}");
                     }
                 }
+                tool_results_since_finalization += 1;
+                if should_stop_for_answer_file_tool_budget(
+                    answer_file_required,
+                    tool_results_since_finalization,
+                    finalization_attempts,
+                    tool_budget_stop_requested,
+                    &engine,
+                ) {
+                    tool_budget_stop_requested = true;
+                    eprintln!(
+                        "Answer file was not created after many tool calls; stopping exploration for a compact finalization pass."
+                    );
+                    engine.stop_stream();
+                }
             }
             AppEvent::StreamCompleted => {
                 engine.handle_event(AppEvent::StreamCompleted);
+                if recovery_pending_after_error {
+                    recovery_pending_after_error = false;
+                    tool_results_since_finalization = 0;
+                    tool_budget_stop_requested = false;
+                    eprintln!(
+                        "Retrying after stream error ({}/{}) with a compact continuation prompt.",
+                        recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                    );
+                    engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                    continue;
+                }
+                if finalization_pending_after_cancel {
+                    finalization_pending_after_cancel = false;
+                    finalization_attempts += 1;
+                    tool_results_since_finalization = 0;
+                    tool_budget_stop_requested = false;
+                    eprintln!(
+                        "Answer file was not created after stopping exploration; requesting a compact finalization pass."
+                    );
+                    send_answer_file_finalization_prompt(&mut engine, &message);
+                    continue;
+                }
+                if should_request_answer_file_finalization(
+                    answer_file_required,
+                    finalization_attempts,
+                    &engine,
+                ) {
+                    finalization_attempts += 1;
+                    tool_results_since_finalization = 0;
+                    tool_budget_stop_requested = false;
+                    eprintln!(
+                        "Answer file was not created; requesting a compact finalization pass."
+                    );
+                    send_answer_file_finalization_prompt(&mut engine, &message);
+                    continue;
+                }
                 break;
             }
             AppEvent::StreamError(error) => {
@@ -96,11 +174,16 @@ pub async fn run_headless(
                     && recovery_attempts < MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
                 {
                     recovery_attempts += 1;
-                    eprintln!(
-                        "Retrying after stream error ({}/{}) with a compact continuation prompt.",
-                        recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
-                    );
-                    engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                    recovery_pending_after_error = true;
+                    continue;
+                }
+
+                if should_request_answer_file_finalization(
+                    answer_file_required,
+                    finalization_attempts,
+                    &engine,
+                ) {
+                    finalization_pending_after_cancel = true;
                     continue;
                 }
 
@@ -108,6 +191,14 @@ pub async fn run_headless(
             }
             AppEvent::StreamCancelled => {
                 engine.handle_event(AppEvent::StreamCancelled);
+                if should_request_answer_file_finalization(
+                    answer_file_required,
+                    finalization_attempts,
+                    &engine,
+                ) {
+                    finalization_pending_after_cancel = true;
+                    continue;
+                }
                 break;
             }
             // Handle other events silently
@@ -117,10 +208,47 @@ pub async fn run_headless(
         }
     }
 
+    if should_infer_missing_answer(&message)
+        && answer_file_required
+        && !answer_file_exists(&engine)
+        && let Some(candidate) = infer_answer_candidate(&engine, &response, &message)
+    {
+        match write_inferred_answer_file(&engine, &candidate) {
+            Ok(path) => eprintln!(
+                "Answer file was missing; wrote inferred compact answer candidate '{}' to {}.",
+                candidate,
+                path.display()
+            ),
+            Err(error) => eprintln!(
+                "Answer file was missing and inferred candidate '{}' could not be written: {}",
+                candidate, error
+            ),
+        }
+    }
+
     // Print response to stdout
     println!("{}", response);
 
     Ok(())
+}
+
+fn should_infer_missing_answer(original_prompt: &str) -> bool {
+    match std::env::var("CHATTY_INFER_MISSING_ANSWER")
+        .ok()
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("0" | "false" | "no") => false,
+        Some("1" | "true" | "yes") => true,
+        _ => prompt_has_strict_answer_format(original_prompt),
+    }
+}
+
+fn prompt_has_strict_answer_format(original_prompt: &str) -> bool {
+    let prompt = original_prompt.to_ascii_lowercase();
+    prompt.contains("answer must be")
+        && prompt.contains("format")
+        && (prompt.contains(":{") || prompt.contains("}:") || prompt.contains(":"))
 }
 
 /// Run in pipe mode: read stdin, send as message, print response to stdout.
@@ -223,6 +351,463 @@ fn is_retryable_stream_error(error: &str) -> bool {
     lowered.contains("jsonerror")
         || lowered.contains("eof while parsing")
         || lowered.contains("failed to parse")
+        || lowered.contains("server overloaded")
+        || lowered.contains("service unavailable")
+        || lowered.contains("internal server error")
+        || lowered.contains("invalid status code 500")
+        || lowered.contains("invalid status code 502")
+        || lowered.contains("invalid status code 503")
+        || lowered.contains("invalid status code 504")
+        || lowered.contains("http 500")
+        || lowered.contains("http 502")
+        || lowered.contains("http 503")
+        || lowered.contains("http 504")
+}
+
+fn prompt_requires_answer_file(prompt: &str) -> bool {
+    prompt.to_ascii_lowercase().contains("answer.txt")
+}
+
+fn should_request_answer_file_finalization(
+    answer_file_required: bool,
+    finalization_attempts: usize,
+    engine: &ChatEngine,
+) -> bool {
+    answer_file_required
+        && finalization_attempts < MAX_FINALIZATION_ATTEMPTS
+        && !answer_file_exists(engine)
+}
+
+fn should_stop_for_answer_file_tool_budget(
+    answer_file_required: bool,
+    tool_results_since_finalization: usize,
+    finalization_attempts: usize,
+    tool_budget_stop_requested: bool,
+    engine: &ChatEngine,
+) -> bool {
+    answer_file_required
+        && !tool_budget_stop_requested
+        && finalization_attempts < MAX_FINALIZATION_ATTEMPTS
+        && tool_results_since_finalization >= MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION
+        && !answer_file_exists(engine)
+}
+
+fn send_answer_file_finalization_prompt(engine: &mut ChatEngine, original_prompt: &str) {
+    let prompt = build_answer_file_finalization_prompt(engine, original_prompt);
+    if let Some(conversation) = engine.conversation.as_mut() {
+        conversation.replace_history(Vec::new(), 0);
+    }
+    engine.execution_settings.max_agent_turns = engine
+        .execution_settings
+        .max_agent_turns
+        .min(FINALIZATION_MAX_AGENT_TURNS);
+    engine.send_message(prompt);
+}
+
+fn build_answer_file_finalization_prompt(engine: &ChatEngine, original_prompt: &str) -> String {
+    let evidence = compact_tool_evidence(engine);
+    format!(
+        "Finalize this answer-file task using only the compact context below.\n\
+          If the evidence contains a final answer candidate, immediately call final_answer with exactly that answer and output_path=/app/answer.txt.\n\
+          Do not keep researching. Do not read reference notes or manuals during finalization. If no answer candidate is present, use at most one compact tool call to compute it. If that tool is execute_code, the code MUST write the computed answer to /app/answer.txt itself and print only the answer.\n\
+          Use exact file paths from the evidence; never invent alternate file names. If exact paths are absent, call file_structure_detector before executing code.\n\n\
+          Original task:\n{}\n\n\
+          Recent compact tool evidence:\n{}\n",
+        truncate_middle(original_prompt, FINALIZATION_ORIGINAL_PROMPT_CHARS),
+        evidence
+    )
+}
+
+fn compact_tool_evidence(engine: &ChatEngine) -> String {
+    let tool_calls: Vec<&ToolCallInfo> = engine
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_calls())
+        .filter(|tool_call| tool_call.output.is_some())
+        .collect();
+
+    let mut sections = Vec::new();
+    let known_paths = known_path_lines_from_tool_calls(&tool_calls);
+    if !known_paths.is_empty() {
+        sections.push(format!("Known file paths:\n{}", known_paths.join("\n")));
+    }
+
+    let candidate_lines = candidate_lines_from_tool_calls(&tool_calls);
+    if !candidate_lines.is_empty() {
+        sections.push(format!(
+            "Candidate/result lines:\n{}",
+            candidate_lines.join("\n")
+        ));
+    }
+
+    let mut recent = Vec::new();
+    for tool_call in tool_calls.iter().rev().take(8).rev() {
+        let output = tool_call
+            .output
+            .as_deref()
+            .map(compact_tool_output)
+            .unwrap_or_default();
+        if output.trim().is_empty() {
+            continue;
+        }
+        recent.push(format!(
+            "[{} {}]\n{}",
+            tool_call.name,
+            match tool_call.state {
+                ToolCallState::Running => "running",
+                ToolCallState::Success => "success",
+                ToolCallState::Error => "error",
+            },
+            truncate_middle(&output, FINALIZATION_TOOL_OUTPUT_CHARS)
+        ));
+    }
+    if !recent.is_empty() {
+        sections.push(format!("Recent tool outputs:\n{}", recent.join("\n\n")));
+    }
+
+    let evidence = if sections.is_empty() {
+        "No prior tool evidence was captured.".to_string()
+    } else {
+        sections.join("\n\n")
+    };
+    truncate_middle(&evidence, FINALIZATION_EVIDENCE_CHARS)
+}
+
+fn known_path_lines_from_tool_calls(tool_calls: &[&ToolCallInfo]) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for tool_call in tool_calls {
+        collect_paths_from_text(&tool_call.input, &mut paths);
+        if let Some(output) = tool_call.output.as_deref() {
+            collect_paths_from_text(output, &mut paths);
+        }
+    }
+    paths.into_iter().take(40).collect()
+}
+
+fn collect_paths_from_text(text: &str, paths: &mut BTreeSet<String>) {
+    for raw in text.split(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']')
+    }) {
+        let token = raw
+            .trim_matches(|ch: char| matches!(ch, ':' | ',' | '.' | '"' | '\'' | '`' | '{' | '}'))
+            .trim_start_matches("./");
+        if token.len() > 160 {
+            continue;
+        }
+        let lowered = token.to_ascii_lowercase();
+        let looks_like_supported_file = [
+            ".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".parquet", ".md", ".txt", ".rst",
+        ]
+        .iter()
+        .any(|extension| lowered.contains(extension));
+        if looks_like_supported_file {
+            paths.insert(token.to_string());
+        }
+    }
+}
+
+fn candidate_lines_from_tool_calls(tool_calls: &[&ToolCallInfo]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for tool_call in tool_calls {
+        let Some(output) = tool_call.output.as_deref() else {
+            continue;
+        };
+        let compact = compact_tool_output(output);
+        for line in compact.lines() {
+            let lowered = line.to_ascii_lowercase();
+            if lowered.contains("final")
+                || lowered.contains("answer")
+                || lowered.contains("best")
+                || lowered.contains("overall")
+                || lowered.contains("lowest")
+                || lowered.contains("preferred")
+                || lowered.contains("cost")
+            {
+                lines.push(format!("{}: {}", tool_call.name, line.trim()));
+                if lines.len() >= 40 {
+                    return lines;
+                }
+            }
+        }
+    }
+    lines
+}
+
+fn compact_tool_output(output: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+        for key in ["stdout", "stderr", "content", "markdown", "result"] {
+            if let Some(text) = value.get(key).and_then(|value| value.as_str())
+                && !text.trim().is_empty()
+            {
+                return text.trim().to_string();
+            }
+        }
+    }
+    output.trim().to_string()
+}
+
+fn infer_answer_candidate(
+    engine: &ChatEngine,
+    response: &str,
+    original_prompt: &str,
+) -> Option<String> {
+    let mut texts = Vec::new();
+    if !response.trim().is_empty() {
+        texts.push(response.to_string());
+    }
+    for tool_call in engine
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_calls())
+    {
+        if is_candidate_source_tool(tool_call.name.as_str())
+            && let Some(output) = tool_call.output.as_deref()
+        {
+            let compact = compact_tool_output(output);
+            if !compact.trim().is_empty() {
+                texts.push(compact);
+            }
+        }
+    }
+
+    for text in texts.iter().rev() {
+        for line in text.lines().rev() {
+            if let Some(candidate) = candidate_from_line(line, original_prompt, true) {
+                return Some(candidate);
+            }
+        }
+    }
+    for text in texts.iter().rev() {
+        for line in text.lines().rev() {
+            if let Some(candidate) = candidate_from_line(line, original_prompt, false) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn is_candidate_source_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "execute_code" | "query_data" | "final_answer" | "write_file"
+    )
+}
+
+fn candidate_from_line(line: &str, original_prompt: &str, require_label: bool) -> Option<String> {
+    let cleaned = clean_candidate(line);
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let lowered = cleaned.to_ascii_lowercase();
+    let candidate = if let Some(candidate) = labeled_candidate(&cleaned, &lowered) {
+        candidate
+    } else if lowered.contains("the answer is") {
+        let idx = lowered.find("the answer is")?;
+        cleaned[idx + "the answer is".len()..]
+            .trim_start_matches([':', '=', '-', ' '])
+            .trim()
+            .to_string()
+    } else if require_label {
+        return None;
+    } else if !is_safe_unlabeled_candidate(&cleaned, original_prompt) {
+        return None;
+    } else {
+        cleaned
+    };
+
+    let normalized = normalize_candidate(&candidate, original_prompt);
+    (is_reasonable_answer_candidate(&normalized)
+        && candidate_matches_prompt_format(&normalized, original_prompt))
+    .then_some(normalized)
+}
+
+fn candidate_matches_prompt_format(candidate: &str, original_prompt: &str) -> bool {
+    if prompt_expects_colon_fee(original_prompt) {
+        return candidate.eq_ignore_ascii_case("not applicable")
+            || is_token_colon_number(candidate);
+    }
+    true
+}
+
+fn is_safe_unlabeled_candidate(candidate: &str, original_prompt: &str) -> bool {
+    let candidate = clean_candidate(candidate);
+    if candidate.eq_ignore_ascii_case("not applicable") {
+        return true;
+    }
+    if prompt_expects_colon_fee(original_prompt) {
+        return is_token_colon_number(&candidate);
+    }
+    let lowered_prompt = original_prompt.to_ascii_lowercase();
+    if lowered_prompt.contains("yes/no") || lowered_prompt.contains("yes or no") {
+        return matches!(candidate.to_ascii_lowercase().as_str(), "yes" | "no");
+    }
+    if lowered_prompt.contains("rounded")
+        || lowered_prompt.contains("decimal")
+        || lowered_prompt.contains("fee")
+        || lowered_prompt.contains("cost")
+        || lowered_prompt.contains("count")
+        || lowered_prompt.contains("number")
+    {
+        return is_number_like(&candidate);
+    }
+    is_token_colon_number(&candidate) || is_number_like(&candidate)
+}
+
+fn prompt_expects_colon_fee(original_prompt: &str) -> bool {
+    let prompt = original_prompt.to_ascii_lowercase();
+    prompt.contains(":{fee}")
+        || prompt.contains("}: {fee}")
+        || prompt.contains("associated cost")
+        || prompt.contains("selected card scheme")
+}
+
+fn is_token_colon_number(candidate: &str) -> bool {
+    let Some((left, right)) = candidate.split_once(':') else {
+        return false;
+    };
+    is_short_token(left.trim()) && is_number_like(right.trim())
+}
+
+fn labeled_candidate(cleaned: &str, lowered: &str) -> Option<String> {
+    for label in [
+        "final answer",
+        "best answer",
+        "best result",
+        "answer",
+        "lowest",
+        "preferred",
+        "result",
+        "best",
+    ] {
+        if lowered.starts_with(label) {
+            let rest = cleaned[label.len()..]
+                .trim_start_matches([':', '=', '-', ' '])
+                .trim();
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn clean_candidate(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('`')
+        .trim_matches('*')
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_string()
+}
+
+fn normalize_candidate(candidate: &str, original_prompt: &str) -> String {
+    let mut candidate = clean_candidate(candidate);
+    if let Some((left, right)) = candidate.split_once('=')
+        && should_convert_equals_to_colon(original_prompt)
+        && is_short_token(left.trim())
+        && is_number_like(right.trim())
+    {
+        candidate = format!("{}:{}", left.trim(), right.trim());
+    }
+    candidate
+}
+
+fn should_convert_equals_to_colon(original_prompt: &str) -> bool {
+    let prompt = original_prompt.to_ascii_lowercase();
+    prompt.contains(':') || prompt.contains("colon") || prompt.contains("format")
+}
+
+fn is_reasonable_answer_candidate(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.chars().count() > 120 {
+        return false;
+    }
+    let lowered = candidate.to_ascii_lowercase();
+    if [
+        "error",
+        "expected",
+        "got",
+        "correct answer",
+        "incorrect answer",
+        "toolset error",
+        "timed_out",
+        "stdout",
+        "stderr",
+        "none",
+        "null",
+    ]
+    .iter()
+    .any(|prefix| lowered.starts_with(prefix))
+    {
+        return false;
+    }
+    if candidate.contains('{') || candidate.contains('}') || candidate.contains('[') {
+        return false;
+    }
+    if candidate.split_whitespace().count() > 8 {
+        return false;
+    }
+    candidate.chars().any(|ch| ch.is_alphanumeric())
+}
+
+fn is_short_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= 40
+        && value
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+}
+
+fn is_number_like(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | ',' | '-' | '+'))
+        && value.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn write_inferred_answer_file(engine: &ChatEngine, candidate: &str) -> std::io::Result<PathBuf> {
+    let mut last_error = None;
+    for path in answer_file_candidates(engine) {
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            last_error = Some(error);
+            continue;
+        }
+        match std::fs::write(&path, format!("{candidate}\n")) {
+            Ok(()) => return Ok(path),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("no answer file candidates")))
+}
+
+fn truncate_middle(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let keep_start = max_chars / 2;
+    let keep_end = max_chars.saturating_sub(keep_start + 24);
+    let start: String = text.chars().take(keep_start).collect();
+    let end: String = text
+        .chars()
+        .rev()
+        .take(keep_end)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{start}\n... [truncated] ...\n{end}")
 }
 
 fn answer_file_exists(engine: &ChatEngine) -> bool {
@@ -299,6 +884,122 @@ mod tests {
         assert!(is_retryable_stream_error(
             "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563"
         ));
+        assert!(is_retryable_stream_error(
+            "CompletionError: HttpError: Invalid status code 503 Service Unavailable with message: server overloaded"
+        ));
         assert!(!is_retryable_stream_error("network timeout"));
+    }
+
+    #[test]
+    fn detects_answer_file_requirement() {
+        assert!(prompt_requires_answer_file(
+            "write ONLY the final answer to `/app/answer.txt`"
+        ));
+        assert!(prompt_requires_answer_file(
+            "Create ANSWER.TXT once you are done"
+        ));
+        assert!(!prompt_requires_answer_file(
+            "Explain the result in the terminal"
+        ));
+    }
+
+    #[test]
+    fn tool_budget_stop_only_applies_to_answer_file_tasks() {
+        assert!(!prompt_requires_answer_file("Explain the result"));
+        assert_eq!(MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION, 12);
+    }
+
+    #[test]
+    fn extracts_labeled_answer_candidate() {
+        assert_eq!(
+            candidate_from_line(
+                "Best: NexPay = 0.63",
+                "Write answer in scheme:fee format to /app/answer.txt",
+                true
+            )
+            .as_deref(),
+            Some("NexPay:0.63")
+        );
+        assert_eq!(
+            candidate_from_line("Final answer: Not Applicable", "write answer.txt", true)
+                .as_deref(),
+            Some("Not Applicable")
+        );
+    }
+
+    #[test]
+    fn rejects_verbose_or_error_candidates() {
+        assert!(candidate_from_line("Error: something failed", "answer.txt", false).is_none());
+        assert!(
+            candidate_from_line(
+                "Best: this is a long explanatory sentence with far too many words to be a scalar",
+                "answer.txt",
+                true
+            )
+            .is_none()
+        );
+        assert!(
+            candidate_from_line(
+                "Best: Practices for Choosing an ACI",
+                "Answer must be just the selected card scheme and the associated cost rounded to 2 decimals in this format: {card_scheme}:{fee}",
+                true
+            )
+            .is_none()
+        );
+        assert!(
+            candidate_from_line(
+                "Merchant characteritics include",
+                "Answer must be just the fee rounded to 2 decimals.",
+                false
+            )
+            .is_none()
+        );
+        assert_eq!(
+            candidate_from_line(
+                "0.0",
+                "Answer must be just the fee rounded to 2 decimals.",
+                false
+            )
+            .as_deref(),
+            Some("0.0")
+        );
+    }
+
+    #[test]
+    fn answer_fallback_only_uses_candidate_source_tools() {
+        assert!(is_candidate_source_tool("execute_code"));
+        assert!(is_candidate_source_tool("query_data"));
+        assert!(!is_candidate_source_tool("doc_retriever"));
+        assert!(!is_candidate_source_tool("read_file"));
+    }
+
+    #[test]
+    fn inferred_answer_fallback_is_opt_in() {
+        // The default must be conservative because unverified candidates can be
+        // worse than a missing answer file. Strictly formatted answer-file tasks
+        // are safe enough to salvage because candidates must match the format.
+        assert!(!prompt_has_strict_answer_format("write answer.txt"));
+        assert!(prompt_has_strict_answer_format(
+            "Answer must be just the selected card scheme and the associated cost rounded to 2 decimals in this format: {card_scheme}:{fee}"
+        ));
+        assert!(candidate_matches_prompt_format(
+            "NexPay:0.63",
+            "format: {card_scheme}:{fee}"
+        ));
+        assert!(!candidate_matches_prompt_format(
+            "Practices for Choosing an ACI",
+            "format: {card_scheme}:{fee}"
+        ));
+    }
+
+    #[test]
+    fn extracts_known_paths_for_finalization() {
+        let mut paths = BTreeSet::new();
+        collect_paths_from_text(
+            r#"{"path":"/app/data/payments.csv","note":"see data/merchant_data.json and ./manual.md"}"#,
+            &mut paths,
+        );
+        assert!(paths.contains("/app/data/payments.csv"));
+        assert!(paths.contains("data/merchant_data.json"));
     }
 }

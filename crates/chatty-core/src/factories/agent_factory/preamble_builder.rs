@@ -44,16 +44,26 @@ pub(super) fn build_preamble(
         );
     }
     if tools.fs_read {
+        let fs_read_names = if tools.doc_retriever {
+            "doc_retriever / read_file / read_binary / list_directory / glob_search"
+        } else {
+            "read_file / read_binary / list_directory / glob_search"
+        };
+        let retriever_note = if tools.doc_retriever {
+            " Use doc_retriever only when exact documentation rules/definitions are needed after mapping files, not for merchant-specific facts or table values."
+        } else {
+            ""
+        };
         tool_sections.push(
-            "- **read_file / read_binary / list_directory / glob_search** \
-             (`read_file` supports `start_line` / `end_line`; large reads are auto-chunked and return `next_start_line`, so continue incrementally instead of rereading the whole file)"
-                .to_string(),
+            format!(
+                "- **{fs_read_names}** (`read_file` supports `start_line` / `end_line`; large reads are auto-chunked and return `next_start_line`; for data files or large docs, prefer `profile_data`, `query_data`, `glob_search`, or targeted ranges instead of reading the whole file).{retriever_note}"
+            ),
         );
     }
     if tools.fs_write {
         tool_sections.push(
-            "- **write_file / apply_diff / create_directory / delete_file / move_file** \
-             (use apply_diff for targeted edits; avoid huge full-file rewrites in tool arguments when a targeted diff or in-place shell script will do)"
+            "- **final_answer / write_file / apply_diff / create_directory / delete_file / move_file** \
+             (use final_answer for factoid or benchmark answer files; use apply_diff for targeted edits; avoid huge full-file rewrites in tool arguments when a targeted diff or in-place shell script will do)"
                 .to_string(),
         );
     }
@@ -100,12 +110,7 @@ pub(super) fn build_preamble(
     }
     if tools.data_query {
         tool_sections.push(
-            "- **query_data / describe_data** (SQL via DuckDB on Parquet/CSV/JSON)".to_string(),
-        );
-    }
-    if tools.dabstep_reference {
-        tool_sections.push(
-            "- **dabstep_reference** (compact DABStep file/schema/rule/month summary; use before opening the large manual)"
+            "- **file_structure_detector / profile_data / describe_data / query_data** (generic DuckDB tools for CSV/JSON/Parquet and document outlines; start data-analysis tasks with file_structure_detector to map files/docs, then use profile_data or aggregate SQL for tables and one compact script when needed; profile_data includes likely important low-cardinality columns beyond the first few columns; when filtering CSV/JSON booleans or categorical strings in code, inspect distinct values or normalize with `str(value).strip().lower()`)"
                 .to_string(),
         );
     }
@@ -406,6 +411,7 @@ mod tests {
     fn fs_tools_included_when_enabled() {
         let mut tools = ToolAvailability::default();
         tools.fs_read = true;
+        tools.doc_retriever = true;
         tools.fs_write = true;
         let result = build_preamble(
             "",
@@ -416,7 +422,9 @@ mod tests {
             &[],
             &[],
         );
+        assert!(result.contains("doc_retriever"));
         assert!(result.contains("read_file"));
+        assert!(result.contains("final_answer"));
         assert!(result.contains("write_file"));
         assert!(result.contains("apply_diff"));
     }
@@ -595,6 +603,7 @@ mod tests {
             &[],
             &[],
         );
+        assert!(result.contains("file_structure_detector"));
         assert!(result.contains("query_data"));
         assert!(result.contains("describe_data"));
     }

@@ -7,6 +7,7 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Default)]
 pub struct ToolAvailability {
     pub fs_read: bool,
+    pub doc_retriever: bool,
     pub fs_write: bool,
     pub list_mcp: bool,
     pub fetch: bool,
@@ -20,7 +21,6 @@ pub struct ToolAvailability {
     pub pdf_info: bool,
     pub pdf_extract_text: bool,
     pub data_query: bool,
-    pub dabstep_reference: bool,
     pub compile_typst: bool,
     pub execute_code: bool,
     pub memory: bool,
@@ -52,10 +52,14 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
                 .map(String::from),
         );
     }
+    if tools.doc_retriever {
+        names.insert(String::from("doc_retriever"));
+    }
     if tools.fs_write {
         names.extend(
             [
                 "write_file",
+                "final_answer",
                 "create_directory",
                 "delete_file",
                 "move_file",
@@ -114,13 +118,15 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.data_query {
         names.extend(
-            ["query_data", "describe_data"]
-                .into_iter()
-                .map(String::from),
+            [
+                "query_data",
+                "describe_data",
+                "profile_data",
+                "file_structure_detector",
+            ]
+            .into_iter()
+            .map(String::from),
         );
-    }
-    if tools.dabstep_reference {
-        names.insert(String::from("dabstep_reference"));
     }
     if tools.compile_typst {
         names.insert(String::from("compile_typst"));
@@ -177,6 +183,16 @@ mod tests {
         for tool in ["read_file", "read_binary", "list_directory", "glob_search"] {
             assert!(names.contains(tool), "{tool} missing for fs_read");
         }
+        assert!(!names.contains("doc_retriever"));
+    }
+
+    #[test]
+    fn includes_doc_retriever_when_enabled() {
+        let names = active_native_tool_names(&ToolAvailability {
+            doc_retriever: true,
+            ..Default::default()
+        });
+        assert!(names.contains("doc_retriever"));
     }
 
     #[test]
@@ -187,6 +203,7 @@ mod tests {
         });
         for tool in [
             "write_file",
+            "final_answer",
             "create_directory",
             "delete_file",
             "move_file",
@@ -284,18 +301,14 @@ mod tests {
             data_query: true,
             ..Default::default()
         });
-        for tool in ["query_data", "describe_data"] {
+        for tool in [
+            "query_data",
+            "describe_data",
+            "profile_data",
+            "file_structure_detector",
+        ] {
             assert!(names.contains(tool), "{tool} missing for data_query");
         }
-    }
-
-    #[test]
-    fn includes_dabstep_reference_tool() {
-        let names = active_native_tool_names(&ToolAvailability {
-            dabstep_reference: true,
-            ..Default::default()
-        });
-        assert!(names.contains("dabstep_reference"));
     }
 
     #[test]
@@ -350,6 +363,7 @@ mod tests {
     fn all_flags_enabled_produces_superset() {
         let all = ToolAvailability {
             fs_read: true,
+            doc_retriever: true,
             fs_write: true,
             list_mcp: true,
             fetch: true,
@@ -363,7 +377,6 @@ mod tests {
             pdf_info: true,
             pdf_extract_text: true,
             data_query: true,
-            dabstep_reference: true,
             compile_typst: true,
             execute_code: true,
             memory: true,
@@ -389,7 +402,9 @@ mod tests {
         // These should NOT be present when all flags are false
         for tool in [
             "read_file",
+            "doc_retriever",
             "write_file",
+            "final_answer",
             "shell_execute",
             "git_status",
             "search_code",

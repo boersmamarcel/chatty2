@@ -116,4 +116,3 @@ clap = { version = "4.6.0", features = ["derive"] }
 
 # Unix-specific
 nix = { version = "0.29", features = ["signal"] }
-

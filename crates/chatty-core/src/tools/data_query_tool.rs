@@ -9,7 +9,12 @@ use crate::services::filesystem_service::FileSystemService;
 
 const DEFAULT_QUERY_MAX_ROWS: u32 = 20;
 const MAX_QUERY_MAX_ROWS: u32 = 10_000;
-const MAX_MARKDOWN_CELL_CHARS: usize = 120;
+const MAX_MARKDOWN_CELL_CHARS: usize = 80;
+const DEFAULT_PROFILE_SAMPLE_ROWS: u32 = 2;
+const MAX_PROFILE_SAMPLE_ROWS: u32 = 5;
+const MAX_PROFILE_COLUMNS: usize = 8;
+const MAX_PROFILE_IMPORTANT_COLUMNS: usize = 14;
+const MAX_PROFILE_SAMPLE_COLUMNS: usize = 8;
 
 // ─── shared types ───
 
@@ -373,9 +378,66 @@ pub struct DescribeDataOutput {
     pub columns: Vec<ColumnInfo>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TopValue {
+    pub value: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnProfile {
+    pub name: String,
+    pub data_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub null_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sum: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub top_values: Vec<TopValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ProfileDataArgs {
+    /// Path to the data file (relative to workspace). Supports .parquet, .csv, .json files.
+    pub path: String,
+    /// Number of sample rows to return (default: 2, max: 5).
+    pub sample_rows: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileDataOutput {
+    pub file_name: String,
+    pub file_size_bytes: u64,
+    pub format: String,
+    pub row_count: u64,
+    pub columns: Vec<ColumnInfo>,
+    pub sample_rows_markdown: String,
+    pub column_profiles: Vec<ColumnProfile>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct DescribeDataTool {
     service: Arc<FileSystemService>,
+}
+
+#[derive(Clone)]
+pub struct ProfileDataTool {
+    service: Arc<FileSystemService>,
+}
+
+impl ProfileDataTool {
+    pub fn new(service: Arc<FileSystemService>) -> Self {
+        Self { service }
+    }
 }
 
 impl DescribeDataTool {
@@ -528,5 +590,520 @@ impl Tool for DescribeDataTool {
             row_count,
             columns,
         })
+    }
+}
+
+impl Tool for ProfileDataTool {
+    const NAME: &'static str = "profile_data";
+    type Error = DataQueryError;
+    type Args = ProfileDataArgs;
+    type Output = ProfileDataOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "profile_data".to_string(),
+            description: "Profile a local CSV, JSON, JSONL, or Parquet file with compact, structured statistics. Returns schema, row count, a tiny sample, numeric min/max/avg/sum, categorical top values, null counts, and notes. Use this early for generic data-analysis tasks before writing custom code or many SQL queries."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .tsv, .json, .jsonl, .ndjson."
+                    },
+                    "sample_rows": {
+                        "type": "integer",
+                        "description": "Number of sample rows to return. Default: 2. Max: 5."
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let canonical = self
+            .service
+            .resolve_path(&args.path)
+            .await
+            .map_err(|e| DataQueryError::PathNotAllowed(e.to_string()))?;
+
+        if !canonical.exists() {
+            return Err(DataQueryError::FileNotFound(args.path.clone()));
+        }
+
+        let file_size_bytes = tokio::fs::metadata(&canonical)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let file_name = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&args.path)
+            .to_string();
+        let ext = canonical
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let format = data_format_from_extension(&ext)?;
+        let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
+        let file_path_owned = canonical.to_string_lossy().to_string();
+        let sample_rows = args
+            .sample_rows
+            .unwrap_or(DEFAULT_PROFILE_SAMPLE_ROWS)
+            .clamp(1, MAX_PROFILE_SAMPLE_ROWS);
+
+        let (columns, row_count, sample_rows_markdown, column_profiles, mut notes) =
+            tokio::task::spawn_blocking(move || {
+                profile_data_file(&workspace_root, &file_path_owned, format, sample_rows)
+            })
+            .await
+            .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
+
+        if columns.len() > MAX_PROFILE_IMPORTANT_COLUMNS {
+            notes.push(format!(
+                "Profiled up to {MAX_PROFILE_IMPORTANT_COLUMNS} representative/important columns out of {} to keep output compact.",
+                columns.len()
+            ));
+        }
+
+        Ok(ProfileDataOutput {
+            file_name,
+            file_size_bytes,
+            format: format.to_string(),
+            row_count,
+            columns,
+            sample_rows_markdown,
+            column_profiles,
+            notes,
+        })
+    }
+}
+
+fn data_format_from_extension(ext: &str) -> Result<&'static str, DataQueryError> {
+    match ext {
+        "parquet" => Ok("parquet"),
+        "csv" | "tsv" => Ok("csv"),
+        "json" | "jsonl" | "ndjson" => Ok("json"),
+        _ => Err(DataQueryError::UnsupportedFormat(format!(
+            "Unsupported file extension '.{}'. Supported: .parquet, .csv, .tsv, .json, .jsonl, .ndjson",
+            ext
+        ))),
+    }
+}
+
+fn profile_data_file(
+    workspace_root: &str,
+    file_path: &str,
+    format: &str,
+    sample_rows: u32,
+) -> Result<
+    (
+        Vec<ColumnInfo>,
+        u64,
+        String,
+        Vec<ColumnProfile>,
+        Vec<String>,
+    ),
+    DataQueryError,
+> {
+    let conn = sandboxed_connection(workspace_root)?;
+    let escaped = file_path.replace('\'', "''");
+    let source = data_source_sql(format, &escaped);
+
+    let columns = describe_source(&conn, &source)?;
+    let row_count = count_source_rows(&conn, &source)?;
+    let sample_columns = columns
+        .iter()
+        .take(MAX_PROFILE_SAMPLE_COLUMNS)
+        .map(|column| quote_identifier(&column.name))
+        .collect::<Vec<_>>();
+    let sample_select = if sample_columns.is_empty() {
+        "*".to_string()
+    } else {
+        sample_columns.join(", ")
+    };
+    let sample_sql = format!("SELECT {sample_select} FROM {source} LIMIT {sample_rows}");
+    let (sample_rows_markdown, _, _, _, shortened_values) =
+        results_to_markdown(&conn, &sample_sql, sample_rows)?;
+
+    let mut notes = Vec::new();
+    if shortened_values {
+        notes.push("Long sample values were shortened for display.".to_string());
+    }
+    if columns.len() > MAX_PROFILE_SAMPLE_COLUMNS {
+        notes.push(format!(
+            "Sample rows show the first {MAX_PROFILE_SAMPLE_COLUMNS} of {} columns.",
+            columns.len()
+        ));
+    }
+
+    let profile_columns = select_profile_columns(&columns);
+    let mut profiles = Vec::new();
+    for column in &profile_columns {
+        profiles.push(profile_column(&conn, &source, column));
+    }
+    if columns.len() > MAX_PROFILE_COLUMNS && profile_columns.len() > MAX_PROFILE_COLUMNS {
+        let names = profile_columns
+            .iter()
+            .skip(MAX_PROFILE_COLUMNS)
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        notes.push(format!(
+            "Added likely important low-cardinality columns beyond the first {MAX_PROFILE_COLUMNS}: {names}."
+        ));
+    }
+
+    Ok((columns, row_count, sample_rows_markdown, profiles, notes))
+}
+
+fn select_profile_columns(columns: &[ColumnInfo]) -> Vec<ColumnInfo> {
+    let mut selected = Vec::new();
+    for column in columns.iter().take(MAX_PROFILE_COLUMNS) {
+        selected.push(column.clone());
+    }
+    if selected.len() >= MAX_PROFILE_IMPORTANT_COLUMNS {
+        return selected;
+    }
+
+    for column in columns.iter().skip(MAX_PROFILE_COLUMNS) {
+        if selected.len() >= MAX_PROFILE_IMPORTANT_COLUMNS {
+            break;
+        }
+        if is_likely_important_low_cardinality_column(column)
+            && !selected.iter().any(|existing| existing.name == column.name)
+        {
+            selected.push(column.clone());
+        }
+    }
+    selected
+}
+
+fn is_likely_important_low_cardinality_column(column: &ColumnInfo) -> bool {
+    let name = column.name.to_ascii_lowercase();
+    let data_type = column.data_type.to_ascii_uppercase();
+    if is_complex_type(&data_type) {
+        return false;
+    }
+    data_type.contains("BOOLEAN")
+        || name == "aci"
+        || name.ends_with("_aci")
+        || name.contains("scheme")
+        || name.contains("status")
+        || name.contains("fraud")
+        || name.contains("refus")
+        || name.contains("credit")
+        || name.contains("debit")
+        || name.contains("country")
+        || name.contains("interaction")
+        || name.contains("device")
+        || name.contains("category")
+        || name.contains("type")
+        || name.contains("bucket")
+        || name.contains("level")
+}
+
+fn describe_source(conn: &Connection, source: &str) -> Result<Vec<ColumnInfo>, DataQueryError> {
+    let mut stmt = conn
+        .prepare(&format!("DESCRIBE SELECT * FROM {source}"))
+        .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
+    let rows = stmt
+        .query([])
+        .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
+    let mut row_iter = rows;
+    let mut columns = Vec::new();
+    loop {
+        match row_iter.next() {
+            Ok(Some(row)) => {
+                let name: String = row.get(0).unwrap_or_default();
+                let data_type: String = row.get(1).unwrap_or_default();
+                columns.push(ColumnInfo { name, data_type });
+            }
+            Ok(None) => break,
+            Err(e) => return Err(DataQueryError::QueryFailed(e.to_string())),
+        }
+    }
+    Ok(columns)
+}
+
+fn count_source_rows(conn: &Connection, source: &str) -> Result<u64, DataQueryError> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {source}"), [], |row| {
+        row.get(0)
+    })
+    .map_err(|e| DataQueryError::QueryFailed(e.to_string()))
+}
+
+fn profile_column(conn: &Connection, source: &str, column: &ColumnInfo) -> ColumnProfile {
+    let ident = quote_identifier(&column.name);
+    let mut notes = Vec::new();
+    let null_count = conn
+        .query_row(
+            &format!("SELECT COUNT(*) - COUNT({ident}) FROM {source}"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| notes.push(format!("null_count unavailable: {e}")))
+        .ok()
+        .filter(|count| *count > 0);
+
+    let (min, max, average, sum) = if is_numeric_type(&column.data_type) {
+        match conn.query_row(
+            &format!("SELECT MIN({ident}), MAX({ident}), AVG({ident}), SUM({ident}) FROM {source}"),
+            [],
+            |row| {
+                let min = row
+                    .get::<_, duckdb::types::Value>(0)
+                    .map(|v| value_to_string(&v))
+                    .ok();
+                let max = row
+                    .get::<_, duckdb::types::Value>(1)
+                    .map(|v| value_to_string(&v))
+                    .ok();
+                let avg = row.get::<_, Option<f64>>(2).ok().flatten();
+                let sum = row.get::<_, Option<f64>>(3).ok().flatten();
+                Ok((min, max, avg, sum))
+            },
+        ) {
+            Ok(stats) => stats,
+            Err(e) => {
+                notes.push(format!("numeric stats unavailable: {e}"));
+                (None, None, None, None)
+            }
+        }
+    } else {
+        (None, None, None, None)
+    };
+
+    let top_values = if should_collect_top_values(&column.data_type) {
+        top_values_for_column(conn, source, &ident, &mut notes)
+    } else {
+        Vec::new()
+    };
+
+    ColumnProfile {
+        name: column.name.clone(),
+        data_type: column.data_type.clone(),
+        null_count,
+        min,
+        max,
+        average,
+        sum,
+        top_values,
+        note: if notes.is_empty() {
+            None
+        } else {
+            Some(notes.join("; "))
+        },
+    }
+}
+
+fn top_values_for_column(
+    conn: &Connection,
+    source: &str,
+    ident: &str,
+    notes: &mut Vec<String>,
+) -> Vec<TopValue> {
+    let sql = format!(
+        "SELECT CAST({ident} AS VARCHAR) AS value, COUNT(*) AS count \
+         FROM {source} GROUP BY 1 ORDER BY count DESC, value ASC LIMIT 5"
+    );
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            notes.push(format!("top values unavailable: {e}"));
+            return Vec::new();
+        }
+    };
+    let rows = match stmt.query([]) {
+        Ok(rows) => rows,
+        Err(e) => {
+            notes.push(format!("top values unavailable: {e}"));
+            return Vec::new();
+        }
+    };
+    let mut row_iter = rows;
+    let mut values = Vec::new();
+    loop {
+        match row_iter.next() {
+            Ok(Some(row)) => {
+                let value = row
+                    .get::<_, duckdb::types::Value>(0)
+                    .map(|v| value_to_string(&v))
+                    .unwrap_or_else(|_| "NULL".to_string());
+                let count = row.get::<_, u64>(1).unwrap_or(0);
+                let (value, _) = format_markdown_cell(&value);
+                values.push(TopValue { value, count });
+            }
+            Ok(None) => break,
+            Err(e) => {
+                notes.push(format!("top values unavailable: {e}"));
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn data_source_sql(format: &str, escaped_path: &str) -> String {
+    match format {
+        "parquet" => format!("read_parquet('{escaped_path}')"),
+        "csv" => format!("read_csv('{escaped_path}')"),
+        "json" => format!("read_json_auto('{escaped_path}')"),
+        _ => unreachable!(),
+    }
+}
+
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn is_numeric_type(data_type: &str) -> bool {
+    let ty = data_type.to_ascii_uppercase();
+    if is_complex_type(&ty) {
+        return false;
+    }
+    [
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "FLOAT",
+        "DOUBLE",
+        "DECIMAL",
+        "NUMERIC",
+        "REAL",
+    ]
+    .iter()
+    .any(|needle| ty.contains(needle))
+}
+
+fn should_collect_top_values(data_type: &str) -> bool {
+    let ty = data_type.to_ascii_uppercase();
+    if is_complex_type(&ty) {
+        return false;
+    }
+    ty.contains("VARCHAR")
+        || ty.contains("TEXT")
+        || ty.contains("BOOLEAN")
+        || ty.contains("ENUM")
+        || ty.contains("DATE")
+        || ty.contains("TIME")
+}
+
+fn is_complex_type(upper_data_type: &str) -> bool {
+    upper_data_type.contains("[]")
+        || upper_data_type.contains("LIST")
+        || upper_data_type.contains("STRUCT")
+        || upper_data_type.contains("MAP")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn profile_data_returns_compact_generic_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("sales.csv"),
+            "category,amount,flag\nbook,10,true\nbook,20,false\ngame,30,true\n",
+        )
+        .unwrap();
+
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = ProfileDataTool::new(service);
+
+        let output = tool
+            .call(ProfileDataArgs {
+                path: "data/sales.csv".to_string(),
+                sample_rows: Some(2),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.file_name, "sales.csv");
+        assert_eq!(output.row_count, 3);
+        assert_eq!(output.columns.len(), 3);
+        assert!(output.sample_rows_markdown.contains("book"));
+
+        let amount = output
+            .column_profiles
+            .iter()
+            .find(|profile| profile.name == "amount")
+            .unwrap();
+        assert_eq!(amount.min.as_deref(), Some("10"));
+        assert_eq!(amount.max.as_deref(), Some("30"));
+        assert_eq!(amount.sum, Some(60.0));
+
+        let category = output
+            .column_profiles
+            .iter()
+            .find(|profile| profile.name == "category")
+            .unwrap();
+        assert!(
+            category
+                .top_values
+                .iter()
+                .any(|value| value.value == "book" && value.count == 2)
+        );
+    }
+
+    #[test]
+    fn profile_skips_top_values_for_complex_types() {
+        assert!(!should_collect_top_values("VARCHAR[]"));
+        assert!(!should_collect_top_values("STRUCT(name VARCHAR)"));
+        assert!(!is_numeric_type("BIGINT[]"));
+        assert!(should_collect_top_values("VARCHAR"));
+        assert!(is_numeric_type("BIGINT"));
+    }
+
+    #[test]
+    fn profile_selects_important_columns_beyond_first_eight() {
+        let columns = vec![
+            ("psp_reference", "BIGINT"),
+            ("merchant", "VARCHAR"),
+            ("card_scheme", "VARCHAR"),
+            ("year", "BIGINT"),
+            ("hour_of_day", "BIGINT"),
+            ("minute_of_hour", "BIGINT"),
+            ("day_of_year", "BIGINT"),
+            ("is_credit", "BOOLEAN"),
+            ("eur_amount", "DOUBLE"),
+            ("email_address", "VARCHAR"),
+            ("has_fraudulent_dispute", "BOOLEAN"),
+            ("is_refused_by_adyen", "BOOLEAN"),
+            ("aci", "VARCHAR"),
+            ("acquirer_country", "VARCHAR"),
+        ]
+        .into_iter()
+        .map(|(name, data_type)| ColumnInfo {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+        let selected = select_profile_columns(&columns);
+        let names = selected
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"has_fraudulent_dispute"));
+        assert!(names.contains(&"is_refused_by_adyen"));
+        assert!(names.contains(&"aci"));
+        assert!(names.contains(&"acquirer_country"));
+        assert!(!names.contains(&"email_address"));
     }
 }

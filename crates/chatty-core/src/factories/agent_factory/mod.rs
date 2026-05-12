@@ -21,7 +21,7 @@ use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::CompileTypstTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DABStepReferenceTool, DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool,
+    DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
     FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
     GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
     ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
@@ -30,7 +30,7 @@ use crate::tools::{
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
-use crate::tools::{DescribeDataTool, QueryDataTool};
+use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 #[cfg(feature = "pdf")]
@@ -42,6 +42,12 @@ use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
 pub use tool_registry::ToolAvailability;
+
+fn doc_retriever_enabled() -> bool {
+    std::env::var("CHATTY_ENABLE_DOC_RETRIEVER")
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true)
+}
 
 /// Contextual dependencies for building an agent.
 ///
@@ -208,13 +214,13 @@ impl AgentClient {
         #[cfg(feature = "pdf")]
         let mut pdf_extract_text_tool: Option<PdfExtractTextTool> = None;
         let mut search_tools: Option<SearchTools> = None;
+        let mut doc_retriever_tool: Option<DocRetrieverTool> = None;
         #[cfg(feature = "excel")]
         let mut excel_read_tool: Option<ReadExcelTool> = None;
         #[cfg(feature = "excel")]
         let mut excel_write_tools: Option<ExcelWriteTools> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
-        let mut dabstep_reference_tool: Option<DABStepReferenceTool> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
             .as_ref()
             .and_then(|s| s.workspace_dir.as_ref())
@@ -263,6 +269,14 @@ impl AgentClient {
                             }
                         }
 
+                        if doc_retriever_enabled() {
+                            doc_retriever_tool = Some(DocRetrieverTool::new(service.clone()));
+                        } else {
+                            tracing::info!(
+                                "doc_retriever skipped: CHATTY_ENABLE_DOC_RETRIEVER disabled it"
+                            );
+                        }
+
                         Some((
                             ReadFileTool::new(service.clone()),
                             ReadBinaryTool::new(service.clone()),
@@ -284,6 +298,7 @@ impl AgentClient {
                         pending_write_approvals.as_ref().map(|approvals| {
                             (
                                 WriteFileTool::new(service.clone(), approvals.clone()),
+                                FinalAnswerTool::new(service.clone(), approvals.clone()),
                                 CreateDirectoryTool::new(service.clone()),
                                 DeleteFileTool::new(service.clone(), approvals.clone()),
                                 MoveFileTool::new(service.clone(), approvals.clone()),
@@ -321,14 +336,9 @@ impl AgentClient {
                         data_query_tools = Some((
                             QueryDataTool::new(service.clone()),
                             DescribeDataTool::new(service.clone()),
+                            ProfileDataTool::new(service.clone()),
+                            FileStructureTool::new(service.clone()),
                         ));
-                    }
-
-                    if read_tools.is_some()
-                        && DABStepReferenceTool::is_available(service.as_ref()).await
-                    {
-                        tracing::info!(workspace = %workspace_dir, "DABStep reference tool enabled");
-                        dabstep_reference_tool = Some(DABStepReferenceTool::new());
                     }
 
                     (read_tools, write_tools)
@@ -684,6 +694,7 @@ impl AgentClient {
 
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
+            doc_retriever: doc_retriever_tool.is_some(),
             fs_write: fs_write_tools.is_some(),
             list_mcp: mcp_mgmt_tools.is_enabled(),
             fetch: fetch_tool.is_some(),
@@ -751,7 +762,6 @@ impl AgentClient {
                     false
                 }
             },
-            dabstep_reference: dabstep_reference_tool.is_some(),
             compile_typst: {
                 #[cfg(feature = "math-render")]
                 {
@@ -823,6 +833,7 @@ impl AgentClient {
         let tool_vec = native_tools!(
             list_tools: list_tools,
             fs_read: fs_read_tools,
+            doc_retriever: doc_retriever_tool,
             fs_write: fs_write_tools,
             add_attachment: add_attachment_tool,
             pdf_to_image: pdf_to_image_tool,
@@ -838,7 +849,6 @@ impl AgentClient {
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,
-            dabstep_reference_tool: dabstep_reference_tool,
             execute_code_tool: execute_code_tool,
             remember_tool: remember_tool,
             save_skill_tool: save_skill_tool,

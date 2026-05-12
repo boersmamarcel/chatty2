@@ -4,7 +4,7 @@ use rig::tool::ToolDyn;
 use crate::tools::CompileTypstTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DABStepReferenceTool, DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool,
+    DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
     FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
     GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
     ListAgentsTool, ListDirectoryTool, ListToolsTool, MoveFileTool, PublishModuleTool,
@@ -13,7 +13,7 @@ use crate::tools::{
     ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
-use crate::tools::{DescribeDataTool, QueryDataTool};
+use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 #[cfg(feature = "pdf")]
@@ -32,6 +32,7 @@ pub(super) type FsReadTools = (
 /// Filesystem write tool set
 pub(super) type FsWriteTools = (
     WriteFileTool,
+    FinalAnswerTool,
     CreateDirectoryTool,
     DeleteFileTool,
     MoveFileTool,
@@ -66,7 +67,12 @@ pub(super) type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 #[cfg(feature = "duckdb")]
-pub(super) type DataQueryTools = (QueryDataTool, DescribeDataTool);
+pub(super) type DataQueryTools = (
+    QueryDataTool,
+    DescribeDataTool,
+    ProfileDataTool,
+    FileStructureTool,
+);
 
 /// Collect all optional native tools into a `Vec<Box<dyn ToolDyn>>`.
 ///
@@ -76,6 +82,7 @@ pub(super) type DataQueryTools = (QueryDataTool, DescribeDataTool);
 pub(super) struct NativeTools {
     pub list_tools: ListToolsTool,
     pub fs_read: Option<FsReadTools>,
+    pub doc_retriever: Option<DocRetrieverTool>,
     pub fs_write: Option<FsWriteTools>,
     pub add_attachment: Option<AddAttachmentTool>,
     #[cfg(feature = "pdf")]
@@ -98,7 +105,6 @@ pub(super) struct NativeTools {
     pub chart_tool: Option<CreateChartTool>,
     #[cfg(feature = "math-render")]
     pub typst_tool: Option<CompileTypstTool>,
-    pub dabstep_reference_tool: Option<DABStepReferenceTool>,
     pub execute_code_tool: Option<ExecuteCodeTool>,
     pub remember_tool: Option<RememberTool>,
     pub save_skill_tool: Option<SaveSkillTool>,
@@ -129,8 +135,12 @@ impl NativeTools {
             tools.push(Box::new(ld));
             tools.push(Box::new(gs));
         }
-        if let Some((wf, cd, df, mf, ad)) = self.fs_write {
+        if let Some(dr) = self.doc_retriever {
+            tools.push(Box::new(dr));
+        }
+        if let Some((wf, fa, cd, df, mf, ad)) = self.fs_write {
             tools.push(Box::new(wf));
+            tools.push(Box::new(fa));
             tools.push(Box::new(cd));
             tools.push(Box::new(df));
             tools.push(Box::new(mf));
@@ -185,18 +195,17 @@ impl NativeTools {
             tools.push(Box::new(et));
         }
         #[cfg(feature = "duckdb")]
-        if let Some((qt, dt)) = self.data_query {
+        if let Some((qt, dt, pt, fsd)) = self.data_query {
             tools.push(Box::new(qt));
             tools.push(Box::new(dt));
+            tools.push(Box::new(pt));
+            tools.push(Box::new(fsd));
         }
         if let Some(t) = self.chart_tool {
             tools.push(Box::new(t));
         }
         #[cfg(feature = "math-render")]
         if let Some(t) = self.typst_tool {
-            tools.push(Box::new(t));
-        }
-        if let Some(t) = self.dabstep_reference_tool {
             tools.push(Box::new(t));
         }
         if let Some(t) = self.execute_code_tool {
@@ -239,6 +248,7 @@ macro_rules! native_tools {
     (
         list_tools: $list_tools:expr,
         fs_read: $fs_read:expr,
+        doc_retriever: $doc_retriever:expr,
         fs_write: $fs_write:expr,
         add_attachment: $add_attachment:expr,
         pdf_to_image: $pdf_to_image:expr,
@@ -254,7 +264,6 @@ macro_rules! native_tools {
         data_query: $data_query:expr,
         chart_tool: $chart_tool:expr,
         typst_tool: $typst_tool:expr,
-        dabstep_reference_tool: $dabstep_reference_tool:expr,
         execute_code_tool: $execute_code_tool:expr,
         remember_tool: $remember_tool:expr,
         save_skill_tool: $save_skill_tool:expr,
@@ -271,6 +280,7 @@ macro_rules! native_tools {
         NativeTools {
             list_tools: $list_tools,
             fs_read: $fs_read,
+            doc_retriever: $doc_retriever,
             fs_write: $fs_write,
             add_attachment: $add_attachment,
             #[cfg(feature = "pdf")]
@@ -293,7 +303,6 @@ macro_rules! native_tools {
             chart_tool: $chart_tool,
             #[cfg(feature = "math-render")]
             typst_tool: $typst_tool,
-            dabstep_reference_tool: $dabstep_reference_tool,
             execute_code_tool: $execute_code_tool,
             remember_tool: $remember_tool,
             save_skill_tool: $save_skill_tool,

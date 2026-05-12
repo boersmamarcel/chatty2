@@ -26,6 +26,7 @@ pub struct ReadFileOutput {
     pub total_lines: usize,
     pub truncated: bool,
     pub next_start_line: Option<usize>,
+    pub note: Option<String>,
 }
 
 #[derive(Clone)]
@@ -53,9 +54,11 @@ impl Tool for ReadFileTool {
                           Files must be within the workspace directory and under 10MB. \
                           Optionally provide start_line and end_line (1-based, inclusive) to read \
                           only part of a file, which is useful for large files. Large reads are \
-                          automatically chunked to at most 200 lines per call; when that happens, \
-                          the output includes returned_start_line / returned_end_line plus \
-                          next_start_line so you can continue with another ranged read. \
+                          automatically chunked to at most 30 lines and 6000 characters per call; when that happens, \
+                           the output includes returned_start_line / returned_end_line plus \
+                           next_start_line so you can continue with another ranged read. \
+                           For large documentation or data tasks, prefer targeted ranges, search, \
+                           profile_data, describe_data, or query_data instead of reading whole files. \
                           For binary files (images, PDFs), use read_binary instead.\n\
                           \n\
                           Examples:\n\
@@ -102,6 +105,14 @@ impl Tool for ReadFileTool {
             total_lines: result.total_lines,
             truncated: result.truncated,
             next_start_line: result.next_start_line,
+            note: result.truncated.then(|| {
+                format!(
+                    "Read was truncated to lines {}-{} of {} and/or a safe character cap. Continue only if those lines are necessary; for large docs/data, prefer search, targeted ranges, profile_data, describe_data, or query_data.",
+                    result.returned_start_line.unwrap_or(1),
+                    result.returned_end_line.unwrap_or(0),
+                    result.total_lines
+                )
+            }),
         })
     }
 }
