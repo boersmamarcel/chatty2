@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState, slash_menu_items_with_skills};
+use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
@@ -1623,10 +1623,10 @@ impl ChatView {
 
         // Refresh available models from global store (in case they changed)
         if let Some(models_model) = cx.try_global::<ModelsModel>() {
-            let models_list: Vec<(String, String)> = models_model
+            let models_list: Vec<ModelOption> = models_model
                 .models()
                 .iter()
-                .map(|m| (m.id.clone(), m.name.clone()))
+                .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
                 .collect();
 
             if !models_list.is_empty() {
@@ -1634,7 +1634,7 @@ impl ChatView {
                     if state.available_models().is_empty()
                         || state.available_models() != models_list.as_slice()
                     {
-                        let default_model_id = models_list.first().map(|(id, _)| id.clone());
+                        let default_model_id = models_list.first().map(|model| model.id.clone());
                         state.set_available_models(models_list, default_model_id);
                     }
                 });
