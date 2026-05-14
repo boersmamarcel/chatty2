@@ -747,11 +747,12 @@ async fn start_mcp_servers() -> Option<McpService> {
 // Zero-config server discovery (--ollama / --openai-compat-url)
 // ---------------------------------------------------------------------------
 
-/// A discovered model from a running server (identifier + display name + vision flag).
+/// A discovered model from a running server (identifier + display name + vision/thinking flags).
 struct DiscoveredModel {
     identifier: String,
     display_name: String,
     supports_vision: bool,
+    supports_thinking: bool,
 }
 
 /// Query a running Ollama instance at `base_url` via `/api/tags` (and `/api/show`
@@ -775,13 +776,12 @@ async fn discover_ollama(base_url: &str) -> Result<Vec<DiscoveredModel>> {
 
     Ok(models
         .into_iter()
-        .map(
-            |(identifier, display_name, supports_vision)| DiscoveredModel {
-                identifier,
-                display_name,
-                supports_vision,
-            },
-        )
+        .map(|m| DiscoveredModel {
+            identifier: m.identifier,
+            display_name: m.display_name,
+            supports_vision: m.supports_vision,
+            supports_thinking: m.supports_thinking,
+        })
         .collect())
 }
 
@@ -843,6 +843,7 @@ async fn discover_openai_compat(
                 identifier: entry.id,
                 display_name,
                 supports_vision: false,
+                supports_thinking: false,
             }
         })
         .collect())
@@ -897,6 +898,8 @@ fn inject_discovered(
         );
         let mut mc = ModelConfig::new(id, dm.display_name, provider_type.clone(), dm.identifier);
         mc.supports_images = dm.supports_vision;
+        mc.supports_thinking = dm.supports_thinking;
+        mc.enable_thinking = dm.supports_thinking;
         models_list.push(mc);
     }
 }

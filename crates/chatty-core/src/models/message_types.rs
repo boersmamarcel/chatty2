@@ -234,6 +234,46 @@ impl SystemTrace {
         self.items.push(TraceItem::Thinking(thinking));
     }
 
+    /// Append a delta to the last thinking block that is still in Processing state.
+    /// Returns true if a matching block was found.
+    pub fn append_thinking_delta(&mut self, delta: &str) -> bool {
+        for item in self.items.iter_mut().rev() {
+            if let TraceItem::Thinking(tb) = item
+                && matches!(tb.state, ThinkingState::Processing)
+            {
+                tb.content.push_str(delta);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark the last Processing thinking block as Completed and generate a summary.
+    /// Returns true if a block was found and finalized.
+    pub fn finalize_last_thinking(&mut self) -> bool {
+        for item in self.items.iter_mut().rev() {
+            if let TraceItem::Thinking(tb) = item
+                && matches!(tb.state, ThinkingState::Processing)
+            {
+                tb.state = ThinkingState::Completed;
+                tb.summary = tb
+                    .content
+                    .lines()
+                    .next()
+                    .map(|line| {
+                        if line.len() > 50 {
+                            format!("{}...", &line[..50])
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "Analysis complete".to_string());
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn has_items(&self) -> bool {
         !self.items.is_empty()
     }

@@ -20,20 +20,30 @@ struct OllamaShowResponse {
     capabilities: Vec<String>,
 }
 
+/// A model discovered from a running Ollama instance.
+#[derive(Debug, Clone)]
+pub struct DiscoveredOllamaModel {
+    /// Ollama model identifier (e.g. `"llama3.2-vision:latest"`)
+    pub identifier: String,
+    /// Human-readable display name (e.g. `"Llama3.2 Vision"`)
+    pub display_name: String,
+    /// Whether the model supports image inputs
+    pub supports_vision: bool,
+    /// Whether the model supports thinking/reasoning mode
+    pub supports_thinking: bool,
+}
+
 /// Discover available Ollama models by querying the Ollama API
 ///
 /// # Arguments
 /// * `base_url` - The base URL of the Ollama API (e.g., "http://localhost:11434")
-///
-/// # Returns
-/// A vector of tuples containing (model_identifier, display_name, supports_vision)
 ///
 /// # Errors
 /// Returns an error if:
 /// - The HTTP request fails
 /// - The API returns a non-success status
 /// - The response cannot be deserialized
-pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, String, bool)>> {
+pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<DiscoveredOllamaModel>> {
     // Build the API endpoint URL
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
 
@@ -76,17 +86,32 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
             format!("{} {}", base_name, tag)
         };
 
-        // Query /api/show to check for vision capability
-        let supports_vision = check_model_vision(&client, base_url, &identifier).await;
+        // Query /api/show to check for vision and thinking capabilities
+        let caps = check_model_capabilities(&client, base_url, &identifier).await;
 
-        models.push((identifier, display_name, supports_vision));
+        models.push(DiscoveredOllamaModel {
+            identifier,
+            display_name,
+            supports_vision: caps.vision,
+            supports_thinking: caps.thinking,
+        });
     }
 
     Ok(models)
 }
 
-/// Check if an Ollama model supports vision by querying /api/show
-async fn check_model_vision(client: &reqwest::Client, base_url: &str, model_name: &str) -> bool {
+/// Capability flags returned by `/api/show`
+struct ModelCapabilities {
+    vision: bool,
+    thinking: bool,
+}
+
+/// Check Ollama model capabilities (vision and thinking) by querying /api/show
+async fn check_model_capabilities(
+    client: &reqwest::Client,
+    base_url: &str,
+    model_name: &str,
+) -> ModelCapabilities {
     let url = format!("{}/api/show", base_url.trim_end_matches('/'));
 
     let response = client
@@ -98,24 +123,37 @@ async fn check_model_vision(client: &reqwest::Client, base_url: &str, model_name
     match response {
         Ok(resp) if resp.status().is_success() => match resp.json::<OllamaShowResponse>().await {
             Ok(show) => {
-                let has_vision = show.capabilities.iter().any(|c| c == "vision");
-                if has_vision {
+                let vision = show.capabilities.iter().any(|c| c == "vision");
+                let thinking = show.capabilities.iter().any(|c| c == "thinking");
+                if vision {
                     debug!(model = %model_name, "Ollama model supports vision");
                 }
-                has_vision
+                if thinking {
+                    debug!(model = %model_name, "Ollama model supports thinking");
+                }
+                ModelCapabilities { vision, thinking }
             }
             Err(e) => {
                 warn!(model = %model_name, error = ?e, "Failed to parse /api/show response");
-                false
+                ModelCapabilities {
+                    vision: false,
+                    thinking: false,
+                }
             }
         },
         Ok(resp) => {
             warn!(model = %model_name, status = %resp.status(), "Ollama /api/show returned error");
-            false
+            ModelCapabilities {
+                vision: false,
+                thinking: false,
+            }
         }
         Err(e) => {
             warn!(model = %model_name, error = ?e, "Failed to query Ollama /api/show");
-            false
+            ModelCapabilities {
+                vision: false,
+                thinking: false,
+            }
         }
     }
 }

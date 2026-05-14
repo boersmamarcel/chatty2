@@ -76,10 +76,18 @@ pub(super) async fn build_provider_agent(
                 .base_url(&url)
                 .build()?;
 
-            let builder = client
+            let mut builder = client
                 .agent(&model_config.model_identifier)
                 .preamble(preamble)
                 .temperature(model_config.temperature as f64);
+
+            // Pass think: true to Ollama when thinking mode is enabled.
+            // Ollama handles the model-specific chat template internally
+            // (e.g. inserting <|think|> for Gemma4 or thinking tokens for
+            // QwQ/DeepSeek-R1), so no system-prompt change is needed here.
+            if model_config.enable_thinking {
+                builder = builder.additional_params(serde_json::json!({ "think": true }));
+            }
 
             let agent =
                 build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);

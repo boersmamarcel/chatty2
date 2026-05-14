@@ -67,6 +67,19 @@ pub enum StreamManagerEvent {
         conversation_id: String,
         text: String,
     },
+    /// A thinking/reasoning block has started for the given conversation
+    ThinkingStarted {
+        conversation_id: String,
+    },
+    /// Incremental content for the current thinking block
+    ThinkingDelta {
+        conversation_id: String,
+        delta: String,
+    },
+    /// The current thinking block has finished
+    ThinkingEnded {
+        conversation_id: String,
+    },
     ToolCallStarted {
         conversation_id: String,
         id: String,
@@ -338,6 +351,22 @@ impl StreamManager {
                         });
                     }
                 }
+            }
+            StreamChunk::ThinkingStarted => {
+                cx.emit(StreamManagerEvent::ThinkingStarted {
+                    conversation_id: conv_id.to_string(),
+                });
+            }
+            StreamChunk::ThinkingDelta(delta) => {
+                cx.emit(StreamManagerEvent::ThinkingDelta {
+                    conversation_id: conv_id.to_string(),
+                    delta,
+                });
+            }
+            StreamChunk::ThinkingEnded => {
+                cx.emit(StreamManagerEvent::ThinkingEnded {
+                    conversation_id: conv_id.to_string(),
+                });
             }
             StreamChunk::ToolCallStarted { id, name } => {
                 cx.emit(StreamManagerEvent::ToolCallStarted {

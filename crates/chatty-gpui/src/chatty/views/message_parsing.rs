@@ -182,26 +182,35 @@ fn detect_incomplete_code_block(text: &str) -> Option<(usize, Option<String>, St
 
 /// Parse content to extract thinking blocks and regular text segments.
 ///
-/// Supports `<think>...</think>`, `<thinking>...</thinking>`, and
-/// `<thought>...</thought>` patterns. Unclosed tags (common during streaming)
-/// are treated as incomplete thinking blocks.
+/// Supports `<think>...</think>`, `<thinking>...</thinking>`, `<thought>...</thought>`,
+/// and the Gemma4 `<|channel>thought\n...<|channel>model\n` format.
+/// Unclosed tags (common during streaming) are treated as incomplete thinking blocks.
 pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
     let mut segments = Vec::new();
     let mut remaining = content;
 
     while !remaining.is_empty() {
-        // Find the earliest opening tag among <thinking>, <thought>, <think>
+        // Find the earliest opening tag among <thinking>, <thought>, <think>, and Gemma4 <|channel>thought
         let find_thinking = remaining.find("<thinking>").map(|i| (i, 10usize));
         let find_thought = remaining.find("<thought>").map(|i| (i, 9usize));
         // <think> must not be the start of <thinking> (different prefix check isn't needed
         // since <thinking> starts with <think but is longer; find("<think>") won't match
         // inside "<thinking>" because the 8th char is 'i' not '>')
         let find_think = remaining.find("<think>").map(|i| (i, 7usize));
+        // Gemma4 thinking channel: <|channel>thought\n
+        let find_channel_thought = remaining
+            .find("<|channel>thought\n")
+            .map(|i| (i, "<|channel>thought\n".len()));
 
-        let result = [find_thinking, find_thought, find_think]
-            .into_iter()
-            .flatten()
-            .min_by_key(|(idx, _)| *idx);
+        let result = [
+            find_thinking,
+            find_thought,
+            find_think,
+            find_channel_thought,
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(idx, _)| *idx);
 
         let (start_idx, tag_len) = if let Some(r) = result {
             r
@@ -222,13 +231,15 @@ pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
             }
         }
 
-        // Find the closing tag - support </think>, </thinking>, and </thought>
+        // Find the closing tag - support </think>, </thinking>, </thought>, and <|channel> (Gemma4)
         let after_open = &remaining[start_idx + tag_len..];
         let end_tag_and_len = after_open
             .find("</think>")
             .map(|idx| (idx, 8)) // "</think>" is 8 chars
             .or_else(|| after_open.find("</thinking>").map(|idx| (idx, 11)))
-            .or_else(|| after_open.find("</thought>").map(|idx| (idx, 10)));
+            .or_else(|| after_open.find("</thought>").map(|idx| (idx, 10)))
+            // Gemma4: thinking ends when another <|channel> token starts
+            .or_else(|| after_open.find("<|channel>").map(|idx| (idx, 0)));
 
         if let Some((end_idx, close_tag_len)) = end_tag_and_len {
             let thinking_content = after_open[..end_idx].trim().to_string();
@@ -251,6 +262,36 @@ pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
 
 // ── Cache-Building Pipeline ───────────────────────────────────────────────
 
+/// Parse thinking block content through the markdown + math pipeline.
+///
+/// Thinking content is treated identically to regular text for rendering
+/// purposes — code blocks, math expressions, and regular text are all parsed.
+/// This ensures the rendered thinking block is as readable as the main message.
+fn parse_thinking_content(text: &str, cx: &App) -> Vec<CachedMarkdownSegment> {
+    parse_markdown_segments(text, false)
+        .into_iter()
+        .map(|ms| match ms {
+            MarkdownSegment::CodeBlock { language, code } => {
+                let styles = syntax_highlighter::highlight_code(&code, language.as_deref(), cx);
+                CachedMarkdownSegment::CodeBlock(CachedCodeBlock {
+                    language,
+                    code,
+                    styles,
+                })
+            }
+            MarkdownSegment::Text(t) => {
+                CachedMarkdownSegment::TextWithMath(parse_math_segments(&t))
+            }
+            MarkdownSegment::IncompleteCodeBlock { .. } => {
+                unreachable!("IncompleteCodeBlock should not appear in non-streaming parse")
+            }
+            MarkdownSegment::UnclosedCodeBlock { language, code } => {
+                CachedMarkdownSegment::UnclosedCodeBlock { language, code }
+            }
+        })
+        .collect()
+}
+
 /// Run the full three-stage parsing pipeline and return a cacheable result.
 ///
 /// Phases:
@@ -264,7 +305,10 @@ pub(super) fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseR
     let cached_segments: Vec<CachedContentSegment> = content_segments
         .into_iter()
         .map(|segment| match segment {
-            ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+            ContentSegment::Thinking(text) => {
+                let cached_md = parse_thinking_content(&text, cx);
+                CachedContentSegment::Thinking(cached_md)
+            }
             ContentSegment::Text(text) => {
                 let markdown_segs = parse_markdown_segments(&text, false);
                 let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
@@ -337,10 +381,12 @@ pub(super) fn build_streaming_parse_result(
     let content_segments = parse_content_segments(content);
     let content_segment_count = content_segments.len();
 
-    // Check if we can reuse the stable prefix from the previous render
-    let can_reuse_prefix = prev.is_some_and(|p| {
-        content.len() >= p.content_len && content_segment_count == p.content_segment_count
-    });
+    // Check if we can reuse the stable prefix from the previous render.
+    // content_segment_count > 0 guards the later `last().unwrap()` call.
+    let can_reuse_prefix = content_segment_count > 0
+        && prev.is_some_and(|p| {
+            content.len() >= p.content_len && content_segment_count == p.content_segment_count
+        });
 
     let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
         // SAFETY: can_reuse_prefix checks prev.is_some_and(...)
@@ -356,8 +402,8 @@ pub(super) fn build_streaming_parse_result(
             segments.push(seg.clone());
         }
 
-        // Re-parse only the last content segment
-        // SAFETY: content_segment_count > 0 (checked by can_reuse_prefix)
+        // Re-parse only the last content segment.
+        // `content_segment_count > 0` in `can_reuse_prefix` guarantees this is non-empty.
         let last = content_segments.into_iter().last().unwrap();
         segments.push(parse_content_segment_streaming(last, prev_state, cx));
 
@@ -402,7 +448,9 @@ fn parse_content_segment_streaming(
     cx: &App,
 ) -> CachedContentSegment {
     match segment {
-        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Thinking(text) => {
+            CachedContentSegment::Thinking(parse_thinking_content(&text, cx))
+        }
         ContentSegment::Text(text) => {
             let markdown_segs = parse_markdown_segments(&text, true);
             let md_count = markdown_segs.len();
@@ -469,7 +517,9 @@ fn parse_content_segment_streaming_fresh(
     cx: &App,
 ) -> CachedContentSegment {
     match segment {
-        ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
+        ContentSegment::Thinking(text) => {
+            CachedContentSegment::Thinking(parse_thinking_content(&text, cx))
+        }
         ContentSegment::Text(text) => {
             let markdown_segs = parse_markdown_segments(&text, true);
             let cached_md: Vec<CachedMarkdownSegment> = markdown_segs

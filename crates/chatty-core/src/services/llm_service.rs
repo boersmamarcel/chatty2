@@ -14,6 +14,12 @@ use crate::models::execution_approval_store::{ApprovalNotification, ApprovalReso
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     Text(String),
+    /// A thinking/reasoning block is starting
+    ThinkingStarted,
+    /// Incremental content for the current thinking block
+    ThinkingDelta(String),
+    /// The current thinking block has finished
+    ThinkingEnded,
     ToolCallStarted {
         id: String,
         name: String,
@@ -54,12 +60,37 @@ pub type ResponseStream = BoxStream<'static, Result<StreamChunk>>;
 macro_rules! process_agent_stream {
     ($stream:expr) => {
         Box::pin(async_stream::stream! {
+            let mut in_thinking = false;
             while let Some(item) = $stream.next().await {
                 match item {
                     Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(content)) => {
                         match content {
                             rig::streaming::StreamedAssistantContent::Text(text) => {
+                                // Close any open thinking block before emitting text
+                                if in_thinking {
+                                    in_thinking = false;
+                                    yield Ok(StreamChunk::ThinkingEnded);
+                                }
                                 yield Ok(StreamChunk::Text(text.text));
+                            }
+                            rig::streaming::StreamedAssistantContent::Reasoning(reasoning) => {
+                                // Full reasoning block received at once
+                                let text = reasoning.display_text();
+                                if !text.is_empty() {
+                                    yield Ok(StreamChunk::ThinkingStarted);
+                                    yield Ok(StreamChunk::ThinkingDelta(text));
+                                    yield Ok(StreamChunk::ThinkingEnded);
+                                }
+                            }
+                            rig::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                                // Incremental reasoning delta
+                                if !in_thinking {
+                                    in_thinking = true;
+                                    yield Ok(StreamChunk::ThinkingStarted);
+                                }
+                                if !reasoning.is_empty() {
+                                    yield Ok(StreamChunk::ThinkingDelta(reasoning));
+                                }
                             }
                             rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                 use tracing::info;
@@ -148,11 +179,30 @@ macro_rules! process_agent_stream {
                         });
                     }
                     Err(e) => {
-                        yield Ok(StreamChunk::Error(e.to_string()));
+                        // Close any open thinking block before exiting.
+                        if in_thinking {
+                            yield Ok(StreamChunk::ThinkingEnded);
+                        }
+                        let err_str = e.to_string();
+                        // "EOF while parsing" means the SSE stream ended mid-JSON chunk —
+                        // this is a transient provider/network condition, not a real
+                        // failure. Treat it as a clean end-of-stream so the response
+                        // finalises gracefully with whatever text was already received.
+                        if err_str.contains("EOF while parsing") {
+                            use tracing::warn;
+                            warn!("Stream ended with truncated JSON chunk; treating as Done");
+                            yield Ok(StreamChunk::Done);
+                        } else {
+                            yield Ok(StreamChunk::Error(err_str));
+                        }
                         return;
                     }
                     _ => {}
                 }
+            }
+            // Close any unclosed thinking block at end of stream
+            if in_thinking {
+                yield Ok(StreamChunk::ThinkingEnded);
             }
             yield Ok(StreamChunk::Done);
         })
@@ -166,6 +216,7 @@ macro_rules! process_agent_stream_with_approvals {
             let mut agent_stream = $stream;
             let mut approval_rx = $approval_rx;
             let mut resolution_rx = $resolution_rx;
+            let mut in_thinking = false;
 
             loop {
                 tokio::select! {
@@ -175,7 +226,31 @@ macro_rules! process_agent_stream_with_approvals {
                             Some(Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(content))) => {
                                 match content {
                                     rig::streaming::StreamedAssistantContent::Text(text) => {
+                                        // Close any open thinking block before emitting text
+                                        if in_thinking {
+                                            in_thinking = false;
+                                            yield Ok(StreamChunk::ThinkingEnded);
+                                        }
                                         yield Ok(StreamChunk::Text(text.text));
+                                    }
+                                    rig::streaming::StreamedAssistantContent::Reasoning(reasoning) => {
+                                        // Full reasoning block received at once
+                                        let text = reasoning.display_text();
+                                        if !text.is_empty() {
+                                            yield Ok(StreamChunk::ThinkingStarted);
+                                            yield Ok(StreamChunk::ThinkingDelta(text));
+                                            yield Ok(StreamChunk::ThinkingEnded);
+                                        }
+                                    }
+                                    rig::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                                        // Incremental reasoning delta
+                                        if !in_thinking {
+                                            in_thinking = true;
+                                            yield Ok(StreamChunk::ThinkingStarted);
+                                        }
+                                        if !reasoning.is_empty() {
+                                            yield Ok(StreamChunk::ThinkingDelta(reasoning));
+                                        }
                                     }
                                     rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                         use tracing::info;
@@ -263,10 +338,27 @@ macro_rules! process_agent_stream_with_approvals {
                                 });
                             }
                             Some(Err(e)) => {
-                                yield Ok(StreamChunk::Error(e.to_string()));
+                                // Close any open thinking block before exiting.
+                                if in_thinking {
+                                    yield Ok(StreamChunk::ThinkingEnded);
+                                }
+                                let err_str = e.to_string();
+                                // "EOF while parsing" means the SSE stream ended mid-JSON chunk —
+                                // treat as a clean end-of-stream.
+                                if err_str.contains("EOF while parsing") {
+                                    use tracing::warn;
+                                    warn!("Stream ended with truncated JSON chunk; treating as Done");
+                                    yield Ok(StreamChunk::Done);
+                                } else {
+                                    yield Ok(StreamChunk::Error(err_str));
+                                }
                                 return;
                             }
                             None => {
+                                // Close any unclosed thinking block at end of stream
+                                if in_thinking {
+                                    yield Ok(StreamChunk::ThinkingEnded);
+                                }
                                 yield Ok(StreamChunk::Done);
                                 return;
                             }

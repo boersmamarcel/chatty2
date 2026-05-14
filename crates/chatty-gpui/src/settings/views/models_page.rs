@@ -9,6 +9,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, IndexPath, Sizable, WindowExt as _,
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputState},
     list::{List, ListDelegate, ListItem, ListState},
@@ -539,6 +540,8 @@ impl ModelsListView {
                                                         supports_images: false,
                                                         supports_pdf: false,
                                                         supports_temperature: true,
+                                                        supports_thinking: false,
+                                                        enable_thinking: false,
                                                     };
 
                                                     // Save the model (capabilities auto-set by create_model)
@@ -667,6 +670,17 @@ impl ModelsListView {
         let view = cx.entity().clone();
         let model_id_for_update = model_id.clone();
         let is_azure = matches!(existing_model.provider_type, ProviderType::AzureOpenAI);
+        let is_ollama = matches!(existing_model.provider_type, ProviderType::Ollama);
+
+        // Preserve existing capability flags (they come from discovery/provider defaults)
+        let existing_supports_images = existing_model.supports_images;
+        let existing_supports_pdf = existing_model.supports_pdf;
+        let existing_supports_temperature = existing_model.supports_temperature;
+        let existing_supports_thinking = existing_model.supports_thinking;
+
+        // enable_thinking is user-controlled: pre-populate from existing model
+        let enable_thinking_cell =
+            std::rc::Rc::new(std::cell::Cell::new(existing_model.enable_thinking));
 
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
@@ -801,6 +815,25 @@ impl ModelsListView {
                                                         .child(Input::new(&api_version_input)),
                                                 )
                                             })
+                                            .when(is_ollama && existing_supports_thinking, |this| {
+                                                let enable_thinking_cell =
+                                                    enable_thinking_cell.clone();
+                                                this.child(
+                                                    h_flex().gap_2().items_center().child(
+                                                        Checkbox::new("enable-thinking")
+                                                            .label("Enable thinking mode")
+                                                            .checked(enable_thinking_cell.get())
+                                                            .on_click({
+                                                                let enable_thinking_cell =
+                                                                    enable_thinking_cell.clone();
+                                                                move |checked: &bool, _, _| {
+                                                                    enable_thinking_cell
+                                                                        .set(*checked);
+                                                                }
+                                                            }),
+                                                    ),
+                                                )
+                                            })
                                     }
                                 })
                                 .child(
@@ -830,6 +863,8 @@ impl ModelsListView {
                                                 let provider_select = provider_select.clone();
                                                 let model_id_for_update =
                                                     model_id_for_update.clone();
+                                                let enable_thinking_cell =
+                                                    enable_thinking_cell.clone();
 
                                                 move |_, window, cx| {
                                                     // Validate and collect form data
@@ -966,9 +1001,15 @@ impl ModelsListView {
                                                         extra_params,
                                                         cost_per_million_input_tokens,
                                                         cost_per_million_output_tokens,
-                                                        supports_images: false,
-                                                        supports_pdf: false,
-                                                        supports_temperature: true,
+                                                        // Preserve capability flags from existing model
+                                                        supports_images: existing_supports_images,
+                                                        supports_pdf: existing_supports_pdf,
+                                                        supports_temperature:
+                                                            existing_supports_temperature,
+                                                        supports_thinking:
+                                                            existing_supports_thinking,
+                                                        // enable_thinking is user-controlled
+                                                        enable_thinking: enable_thinking_cell.get(),
                                                     };
 
                                                     // Update the model

@@ -849,7 +849,6 @@ impl ChatView {
     }
 
     /// Handle thinking block started event
-    #[allow(dead_code)]
     pub fn handle_thinking_started(&mut self, cx: &mut Context<Self>) {
         debug!("Thinking block started");
 
@@ -887,7 +886,6 @@ impl ChatView {
     }
 
     /// Helper method to update the active thinking block in the live trace
-    #[allow(dead_code)]
     fn update_thinking_trace<F>(&mut self, updater: F) -> bool
     where
         F: FnOnce(&mut ThinkingBlock),
@@ -925,7 +923,6 @@ impl ChatView {
     }
 
     /// Handle thinking block content delta event
-    #[allow(dead_code)]
     pub fn handle_thinking_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
         self.update_thinking_trace(|tb| {
             tb.content.push_str(delta);
@@ -936,7 +933,6 @@ impl ChatView {
     }
 
     /// Handle thinking block ended event
-    #[allow(dead_code)]
     pub fn handle_thinking_ended(&mut self, cx: &mut Context<Self>) {
         debug!("Thinking block ended");
 

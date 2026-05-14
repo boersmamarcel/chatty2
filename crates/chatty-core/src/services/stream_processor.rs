@@ -95,6 +95,14 @@ pub async fn run_stream_loop(
         }
     }
 
+    // Drain any progress events that arrived just as the LLM stream ended. This
+    // keeps frontends from duplicating post-loop drain logic and prevents losing
+    // the final invoke_agent progress line when both channels become ready at
+    // nearly the same time.
+    while let Ok(progress) = progress_rx.try_recv() {
+        handler.on_progress(progress);
+    }
+
     handler.on_stream_ended();
     Ok(())
 }
@@ -111,6 +119,7 @@ mod tests {
         cancelled: bool,
         chunks: Vec<StreamChunk>,
         progress_events: Vec<InvokeAgentProgress>,
+        progress_to_send_on_done: Option<mpsc::UnboundedSender<InvokeAgentProgress>>,
     }
 
     impl TestHandler {
@@ -121,6 +130,7 @@ mod tests {
                 cancelled: false,
                 chunks: Vec::new(),
                 progress_events: Vec::new(),
+                progress_to_send_on_done: None,
             }
         }
     }
@@ -135,6 +145,10 @@ mod tests {
             let is_done = matches!(chunk, StreamChunk::Done);
             let is_error = matches!(chunk, StreamChunk::Error(_));
             self.chunks.push(chunk);
+            if is_done && let Some(tx) = self.progress_to_send_on_done.take() {
+                tx.send(InvokeAgentProgress::Text("late progress".to_string()))
+                    .unwrap();
+            }
             if is_done || is_error {
                 Ok(ChunkAction::Break)
             } else {
@@ -205,5 +219,27 @@ mod tests {
 
         let _rx = install_progress_channel(&slot);
         assert!(slot.lock().is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_loop_drains_progress_after_break() {
+        let chunks: Vec<Result<StreamChunk>> = vec![Ok(StreamChunk::Done)];
+        let mut stream: ResponseStream = Box::pin(futures::stream::iter(chunks));
+        let (tx, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        handler.progress_to_send_on_done = Some(tx);
+
+        run_stream_loop(&mut stream, &mut progress_rx, &cancel_flag, &mut handler)
+            .await
+            .unwrap();
+
+        assert!(handler.ended);
+        assert_eq!(handler.progress_events.len(), 1);
+        assert!(matches!(
+            handler.progress_events[0],
+            InvokeAgentProgress::Text(ref text) if text == "late progress"
+        ));
     }
 }
