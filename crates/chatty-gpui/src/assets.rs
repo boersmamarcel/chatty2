@@ -47,6 +47,9 @@ pub enum CustomIcon {
     Image,         // image.svg - Copy as image (PNG)
     Download,      // download.svg - Conversation download action
     FolderOpen,    // folder-open.svg - Working directory picker
+    Ollama,        // ollama.svg - Ollama provider badge
+    OpenRouter,    // openrouter.svg - OpenRouter provider badge
+    Azure,         // azure.svg - Azure provider badge
 }
 
 impl IconNamed for CustomIcon {
@@ -70,6 +73,9 @@ impl IconNamed for CustomIcon {
             CustomIcon::Image => "icons/image.svg",
             CustomIcon::Download => "icons/download.svg",
             CustomIcon::FolderOpen => "icons/folder-open.svg",
+            CustomIcon::Ollama => "icons/ollama.svg",
+            CustomIcon::OpenRouter => "icons/openrouter.svg",
+            CustomIcon::Azure => "icons/azure.svg",
         }
         .into()
     }

@@ -25,7 +25,7 @@ use crate::chatty::token_budget::{
     gather_snapshot_inputs, summarize_oldest_half,
 };
 use crate::chatty::tools::LocalModuleAgentSummary;
-use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, SkillEntry};
+use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
     ApprovalBlock, ApprovalState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
@@ -605,13 +605,13 @@ impl ChattyApp {
 
         // Get models from global store
         if let Some(models_model) = cx.try_global::<ModelsModel>() {
-            let models_list: Vec<(String, String)> = models_model
+            let models_list: Vec<ModelOption> = models_model
                 .models()
                 .iter()
-                .map(|m| (m.id.clone(), m.name.clone()))
+                .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
                 .collect();
 
-            let default_model_id = models_list.first().map(|(id, _)| id.clone());
+            let default_model_id = models_list.first().map(|model| model.id.clone());
 
             // Get capabilities of the default model
             let default_capabilities = models_model

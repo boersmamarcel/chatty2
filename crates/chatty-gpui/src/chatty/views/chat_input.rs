@@ -14,6 +14,7 @@ use super::attachment_validation::{PDF_EXTENSION, is_image_extension, validate_a
 use crate::assets::CustomIcon;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
+use crate::settings::models::providers_store::ProviderType;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -320,6 +321,23 @@ pub enum ChatInputEvent {
 
 impl EventEmitter<ChatInputEvent> for ChatInputState {}
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelOption {
+    pub id: String,
+    pub name: String,
+    pub provider_type: ProviderType,
+}
+
+impl ModelOption {
+    pub fn new(id: String, name: String, provider_type: ProviderType) -> Self {
+        Self {
+            id,
+            name,
+            provider_type,
+        }
+    }
+}
+
 /// State for the chat input component
 /// Cache for PDF thumbnails: maps PDF path -> thumbnail path or error
 type ThumbnailCache = Arc<RwLock<HashMap<PathBuf, Result<PathBuf, String>>>>;
@@ -329,7 +347,7 @@ pub struct ChatInputState {
     attachments: Vec<PathBuf>,
     should_clear: bool,
     selected_model_id: Option<String>,
-    available_models: Vec<(String, String)>, // (id, display_name)
+    available_models: Vec<ModelOption>,
     supports_images: bool,
     supports_pdf: bool,
     thumbnail_cache: ThumbnailCache,
@@ -402,21 +420,17 @@ impl ChatInputState {
     }
 
     /// Set available models for selection
-    pub fn set_available_models(
-        &mut self,
-        models: Vec<(String, String)>,
-        default_id: Option<String>,
-    ) {
+    pub fn set_available_models(&mut self, models: Vec<ModelOption>, default_id: Option<String>) {
         self.available_models = models;
 
         if self.selected_model_id.is_none() {
             self.selected_model_id =
-                default_id.or_else(|| self.available_models.first().map(|(id, _)| id.clone()));
+                default_id.or_else(|| self.available_models.first().map(|m| m.id.clone()));
         }
     }
 
     /// Get the available models list
-    pub fn available_models(&self) -> &[(String, String)] {
+    pub fn available_models(&self) -> &[ModelOption] {
         &self.available_models
     }
 
@@ -829,14 +843,8 @@ impl ChatInputState {
 
     /// Get display name for selected model
     pub fn get_selected_model_display_name(&self) -> String {
-        self.selected_model_id
-            .as_ref()
-            .and_then(|id| {
-                self.available_models
-                    .iter()
-                    .find(|(model_id, _)| model_id == id)
-                    .map(|(_, name)| name.clone())
-            })
+        self.selected_model()
+            .map(|model| format!("{} · {}", model.name, model.provider_type.display_name()))
             .unwrap_or_else(|| {
                 if self.available_models.is_empty() {
                     "No models".to_string()
@@ -844,6 +852,12 @@ impl ChatInputState {
                     "Select Model".to_string()
                 }
             })
+    }
+
+    pub fn selected_model(&self) -> Option<&ModelOption> {
+        self.selected_model_id
+            .as_ref()
+            .and_then(|id| self.available_models.iter().find(|model| model.id == *id))
     }
 }
 
@@ -857,6 +871,14 @@ fn is_pdf(path: &Path) -> bool {
     path.extension()
         .map(|ext| ext.to_string_lossy().to_lowercase() == PDF_EXTENSION)
         .unwrap_or(false)
+}
+
+fn provider_icon(provider_type: &ProviderType) -> CustomIcon {
+    match provider_type {
+        ProviderType::Ollama => CustomIcon::Ollama,
+        ProviderType::OpenRouter => CustomIcon::OpenRouter,
+        ProviderType::AzureOpenAI => CustomIcon::Azure,
+    }
 }
 
 fn render_file_chip(
@@ -984,6 +1006,7 @@ impl RenderOnce for ChatInput {
 
         // Model display name
         let model_display = self.state.read(cx).get_selected_model_display_name();
+        let selected_model = self.state.read(cx).selected_model().cloned();
         let _no_models = self.state.read(cx).available_models.is_empty();
 
         // --- Slash menu ---
@@ -1003,7 +1026,13 @@ impl RenderOnce for ChatInput {
         let at_menu_selected = self.state.read(cx).at_menu_selected();
 
         // Model dropdown button
-        let model_button = Button::new("model-select").label(model_display.clone());
+        let model_button = if let Some(model) = selected_model {
+            Button::new("model-select")
+                .label(model_display.clone())
+                .icon(Icon::new(provider_icon(&model.provider_type)).size_3())
+        } else {
+            Button::new("model-select").label(model_display.clone())
+        };
 
         // Model popover
         let model_popover = Popover::new("model-menu")
@@ -1041,10 +1070,12 @@ impl RenderOnce for ChatInput {
                                 .overflow_y_scrollbar()
                                 .flex()
                                 .flex_col()
-                                .children(models.iter().map(|(id, name)| {
-                                    let id_clone = id.clone();
+                                .children(models.iter().map(|model| {
+                                    let id_clone = model.id.clone();
+                                    let provider_name =
+                                        model.provider_type.display_name().to_string();
                                     let state_for_click = state.clone();
-                                    let is_selected = selected_id.as_ref() == Some(id);
+                                    let is_selected = selected_id.as_ref() == Some(&model.id);
 
                                     div()
                                         .px_3()
@@ -1053,8 +1084,36 @@ impl RenderOnce for ChatInput {
                                         .cursor_pointer()
                                         .when(is_selected, |d| d.bg(cx.theme().secondary))
                                         .hover(|style| style.bg(cx.theme().secondary))
-                                        .text_sm()
-                                        .child(name.clone())
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_3()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            Icon::new(provider_icon(
+                                                                &model.provider_type,
+                                                            ))
+                                                            .size_3(),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .child(model.name.clone()),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(provider_name),
+                                                ),
+                                        )
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             move |_event, _window, cx| {

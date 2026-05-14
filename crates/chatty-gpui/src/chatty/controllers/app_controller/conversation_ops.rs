@@ -212,11 +212,13 @@ impl ChattyApp {
                     view.clear_messages(cx);
 
                     // Set available models in chat input
-                    let models_list: Vec<(String, String)> = cx
+                    let models_list: Vec<ModelOption> = cx
                         .global::<ModelsModel>()
                         .models()
                         .iter()
-                        .map(|m| (m.id.clone(), m.name.clone()))
+                        .map(|m| {
+                            ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone())
+                        })
                         .collect();
 
                     view.chat_input_state().update(cx, |state, cx| {
