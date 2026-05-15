@@ -25,6 +25,8 @@ pub mod execute_code_tool;
 pub mod fetch_tool;
 #[cfg(feature = "docx")]
 pub mod docx_tool;
+#[cfg(feature = "pptx")]
+pub mod pptx_tool;
 #[cfg(feature = "duckdb")]
 pub mod file_structure_tool;
 pub mod filesystem_tool;
@@ -68,6 +70,8 @@ pub use execute_code_tool::ExecuteCodeTool;
 pub use fetch_tool::FetchTool;
 #[cfg(feature = "docx")]
 pub use docx_tool::{ReadDocxTool, WriteDocxTool};
+#[cfg(feature = "pptx")]
+pub use pptx_tool::ReadPptxTool;
 #[cfg(feature = "duckdb")]
 pub use file_structure_tool::FileStructureTool;
 pub use filesystem_tool::{GlobSearchTool, ListDirectoryTool, ReadBinaryTool, ReadFileTool};

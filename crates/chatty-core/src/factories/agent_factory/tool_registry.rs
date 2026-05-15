@@ -19,6 +19,7 @@ pub struct ToolAvailability {
     pub excel_write: bool,
     pub docx_read: bool,
     pub docx_write: bool,
+    pub pptx_read: bool,
     pub pdf_to_image: bool,
     pub pdf_info: bool,
     pub pdf_extract_text: bool,
@@ -114,6 +115,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.docx_write {
         names.insert(String::from("write_docx"));
+    }
+    if tools.pptx_read {
+        names.insert(String::from("read_pptx"));
     }
     if tools.pdf_to_image {
         names.insert(String::from("pdf_to_image"));
@@ -303,6 +307,15 @@ mod tests {
     }
 
     #[test]
+    fn includes_pptx_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            pptx_read: true,
+            ..Default::default()
+        });
+        assert!(names.contains("read_pptx"), "read_pptx missing for pptx");
+    }
+
+    #[test]
     fn includes_pdf_tools() {
         let names = active_native_tool_names(&ToolAvailability {
             pdf_to_image: true,
@@ -395,6 +408,7 @@ mod tests {
             excel_write: true,
             docx_read: true,
             docx_write: true,
+            pptx_read: true,
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,

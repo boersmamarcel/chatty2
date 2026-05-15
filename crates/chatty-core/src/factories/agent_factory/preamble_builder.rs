@@ -105,6 +105,9 @@ pub(super) fn build_preamble(
         }
         tool_sections.push(format!("- {} (.docx Word documents)", docx_desc.join(" / ")));
     }
+    if tools.pptx_read {
+        tool_sections.push("- **read_pptx** (.pptx PowerPoint presentations)".to_string());
+    }
     if tools.pdf_to_image || tools.pdf_info || tools.pdf_extract_text {
         let mut pdf_names = Vec::new();
         if tools.pdf_info {
@@ -323,8 +326,7 @@ how to proceed. Continuing to rewrite code indefinitely does not converge.\n\
 \n\
 **Binary and Office files**: Files with binary formats must not be read with `read_file` / `read_binary` (returns garbage). \
 Use the dedicated native tools instead: `read_docx` for Word (.docx), `read_excel` for spreadsheets (.xlsx/.xls/.ods), \
-`pdf_extract_text` / `pdf_info` for PDFs. For PowerPoint (.pptx) files without a native tool, \
-use Python via `shell_execute` or `execute_code`: `python-pptx` extracts slide text reliably.\n\
+`pdf_extract_text` / `pdf_info` for PDFs, `read_pptx` for PowerPoint (.pptx).\n\
 \n\
 **Timeouts on network and shell**: Always set explicit timeouts on blocking operations. \
 Use `--max-time 30` on curl, `timeout=20` on Python `requests.get` / `urlopen`, \
@@ -644,6 +646,22 @@ mod tests {
         );
         assert!(result.contains("read_docx"));
         assert!(result.contains("write_docx"));
+    }
+
+    #[test]
+    fn pptx_tool_section_included() {
+        let mut tools = ToolAvailability::default();
+        tools.pptx_read = true;
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenRouter,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        assert!(result.contains("read_pptx"));
     }
 
     #[test]

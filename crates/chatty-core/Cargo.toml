@@ -60,6 +60,10 @@ rust_xlsxwriter = { workspace = true, optional = true }
 # DOCX (optional — enable with "docx" feature)
 docx-rs = { workspace = true, optional = true }
 
+# PPTX (optional — enable with "pptx" feature)
+zip = { workspace = true, optional = true }
+roxmltree = { workspace = true, optional = true }
+
 # DuckDB (optional — enable with "duckdb" feature)
 duckdb = { workspace = true, optional = true }
 
@@ -110,8 +114,9 @@ gpui-globals = ["dep:gpui"]
 excel = ["dep:calamine", "dep:rust_xlsxwriter"]
 docx = ["dep:docx-rs"]
 pdf = ["dep:pdfium-render", "dep:image"]
+pptx = ["dep:zip", "dep:roxmltree"]
 math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:mitex", "dep:typst-assets", "dep:comemo"]
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]
 # Convenience: enable all optional tool dependencies
-all-tools = ["excel", "docx", "pdf", "math-render", "mermaid", "duckdb"]
+all-tools = ["excel", "docx", "pdf", "pptx", "math-render", "mermaid", "duckdb"]

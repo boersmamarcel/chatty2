@@ -35,6 +35,8 @@ use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDa
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 #[cfg(feature = "docx")]
 use crate::tools::{ReadDocxTool, WriteDocxTool};
+#[cfg(feature = "pptx")]
+use crate::tools::ReadPptxTool;
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 
@@ -225,6 +227,8 @@ impl AgentClient {
         let mut docx_read_tool: Option<ReadDocxTool> = None;
         #[cfg(feature = "docx")]
         let mut docx_write_tool: Option<WriteDocxTool> = None;
+        #[cfg(feature = "pptx")]
+        let mut pptx_read_tool: Option<ReadPptxTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
@@ -347,6 +351,13 @@ impl AgentClient {
                     if write_tools.is_some() {
                         tracing::info!(workspace = %workspace_dir, "DOCX write tool enabled");
                         docx_write_tool = Some(WriteDocxTool::new(service.clone()));
+                    }
+
+                    // PPTX read tool
+                    #[cfg(feature = "pptx")]
+                    if read_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "PPTX read tool enabled");
+                        pptx_read_tool = Some(ReadPptxTool::new(service.clone()));
                     }
 
                     // Data query tools
@@ -762,6 +773,16 @@ impl AgentClient {
                     false
                 }
             },
+            pptx_read: {
+                #[cfg(feature = "pptx")]
+                {
+                    pptx_read_tool.is_some()
+                }
+                #[cfg(not(feature = "pptx"))]
+                {
+                    false
+                }
+            },
             pdf_to_image: {
                 #[cfg(feature = "pdf")]
                 {
@@ -888,6 +909,7 @@ impl AgentClient {
             excel_write: excel_write_tools,
             docx_read: docx_read_tool,
             docx_write: docx_write_tool,
+            pptx_read: pptx_read_tool,
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,
