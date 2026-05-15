@@ -15,7 +15,7 @@ use chatty_core::models::message_types::{
     detect_execution_engine, predict_execution_engine,
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
-use chatty_core::services::{McpService, MemoryService};
+use chatty_core::services::{ContextShaperSettings, McpService, MemoryService, shape_context};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -621,12 +621,25 @@ impl ChatEngine {
         self.cancel_flag = Some(cancel_flag.clone());
 
         let agent = conversation.agent().clone();
-        let history = conversation.messages();
+        let raw_history = conversation.messages();
         let invoke_agent_progress_slot = conversation.invoke_agent_progress_slot();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
 
         tokio::spawn(async move {
+            // Apply context shaping before every LLM call (stages 1-3 are free;
+            // stages 4-5 need an LLM call so we pass None here to cap at stage 3).
+            let shaper_settings = ContextShaperSettings::default();
+            let shaped = shape_context(raw_history, &shaper_settings, None).await;
+            if let Some(stage) = shaped.stage_applied {
+                tracing::debug!(
+                    stage = ?stage,
+                    chars_freed = shaped.chars_freed,
+                    "context shaper applied before stream"
+                );
+            }
+            let history = shaped.messages;
+
             let result = streaming::run_stream(streaming::StreamParams {
                 agent,
                 history,

@@ -22,6 +22,8 @@
 //! | **Repository** | Data persistence (load/save to disk) | `ConversationRepository` |
 
 pub mod a2a_client;
+pub mod agent_loop_guard;
+pub mod context_shaper;
 pub mod chart_svg_renderer;
 pub mod embedding_service;
 pub mod error_collector_layer;
@@ -52,6 +54,8 @@ pub mod title_generator;
 pub mod typst_compiler_service;
 
 pub use a2a_client::{A2aClient, A2aStreamEvent};
+pub use agent_loop_guard::AgentLoopGuard;
+pub use context_shaper::{ContextShaperSettings, ShapedContext, shape_context};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
 pub use llm_service::{StreamChunk, stream_prompt};

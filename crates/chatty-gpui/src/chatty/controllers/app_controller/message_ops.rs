@@ -1351,12 +1351,23 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         }
     }
 
-    // 3. Call stream_prompt with user contents directly (no auto-context injection)
+    // 3. Apply context shaping to keep history within LLM context limits.
+    let shaped_history = {
+        let settings = chatty_core::services::ContextShaperSettings::default();
+        let shaped = chatty_core::services::shape_context(history, &settings, None).await;
+        if let Some(stage) = shaped.stage_applied {
+            debug!(conv_id = %conv_id, stage = ?stage, freed = shaped.chars_freed,
+                "Context shaper applied");
+        }
+        shaped.messages
+    };
+
+    // 3b. Call stream_prompt with user contents directly (no auto-context injection)
     let llm_user_contents = user_contents.clone();
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _user_message) = stream_prompt(
         &agent,
-        &history,
+        &shaped_history,
         llm_user_contents,
         Some(approval_rx),
         Some(resolution_rx),

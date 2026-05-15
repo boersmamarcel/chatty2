@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use chatty_core::services::AgentLoopGuard;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -14,6 +15,7 @@ const FINALIZATION_MAX_AGENT_TURNS: u32 = 12;
 const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 6_000;
 const FINALIZATION_EVIDENCE_CHARS: usize = 8_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 800;
+const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "The previous provider response failed after partial progress. Continue from the existing conversation and prior tool results. Do not repeat earlier analysis. If the answer is ready, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep any execute_code output short.";
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
@@ -35,6 +37,12 @@ pub async fn run_headless(
     let mut tool_budget_stop_requested = false;
     let mut finalization_pending_after_cancel = false;
     let mut recovery_pending_after_error = false;
+    // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
+    // and per-turn verbosity tracking.
+    let max_agent_turns = engine.execution_settings.max_agent_turns as usize;
+    let mut loop_guard = AgentLoopGuard::new(max_agent_turns, answer_file_required);
+    // Hard-stop flag set when loop_guard or the backstop threshold is exceeded.
+    let mut text_overflow_stop_requested = false;
 
     while let Some(event) = event_rx.recv().await {
         match event {
@@ -43,6 +51,19 @@ pub async fn run_headless(
                 // Stream text chunks to stderr so parent process can show live progress.
                 eprint!("{}", text);
                 response.push_str(&text);
+                if !text_overflow_stop_requested {
+                    // Soft stop via loop guard (4 KB).
+                    // NOTE: We do NOT call engine.stop_stream() here — interrupting mid-stream
+                    // causes JSON parse errors ("EOF while parsing a string at col N").
+                    // Instead, we set the flag and inject a recovery prompt after the response
+                    // completes naturally in the StreamCompleted handler.
+                    if loop_guard.on_text_chunk(text.len()) {
+                        text_overflow_stop_requested = true;
+                        eprintln!(
+                            "\nText-only response exceeded verbosity limit; will inject brevity prompt after response completes."
+                        );
+                    }
+                }
             }
             AppEvent::ToolCallStarted { ref name, .. } => {
                 let name_str = name.clone();
@@ -62,6 +83,8 @@ pub async fn run_headless(
             AppEvent::ToolCallResult { ref id, .. } => {
                 let id_str = id.clone();
                 engine.handle_event(event);
+                let mut called_final_answer = false;
+                let mut pivot_msg: Option<String> = None;
                 if let Some(tc) = engine
                     .messages
                     .iter()
@@ -73,6 +96,30 @@ pub async fn run_headless(
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
+                    if tc.name == "final_answer" && answer_file_exists(&engine) {
+                        called_final_answer = true;
+                    }
+                    // Check for repeated identical tool call (loop detection).
+                    pivot_msg = loop_guard.on_tool_completed(&tc.name, &tc.input);
+                }
+                if called_final_answer {
+                    eprintln!("final_answer completed and answer file exists; stopping stream.");
+                    engine.stop_stream();
+                } else if answer_file_required && answer_file_exists(&engine) {
+                    // Answer file was written by a non-final_answer tool (e.g. echo via shell).
+                    // Stop the stream so the model doesn't loop writing the same answer repeatedly.
+                    eprintln!("Answer file exists after tool call; stopping stream early.");
+                    engine.stop_stream();
+                } else if let Some(pivot) = pivot_msg {
+                    eprintln!(
+                        "Loop detected (pivot {}/{}): injecting strategy pivot prompt.",
+                        loop_guard.loop_pivot_count(),
+                        3
+                    );
+                    engine.stop_stream();
+                    engine.send_message(pivot);
+                    tool_results_since_finalization = 0;
+                    continue;
                 }
                 tool_results_since_finalization += 1;
                 if should_stop_for_answer_file_tool_budget(
@@ -121,6 +168,15 @@ pub async fn run_headless(
             }
             AppEvent::StreamCompleted => {
                 engine.handle_event(AppEvent::StreamCompleted);
+                // Update loop guard: resets per-turn counters and checks for late-game deadline.
+                let turns_used = engine
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m.role, crate::engine::MessageRole::Assistant))
+                    .count();
+                loop_guard.on_turn_complete(turns_used, answer_file_exists(&engine));
+                let was_text_overflow = text_overflow_stop_requested;
+                text_overflow_stop_requested = false;
                 if recovery_pending_after_error {
                     recovery_pending_after_error = false;
                     tool_results_since_finalization = 0;
@@ -132,6 +188,28 @@ pub async fn run_headless(
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                     engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                    continue;
+                }
+                if was_text_overflow {
+                    // Model generated too much text without calling a tool (response completed naturally).
+                    // Inject a focused action prompt to redirect toward a tool call.
+                    if recovery_attempts < MAX_STREAM_ERROR_RECOVERY_ATTEMPTS {
+                        recovery_attempts += 1;
+                        tool_results_since_finalization = 0;
+                        tool_budget_stop_requested = false;
+                        eprintln!(
+                            "Text overflow (no tool call after 4KB): injecting action prompt ({}/{}).",
+                            recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                        );
+                        engine.send_message(TEXT_OVERFLOW_RECOVERY_PROMPT.to_string());
+                        continue;
+                    }
+                    // Exhausted recovery attempts — fall through to finalization.
+                }
+                // Late-game deadline: inject once when turns are almost exhausted.
+                if let Some(deadline) = loop_guard.take_deadline_message() {
+                    eprintln!("Late-game deadline prompt injected ({} turns used of {}).", turns_used, max_agent_turns);
+                    engine.send_message(deadline);
                     continue;
                 }
                 if finalization_pending_after_cancel {
@@ -414,7 +492,7 @@ fn build_answer_file_finalization_prompt(engine: &ChatEngine, original_prompt: &
     format!(
         "Finalize this answer-file task using only the compact context below.\n\
           If the evidence contains a final answer candidate, immediately call final_answer with exactly that answer and output_path=/app/answer.txt.\n\
-          Do not keep researching. If no answer candidate is present, use at most one compact tool call to compute it. If that tool is execute_code, the code MUST write the computed answer to /app/answer.txt itself and print only the answer. IMPORTANT: If computing fees, the code MUST start with exec(open('/app/helpers.py').read()) to load correct functions.\n\
+          Do not keep researching. If no answer candidate is present, use at most one compact tool call to compute it. Write the computed answer to /app/answer.txt and then call final_answer with output_path=/app/answer.txt.\n\
           Use exact file paths from the evidence; never invent alternate file names. If exact paths are absent, call file_structure_detector before executing code.\n\n\
           Original task:\n{}\n\n\
           Recent compact tool evidence:\n{}\n",
