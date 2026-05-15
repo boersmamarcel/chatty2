@@ -16,6 +16,8 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "docx")]
+use crate::tools::{ReadDocxTool, WriteDocxTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 
@@ -65,6 +67,10 @@ pub(super) type SearchTools = (SearchCodeTool, FindFilesTool, FindDefinitionTool
 #[cfg(feature = "excel")]
 pub(super) type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
+/// DOCX tool set (gated on docx feature)
+#[cfg(feature = "docx")]
+pub(super) type DocxWriteTools = WriteDocxTool;
+
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 #[cfg(feature = "duckdb")]
 pub(super) type DataQueryTools = (
@@ -100,6 +106,10 @@ pub(super) struct NativeTools {
     pub excel_read: Option<ReadExcelTool>,
     #[cfg(feature = "excel")]
     pub excel_write: Option<ExcelWriteTools>,
+    #[cfg(feature = "docx")]
+    pub docx_read: Option<ReadDocxTool>,
+    #[cfg(feature = "docx")]
+    pub docx_write: Option<WriteDocxTool>,
     #[cfg(feature = "duckdb")]
     pub data_query: Option<DataQueryTools>,
     pub chart_tool: Option<CreateChartTool>,
@@ -194,6 +204,14 @@ impl NativeTools {
             tools.push(Box::new(wt));
             tools.push(Box::new(et));
         }
+        #[cfg(feature = "docx")]
+        if let Some(t) = self.docx_read {
+            tools.push(Box::new(t));
+        }
+        #[cfg(feature = "docx")]
+        if let Some(t) = self.docx_write {
+            tools.push(Box::new(t));
+        }
         #[cfg(feature = "duckdb")]
         if let Some((qt, dt, pt, fsd)) = self.data_query {
             tools.push(Box::new(qt));
@@ -261,6 +279,8 @@ macro_rules! native_tools {
         search_tools: $search_tools:expr,
         excel_read: $excel_read:expr,
         excel_write: $excel_write:expr,
+        docx_read: $docx_read:expr,
+        docx_write: $docx_write:expr,
         data_query: $data_query:expr,
         chart_tool: $chart_tool:expr,
         typst_tool: $typst_tool:expr,
@@ -298,6 +318,10 @@ macro_rules! native_tools {
             excel_read: $excel_read,
             #[cfg(feature = "excel")]
             excel_write: $excel_write,
+            #[cfg(feature = "docx")]
+            docx_read: $docx_read,
+            #[cfg(feature = "docx")]
+            docx_write: $docx_write,
             #[cfg(feature = "duckdb")]
             data_query: $data_query,
             chart_tool: $chart_tool,

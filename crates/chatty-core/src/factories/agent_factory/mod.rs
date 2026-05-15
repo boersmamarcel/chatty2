@@ -33,6 +33,8 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "docx")]
+use crate::tools::{ReadDocxTool, WriteDocxTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 
@@ -219,6 +221,10 @@ impl AgentClient {
         let mut excel_read_tool: Option<ReadExcelTool> = None;
         #[cfg(feature = "excel")]
         let mut excel_write_tools: Option<ExcelWriteTools> = None;
+        #[cfg(feature = "docx")]
+        let mut docx_read_tool: Option<ReadDocxTool> = None;
+        #[cfg(feature = "docx")]
+        let mut docx_write_tool: Option<WriteDocxTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
@@ -327,6 +333,20 @@ impl AgentClient {
                                 EditExcelTool::new(service.clone(), approvals.clone()),
                             )
                         });
+                    }
+
+                    // DOCX read tool
+                    #[cfg(feature = "docx")]
+                    if read_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "DOCX read tool enabled");
+                        docx_read_tool = Some(ReadDocxTool::new(service.clone()));
+                    }
+
+                    // DOCX write tool
+                    #[cfg(feature = "docx")]
+                    if write_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "DOCX write tool enabled");
+                        docx_write_tool = Some(WriteDocxTool::new(service.clone()));
                     }
 
                     // Data query tools
@@ -722,6 +742,26 @@ impl AgentClient {
                     false
                 }
             },
+            docx_read: {
+                #[cfg(feature = "docx")]
+                {
+                    docx_read_tool.is_some()
+                }
+                #[cfg(not(feature = "docx"))]
+                {
+                    false
+                }
+            },
+            docx_write: {
+                #[cfg(feature = "docx")]
+                {
+                    docx_write_tool.is_some()
+                }
+                #[cfg(not(feature = "docx"))]
+                {
+                    false
+                }
+            },
             pdf_to_image: {
                 #[cfg(feature = "pdf")]
                 {
@@ -846,6 +886,8 @@ impl AgentClient {
             search_tools: search_tools,
             excel_read: excel_read_tool,
             excel_write: excel_write_tools,
+            docx_read: docx_read_tool,
+            docx_write: docx_write_tool,
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,

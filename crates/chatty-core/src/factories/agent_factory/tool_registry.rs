@@ -17,6 +17,8 @@ pub struct ToolAvailability {
     pub add_attachment: bool,
     pub excel_read: bool,
     pub excel_write: bool,
+    pub docx_read: bool,
+    pub docx_write: bool,
     pub pdf_to_image: bool,
     pub pdf_info: bool,
     pub pdf_extract_text: bool,
@@ -106,6 +108,12 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.excel_write {
         names.extend(["write_excel", "edit_excel"].into_iter().map(String::from));
+    }
+    if tools.docx_read {
+        names.insert(String::from("read_docx"));
+    }
+    if tools.docx_write {
+        names.insert(String::from("write_docx"));
     }
     if tools.pdf_to_image {
         names.insert(String::from("pdf_to_image"));
@@ -283,6 +291,18 @@ mod tests {
     }
 
     #[test]
+    fn includes_docx_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            docx_read: true,
+            docx_write: true,
+            ..Default::default()
+        });
+        for tool in ["read_docx", "write_docx"] {
+            assert!(names.contains(tool), "{tool} missing for docx");
+        }
+    }
+
+    #[test]
     fn includes_pdf_tools() {
         let names = active_native_tool_names(&ToolAvailability {
             pdf_to_image: true,
@@ -373,6 +393,8 @@ mod tests {
             add_attachment: true,
             excel_read: true,
             excel_write: true,
+            docx_read: true,
+            docx_write: true,
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,

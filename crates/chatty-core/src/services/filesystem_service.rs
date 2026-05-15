@@ -141,6 +141,12 @@ impl FileSystemService {
         self.validator.validate(path).await
     }
 
+    /// Resolve a path for a file that may not yet exist (write operations).
+    /// The parent directory must exist; the file itself need not.
+    pub async fn resolve_new_path(&self, path: &str) -> Result<PathBuf> {
+        self.validator.validate_new_path(path).await
+    }
+
     /// Read a text file and return its contents as a string.
     ///
     /// The file must be within the workspace root and under 10MB.

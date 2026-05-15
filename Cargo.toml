@@ -77,6 +77,9 @@ image = "0.25"
 calamine = "0.34.0"
 rust_xlsxwriter = "0.94.0"
 
+# DOCX (Word documents)
+docx-rs = "0.4.20"
+
 # DuckDB
 duckdb = { version = "1.10500.0", features = ["parquet", "json", "bundled"] }
 

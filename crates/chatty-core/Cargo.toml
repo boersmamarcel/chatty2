@@ -57,6 +57,9 @@ image = { workspace = true, optional = true }
 calamine = { workspace = true, optional = true }
 rust_xlsxwriter = { workspace = true, optional = true }
 
+# DOCX (optional — enable with "docx" feature)
+docx-rs = { workspace = true, optional = true }
+
 # DuckDB (optional — enable with "duckdb" feature)
 duckdb = { workspace = true, optional = true }
 
@@ -105,9 +108,10 @@ mcp = ["rig-core/rmcp"]
 gpui-globals = ["dep:gpui"]
 # Optional tool/service feature groups
 excel = ["dep:calamine", "dep:rust_xlsxwriter"]
+docx = ["dep:docx-rs"]
 pdf = ["dep:pdfium-render", "dep:image"]
 math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:mitex", "dep:typst-assets", "dep:comemo"]
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]
 # Convenience: enable all optional tool dependencies
-all-tools = ["excel", "pdf", "math-render", "mermaid", "duckdb"]
+all-tools = ["excel", "docx", "pdf", "math-render", "mermaid", "duckdb"]

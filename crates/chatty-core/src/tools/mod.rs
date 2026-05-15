@@ -23,6 +23,8 @@ pub mod doc_retriever_tool;
 pub mod excel_tool;
 pub mod execute_code_tool;
 pub mod fetch_tool;
+#[cfg(feature = "docx")]
+pub mod docx_tool;
 #[cfg(feature = "duckdb")]
 pub mod file_structure_tool;
 pub mod filesystem_tool;
@@ -64,6 +66,8 @@ pub use doc_retriever_tool::DocRetrieverTool;
 pub use excel_tool::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 pub use execute_code_tool::ExecuteCodeTool;
 pub use fetch_tool::FetchTool;
+#[cfg(feature = "docx")]
+pub use docx_tool::{ReadDocxTool, WriteDocxTool};
 #[cfg(feature = "duckdb")]
 pub use file_structure_tool::FileStructureTool;
 pub use filesystem_tool::{GlobSearchTool, ListDirectoryTool, ReadBinaryTool, ReadFileTool};

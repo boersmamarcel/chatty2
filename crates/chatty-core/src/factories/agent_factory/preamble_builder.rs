@@ -95,6 +95,16 @@ pub(super) fn build_preamble(
         }
         tool_sections.push(format!("- {} (.xlsx, .xls, .ods)", excel_desc.join(" / ")));
     }
+    if tools.docx_read || tools.docx_write {
+        let mut docx_desc = Vec::new();
+        if tools.docx_read {
+            docx_desc.push("**read_docx**");
+        }
+        if tools.docx_write {
+            docx_desc.push("**write_docx**");
+        }
+        tool_sections.push(format!("- {} (.docx Word documents)", docx_desc.join(" / ")));
+    }
     if tools.pdf_to_image || tools.pdf_info || tools.pdf_extract_text {
         let mut pdf_names = Vec::new();
         if tools.pdf_info {
@@ -311,10 +321,10 @@ that approach. Switch strategy or make a best-guess decision. Infinite retries n
 output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \
 how to proceed. Continuing to rewrite code indefinitely does not converge.\n\
 \n\
-**Binary and Office files**: Files with extensions `.docx`, `.xlsx`, `.xls`, `.pptx`, `.pdf` are \
-binary formats — `read_file` / `read_binary` return garbage. Use Python libraries instead: \
-`python-docx` for Word, `openpyxl` for Excel, `pdfminer.six` or `pypdf` for PDF. Write a short \
-script via shell_execute (or execute_code if docker mode is available) to extract the content you need.\n\
+**Binary and Office files**: Files with binary formats must not be read with `read_file` / `read_binary` (returns garbage). \
+Use the dedicated native tools instead: `read_docx` for Word (.docx), `read_excel` for spreadsheets (.xlsx/.xls/.ods), \
+`pdf_extract_text` / `pdf_info` for PDFs. For PowerPoint (.pptx) files without a native tool, \
+use Python via `shell_execute` or `execute_code`: `python-pptx` extracts slide text reliably.\n\
 \n\
 **Timeouts on network and shell**: Always set explicit timeouts on blocking operations. \
 Use `--max-time 30` on curl, `timeout=20` on Python `requests.get` / `urlopen`, \
@@ -616,6 +626,24 @@ mod tests {
         );
         assert!(result.contains("pdf_info"));
         assert!(result.contains("pdf_extract_text"));
+    }
+
+    #[test]
+    fn docx_tools_section_included() {
+        let mut tools = ToolAvailability::default();
+        tools.docx_read = true;
+        tools.docx_write = true;
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenRouter,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        assert!(result.contains("read_docx"));
+        assert!(result.contains("write_docx"));
     }
 
     #[test]
