@@ -61,7 +61,7 @@ impl ChattyApp {
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
-        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+        let task = cx.spawn(async move |weak_ctrl, cx| -> anyhow::Result<()> {
                 debug!("Async task started");
 
                 // PHASE 1: Ensure conversation exists (create if needed)
@@ -259,6 +259,7 @@ impl ChattyApp {
                         stream_manager,
                         cancel_flag: cancel_flag_for_loop,
                         invoke_agent_progress_slot,
+                        weak_ctrl,
                     },
                     cx,
                 )
@@ -1132,7 +1133,7 @@ impl ChattyApp {
         let stream_manager = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get());
 
         let conv_id_for_task = conv_id.clone();
-        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+        let task = cx.spawn(async move |weak_ctrl, cx| -> anyhow::Result<()> {
             debug!(conv_id = %conv_id, "Regeneration: starting new stream");
 
             // Force sidebar to re-render
@@ -1191,6 +1192,7 @@ impl ChattyApp {
                     stream_manager,
                     cancel_flag: cancel_flag_for_loop,
                     invoke_agent_progress_slot,
+                    weak_ctrl,
                 },
                 cx,
             )
@@ -1220,6 +1222,9 @@ struct LlmStreamParams {
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     cancel_flag: Arc<AtomicBool>,
     invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
+    /// Weak controller handle — used to inject follow-up messages when
+    /// AgentLoopGuard detects a loop or deadline.
+    weak_ctrl: gpui::WeakEntity<ChattyApp>,
 }
 
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
@@ -1245,6 +1250,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         stream_manager,
         cancel_flag,
         invoke_agent_progress_slot,
+        weak_ctrl,
     } = params;
     // 1. Create approval notification channels
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1394,6 +1400,18 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     let mut progress_rx =
         chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
 
+    // 5b. AgentLoopGuard: detects repeated tool calls (loops) and verbosity bursts.
+    // Desktop streams don't require an answer file, so answer_file_required=false.
+    let mut loop_guard = chatty_core::services::AgentLoopGuard::new(max_agent_turns, false);
+    // Track id→name and id→args for the current tool call in flight.
+    let mut pending_tool_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut pending_tool_args: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // If loop detection fires, we cancel the stream and inject this follow-up.
+    let mut pending_follow_up: Option<String> = None;
+    let mut text_overflow_stop_requested = false;
+
     // 6. Stream processing loop
     debug!(conv_id = %conv_id, "Entering stream processing loop");
     use futures::StreamExt;
@@ -1484,12 +1502,29 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                         })
                         .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
                         .ok();
+                        // Verbosity guard: flag if the model is writing a wall of text with no tools.
+                        if !text_overflow_stop_requested
+                            && loop_guard.on_text_chunk(text.len())
+                        {
+                            text_overflow_stop_requested = true;
+                            debug!(conv_id = %conv_id,
+                                "Text-only response exceeded verbosity limit; will inject brevity prompt after response completes.");
+                        }
                     }
                     Ok(StreamChunk::TokenUsage { .. }) => {
                         // Token usage tracked by StreamManager
                     }
                     Ok(StreamChunk::Done) => {
                         debug!(conv_id = %conv_id, "Received Done chunk");
+                        // If the model produced too much text without a tool call, queue a brevity prompt.
+                        if text_overflow_stop_requested && pending_follow_up.is_none() {
+                            pending_follow_up = Some(
+                                "You produced a long response without any tool call. \
+                                 If you have enough information, give your final answer now. \
+                                 Otherwise, make a single focused tool call to get what you need."
+                                    .to_string(),
+                            );
+                        }
                         // Forward to StreamManager before breaking
                         if let Some(ref sm) = stream_manager {
                             sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
@@ -1521,8 +1556,24 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                             }
                         }
                     }
+                    Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
+                        pending_tool_name.insert(id.clone(), name.clone());
+                    }
+                    Ok(StreamChunk::ToolCallInput { ref id, ref arguments }) => {
+                        pending_tool_args.insert(id.clone(), arguments.clone());
+                    }
+                    Ok(StreamChunk::ToolCallResult { ref id, .. }) => {
+                        let tool_name = pending_tool_name.remove(id).unwrap_or_default();
+                        let tool_args = pending_tool_args.remove(id).unwrap_or_default();
+                        if let Some(pivot) = loop_guard.on_tool_completed(&tool_name, &tool_args) {
+                            debug!(conv_id = %conv_id, pivot = %pivot,
+                                "AgentLoopGuard loop detected; cancelling stream");
+                            cancel_flag.store(true, Ordering::Relaxed);
+                            pending_follow_up = Some(pivot);
+                        }
+                    }
                     Ok(_) => {
-                        // ToolCall*, Approval* chunks: no local state update needed
+                        // ApprovalRequested, ApprovalResolved, TokenUsage, ToolCallError: no local state
                     }
                     Err(ref e) => {
                         error!(error = %e, conv_id = %conv_id, "Stream error");
@@ -1641,6 +1692,18 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         })
         .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
         .ok();
+    }
+
+    // 7. AgentLoopGuard follow-up: inject pivot or verbosity prompt as a new message.
+    // This runs AFTER finalization so the UI shows the previous response first.
+    if let Some(follow_up) = pending_follow_up {
+        debug!(conv_id = %conv_id, "AgentLoopGuard: injecting follow-up message after stream");
+        weak_ctrl
+            .update(&mut *cx, |app, cx| {
+                app.send_message(follow_up, vec![], cx);
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to inject AgentLoopGuard follow-up"))
+            .ok();
     }
 
     Ok(())

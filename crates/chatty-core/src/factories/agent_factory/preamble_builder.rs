@@ -122,7 +122,10 @@ pub(super) fn build_preamble(
         .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
     if tools.execute_code {
         tool_sections.push(
-            "- **execute_code** (isolated sandbox; Python may use Monty or Docker, other languages use Docker)".to_string(),
+            "- **execute_code** (isolated sandbox; Python may use Monty or Docker, other languages use Docker; \
+Monty mode is stdlib-only — if execute_code returns an import or module error on a third-party library, \
+immediately switch to shell_execute: write a `/tmp/solve.py` script and run it there instead)"
+                .to_string(),
         );
     }
     if tools.memory {
@@ -303,6 +306,20 @@ an extra tool call is always higher than the cost of a direct answer.\n\
 \n\
 **Failure budget**: After 3 failed or unhelpful tool calls on the same sub-problem, stop trying \
 that approach. Switch strategy or make a best-guess decision. Infinite retries never converge.\n\
+\n\
+**Code iteration limit**: After 3 rounds of code that give contradictory, confusing, or oscillating \
+output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \
+how to proceed. Continuing to rewrite code indefinitely does not converge.\n\
+\n\
+**Binary and Office files**: Files with extensions `.docx`, `.xlsx`, `.xls`, `.pptx`, `.pdf` are \
+binary formats — `read_file` / `read_binary` return garbage. Use Python libraries instead: \
+`python-docx` for Word, `openpyxl` for Excel, `pdfminer.six` or `pypdf` for PDF. Write a short \
+script via shell_execute (or execute_code if docker mode is available) to extract the content you need.\n\
+\n\
+**Timeouts on network and shell**: Always set explicit timeouts on blocking operations. \
+Use `--max-time 30` on curl, `timeout=20` on Python `requests.get` / `urlopen`, \
+and `timeout 60 <command>` before long-running shell commands. A hung network call stalls \
+the entire session.\n\
 </agentic_behavior>\n\
 \n\
 <clarification_policy>\n\
