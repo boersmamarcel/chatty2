@@ -18,10 +18,15 @@ pub mod chart_tool;
 #[cfg(feature = "duckdb")]
 pub mod data_query_tool;
 pub mod daytona_tool;
+pub mod doc_retriever_tool;
+#[cfg(feature = "docx")]
+pub mod docx_tool;
 #[cfg(feature = "excel")]
 pub mod excel_tool;
 pub mod execute_code_tool;
 pub mod fetch_tool;
+#[cfg(feature = "duckdb")]
+pub mod file_structure_tool;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod git_tool;
@@ -36,6 +41,8 @@ pub mod pdf_extract_text_tool;
 pub mod pdf_info_tool;
 #[cfg(feature = "pdf")]
 pub mod pdf_to_image_tool;
+#[cfg(feature = "pptx")]
+pub mod pptx_tool;
 pub mod publish_module_tool;
 pub mod read_skill_tool;
 pub mod remember_tool;
@@ -54,15 +61,21 @@ pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
 #[cfg(feature = "duckdb")]
-pub use data_query_tool::{DescribeDataTool, QueryDataTool};
+pub use data_query_tool::{DescribeDataTool, ProfileDataTool, QueryDataTool};
 pub use daytona_tool::DaytonaTool;
+pub use doc_retriever_tool::DocRetrieverTool;
+#[cfg(feature = "docx")]
+pub use docx_tool::{ReadDocxTool, WriteDocxTool};
 #[cfg(feature = "excel")]
 pub use excel_tool::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 pub use execute_code_tool::ExecuteCodeTool;
 pub use fetch_tool::FetchTool;
+#[cfg(feature = "duckdb")]
+pub use file_structure_tool::FileStructureTool;
 pub use filesystem_tool::{GlobSearchTool, ListDirectoryTool, ReadBinaryTool, ReadFileTool};
 pub use filesystem_write_tool::{
-    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, MoveFileTool, WriteFileTool,
+    ApplyDiffTool, CreateDirectoryTool, DeleteFileTool, FinalAnswerTool, MoveFileTool,
+    WriteFileTool,
 };
 pub use git_tool::{
     GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
@@ -78,6 +91,8 @@ pub use pdf_extract_text_tool::PdfExtractTextTool;
 pub use pdf_info_tool::PdfInfoTool;
 #[cfg(feature = "pdf")]
 pub use pdf_to_image_tool::PdfToImageTool;
+#[cfg(feature = "pptx")]
+pub use pptx_tool::{ReadPptxTool, WritePptxTool};
 pub use publish_module_tool::PublishModuleTool;
 pub use read_skill_tool::ReadSkillTool;
 pub use remember_tool::RememberTool;

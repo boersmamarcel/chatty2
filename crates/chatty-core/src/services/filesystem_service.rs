@@ -37,6 +37,23 @@ pub struct GlobResult {
     pub count: usize,
 }
 
+/// Result of reading a text file, potentially chunked to keep payloads bounded.
+#[derive(Debug, Serialize)]
+pub struct FileReadResult {
+    /// File contents for the returned chunk.
+    pub content: String,
+    /// Total line count in the source file.
+    pub total_lines: usize,
+    /// First line number included in content (1-based, inclusive).
+    pub returned_start_line: Option<usize>,
+    /// Last line number included in content (1-based, inclusive).
+    pub returned_end_line: Option<usize>,
+    /// Whether more lines remain in the requested range.
+    pub truncated: bool,
+    /// Suggested next line to continue reading from when truncated.
+    pub next_start_line: Option<usize>,
+}
+
 /// File system operations service (read and write).
 ///
 /// All operations are workspace-restricted via PathValidator.
@@ -47,6 +64,67 @@ pub struct FileSystemService {
 }
 
 impl FileSystemService {
+    const MAX_READ_FILE_LINES: usize = 30;
+    const MAX_READ_FILE_CHARS: usize = 6_000;
+
+    fn slice_lines(
+        content: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<FileReadResult> {
+        if content.is_empty() {
+            return Ok(FileReadResult {
+                content: String::new(),
+                total_lines: 0,
+                returned_start_line: None,
+                returned_end_line: None,
+                truncated: false,
+                next_start_line: None,
+            });
+        }
+
+        let start_line = start_line.unwrap_or(1);
+        if start_line == 0 {
+            return Err(anyhow!("start_line must be 1 or greater"));
+        }
+
+        if let Some(end_line) = end_line
+            && end_line < start_line
+        {
+            return Err(anyhow!(
+                "end_line must be greater than or equal to start_line"
+            ));
+        }
+
+        let lines: Vec<&str> = content.split_inclusive('\n').collect();
+        let total_lines = lines.len();
+
+        if start_line > total_lines {
+            return Err(anyhow!(
+                "start_line {} is beyond the end of the file ({} lines)",
+                start_line,
+                total_lines
+            ));
+        }
+
+        let requested_end_line = end_line.unwrap_or(total_lines).min(total_lines);
+        let returned_end_line = requested_end_line
+            .min(start_line.saturating_add(Self::MAX_READ_FILE_LINES.saturating_sub(1)));
+        let selected = lines[start_line - 1..returned_end_line].concat();
+        let (selected, char_truncated) = truncate_text_chars(&selected, Self::MAX_READ_FILE_CHARS);
+        let line_truncated = returned_end_line < requested_end_line;
+        let truncated = line_truncated || char_truncated;
+
+        Ok(FileReadResult {
+            content: selected,
+            total_lines,
+            returned_start_line: Some(start_line),
+            returned_end_line: Some(returned_end_line),
+            truncated,
+            next_start_line: truncated.then_some(returned_end_line + 1),
+        })
+    }
+
     /// Create a new FileSystemService with the given workspace root.
     pub async fn new(workspace_root: &str) -> Result<Self> {
         let validator = PathValidator::new(workspace_root).await?;
@@ -61,6 +139,12 @@ impl FileSystemService {
     /// Resolve a path within the workspace and return the canonicalized absolute path.
     pub async fn resolve_path(&self, path: &str) -> Result<PathBuf> {
         self.validator.validate(path).await
+    }
+
+    /// Resolve a path for a file that may not yet exist (write operations).
+    /// The parent directory must exist; the file itself need not.
+    pub async fn resolve_new_path(&self, path: &str) -> Result<PathBuf> {
+        self.validator.validate_new_path(path).await
     }
 
     /// Read a text file and return its contents as a string.
@@ -81,10 +165,36 @@ impl FileSystemService {
         })
     }
 
+    /// Read a text file and optionally return only a line range.
+    ///
+    /// Line numbers are 1-based and inclusive.
+    pub async fn read_file_range(
+        &self,
+        path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<FileReadResult> {
+        let content = self.read_file(path).await?;
+        Self::slice_lines(&content, start_line, end_line)
+    }
+
     /// Read a binary file and return its contents as base64-encoded data.
     ///
     /// Suitable for images and PDFs. The file must be within the workspace root and under 10MB.
     pub async fn read_binary(&self, path: &str) -> Result<String> {
+        let (_, bytes) = self.read_binary_bytes(path).await?;
+
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &bytes,
+        ))
+    }
+
+    /// Read a binary file and return its canonical path plus raw bytes.
+    ///
+    /// Suitable for internal tool implementations that need the original bytes.
+    /// The file must be within the workspace root and under 10MB.
+    pub async fn read_binary_bytes(&self, path: &str) -> Result<(PathBuf, Vec<u8>)> {
         let canonical = self.validator.validate(path).await?;
         self.validator.validate_file_size(&canonical).await?;
 
@@ -94,10 +204,7 @@ impl FileSystemService {
             .await
             .map_err(|e| anyhow!("Failed to read binary file '{}': {}", path, e))?;
 
-        Ok(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &bytes,
-        ))
+        Ok((canonical, bytes))
     }
 
     /// List contents of a directory.
@@ -350,6 +457,17 @@ impl FileSystemService {
     }
 }
 
+fn truncate_text_chars(text: &str, max_chars: usize) -> (String, bool) {
+    if text.chars().count() <= max_chars {
+        return (text.to_string(), false);
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push_str(
+        "\n... [read_file output truncated; use targeted ranges, profile_data, describe_data, or query_data for large docs/data] ...\n",
+    );
+    (truncated, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +499,109 @@ mod tests {
             .unwrap();
         let content = service.read_file("subdir/test.txt").await.unwrap();
         assert_eq!(content, "nested content");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("test.txt");
+        fs::write(&test_file, "one\ntwo\nthree\nfour\n").unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service
+            .read_file_range("test.txt", Some(2), Some(3))
+            .await
+            .unwrap();
+
+        assert_eq!(result.content, "two\nthree\n");
+        assert_eq!(result.total_lines, 4);
+        assert_eq!(result.returned_start_line, Some(2));
+        assert_eq!(result.returned_end_line, Some(3));
+        assert!(!result.truncated);
+        assert_eq!(result.next_start_line, None);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_rejects_invalid_bounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("test.txt");
+        fs::write(&test_file, "one\ntwo\n").unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service.read_file_range("test.txt", Some(3), Some(2)).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_chunks_large_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("test.txt");
+        let content = (1..=250).map(|n| format!("line {n}\n")).collect::<String>();
+        fs::write(&test_file, content).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service
+            .read_file_range("test.txt", None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_lines, 250);
+        assert_eq!(result.returned_start_line, Some(1));
+        assert_eq!(result.returned_end_line, Some(30));
+        assert!(result.truncated);
+        assert_eq!(result.next_start_line, Some(31));
+        assert!(result.content.starts_with("line 1\n"));
+        assert!(result.content.ends_with("line 30\n"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_caps_large_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("large.json");
+        fs::write(&test_file, format!("{}\n", "x".repeat(10_000))).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service
+            .read_file_range("large.json", None, None)
+            .await
+            .unwrap();
+
+        assert!(result.truncated);
+        assert!(result.content.chars().count() < 6_200);
+        assert!(result.content.contains("read_file output truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_char_only_truncation_sets_next_start_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("wide.txt");
+        let content = (1..=25)
+            .map(|n| format!("line {n} {}\n", "x".repeat(500)))
+            .collect::<String>();
+        fs::write(&test_file, content).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service
+            .read_file_range("wide.txt", Some(1), Some(12))
+            .await
+            .unwrap();
+
+        assert!(result.truncated);
+        assert_eq!(result.returned_start_line, Some(1));
+        assert_eq!(result.returned_end_line, Some(12));
+        assert_eq!(result.next_start_line, Some(13));
+        assert!(result.content.contains("read_file output truncated"));
     }
 
     #[tokio::test]

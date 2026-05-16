@@ -300,7 +300,6 @@ mod tests {
         let openai: ProviderType = serde_json::from_str("\"open_ai\"").unwrap();
         assert_eq!(openai, ProviderType::OpenRouter);
 
-        // Legacy typo variant — was written by earlier app versions
         let legacy_openai: ProviderType = serde_json::from_str("\"open_a_i\"").unwrap();
         assert_eq!(legacy_openai, ProviderType::OpenRouter);
 

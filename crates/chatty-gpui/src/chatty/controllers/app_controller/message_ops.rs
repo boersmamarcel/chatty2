@@ -61,7 +61,7 @@ impl ChattyApp {
 
         // Get active conversation and send message
         debug!("Spawning async task for LLM call");
-        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+        let task = cx.spawn(async move |weak_ctrl, cx| -> anyhow::Result<()> {
                 debug!("Async task started");
 
                 // PHASE 1: Ensure conversation exists (create if needed)
@@ -169,17 +169,21 @@ impl ChattyApp {
                 }
 
                 // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                let (agent, history, _model_id, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
 
                             // Get capabilities from ModelsModel
-                            let (supports_pdf, supports_images) = cx
+                            let (provider_type, supports_pdf, supports_images) = cx
                                 .global::<ModelsModel>()
                                 .get_model(&model_id)
-                                .map(|m| (m.supports_pdf, m.supports_images))
-                                .unwrap_or((false, false)); // Safe fallback if model not found
+                                .map(|m| (m.provider_type.clone(), m.supports_pdf, m.supports_images))
+                                .unwrap_or((
+                                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
+                                    false,
+                                    false,
+                                )); // Safe fallback if model not found
 
                             // Clear any leftover artifacts from a previous stream
                             if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
@@ -190,6 +194,7 @@ impl ChattyApp {
                                 conv.agent().clone(),
                                 conv.messages(),
                                 model_id,
+                                provider_type,
                                 supports_pdf,
                                 supports_images,
                                 conv.entries().to_vec(),
@@ -255,10 +260,12 @@ impl ChattyApp {
                         user_contents: contents,
                         add_user_message_to_model: true,
                         attachment_paths: attachments,
+                        provider_type,
                         chat_view,
                         stream_manager,
                         cancel_flag: cancel_flag_for_loop,
                         invoke_agent_progress_slot,
+                        weak_ctrl,
                     },
                     cx,
                 )
@@ -1132,7 +1139,7 @@ impl ChattyApp {
         let stream_manager = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get());
 
         let conv_id_for_task = conv_id.clone();
-        let task = cx.spawn(async move |_weak, cx| -> anyhow::Result<()> {
+        let task = cx.spawn(async move |weak_ctrl, cx| -> anyhow::Result<()> {
             debug!(conv_id = %conv_id, "Regeneration: starting new stream");
 
             // Force sidebar to re-render
@@ -1144,15 +1151,24 @@ impl ChattyApp {
                 .ok();
 
             // Extract agent and history (ends with the user message after removal)
-            let (agent, history, invoke_agent_progress_slot) = cx
+            let (agent, history, provider_type, invoke_agent_progress_slot) = cx
                 .update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation(&conv_id) {
+                        let model_id = conv.model_id().to_string();
+                        let provider_type = _cx
+                            .global::<ModelsModel>()
+                            .get_model(&model_id)
+                            .map(|m| m.provider_type.clone())
+                            .unwrap_or(
+                                chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
+                            );
                         if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                             artifacts.clear();
                         }
                         Ok((
                             conv.agent().clone(),
                             conv.messages(),
+                            provider_type,
                             conv.invoke_agent_progress_slot(),
                         ))
                     } else {
@@ -1187,10 +1203,12 @@ impl ChattyApp {
                     user_contents,
                     add_user_message_to_model: false,
                     attachment_paths: vec![],
+                    provider_type,
                     chat_view,
                     stream_manager,
                     cancel_flag: cancel_flag_for_loop,
                     invoke_agent_progress_slot,
+                    weak_ctrl,
                 },
                 cx,
             )
@@ -1216,10 +1234,14 @@ struct LlmStreamParams {
     user_contents: Vec<rig::message::UserContent>,
     add_user_message_to_model: bool,
     attachment_paths: Vec<PathBuf>,
+    provider_type: chatty_core::settings::models::providers_store::ProviderType,
     chat_view: Entity<ChatView>,
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     cancel_flag: Arc<AtomicBool>,
     invoke_agent_progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
+    /// Weak controller handle — used to inject follow-up messages when
+    /// AgentLoopGuard detects a loop or deadline.
+    weak_ctrl: gpui::WeakEntity<ChattyApp>,
 }
 
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
@@ -1241,10 +1263,12 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         user_contents,
         add_user_message_to_model,
         attachment_paths,
+        provider_type,
         chat_view,
         stream_manager,
         cancel_flag,
         invoke_agent_progress_slot,
+        weak_ctrl,
     } = params;
     // 1. Create approval notification channels
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1351,12 +1375,23 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         }
     }
 
-    // 3. Call stream_prompt with user contents directly (no auto-context injection)
+    // 3. Apply context shaping to keep history within LLM context limits.
+    let shaped_history = {
+        let settings = chatty_core::services::ContextShaperSettings::default();
+        let shaped = chatty_core::services::shape_context(history, &settings, None).await;
+        if let Some(stage) = shaped.stage_applied {
+            debug!(conv_id = %conv_id, stage = ?stage, freed = shaped.chars_freed,
+                "Context shaper applied");
+        }
+        shaped.messages
+    };
+
+    // 3b. Call stream_prompt with user contents directly (no auto-context injection)
     let llm_user_contents = user_contents.clone();
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _user_message) = stream_prompt(
         &agent,
-        &history,
+        &shaped_history,
         llm_user_contents,
         Some(approval_rx),
         Some(resolution_rx),
@@ -1382,6 +1417,18 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     // 5. Install invoke_agent progress channel
     let mut progress_rx =
         chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
+
+    // 5b. AgentLoopGuard: detects repeated tool calls (loops) and verbosity bursts.
+    // Desktop streams don't require an answer file, so answer_file_required=false.
+    let mut loop_guard = chatty_core::services::AgentLoopGuard::new(max_agent_turns, false);
+    // Track id→name and id→args for the current tool call in flight.
+    let mut pending_tool_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut pending_tool_args: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // If loop detection fires, we cancel the stream and inject this follow-up.
+    let mut pending_follow_up: Option<String> = None;
+    let mut text_overflow_stop_requested = false;
 
     // 6. Stream processing loop
     debug!(conv_id = %conv_id, "Entering stream processing loop");
@@ -1473,12 +1520,29 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                         })
                         .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
                         .ok();
+                        // Verbosity guard: flag if the model is writing a wall of text with no tools.
+                        if !text_overflow_stop_requested
+                            && loop_guard.on_text_chunk(text.len())
+                        {
+                            text_overflow_stop_requested = true;
+                            debug!(conv_id = %conv_id,
+                                "Text-only response exceeded verbosity limit; will inject brevity prompt after response completes.");
+                        }
                     }
                     Ok(StreamChunk::TokenUsage { .. }) => {
                         // Token usage tracked by StreamManager
                     }
                     Ok(StreamChunk::Done) => {
                         debug!(conv_id = %conv_id, "Received Done chunk");
+                        // If the model produced too much text without a tool call, queue a brevity prompt.
+                        if text_overflow_stop_requested && pending_follow_up.is_none() {
+                            pending_follow_up = Some(
+                                "You produced a long response without any tool call. \
+                                 If you have enough information, give your final answer now. \
+                                 Otherwise, make a single focused tool call to get what you need."
+                                    .to_string(),
+                            );
+                        }
                         // Forward to StreamManager before breaking
                         if let Some(ref sm) = stream_manager {
                             sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
@@ -1492,7 +1556,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                         error!(error = %err, conv_id = %conv_id, "Stream error");
 
                         // Detect authentication errors (401/Unauthorized)
-                        if err.contains("401") || err.contains("Unauthorized") {
+                        if should_refresh_azure_auth(&provider_type, err) {
                             tracing::warn!("Detected Azure auth error - token likely expired");
                             if let Some(cache) = cx
                                 .update(|cx| {
@@ -1508,10 +1572,34 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                                     tracing::info!("Azure token refreshed successfully.");
                                 }
                             }
+                        } else if matches!(
+                            provider_type,
+                            chatty_core::settings::models::providers_store::ProviderType::OpenRouter
+                        ) && is_auth_stream_error(err)
+                        {
+                            tracing::warn!(
+                                "Detected OpenRouter authentication error - check the configured API key/header"
+                            );
+                        }
+                    }
+                    Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
+                        pending_tool_name.insert(id.clone(), name.clone());
+                    }
+                    Ok(StreamChunk::ToolCallInput { ref id, ref arguments }) => {
+                        pending_tool_args.insert(id.clone(), arguments.clone());
+                    }
+                    Ok(StreamChunk::ToolCallResult { ref id, .. }) => {
+                        let tool_name = pending_tool_name.remove(id).unwrap_or_default();
+                        let tool_args = pending_tool_args.remove(id).unwrap_or_default();
+                        if let Some(pivot) = loop_guard.on_tool_completed(&tool_name, &tool_args) {
+                            debug!(conv_id = %conv_id, pivot = %pivot,
+                                "AgentLoopGuard loop detected; cancelling stream");
+                            cancel_flag.store(true, Ordering::Relaxed);
+                            pending_follow_up = Some(pivot);
                         }
                     }
                     Ok(_) => {
-                        // ToolCall*, Approval* chunks: no local state update needed
+                        // ApprovalRequested, ApprovalResolved, TokenUsage, ToolCallError: no local state
                     }
                     Err(ref e) => {
                         error!(error = %e, conv_id = %conv_id, "Stream error");
@@ -1632,7 +1720,33 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         .ok();
     }
 
+    // 7. AgentLoopGuard follow-up: inject pivot or verbosity prompt as a new message.
+    // This runs AFTER finalization so the UI shows the previous response first.
+    if let Some(follow_up) = pending_follow_up {
+        debug!(conv_id = %conv_id, "AgentLoopGuard: injecting follow-up message after stream");
+        weak_ctrl
+            .update(&mut *cx, |app, cx| {
+                app.send_message(follow_up, vec![], cx);
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to inject AgentLoopGuard follow-up"))
+            .ok();
+    }
+
     Ok(())
+}
+
+fn is_auth_stream_error(err: &str) -> bool {
+    err.contains("401") || err.contains("Unauthorized")
+}
+
+fn should_refresh_azure_auth(
+    provider_type: &chatty_core::settings::models::providers_store::ProviderType,
+    err: &str,
+) -> bool {
+    matches!(
+        provider_type,
+        chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
+    ) && is_auth_stream_error(err)
 }
 
 /// Select attachment paths from the most recent assistant message that the
@@ -1762,6 +1876,25 @@ mod tests {
         let entries = vec![entry(user_msg("hello"), vec![])];
         let result = select_recent_assistant_attachments(&entries, true, true);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn azure_refresh_detection_is_provider_specific() {
+        use chatty_core::settings::models::providers_store::ProviderType;
+
+        let err = "ProviderError: Invalid status code 401 Unauthorized";
+        assert!(should_refresh_azure_auth(&ProviderType::AzureOpenAI, err));
+        assert!(!should_refresh_azure_auth(&ProviderType::OpenRouter, err));
+        assert!(!should_refresh_azure_auth(&ProviderType::Ollama, err));
+    }
+
+    #[test]
+    fn auth_stream_error_detects_common_401_text() {
+        assert!(is_auth_stream_error(
+            "Invalid status code 401 Unauthorized with message: missing auth"
+        ));
+        assert!(is_auth_stream_error("ProviderError: Unauthorized"));
+        assert!(!is_auth_stream_error("ProviderError: rate limited"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use chatty_core::models::message_types::{
     detect_execution_engine, predict_execution_engine,
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
-use chatty_core::services::{McpService, MemoryService};
+use chatty_core::services::{ContextShaperSettings, McpService, MemoryService, shape_context};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -421,7 +421,7 @@ impl ChatEngine {
             || es.filesystem_write_enabled
             || es.fetch_enabled
             || es.git_enabled
-            || es.docker_code_execution_enabled;
+            || es.execute_code_enabled;
         let exec_settings = if any_tool_enabled {
             Some(self.execution_settings.clone())
         } else {
@@ -510,7 +510,7 @@ impl ChatEngine {
                 || es.filesystem_write_enabled
                 || es.fetch_enabled
                 || es.git_enabled
-                || es.docker_code_execution_enabled;
+                || es.execute_code_enabled;
             let exec_settings = if any_tool_enabled {
                 Some(execution_settings.clone())
             } else {
@@ -621,12 +621,25 @@ impl ChatEngine {
         self.cancel_flag = Some(cancel_flag.clone());
 
         let agent = conversation.agent().clone();
-        let history = conversation.messages();
+        let raw_history = conversation.messages();
         let invoke_agent_progress_slot = conversation.invoke_agent_progress_slot();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
 
         tokio::spawn(async move {
+            // Apply context shaping before every LLM call (stages 1-3 are free;
+            // stages 4-5 need an LLM call so we pass None here to cap at stage 3).
+            let shaper_settings = ContextShaperSettings::default();
+            let shaped = shape_context(raw_history, &shaper_settings, None).await;
+            if let Some(stage) = shaped.stage_applied {
+                tracing::debug!(
+                    stage = ?stage,
+                    chars_freed = shaped.chars_freed,
+                    "context shaper applied before stream"
+                );
+            }
+            let history = shaped.messages;
+
             let result = streaming::run_stream(streaming::StreamParams {
                 agent,
                 history,
@@ -755,9 +768,8 @@ impl ChatEngine {
                     last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
                 }
-                self.is_streaming = false;
-                self.cancel_flag = None;
-                self.pending_approval = None;
+                self.finalize_partial_response();
+                self.reset_stream_state();
                 EngineAction::Redraw
             }
             AppEvent::StreamCancelled => {
@@ -765,15 +777,8 @@ impl ChatEngine {
                     last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
-                self.is_streaming = false;
-                self.cancel_flag = None;
-                self.pending_approval = None;
-                // Finalize whatever we got
-                if let Some(conv) = self.conversation.as_mut() {
-                    let response = conv.streaming_message().cloned().unwrap_or_default();
-                    conv.finalize_response(response, vec![], None);
-                    conv.set_streaming_message(None);
-                }
+                self.finalize_partial_response();
+                self.reset_stream_state();
                 EngineAction::Redraw
             }
             AppEvent::TitleGenerated(title) => {
@@ -896,16 +901,8 @@ impl ChatEngine {
             last.is_streaming = false;
         }
 
-        // Finalize conversation
-        if let Some(conv) = self.conversation.as_mut() {
-            let response = conv.streaming_message().cloned().unwrap_or_default();
-            conv.finalize_response(response, vec![], None);
-            conv.set_streaming_message(None);
-        }
-
-        self.is_streaming = false;
-        self.cancel_flag = None;
-        self.pending_approval = None;
+        self.finalize_partial_response();
+        self.reset_stream_state();
 
         // Generate title after first exchange
         if self.messages.len() == 2 && self.title == "New Chat" {
@@ -925,6 +922,20 @@ impl ChatEngine {
                 });
             }
         }
+    }
+
+    fn finalize_partial_response(&mut self) {
+        if let Some(conv) = self.conversation.as_mut() {
+            let response = conv.streaming_message().cloned().unwrap_or_default();
+            conv.finalize_response(response, vec![], None);
+            conv.set_streaming_message(None);
+        }
+    }
+
+    fn reset_stream_state(&mut self) {
+        self.is_streaming = false;
+        self.cancel_flag = None;
+        self.pending_approval = None;
     }
 }
 

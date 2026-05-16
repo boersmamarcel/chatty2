@@ -4,19 +4,24 @@ use rig::tool::ToolDyn;
 use crate::tools::CompileTypstTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool,
-    ListToolsTool, MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
-    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
+    DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
+    FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
+    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
+    ListAgentsTool, ListDirectoryTool, ListToolsTool, MoveFileTool, PublishModuleTool,
+    ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool,
+    SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
+    ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
-use crate::tools::{DescribeDataTool, QueryDataTool};
+use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
+#[cfg(feature = "docx")]
+use crate::tools::{ReadDocxTool, WriteDocxTool};
+#[cfg(feature = "pptx")]
+use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use super::mcp_helpers::McpTools;
 
@@ -31,6 +36,7 @@ pub(super) type FsReadTools = (
 /// Filesystem write tool set
 pub(super) type FsWriteTools = (
     WriteFileTool,
+    FinalAnswerTool,
     CreateDirectoryTool,
     DeleteFileTool,
     MoveFileTool,
@@ -65,7 +71,12 @@ pub(super) type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 #[cfg(feature = "duckdb")]
-pub(super) type DataQueryTools = (QueryDataTool, DescribeDataTool);
+pub(super) type DataQueryTools = (
+    QueryDataTool,
+    DescribeDataTool,
+    ProfileDataTool,
+    FileStructureTool,
+);
 
 /// Collect all optional native tools into a `Vec<Box<dyn ToolDyn>>`.
 ///
@@ -75,6 +86,7 @@ pub(super) type DataQueryTools = (QueryDataTool, DescribeDataTool);
 pub(super) struct NativeTools {
     pub list_tools: ListToolsTool,
     pub fs_read: Option<FsReadTools>,
+    pub doc_retriever: Option<DocRetrieverTool>,
     pub fs_write: Option<FsWriteTools>,
     pub add_attachment: Option<AddAttachmentTool>,
     #[cfg(feature = "pdf")]
@@ -92,6 +104,14 @@ pub(super) struct NativeTools {
     pub excel_read: Option<ReadExcelTool>,
     #[cfg(feature = "excel")]
     pub excel_write: Option<ExcelWriteTools>,
+    #[cfg(feature = "docx")]
+    pub docx_read: Option<ReadDocxTool>,
+    #[cfg(feature = "docx")]
+    pub docx_write: Option<WriteDocxTool>,
+    #[cfg(feature = "pptx")]
+    pub pptx_read: Option<ReadPptxTool>,
+    #[cfg(feature = "pptx")]
+    pub pptx_write: Option<WritePptxTool>,
     #[cfg(feature = "duckdb")]
     pub data_query: Option<DataQueryTools>,
     pub chart_tool: Option<CreateChartTool>,
@@ -127,8 +147,12 @@ impl NativeTools {
             tools.push(Box::new(ld));
             tools.push(Box::new(gs));
         }
-        if let Some((wf, cd, df, mf, ad)) = self.fs_write {
+        if let Some(dr) = self.doc_retriever {
+            tools.push(Box::new(dr));
+        }
+        if let Some((wf, fa, cd, df, mf, ad)) = self.fs_write {
             tools.push(Box::new(wf));
+            tools.push(Box::new(fa));
             tools.push(Box::new(cd));
             tools.push(Box::new(df));
             tools.push(Box::new(mf));
@@ -182,10 +206,28 @@ impl NativeTools {
             tools.push(Box::new(wt));
             tools.push(Box::new(et));
         }
+        #[cfg(feature = "docx")]
+        if let Some(t) = self.docx_read {
+            tools.push(Box::new(t));
+        }
+        #[cfg(feature = "docx")]
+        if let Some(t) = self.docx_write {
+            tools.push(Box::new(t));
+        }
+        #[cfg(feature = "pptx")]
+        if let Some(t) = self.pptx_read {
+            tools.push(Box::new(t));
+        }
+        #[cfg(feature = "pptx")]
+        if let Some(t) = self.pptx_write {
+            tools.push(Box::new(t));
+        }
         #[cfg(feature = "duckdb")]
-        if let Some((qt, dt)) = self.data_query {
+        if let Some((qt, dt, pt, fsd)) = self.data_query {
             tools.push(Box::new(qt));
             tools.push(Box::new(dt));
+            tools.push(Box::new(pt));
+            tools.push(Box::new(fsd));
         }
         if let Some(t) = self.chart_tool {
             tools.push(Box::new(t));
@@ -234,6 +276,7 @@ macro_rules! native_tools {
     (
         list_tools: $list_tools:expr,
         fs_read: $fs_read:expr,
+        doc_retriever: $doc_retriever:expr,
         fs_write: $fs_write:expr,
         add_attachment: $add_attachment:expr,
         pdf_to_image: $pdf_to_image:expr,
@@ -246,6 +289,10 @@ macro_rules! native_tools {
         search_tools: $search_tools:expr,
         excel_read: $excel_read:expr,
         excel_write: $excel_write:expr,
+        docx_read: $docx_read:expr,
+        docx_write: $docx_write:expr,
+        pptx_read: $pptx_read:expr,
+        pptx_write: $pptx_write:expr,
         data_query: $data_query:expr,
         chart_tool: $chart_tool:expr,
         typst_tool: $typst_tool:expr,
@@ -265,6 +312,7 @@ macro_rules! native_tools {
         NativeTools {
             list_tools: $list_tools,
             fs_read: $fs_read,
+            doc_retriever: $doc_retriever,
             fs_write: $fs_write,
             add_attachment: $add_attachment,
             #[cfg(feature = "pdf")]
@@ -282,6 +330,14 @@ macro_rules! native_tools {
             excel_read: $excel_read,
             #[cfg(feature = "excel")]
             excel_write: $excel_write,
+            #[cfg(feature = "docx")]
+            docx_read: $docx_read,
+            #[cfg(feature = "docx")]
+            docx_write: $docx_write,
+            #[cfg(feature = "pptx")]
+            pptx_read: $pptx_read,
+            #[cfg(feature = "pptx")]
+            pptx_write: $pptx_write,
             #[cfg(feature = "duckdb")]
             data_query: $data_query,
             chart_tool: $chart_tool,

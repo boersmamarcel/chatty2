@@ -7,6 +7,7 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Default)]
 pub struct ToolAvailability {
     pub fs_read: bool,
+    pub doc_retriever: bool,
     pub fs_write: bool,
     pub list_mcp: bool,
     pub fetch: bool,
@@ -16,6 +17,10 @@ pub struct ToolAvailability {
     pub add_attachment: bool,
     pub excel_read: bool,
     pub excel_write: bool,
+    pub docx_read: bool,
+    pub docx_write: bool,
+    pub pptx_read: bool,
+    pub pptx_write: bool,
     pub pdf_to_image: bool,
     pub pdf_info: bool,
     pub pdf_extract_text: bool,
@@ -51,10 +56,14 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
                 .map(String::from),
         );
     }
+    if tools.doc_retriever {
+        names.insert(String::from("doc_retriever"));
+    }
     if tools.fs_write {
         names.extend(
             [
                 "write_file",
+                "final_answer",
                 "create_directory",
                 "delete_file",
                 "move_file",
@@ -102,6 +111,18 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     if tools.excel_write {
         names.extend(["write_excel", "edit_excel"].into_iter().map(String::from));
     }
+    if tools.docx_read {
+        names.insert(String::from("read_docx"));
+    }
+    if tools.docx_write {
+        names.insert(String::from("write_docx"));
+    }
+    if tools.pptx_read {
+        names.insert(String::from("read_pptx"));
+    }
+    if tools.pptx_write {
+        names.insert(String::from("write_pptx"));
+    }
     if tools.pdf_to_image {
         names.insert(String::from("pdf_to_image"));
     }
@@ -113,9 +134,14 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.data_query {
         names.extend(
-            ["query_data", "describe_data"]
-                .into_iter()
-                .map(String::from),
+            [
+                "query_data",
+                "describe_data",
+                "profile_data",
+                "file_structure_detector",
+            ]
+            .into_iter()
+            .map(String::from),
         );
     }
     if tools.compile_typst {
@@ -173,6 +199,16 @@ mod tests {
         for tool in ["read_file", "read_binary", "list_directory", "glob_search"] {
             assert!(names.contains(tool), "{tool} missing for fs_read");
         }
+        assert!(!names.contains("doc_retriever"));
+    }
+
+    #[test]
+    fn includes_doc_retriever_when_enabled() {
+        let names = active_native_tool_names(&ToolAvailability {
+            doc_retriever: true,
+            ..Default::default()
+        });
+        assert!(names.contains("doc_retriever"));
     }
 
     #[test]
@@ -183,6 +219,7 @@ mod tests {
         });
         for tool in [
             "write_file",
+            "final_answer",
             "create_directory",
             "delete_file",
             "move_file",
@@ -262,6 +299,29 @@ mod tests {
     }
 
     #[test]
+    fn includes_docx_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            docx_read: true,
+            docx_write: true,
+            ..Default::default()
+        });
+        for tool in ["read_docx", "write_docx"] {
+            assert!(names.contains(tool), "{tool} missing for docx");
+        }
+    }
+
+    #[test]
+    fn includes_pptx_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            pptx_read: true,
+            pptx_write: true,
+            ..Default::default()
+        });
+        assert!(names.contains("read_pptx"), "read_pptx missing for pptx");
+        assert!(names.contains("write_pptx"), "write_pptx missing for pptx");
+    }
+
+    #[test]
     fn includes_pdf_tools() {
         let names = active_native_tool_names(&ToolAvailability {
             pdf_to_image: true,
@@ -280,7 +340,12 @@ mod tests {
             data_query: true,
             ..Default::default()
         });
-        for tool in ["query_data", "describe_data"] {
+        for tool in [
+            "query_data",
+            "describe_data",
+            "profile_data",
+            "file_structure_detector",
+        ] {
             assert!(names.contains(tool), "{tool} missing for data_query");
         }
     }
@@ -337,6 +402,7 @@ mod tests {
     fn all_flags_enabled_produces_superset() {
         let all = ToolAvailability {
             fs_read: true,
+            doc_retriever: true,
             fs_write: true,
             list_mcp: true,
             fetch: true,
@@ -346,6 +412,10 @@ mod tests {
             add_attachment: true,
             excel_read: true,
             excel_write: true,
+            docx_read: true,
+            docx_write: true,
+            pptx_read: true,
+            pptx_write: true,
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,
@@ -375,7 +445,9 @@ mod tests {
         // These should NOT be present when all flags are false
         for tool in [
             "read_file",
+            "doc_retriever",
             "write_file",
+            "final_answer",
             "shell_execute",
             "git_status",
             "search_code",

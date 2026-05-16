@@ -11,12 +11,22 @@ use crate::tools::ToolError;
 #[derive(Deserialize, Serialize)]
 pub struct ReadFileArgs {
     pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ReadFileOutput {
     pub content: String,
     pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub returned_start_line: Option<usize>,
+    pub returned_end_line: Option<usize>,
+    pub total_lines: usize,
+    pub truncated: bool,
+    pub next_start_line: Option<usize>,
+    pub note: Option<String>,
 }
 
 #[derive(Clone)]
@@ -40,14 +50,22 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description: "Read the contents of a text file within the workspace. \
-                         Returns the file contents as a string. \
-                         Files must be within the workspace directory and under 10MB. \
-                         For binary files (images, PDFs), use read_binary instead.\n\
-                         \n\
-                         Examples:\n\
-                         - Read source code: {\"path\": \"src/main.rs\"}\n\
-                         - Read config: {\"path\": \"config.json\"}\n\
-                         - Read nested file: {\"path\": \"src/utils/helpers.rs\"}"
+                          Returns the file contents as a string. \
+                          Files must be within the workspace directory and under 10MB. \
+                          Optionally provide start_line and end_line (1-based, inclusive) to read \
+                          only part of a file, which is useful for large files. Large reads are \
+                          automatically chunked to at most 30 lines and 6000 characters per call; when that happens, \
+                           the output includes returned_start_line / returned_end_line plus \
+                           next_start_line so you can continue with another ranged read. \
+                           For large documentation or data tasks, prefer targeted ranges, search, \
+                           profile_data, describe_data, or query_data instead of reading whole files. \
+                          For binary files (images, PDFs), use read_binary instead.\n\
+                          \n\
+                          Examples:\n\
+                          - Read source code: {\"path\": \"src/main.rs\"}\n\
+                          - Read config: {\"path\": \"config.json\"}\n\
+                         - Read nested file: {\"path\": \"src/utils/helpers.rs\"}\n\
+                         - Read a range: {\"path\": \"src/main.rs\", \"start_line\": 40, \"end_line\": 80}"
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -55,6 +73,16 @@ impl Tool for ReadFileTool {
                     "path": {
                         "type": "string",
                         "description": "Path to the file to read, relative to the workspace root or absolute within workspace"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based starting line number"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based ending line number, inclusive"
                     }
                 },
                 "required": ["path"]
@@ -63,10 +91,28 @@ impl Tool for ReadFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let content = self.service.read_file(&args.path).await?;
+        let result = self
+            .service
+            .read_file_range(&args.path, args.start_line, args.end_line)
+            .await?;
         Ok(ReadFileOutput {
-            content,
+            content: result.content,
             path: args.path,
+            start_line: args.start_line,
+            end_line: args.end_line,
+            returned_start_line: result.returned_start_line,
+            returned_end_line: result.returned_end_line,
+            total_lines: result.total_lines,
+            truncated: result.truncated,
+            next_start_line: result.next_start_line,
+            note: result.truncated.then(|| {
+                format!(
+                    "Read was truncated to lines {}-{} of {} and/or a safe character cap. Continue only if those lines are necessary; for large docs/data, prefer search, targeted ranges, profile_data, describe_data, or query_data.",
+                    result.returned_start_line.unwrap_or(1),
+                    result.returned_end_line.unwrap_or(0),
+                    result.total_lines
+                )
+            }),
         })
     }
 }

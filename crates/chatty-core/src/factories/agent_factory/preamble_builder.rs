@@ -39,18 +39,31 @@ pub(super) fn build_preamble(
     if tools.shell {
         tool_sections.push(
             "- **shell_execute / shell_cd / shell_set_env / shell_status** \
-             (persistent session; prefer over asking the user to run commands)"
+             (persistent session; prefer over asking the user to run commands; for multi-line Python or shell logic, prefer writing a script via here-doc / temp file and running it instead of `python -c '...'` one-liners; for verbose commands, prefer quiet flags and targeted output like `curl -fsSL`, `head`, or `sed -n`)"
                 .to_string(),
         );
     }
     if tools.fs_read {
-        tool_sections
-            .push("- **read_file / read_binary / list_directory / glob_search**".to_string());
+        let fs_read_names = if tools.doc_retriever {
+            "doc_retriever / read_file / read_binary / list_directory / glob_search"
+        } else {
+            "read_file / read_binary / list_directory / glob_search"
+        };
+        let retriever_note = if tools.doc_retriever {
+            " Use doc_retriever only when exact documentation rules/definitions are needed after mapping files, not for merchant-specific facts or table values."
+        } else {
+            ""
+        };
+        tool_sections.push(
+            format!(
+                "- **{fs_read_names}** (`read_file` supports `start_line` / `end_line`; large reads are auto-chunked and return `next_start_line`; for data files or large docs, prefer `profile_data`, `query_data`, `glob_search`, or targeted ranges instead of reading the whole file).{retriever_note}"
+            ),
+        );
     }
     if tools.fs_write {
         tool_sections.push(
-            "- **write_file / apply_diff / create_directory / delete_file / move_file** \
-             (use apply_diff for targeted edits)"
+            "- **final_answer / write_file / apply_diff / create_directory / delete_file / move_file** \
+             (use final_answer for factoid or benchmark answer files; use apply_diff for targeted edits; avoid huge full-file rewrites in tool arguments when a targeted diff or in-place shell script will do)"
                 .to_string(),
         );
     }
@@ -82,6 +95,32 @@ pub(super) fn build_preamble(
         }
         tool_sections.push(format!("- {} (.xlsx, .xls, .ods)", excel_desc.join(" / ")));
     }
+    if tools.docx_read || tools.docx_write {
+        let mut docx_desc = Vec::new();
+        if tools.docx_read {
+            docx_desc.push("**read_docx**");
+        }
+        if tools.docx_write {
+            docx_desc.push("**write_docx**");
+        }
+        tool_sections.push(format!(
+            "- {} (.docx Word documents)",
+            docx_desc.join(" / ")
+        ));
+    }
+    if tools.pptx_read || tools.pptx_write {
+        let mut pptx_desc = Vec::new();
+        if tools.pptx_read {
+            pptx_desc.push("**read_pptx**");
+        }
+        if tools.pptx_write {
+            pptx_desc.push("**write_pptx**");
+        }
+        tool_sections.push(format!(
+            "- {} (.pptx PowerPoint presentations)",
+            pptx_desc.join(" / ")
+        ));
+    }
     if tools.pdf_to_image || tools.pdf_info || tools.pdf_extract_text {
         let mut pdf_names = Vec::new();
         if tools.pdf_info {
@@ -97,7 +136,8 @@ pub(super) fn build_preamble(
     }
     if tools.data_query {
         tool_sections.push(
-            "- **query_data / describe_data** (SQL via DuckDB on Parquet/CSV/JSON)".to_string(),
+            "- **file_structure_detector / profile_data / describe_data / query_data** (generic DuckDB tools for CSV/JSON/Parquet and document outlines; start data-analysis tasks with file_structure_detector to map files/docs, then use profile_data or aggregate SQL for tables and one compact script when needed; profile_data includes likely important low-cardinality columns beyond the first few columns; when filtering CSV/JSON booleans or categorical strings in code, inspect distinct values or normalize with `str(value).strip().lower()`)"
+                .to_string(),
         );
     }
     if mcp_mgmt_tools.is_enabled() {
@@ -108,7 +148,10 @@ pub(super) fn build_preamble(
         .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
     if tools.execute_code {
         tool_sections.push(
-            "- **execute_code** (isolated sandbox; Python may use Monty or Docker, other languages use Docker)".to_string(),
+            "- **execute_code** (isolated sandbox; Python may use Monty or Docker, other languages use Docker; \
+Monty mode is stdlib-only — if execute_code returns an import or module error on a third-party library, \
+immediately switch to shell_execute: write a `/tmp/solve.py` script and run it there instead)"
+                .to_string(),
         );
     }
     if tools.memory {
@@ -159,6 +202,9 @@ pub(super) fn build_preamble(
              Use tools proactively instead of asking the user to do things manually. \
              When a task requires multiple steps, execute them yourself by chaining \
              tool calls rather than listing instructions for the user. \
+             For large file edits, prefer targeted diffs or shell scripts that edit \
+             files in place instead of emitting very large inline file contents in a \
+             tool call. \
              Each tool's full schema is provided separately; here is a quick reference:\n\n{}",
             tool_sections.join("\n")
         )
@@ -275,6 +321,30 @@ Use available tools proactively. When a task requires multiple steps, execute th
 chaining tool calls rather than listing instructions for the user. If shell or filesystem tools \
 are available, run commands and read files directly — do not ask the user to do things you can \
 do yourself. Prefer doing over describing.\n\
+\n\
+**Start with a tool call**: When a task benefits from any tool — fetching data, reading a file, \
+running code — begin with that tool call. Do not narrate what you are about to do; just do it. \
+Pre-tool reasoning text wastes tokens and delays the answer.\n\
+\n\
+**Commit on evidence**: When a tool call returns enough information to answer the question, \
+act on it immediately. Do not continue exploring when you already have the answer. The cost of \
+an extra tool call is always higher than the cost of a direct answer.\n\
+\n\
+**Failure budget**: After 3 failed or unhelpful tool calls on the same sub-problem, stop trying \
+that approach. Switch strategy or make a best-guess decision. Infinite retries never converge.\n\
+\n\
+**Code iteration limit**: After 3 rounds of code that give contradictory, confusing, or oscillating \
+output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \
+how to proceed. Continuing to rewrite code indefinitely does not converge.\n\
+\n\
+**Binary and Office files**: Files with binary formats must not be read with `read_file` / `read_binary` (returns garbage). \
+Use the dedicated native tools instead: `read_docx` for Word (.docx), `read_excel` for spreadsheets (.xlsx/.xls/.ods), \
+`pdf_extract_text` / `pdf_info` for PDFs, `read_pptx` for PowerPoint (.pptx).\n\
+\n\
+**Timeouts on network and shell**: Always set explicit timeouts on blocking operations. \
+Use `--max-time 30` on curl, `timeout=20` on Python `requests.get` / `urlopen`, \
+and `timeout 60 <command>` before long-running shell commands. A hung network call stalls \
+the entire session.\n\
 </agentic_behavior>\n\
 \n\
 <clarification_policy>\n\
@@ -394,6 +464,7 @@ mod tests {
     fn fs_tools_included_when_enabled() {
         let mut tools = ToolAvailability::default();
         tools.fs_read = true;
+        tools.doc_retriever = true;
         tools.fs_write = true;
         let result = build_preamble(
             "",
@@ -404,7 +475,9 @@ mod tests {
             &[],
             &[],
         );
+        assert!(result.contains("doc_retriever"));
         assert!(result.contains("read_file"));
+        assert!(result.contains("final_answer"));
         assert!(result.contains("write_file"));
         assert!(result.contains("apply_diff"));
     }
@@ -571,6 +644,42 @@ mod tests {
     }
 
     #[test]
+    fn docx_tools_section_included() {
+        let mut tools = ToolAvailability::default();
+        tools.docx_read = true;
+        tools.docx_write = true;
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenRouter,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        assert!(result.contains("read_docx"));
+        assert!(result.contains("write_docx"));
+    }
+
+    #[test]
+    fn pptx_tool_section_included() {
+        let mut tools = ToolAvailability::default();
+        tools.pptx_read = true;
+        tools.pptx_write = true;
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenRouter,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+        );
+        assert!(result.contains("read_pptx"));
+        assert!(result.contains("write_pptx"));
+    }
+
+    #[test]
     fn data_query_section_included() {
         let mut tools = ToolAvailability::default();
         tools.data_query = true;
@@ -583,6 +692,7 @@ mod tests {
             &[],
             &[],
         );
+        assert!(result.contains("file_structure_detector"));
         assert!(result.contains("query_data"));
         assert!(result.contains("describe_data"));
     }

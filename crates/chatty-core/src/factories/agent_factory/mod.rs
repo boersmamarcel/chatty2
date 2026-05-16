@@ -21,20 +21,24 @@ use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::CompileTypstTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DaytonaTool, DeleteFileTool, ExecuteCodeTool, FetchTool, FindDefinitionTool, FindFilesTool,
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool,
-    ListMcpTool, ListToolsTool, LocalModuleAgentSummary, MoveFileTool, PendingArtifacts,
-    PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool,
-    SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
+    DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
+    FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
+    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
+    ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
+    MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
+    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
 };
 #[cfg(feature = "duckdb")]
-use crate::tools::{DescribeDataTool, QueryDataTool};
+use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
+#[cfg(feature = "docx")]
+use crate::tools::{ReadDocxTool, WriteDocxTool};
+#[cfg(feature = "pptx")]
+use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use mcp_helpers::{McpTools, filter_mcp_tool_info};
 use preamble_builder::build_preamble;
@@ -42,6 +46,12 @@ use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
 pub use tool_registry::ToolAvailability;
+
+fn doc_retriever_enabled() -> bool {
+    std::env::var("CHATTY_ENABLE_DOC_RETRIEVER")
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true)
+}
 
 /// Contextual dependencies for building an agent.
 ///
@@ -208,10 +218,19 @@ impl AgentClient {
         #[cfg(feature = "pdf")]
         let mut pdf_extract_text_tool: Option<PdfExtractTextTool> = None;
         let mut search_tools: Option<SearchTools> = None;
+        let mut doc_retriever_tool: Option<DocRetrieverTool> = None;
         #[cfg(feature = "excel")]
         let mut excel_read_tool: Option<ReadExcelTool> = None;
         #[cfg(feature = "excel")]
         let mut excel_write_tools: Option<ExcelWriteTools> = None;
+        #[cfg(feature = "docx")]
+        let mut docx_read_tool: Option<ReadDocxTool> = None;
+        #[cfg(feature = "docx")]
+        let mut docx_write_tool: Option<WriteDocxTool> = None;
+        #[cfg(feature = "pptx")]
+        let mut pptx_read_tool: Option<ReadPptxTool> = None;
+        #[cfg(feature = "pptx")]
+        let mut pptx_write_tool: Option<WritePptxTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
@@ -262,6 +281,14 @@ impl AgentClient {
                             }
                         }
 
+                        if doc_retriever_enabled() {
+                            doc_retriever_tool = Some(DocRetrieverTool::new(service.clone()));
+                        } else {
+                            tracing::info!(
+                                "doc_retriever skipped: CHATTY_ENABLE_DOC_RETRIEVER disabled it"
+                            );
+                        }
+
                         Some((
                             ReadFileTool::new(service.clone()),
                             ReadBinaryTool::new(service.clone()),
@@ -283,6 +310,7 @@ impl AgentClient {
                         pending_write_approvals.as_ref().map(|approvals| {
                             (
                                 WriteFileTool::new(service.clone(), approvals.clone()),
+                                FinalAnswerTool::new(service.clone(), approvals.clone()),
                                 CreateDirectoryTool::new(service.clone()),
                                 DeleteFileTool::new(service.clone(), approvals.clone()),
                                 MoveFileTool::new(service.clone(), approvals.clone()),
@@ -313,6 +341,34 @@ impl AgentClient {
                         });
                     }
 
+                    // DOCX read tool
+                    #[cfg(feature = "docx")]
+                    if read_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "DOCX read tool enabled");
+                        docx_read_tool = Some(ReadDocxTool::new(service.clone()));
+                    }
+
+                    // DOCX write tool
+                    #[cfg(feature = "docx")]
+                    if write_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "DOCX write tool enabled");
+                        docx_write_tool = Some(WriteDocxTool::new(service.clone()));
+                    }
+
+                    // PPTX read tool
+                    #[cfg(feature = "pptx")]
+                    if read_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "PPTX read tool enabled");
+                        pptx_read_tool = Some(ReadPptxTool::new(service.clone()));
+                    }
+
+                    // PPTX write tool
+                    #[cfg(feature = "pptx")]
+                    if write_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
+                        pptx_write_tool = Some(WritePptxTool::new(service.clone()));
+                    }
+
                     // Data query tools
                     #[cfg(feature = "duckdb")]
                     if read_tools.is_some() {
@@ -320,6 +376,8 @@ impl AgentClient {
                         data_query_tools = Some((
                             QueryDataTool::new(service.clone()),
                             DescribeDataTool::new(service.clone()),
+                            ProfileDataTool::new(service.clone()),
+                            FileStructureTool::new(service.clone()),
                         ));
                     }
 
@@ -611,13 +669,13 @@ impl AgentClient {
             None
         };
 
-        // Docker code execution tool
+        // Code execution tool (Monty and optional Docker fallback)
         let execute_code_tool: Option<ExecuteCodeTool> = if exec_settings
             .as_ref()
-            .map(|s| s.docker_code_execution_enabled)
+            .map(|s| s.execute_code_enabled)
             .unwrap_or(false)
         {
-            tracing::info!("Docker code execution tool enabled");
+            tracing::info!("Code execution tool enabled");
             let sandbox_config = SandboxConfig {
                 timeout_secs: exec_settings
                     .as_ref()
@@ -629,12 +687,20 @@ impl AgentClient {
                     .unwrap_or(true),
                 workspace_path: exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
                 docker_host: exec_settings.as_ref().and_then(|s| s.docker_host.clone()),
+                allow_docker_fallback: exec_settings
+                    .as_ref()
+                    .map(|s| s.docker_code_execution_enabled)
+                    .unwrap_or(false),
+                max_output_bytes: exec_settings
+                    .as_ref()
+                    .map(|s| s.max_output_bytes.min(4096))
+                    .unwrap_or(4096),
                 ..SandboxConfig::default()
             };
             let manager = std::sync::Arc::new(SandboxManager::new(sandbox_config));
             Some(ExecuteCodeTool::new(manager))
         } else {
-            tracing::info!("Docker code execution tool disabled by execution settings");
+            tracing::info!("Code execution tool disabled by execution settings");
             None
         };
 
@@ -668,6 +734,7 @@ impl AgentClient {
 
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
+            doc_retriever: doc_retriever_tool.is_some(),
             fs_write: fs_write_tools.is_some(),
             list_mcp: mcp_mgmt_tools.is_enabled(),
             fetch: fetch_tool.is_some(),
@@ -691,6 +758,46 @@ impl AgentClient {
                     excel_write_tools.is_some()
                 }
                 #[cfg(not(feature = "excel"))]
+                {
+                    false
+                }
+            },
+            docx_read: {
+                #[cfg(feature = "docx")]
+                {
+                    docx_read_tool.is_some()
+                }
+                #[cfg(not(feature = "docx"))]
+                {
+                    false
+                }
+            },
+            docx_write: {
+                #[cfg(feature = "docx")]
+                {
+                    docx_write_tool.is_some()
+                }
+                #[cfg(not(feature = "docx"))]
+                {
+                    false
+                }
+            },
+            pptx_read: {
+                #[cfg(feature = "pptx")]
+                {
+                    pptx_read_tool.is_some()
+                }
+                #[cfg(not(feature = "pptx"))]
+                {
+                    false
+                }
+            },
+            pptx_write: {
+                #[cfg(feature = "pptx")]
+                {
+                    pptx_write_tool.is_some()
+                }
+                #[cfg(not(feature = "pptx"))]
                 {
                     false
                 }
@@ -806,6 +913,7 @@ impl AgentClient {
         let tool_vec = native_tools!(
             list_tools: list_tools,
             fs_read: fs_read_tools,
+            doc_retriever: doc_retriever_tool,
             fs_write: fs_write_tools,
             add_attachment: add_attachment_tool,
             pdf_to_image: pdf_to_image_tool,
@@ -818,6 +926,10 @@ impl AgentClient {
             search_tools: search_tools,
             excel_read: excel_read_tool,
             excel_write: excel_write_tools,
+            docx_read: docx_read_tool,
+            docx_write: docx_write_tool,
+            pptx_read: pptx_read_tool,
+            pptx_write: pptx_write_tool,
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,

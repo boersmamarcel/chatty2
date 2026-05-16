@@ -77,6 +77,14 @@ image = "0.25"
 calamine = "0.34.0"
 rust_xlsxwriter = "0.94.0"
 
+# DOCX (Word documents)
+docx-rs = "0.4.20"
+
+# PPTX (PowerPoint) — ZIP+XML read support plus `pptx` crate write support
+zip = "7"
+roxmltree = "0.21"
+pptx_writer = { package = "pptx", version = "0.1.0" }
+
 # DuckDB
 duckdb = { version = "1.10500.0", features = ["parquet", "json", "bundled"] }
 
@@ -116,4 +124,3 @@ clap = { version = "4.6.0", features = ["derive"] }
 
 # Unix-specific
 nix = { version = "0.29", features = ["signal"] }
-

@@ -47,7 +47,20 @@ pub fn execution_settings_page() -> SettingPage {
                          (commit, branch) require user confirmation.",
                     ),
                     SettingItem::new(
-                        "Enable Docker Code Execution",
+                        "Enable Code Execution Tool",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().execute_code_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_execute_code(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Expose the execute_code tool. Python may run through Monty; enabling Docker fallback below allows broader language and package support.",
+                    ),
+                    SettingItem::new(
+                        "Enable Docker Fallback",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().docker_code_execution_enabled,
                             |_val: bool, cx: &mut App| {
@@ -57,8 +70,7 @@ pub fn execution_settings_page() -> SettingPage {
                         .default_value(false),
                     )
                     .description(
-                        "Execute code in isolated Docker containers. Supports Python, JavaScript, \
-                         TypeScript, Rust, and Bash. Requires Docker to be installed and running.",
+                        "Allow execute_code to fall back to isolated Docker containers for unsupported Python snippets and non-Python languages. Requires Docker to be installed and running.",
                     ),
                     SettingItem::new(
                         "Docker Host",

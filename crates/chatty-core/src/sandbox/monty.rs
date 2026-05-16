@@ -54,6 +54,7 @@ const SUPPORTED_STDLIB_MODULES: &[&str] = &[
     "asyncio",
     "re",
     "os",
+    "csv",
     "json",
     "math",
     "random",
@@ -336,6 +337,13 @@ mod tests {
     fn can_handle_from_import() {
         assert!(MontySandbox::can_handle(
             "from collections import Counter\nprint(Counter('hello'))"
+        ));
+    }
+
+    #[test]
+    fn can_handle_csv_and_collections_imports_together() {
+        assert!(MontySandbox::can_handle(
+            "import csv\nfrom collections import Counter\nprint(csv, Counter)"
         ));
     }
 

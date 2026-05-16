@@ -92,7 +92,10 @@ impl CodeSearchService {
         let rg_limit = max_results + 1;
         let mut args: Vec<String> = vec![
             "--json".to_string(),
-            format!("--max-total-count={}", rg_limit),
+            // Older ripgrep builds do not support --max-total-count. Use the
+            // widely supported per-file cap and still enforce the global cap
+            // after parsing below.
+            format!("--max-count={}", rg_limit),
         ];
 
         if case_insensitive {
@@ -590,5 +593,31 @@ type UserId = string;
 
         assert!(truncated, "expected truncated=true");
         assert_eq!(matches.len(), max_results);
+    }
+
+    #[tokio::test]
+    async fn test_search_code_uses_supported_ripgrep_limit_flag() {
+        if std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("notes.md"),
+            "alpha one\nbeta\nalpha two\nalpha three\n",
+        )
+        .unwrap();
+
+        let service = CodeSearchService::new(tmp.path().to_str().unwrap()).unwrap();
+        let result = service.search_code("alpha", false, None, 1).await.unwrap();
+
+        assert_eq!(result.count, 1);
+        assert!(result.truncated);
+        assert_eq!(result.matches[0].line_number, 1);
+        assert!(result.matches[0].line.contains("alpha one"));
     }
 }

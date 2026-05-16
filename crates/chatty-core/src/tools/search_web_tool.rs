@@ -309,7 +309,6 @@ impl Tool for SearchWebTool {
                 self.search_duckduckgo_fallback(&query, max_results).await?
             }
         };
-
         let result_count = results.len();
         if result_count == 0 {
             warn!(query = %query, "Web search returned no results");

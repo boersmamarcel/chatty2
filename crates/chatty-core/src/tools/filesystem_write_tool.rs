@@ -109,6 +109,255 @@ pub async fn request_write_approval(
     }
 }
 
+// ─── final_answer tool ───
+
+#[derive(Deserialize, Serialize)]
+pub struct FinalAnswerArgs {
+    pub answer: String,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub guidance: Option<String>,
+    #[serde(default)]
+    pub format_hint: Option<String>,
+    #[serde(default)]
+    pub trailing_newline: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FinalAnswerOutput {
+    pub path: String,
+    pub answer: String,
+    pub overwritten: bool,
+    pub bytes_written: usize,
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct FinalAnswerTool {
+    service: Arc<FileSystemService>,
+    pending_approvals: PendingWriteApprovals,
+}
+
+impl FinalAnswerTool {
+    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+        Self {
+            service,
+            pending_approvals,
+        }
+    }
+}
+
+impl Tool for FinalAnswerTool {
+    const NAME: &'static str = "final_answer";
+    type Error = ToolError;
+    type Args = FinalAnswerArgs;
+    type Output = FinalAnswerOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "final_answer".to_string(),
+            description: "Normalize and write a final answer to a workspace file. \
+                          Use this instead of write_file for benchmark/factoid tasks \
+                          once you have the answer candidate. Defaults to answer.txt \
+                          in the workspace and keeps output compact."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "The final answer candidate, not the full reasoning."
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Optional output path. Defaults to answer.txt. Use /app/answer.txt when the task explicitly requires it."
+                    },
+                    "guidance": {
+                        "type": "string",
+                        "description": "Optional task formatting guidance, such as rounding, yes/no, or comma-separated output."
+                    },
+                    "format_hint": {
+                        "type": "string",
+                        "description": "Optional explicit format hint: scalar, numeric, yes_no, comma_separated, or multiline."
+                    },
+                    "trailing_newline": {
+                        "type": "boolean",
+                        "description": "Whether to end the written file with a newline. Defaults to true."
+                    }
+                },
+                "required": ["answer"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let path = args.output_path.unwrap_or_else(|| "answer.txt".to_string());
+        let (answer, notes) = normalize_final_answer(
+            &args.answer,
+            args.guidance.as_deref(),
+            args.format_hint.as_deref(),
+        );
+        if answer.is_empty() {
+            return Err(ToolError::OperationFailed(
+                "final_answer received an empty answer after normalization".to_string(),
+            ));
+        }
+
+        let content = if args.trailing_newline.unwrap_or(true) {
+            format!("{answer}\n")
+        } else {
+            answer.clone()
+        };
+        let is_overwrite = self.service.read_file(&path).await.is_ok();
+        let operation = WriteOperation::WriteFile {
+            path: path.clone(),
+            is_overwrite,
+            content_preview: preview(&content, PREVIEW_MAX_CHARS),
+        };
+
+        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        if !approved {
+            return Err(ToolError::OperationFailed(
+                "Final answer write denied by user".to_string(),
+            ));
+        }
+
+        let bytes = content.len();
+        let overwritten = self.service.write_file(&path, &content).await?;
+
+        Ok(FinalAnswerOutput {
+            path,
+            answer,
+            overwritten,
+            bytes_written: bytes,
+            notes,
+        })
+    }
+}
+
+fn normalize_final_answer(
+    raw: &str,
+    guidance: Option<&str>,
+    format_hint: Option<&str>,
+) -> (String, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut answer = strip_code_fence(raw.trim()).trim().to_string();
+
+    if answer.len() >= 2
+        && ((answer.starts_with('"') && answer.ends_with('"'))
+            || (answer.starts_with('\'') && answer.ends_with('\'')))
+    {
+        answer = answer[1..answer.len() - 1].trim().to_string();
+        notes.push("removed surrounding quotes".to_string());
+    }
+
+    let hint = format_hint.unwrap_or_default().to_ascii_lowercase();
+    let guidance_lc = guidance.unwrap_or_default().to_ascii_lowercase();
+    if !hint.contains("multiline") {
+        let collapsed = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed != answer {
+            answer = collapsed;
+            notes.push("collapsed whitespace".to_string());
+        }
+    }
+
+    if hint.contains("yes_no")
+        || guidance_lc.contains("yes/no")
+        || guidance_lc.contains("yes or no")
+    {
+        let lower = answer.to_ascii_lowercase();
+        let first_token = lower
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        if lower == "yes" || first_token == "yes" {
+            answer = "yes".to_string();
+            notes.push("normalized yes/no answer".to_string());
+        } else if lower == "no" || first_token == "no" {
+            answer = "no".to_string();
+            notes.push("normalized yes/no answer".to_string());
+        }
+    }
+
+    if hint.contains("comma") || guidance_lc.contains("comma-separated") {
+        let normalized = answer
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if normalized != answer {
+            answer = normalized;
+            notes.push("normalized comma-separated spacing".to_string());
+        }
+    }
+
+    let requested_places = requested_decimal_places(&guidance_lc).or_else(|| {
+        if hint.contains("numeric") {
+            requested_decimal_places(&hint)
+        } else {
+            None
+        }
+    });
+    if let Some(places) = requested_places {
+        if is_plain_number(&answer)
+            && let Ok(value) = answer.replace(',', "").parse::<f64>()
+        {
+            answer = format!("{value:.places$}");
+            notes.push(format!("rounded numeric answer to {places} decimal places"));
+        }
+    }
+
+    (answer, notes)
+}
+
+fn strip_code_fence(value: &str) -> String {
+    if !value.starts_with("```") {
+        return value.to_string();
+    }
+    let mut lines = value.lines();
+    let Some(first) = lines.next() else {
+        return value.to_string();
+    };
+    if !first.starts_with("```") {
+        return value.to_string();
+    }
+    let mut inner: Vec<&str> = lines.collect();
+    if inner
+        .last()
+        .is_some_and(|line| line.trim_start().starts_with("```"))
+    {
+        inner.pop();
+        inner.join("\n")
+    } else {
+        value.to_string()
+    }
+}
+
+fn requested_decimal_places(text: &str) -> Option<usize> {
+    for pattern in [
+        r"round(?:ed)?\s+to\s+(\d+)\s+decimal",
+        r"(\d+)\s+decimal\s+places?",
+    ] {
+        let re = regex::Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(text)
+            && let Some(m) = caps.get(1)
+            && let Ok(value) = m.as_str().parse::<usize>()
+        {
+            return Some(value.min(12));
+        }
+    }
+    None
+}
+
+fn is_plain_number(value: &str) -> bool {
+    regex::Regex::new(r"^-?\d+(?:,\d{3})*(?:\.\d+)?$|^-?\d+(?:\.\d+)?$")
+        .map(|re| re.is_match(value.trim()))
+        .unwrap_or(false)
+}
+
 // ─── write_file tool ───
 
 #[derive(Deserialize, Serialize)]
@@ -427,6 +676,54 @@ impl Tool for MoveFileTool {
             source: args.source,
             destination: args.destination,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_final_answer;
+
+    #[test]
+    fn final_answer_normalizes_scalar_wrappers() {
+        let (answer, notes) = normalize_final_answer("```text\n  NexPay:482.08  \n```", None, None);
+
+        assert_eq!(answer, "NexPay:482.08");
+        assert!(!notes.iter().any(|note| note.contains("rounded")));
+    }
+
+    #[test]
+    fn final_answer_applies_decimal_guidance() {
+        let (answer, notes) =
+            normalize_final_answer("482.0849", Some("rounded to 2 decimal places"), None);
+
+        assert_eq!(answer, "482.08");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note == "rounded numeric answer to 2 decimal places")
+        );
+    }
+
+    #[test]
+    fn final_answer_preserves_structured_non_numeric_answer() {
+        let (answer, notes) =
+            normalize_final_answer("NexPay:482.0849", Some("rounded to 2 decimal places"), None);
+
+        assert_eq!(answer, "NexPay:482.0849");
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.contains("rounded numeric answer"))
+        );
+    }
+
+    #[test]
+    fn final_answer_normalizes_yes_no_and_commas() {
+        let (answer, _) = normalize_final_answer("Yes, because it matches", Some("yes/no"), None);
+        assert_eq!(answer, "yes");
+
+        let (answer, _) = normalize_final_answer("A, B, C", None, Some("comma_separated"));
+        assert_eq!(answer, "A,B,C");
     }
 }
 

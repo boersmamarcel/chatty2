@@ -8,6 +8,7 @@ use std::path::Path;
 pub const MAX_FILE_SIZE: u64 = 5_242_880; // 5MB
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
 pub const PDF_EXTENSION: &str = "pdf";
+pub const OFFICE_EXTENSIONS: &[&str] = &["docx", "pptx", "xlsx"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValidationError {
@@ -56,7 +57,9 @@ fn validate_attachment_metadata(path: &Path, size: u64) -> Result<(), Validation
 /// Check if an extension is supported
 pub fn is_supported_extension(ext: &str) -> bool {
     let ext_lower = ext.to_lowercase();
-    IMAGE_EXTENSIONS.contains(&ext_lower.as_str()) || ext_lower == PDF_EXTENSION
+    IMAGE_EXTENSIONS.contains(&ext_lower.as_str())
+        || ext_lower == PDF_EXTENSION
+        || OFFICE_EXTENSIONS.contains(&ext_lower.as_str())
 }
 
 /// Check if a file is an image based on extension
@@ -191,6 +194,14 @@ mod tests {
         assert!(is_supported_extension("pdf"));
         assert!(is_supported_extension("PDF"));
         assert!(is_supported_extension("Pdf"));
+    }
+
+    #[test]
+    fn test_is_supported_extension_office() {
+        assert!(is_supported_extension("docx"));
+        assert!(is_supported_extension("DOCX"));
+        assert!(is_supported_extension("pptx"));
+        assert!(is_supported_extension("xlsx"));
     }
 
     #[test]

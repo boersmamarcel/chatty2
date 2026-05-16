@@ -36,8 +36,13 @@ pub struct ExecutionSettingsModel {
     /// Requires workspace_dir to be set and the workspace to be a git repository.
     #[serde(default)]
     pub git_enabled: bool,
+    /// Expose the execute_code tool to the model.
+    /// Python may run via Monty; other languages require Docker fallback.
+    #[serde(default)]
+    pub execute_code_enabled: bool,
     /// Enable Docker-based code execution sandbox.
-    /// Requires Docker to be installed and running on the host.
+    /// When disabled, execute_code runs in Monty-only mode and only supports
+    /// stdlib Python snippets that Monty can handle.
     #[serde(default)]
     pub docker_code_execution_enabled: bool,
     /// Custom Docker host URI or socket path (e.g., "/run/user/1000/docker.sock"
@@ -89,6 +94,7 @@ impl Default for ExecutionSettingsModel {
             filesystem_write_enabled: true, // Enabled by default when workspace is set
             fetch_enabled: true,           // Enabled by default for zero-config web access
             git_enabled: false,            // Opt-in: requires workspace with git repo
+            execute_code_enabled: false,   // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
             docker_host: None,
             timeout_seconds: 30,
