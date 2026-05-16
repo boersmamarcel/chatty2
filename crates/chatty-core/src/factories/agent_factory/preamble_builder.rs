@@ -108,8 +108,18 @@ pub(super) fn build_preamble(
             docx_desc.join(" / ")
         ));
     }
-    if tools.pptx_read {
-        tool_sections.push("- **read_pptx** (.pptx PowerPoint presentations)".to_string());
+    if tools.pptx_read || tools.pptx_write {
+        let mut pptx_desc = Vec::new();
+        if tools.pptx_read {
+            pptx_desc.push("**read_pptx**");
+        }
+        if tools.pptx_write {
+            pptx_desc.push("**write_pptx**");
+        }
+        tool_sections.push(format!(
+            "- {} (.pptx PowerPoint presentations)",
+            pptx_desc.join(" / ")
+        ));
     }
     if tools.pdf_to_image || tools.pdf_info || tools.pdf_extract_text {
         let mut pdf_names = Vec::new();
@@ -655,6 +665,7 @@ mod tests {
     fn pptx_tool_section_included() {
         let mut tools = ToolAvailability::default();
         tools.pptx_read = true;
+        tools.pptx_write = true;
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -665,6 +676,7 @@ mod tests {
             &[],
         );
         assert!(result.contains("read_pptx"));
+        assert!(result.contains("write_pptx"));
     }
 
     #[test]

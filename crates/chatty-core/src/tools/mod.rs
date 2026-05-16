@@ -92,7 +92,7 @@ pub use pdf_info_tool::PdfInfoTool;
 #[cfg(feature = "pdf")]
 pub use pdf_to_image_tool::PdfToImageTool;
 #[cfg(feature = "pptx")]
-pub use pptx_tool::ReadPptxTool;
+pub use pptx_tool::{ReadPptxTool, WritePptxTool};
 pub use publish_module_tool::PublishModuleTool;
 pub use read_skill_tool::ReadSkillTool;
 pub use remember_tool::RememberTool;

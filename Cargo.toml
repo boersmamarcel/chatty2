@@ -80,9 +80,10 @@ rust_xlsxwriter = "0.94.0"
 # DOCX (Word documents)
 docx-rs = "0.4.20"
 
-# PPTX (PowerPoint) — ZIP+XML parsing, read-only
+# PPTX (PowerPoint) — ZIP+XML read support plus `pptx` crate write support
 zip = "7"
 roxmltree = "0.21"
+pptx_writer = { package = "pptx", version = "0.1.0" }
 
 # DuckDB
 duckdb = { version = "1.10500.0", features = ["parquet", "json", "bundled"] }

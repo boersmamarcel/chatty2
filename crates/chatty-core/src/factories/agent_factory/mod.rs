@@ -20,7 +20,7 @@ use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
 #[cfg(feature = "pptx")]
-use crate::tools::ReadPptxTool;
+use crate::tools::{ReadPptxTool, WritePptxTool};
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
     DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
@@ -229,6 +229,8 @@ impl AgentClient {
         let mut docx_write_tool: Option<WriteDocxTool> = None;
         #[cfg(feature = "pptx")]
         let mut pptx_read_tool: Option<ReadPptxTool> = None;
+        #[cfg(feature = "pptx")]
+        let mut pptx_write_tool: Option<WritePptxTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
@@ -358,6 +360,13 @@ impl AgentClient {
                     if read_tools.is_some() {
                         tracing::info!(workspace = %workspace_dir, "PPTX read tool enabled");
                         pptx_read_tool = Some(ReadPptxTool::new(service.clone()));
+                    }
+
+                    // PPTX write tool
+                    #[cfg(feature = "pptx")]
+                    if write_tools.is_some() {
+                        tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
+                        pptx_write_tool = Some(WritePptxTool::new(service.clone()));
                     }
 
                     // Data query tools
@@ -783,6 +792,16 @@ impl AgentClient {
                     false
                 }
             },
+            pptx_write: {
+                #[cfg(feature = "pptx")]
+                {
+                    pptx_write_tool.is_some()
+                }
+                #[cfg(not(feature = "pptx"))]
+                {
+                    false
+                }
+            },
             pdf_to_image: {
                 #[cfg(feature = "pdf")]
                 {
@@ -910,6 +929,7 @@ impl AgentClient {
             docx_read: docx_read_tool,
             docx_write: docx_write_tool,
             pptx_read: pptx_read_tool,
+            pptx_write: pptx_write_tool,
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,

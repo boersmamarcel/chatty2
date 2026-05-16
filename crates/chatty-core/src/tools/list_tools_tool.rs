@@ -248,6 +248,22 @@ impl ListToolsTool {
             ]);
         }
 
+        if tools.pptx_read {
+            native_tools.push(ToolInfo {
+                name: "read_pptx".to_string(),
+                description: "Read a PowerPoint presentation and return slide titles, text, tables, and optional speaker notes.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
+        if tools.pptx_write {
+            native_tools.push(ToolInfo {
+                name: "write_pptx".to_string(),
+                description: "Create a new PowerPoint (.pptx) file from structured JSON slides containing titles, text boxes, bullet lists, and tables.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         if tools.pdf_to_image {
             native_tools.push(ToolInfo {
                 name: "pdf_to_image".to_string(),
@@ -492,6 +508,7 @@ mod tests {
             docx_read: false,
             docx_write: false,
             pptx_read: false,
+            pptx_write: false,
             pdf_to_image: false,
             pdf_info: false,
             pdf_extract_text: false,
@@ -523,6 +540,7 @@ mod tests {
             docx_read: true,
             docx_write: true,
             pptx_read: true,
+            pptx_write: true,
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,
@@ -641,6 +659,8 @@ mod tests {
             "read_excel",
             "write_excel",
             "edit_excel",
+            "read_pptx",
+            "write_pptx",
             "pdf_to_image",
             "pdf_info",
             "pdf_extract_text",

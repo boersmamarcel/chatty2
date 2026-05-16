@@ -3,7 +3,7 @@ use rig::tool::ToolDyn;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
 #[cfg(feature = "pptx")]
-use crate::tools::ReadPptxTool;
+use crate::tools::{ReadPptxTool, WritePptxTool};
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
     DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
@@ -110,6 +110,8 @@ pub(super) struct NativeTools {
     pub docx_write: Option<WriteDocxTool>,
     #[cfg(feature = "pptx")]
     pub pptx_read: Option<ReadPptxTool>,
+    #[cfg(feature = "pptx")]
+    pub pptx_write: Option<WritePptxTool>,
     #[cfg(feature = "duckdb")]
     pub data_query: Option<DataQueryTools>,
     pub chart_tool: Option<CreateChartTool>,
@@ -216,6 +218,10 @@ impl NativeTools {
         if let Some(t) = self.pptx_read {
             tools.push(Box::new(t));
         }
+        #[cfg(feature = "pptx")]
+        if let Some(t) = self.pptx_write {
+            tools.push(Box::new(t));
+        }
         #[cfg(feature = "duckdb")]
         if let Some((qt, dt, pt, fsd)) = self.data_query {
             tools.push(Box::new(qt));
@@ -286,6 +292,7 @@ macro_rules! native_tools {
         docx_read: $docx_read:expr,
         docx_write: $docx_write:expr,
         pptx_read: $pptx_read:expr,
+        pptx_write: $pptx_write:expr,
         data_query: $data_query:expr,
         chart_tool: $chart_tool:expr,
         typst_tool: $typst_tool:expr,
@@ -329,6 +336,8 @@ macro_rules! native_tools {
             docx_write: $docx_write,
             #[cfg(feature = "pptx")]
             pptx_read: $pptx_read,
+            #[cfg(feature = "pptx")]
+            pptx_write: $pptx_write,
             #[cfg(feature = "duckdb")]
             data_query: $data_query,
             chart_tool: $chart_tool,
