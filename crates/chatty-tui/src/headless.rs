@@ -2,7 +2,7 @@ use anyhow::Result;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::services::AgentLoopGuard;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::engine::{ChatEngine, ToolCallInfo, ToolCallState};
@@ -1201,12 +1201,6 @@ fn answer_file_candidates(engine: &ChatEngine) -> Vec<PathBuf> {
     }
 
     candidates
-}
-
-fn file_has_content(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|contents| !contents.trim().is_empty())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
