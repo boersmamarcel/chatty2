@@ -169,17 +169,21 @@ impl ChattyApp {
                 }
 
                 // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                let (agent, history, _model_id, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
 
                             // Get capabilities from ModelsModel
-                            let (supports_pdf, supports_images) = cx
+                            let (provider_type, supports_pdf, supports_images) = cx
                                 .global::<ModelsModel>()
                                 .get_model(&model_id)
-                                .map(|m| (m.supports_pdf, m.supports_images))
-                                .unwrap_or((false, false)); // Safe fallback if model not found
+                                .map(|m| (m.provider_type.clone(), m.supports_pdf, m.supports_images))
+                                .unwrap_or((
+                                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
+                                    false,
+                                    false,
+                                )); // Safe fallback if model not found
 
                             // Clear any leftover artifacts from a previous stream
                             if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
@@ -190,6 +194,7 @@ impl ChattyApp {
                                 conv.agent().clone(),
                                 conv.messages(),
                                 model_id,
+                                provider_type,
                                 supports_pdf,
                                 supports_images,
                                 conv.entries().to_vec(),
@@ -255,6 +260,7 @@ impl ChattyApp {
                         user_contents: contents,
                         add_user_message_to_model: true,
                         attachment_paths: attachments,
+                        provider_type,
                         chat_view,
                         stream_manager,
                         cancel_flag: cancel_flag_for_loop,
@@ -1145,15 +1151,24 @@ impl ChattyApp {
                 .ok();
 
             // Extract agent and history (ends with the user message after removal)
-            let (agent, history, invoke_agent_progress_slot) = cx
+            let (agent, history, provider_type, invoke_agent_progress_slot) = cx
                 .update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation(&conv_id) {
+                        let model_id = conv.model_id().to_string();
+                        let provider_type = _cx
+                            .global::<ModelsModel>()
+                            .get_model(&model_id)
+                            .map(|m| m.provider_type.clone())
+                            .unwrap_or(
+                                chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
+                            );
                         if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                             artifacts.clear();
                         }
                         Ok((
                             conv.agent().clone(),
                             conv.messages(),
+                            provider_type,
                             conv.invoke_agent_progress_slot(),
                         ))
                     } else {
@@ -1188,6 +1203,7 @@ impl ChattyApp {
                     user_contents,
                     add_user_message_to_model: false,
                     attachment_paths: vec![],
+                    provider_type,
                     chat_view,
                     stream_manager,
                     cancel_flag: cancel_flag_for_loop,
@@ -1218,6 +1234,7 @@ struct LlmStreamParams {
     user_contents: Vec<rig::message::UserContent>,
     add_user_message_to_model: bool,
     attachment_paths: Vec<PathBuf>,
+    provider_type: chatty_core::settings::models::providers_store::ProviderType,
     chat_view: Entity<ChatView>,
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     cancel_flag: Arc<AtomicBool>,
@@ -1246,6 +1263,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
         user_contents,
         add_user_message_to_model,
         attachment_paths,
+        provider_type,
         chat_view,
         stream_manager,
         cancel_flag,
@@ -1538,7 +1556,7 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                         error!(error = %err, conv_id = %conv_id, "Stream error");
 
                         // Detect authentication errors (401/Unauthorized)
-                        if err.contains("401") || err.contains("Unauthorized") {
+                        if should_refresh_azure_auth(&provider_type, err) {
                             tracing::warn!("Detected Azure auth error - token likely expired");
                             if let Some(cache) = cx
                                 .update(|cx| {
@@ -1554,6 +1572,14 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
                                     tracing::info!("Azure token refreshed successfully.");
                                 }
                             }
+                        } else if matches!(
+                            provider_type,
+                            chatty_core::settings::models::providers_store::ProviderType::OpenRouter
+                        ) && is_auth_stream_error(err)
+                        {
+                            tracing::warn!(
+                                "Detected OpenRouter authentication error - check the configured API key/header"
+                            );
                         }
                     }
                     Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
@@ -1709,6 +1735,20 @@ async fn run_llm_stream(params: LlmStreamParams, cx: &mut AsyncApp) -> anyhow::R
     Ok(())
 }
 
+fn is_auth_stream_error(err: &str) -> bool {
+    err.contains("401") || err.contains("Unauthorized")
+}
+
+fn should_refresh_azure_auth(
+    provider_type: &chatty_core::settings::models::providers_store::ProviderType,
+    err: &str,
+) -> bool {
+    matches!(
+        provider_type,
+        chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
+    ) && is_auth_stream_error(err)
+}
+
 /// Select attachment paths from the most recent assistant message that the
 /// current model can handle. Returns paths filtered by capability.
 ///
@@ -1836,6 +1876,25 @@ mod tests {
         let entries = vec![entry(user_msg("hello"), vec![])];
         let result = select_recent_assistant_attachments(&entries, true, true);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn azure_refresh_detection_is_provider_specific() {
+        use chatty_core::settings::models::providers_store::ProviderType;
+
+        let err = "ProviderError: Invalid status code 401 Unauthorized";
+        assert!(should_refresh_azure_auth(&ProviderType::AzureOpenAI, err));
+        assert!(!should_refresh_azure_auth(&ProviderType::OpenRouter, err));
+        assert!(!should_refresh_azure_auth(&ProviderType::Ollama, err));
+    }
+
+    #[test]
+    fn auth_stream_error_detects_common_401_text() {
+        assert!(is_auth_stream_error(
+            "Invalid status code 401 Unauthorized with message: missing auth"
+        ));
+        assert!(is_auth_stream_error("ProviderError: Unauthorized"));
+        assert!(!is_auth_stream_error("ProviderError: rate limited"));
     }
 
     #[test]

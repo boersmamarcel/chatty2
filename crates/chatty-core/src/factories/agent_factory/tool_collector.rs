@@ -69,10 +69,6 @@ pub(super) type SearchTools = (SearchCodeTool, FindFilesTool, FindDefinitionTool
 #[cfg(feature = "excel")]
 pub(super) type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
 
-/// DOCX tool set (gated on docx feature)
-#[cfg(feature = "docx")]
-pub(super) type DocxWriteTools = WriteDocxTool;
-
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 #[cfg(feature = "duckdb")]
 pub(super) type DataQueryTools = (

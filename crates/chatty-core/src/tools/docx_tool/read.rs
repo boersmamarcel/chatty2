@@ -210,33 +210,31 @@ fn render_table(table: &docx_rs::Table) -> String {
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for row_child in &table.rows {
-        if let docx_rs::TableChild::TableRow(row) = row_child {
-            let mut cells: Vec<String> = Vec::new();
-            for cell_child in &row.cells {
-                if let docx_rs::TableRowChild::TableCell(cell) = cell_child {
-                    let cell_text = cell
-                        .children
-                        .iter()
-                        .filter_map(|c| {
-                            if let docx_rs::TableCellContent::Paragraph(p) = c {
-                                let t = collect_paragraph_text(p);
-                                if t.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(t.trim().to_string())
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    cells.push(cell_text);
-                }
-            }
-            if !cells.is_empty() {
-                rows.push(cells);
-            }
+        let docx_rs::TableChild::TableRow(row) = row_child;
+        let mut cells: Vec<String> = Vec::new();
+        for cell_child in &row.cells {
+            let docx_rs::TableRowChild::TableCell(cell) = cell_child;
+            let cell_text = cell
+                .children
+                .iter()
+                .filter_map(|c| {
+                    if let docx_rs::TableCellContent::Paragraph(p) = c {
+                        let t = collect_paragraph_text(p);
+                        if t.trim().is_empty() {
+                            None
+                        } else {
+                            Some(t.trim().to_string())
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            cells.push(cell_text);
+        }
+        if !cells.is_empty() {
+            rows.push(cells);
         }
     }
 
