@@ -77,9 +77,9 @@ Chatty can give your LLM access to the filesystem, a sandboxed shell, MCP server
 
 You can also set a **per-chat working directory** to override the global workspace for a specific conversation. Click the folder icon in the chat input bar to open an OS directory picker — the selected folder name appears next to the icon. A `×` button lets you reset back to the global default. The override is saved with the conversation and takes effect immediately.
 
-Optionally, enable **Docker Code Execution** to run agent-generated code in isolated Docker containers (Python, JavaScript, TypeScript, Rust, Bash). This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
+Optionally, enable **Code Execution** to expose the `execute_code` tool — simple Python scripts are automatically run directly on the host interpreter (~5–50 ms) via MontySandbox. For broader language support (JavaScript, TypeScript, Rust, Bash) and third-party Python packages, also enable **Docker Fallback**. This requires Docker to be installed and running on your machine. Chatty auto-detects common socket locations (including rootless Docker and Docker Desktop). If your Docker socket is in a non-standard location, set the **Docker Host** field (e.g., `/run/user/1000/docker.sock`) to point Chatty at it directly.
 
-**Fast Python execution (MontySandbox):** Simple Python scripts that use only the standard library are automatically run directly on the host interpreter (~5–50 ms) rather than spinning up a Docker container (200–500 ms cold start). Scripts that import third-party packages, or that fail with a module-not-found error, automatically fall back to Docker — no configuration needed. The fast path enforces a memory cap and runs with a minimal environment; it does not provide the same full isolation as Docker.
+**Fast Python execution (MontySandbox):** Simple Python scripts that use only the standard library are automatically run directly on the host interpreter (~5–50 ms) rather than spinning up a Docker container (200–500 ms cold start). Scripts that import third-party packages, or that fail with a module-not-found error, automatically fall back to Docker if the **Docker Fallback** toggle is enabled — no extra configuration needed. The fast path enforces a memory cap and runs with a minimal environment; it does not provide the same full isolation as Docker.
 
 See [Tools & MCP](#tools--mcp) below for the full list of agent tools.
 
@@ -136,8 +136,8 @@ With tools enabled, an agent can autonomously:
 
 - **Explore and edit your codebase** — read files, navigate directories, apply diffs, rename and delete files
 - **Execute shell commands** — run build systems, test suites, git operations, or arbitrary scripts inside a sandbox
-- **Write and run code** — generate Python, JavaScript, TypeScript, Rust, or Bash scripts and execute them in isolated Docker containers
-- **Query your data** — run SQL over Parquet, CSV, and JSON files using DuckDB; read and write Excel spreadsheets
+- **Write and run code** — generate Python, JavaScript, TypeScript, Rust, or Bash scripts and execute them in a sandboxed environment (simple Python runs directly via MontySandbox; Docker fallback available for broader language and package support)
+- **Query your data** — run SQL over Parquet, CSV, and JSON files using DuckDB; read and write Excel spreadsheets, Word documents, and PowerPoint presentations
 - **Browse the web** — search via Tavily or Brave (API key required, configure in Settings > Search); falls back to DuckDuckGo lite automatically when no API key is configured; fetch and parse any URL
 - **Generate and display outputs** — create charts (bar, line, pie, donut, area, candlestick), compile Typst documents to PDF, render diagrams, and display images inline in chat
 - **Manage its own tools** — list available tools and configured MCP servers, discover new capabilities at runtime
@@ -201,7 +201,7 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 | Tool | What the agent can do | Approval |
 |:-----|:----------------------|:--------:|
 | `bash` | Execute shell commands in a sandboxed environment with streaming output | ✓ |
-| `execute_code` | Run Python, JavaScript, TypeScript, Rust, or Bash in an isolated Docker container | ✓ |
+| `execute_code` | Run Python (via MontySandbox or Docker fallback), JavaScript, TypeScript, Rust, or Bash in a sandboxed environment | ✓ |
 
 #### Data & Documents
 
@@ -212,10 +212,15 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 | `read_excel` | Read Excel spreadsheets (.xlsx, .xls, .xlsm, .xlsb, .ods) as JSON | — |
 | `write_excel` | Create Excel files with data, formatting, formulas, merged cells, auto-filters | ✓ |
 | `edit_excel` | Modify existing Excel files (set cells, add sheets, delete rows, formulas) | ✓ |
+| `read_docx` | Read Word documents (.docx) as structured text | — |
+| `write_docx` | Create Word documents with headings, paragraphs, and tables from Markdown | ✓ |
+| `read_pptx` | Read PowerPoint presentations (.pptx) as structured text | — |
+| `write_pptx` | Create PowerPoint presentations with slides, text boxes, bullet lists, and tables | ✓ |
 | `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | — |
 | `pdf_info` | Get metadata and structural information about a PDF | — |
 | `pdf_extract_text` | Extract text from PDF pages (up to 50 pages) | — |
 | `compile_typst` | Compile Typst markup into a PDF — headings, tables, math, code blocks, multi-page | ✓ |
+| `doc_retriever` | Full-text BM25 search across workspace documentation and source files | — |
 
 #### Visuals & Output
 
@@ -466,7 +471,7 @@ Optional **network isolation** lets you block shell commands from making any net
 
 ### Docker Isolation
 
-When Docker Code Execution is enabled, agent-generated code runs inside ephemeral Docker containers — fully isolated from the host filesystem and network. **Exception:** simple Python scripts that use only the standard library run via MontySandbox (directly on the host interpreter) for speed. These scripts run with a memory cap and a stripped environment, then fall back to Docker automatically on any import error or unsupported syntax.
+When **Code Execution** is enabled, agent-generated code runs via MontySandbox for simple Python (directly on the host interpreter, ~5–50 ms). When **Docker Fallback** is also enabled, code runs inside ephemeral Docker containers — fully isolated from the host filesystem and network — for non-Python languages and Python scripts that require third-party packages. Docker containers are fully isolated from the host filesystem and network; MontySandbox scripts run with a memory cap and a stripped environment, then fall back to Docker automatically on any import error or unsupported syntax.
 
 ### Approval Flows
 
@@ -656,7 +661,7 @@ cargo install --path crates/chatty-tui
 
 ### Welcome Screen & Status Bar
 
-When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The TUI appears instantly — MCP servers, memory, and embedding services load in the background. While they are initializing, affected badges on the welcome screen show a `⟳` spinner (e.g., `[MCP ⟳]`) and the status bar displays `● loading services…`; both update automatically once services are ready. The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace. A hint footer below the input bar shows the most useful shortcuts at a glance and updates to show `Ctrl+C stop` while the agent is streaming. A scrollbar appears on the right side of the chat area when content overflows; scrolling up unpins the viewport from the bottom (new content continues to stream in the background), and pressing `End` or scrolling back down re-pins it.
+When you launch `chatty-tui` in interactive mode with an empty conversation, a welcome screen summarizes your current setup: active model and context window size, workspace directory, git branch, enabled tools (shell, fs-read/write, git, code, docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and runtime features (memory, modules, remote agents). The TUI appears instantly — MCP servers, memory, and embedding services load in the background. While they are initializing, affected badges on the welcome screen show a `⟳` spinner (e.g., `[MCP ⟳]`) and the status bar displays `● loading services…`; both update automatically once services are ready. The status bar at the bottom always shows the app version, current working directory (truncated to fit), and git branch when inside a git workspace. A hint footer below the input bar shows the most useful shortcuts at a glance and updates to show `Ctrl+C stop` while the agent is streaming. A scrollbar appears on the right side of the chat area when content overflows; scrolling up unpins the viewport from the bottom (new content continues to stream in the background), and pressing `End` or scrolling back down re-pins it.
 
 ### Interactive Mode Keybindings
 
