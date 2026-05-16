@@ -68,6 +68,14 @@ impl Tool for DocRetrieverTool {
     type Output = DocRetrieverOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let top_k_description =
+            format!("Number of chunks to return. Default: {DEFAULT_TOP_K}. Max: {MAX_TOP_K}.");
+        let max_files_description = format!(
+            "Maximum documentation files to index. Default: {DEFAULT_MAX_FILES}. Max: {MAX_FILES}."
+        );
+        let max_chunk_chars_description = format!(
+            "Maximum text characters per returned chunk. Default: {DEFAULT_MAX_CHUNK_CHARS}. Max: {MAX_CHUNK_CHARS}."
+        );
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Search local Markdown/text documentation with sparse BM25 retrieval. \
@@ -88,15 +96,15 @@ impl Tool for DocRetrieverTool {
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "Number of chunks to return. Default: 5. Max: 10."
+                        "description": top_k_description
                     },
                     "max_files": {
                         "type": "integer",
-                        "description": "Maximum documentation files to index. Default: 30. Max: 80."
+                        "description": max_files_description
                     },
                     "max_chunk_chars": {
                         "type": "integer",
-                        "description": "Maximum text characters per returned chunk. Default: 1500. Max: 3000."
+                        "description": max_chunk_chars_description
                     }
                 },
                 "required": ["query"]

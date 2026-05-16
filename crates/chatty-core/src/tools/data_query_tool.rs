@@ -2,6 +2,7 @@ use duckdb::Connection;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -15,6 +16,13 @@ const MAX_PROFILE_SAMPLE_ROWS: u32 = 5;
 const MAX_PROFILE_COLUMNS: usize = 8;
 const MAX_PROFILE_IMPORTANT_COLUMNS: usize = 14;
 const MAX_PROFILE_SAMPLE_COLUMNS: usize = 8;
+type ProfileDataSummary = (
+    Vec<ColumnInfo>,
+    u64,
+    String,
+    Vec<ColumnProfile>,
+    Vec<String>,
+);
 
 // ─── shared types ───
 
@@ -47,25 +55,157 @@ pub enum DataQueryError {
 fn sandboxed_connection(workspace_root: &str) -> Result<Connection, DataQueryError> {
     let conn = Connection::open_in_memory()
         .map_err(|e| DataQueryError::QueryFailed(format!("Failed to open DuckDB: {}", e)))?;
+    let workspace_root = escape_sql_string(workspace_root);
 
-    // Block extension auto-downloading without disabling local filesystem access.
-    // `enable_external_access = false` would also block reading local files, so we use
-    // more granular settings instead.
-    conn.execute_batch(
+    // Lock DuckDB down to workspace-local files only. This still allows relative
+    // reads inside the workspace but blocks arbitrary local file access and
+    // prevents the SQL itself from loosening the configuration again.
+    conn.execute_batch(&format!(
         "SET autoinstall_known_extensions = false;
-         SET autoload_known_extensions = false;
-         SET allow_community_extensions = false;",
-    )
+             SET autoload_known_extensions = false;
+             SET allow_community_extensions = false;
+             SET allowed_directories = ['{workspace_root}'];
+             SET file_search_path = '{workspace_root}';
+             SET enable_external_access = false;
+             SET lock_configuration = true;"
+    ))
     .map_err(|e| DataQueryError::QueryFailed(format!("Failed to configure sandbox: {}", e)))?;
 
-    // Set working directory so relative paths resolve within workspace
-    conn.execute_batch(&format!(
-        "SET file_search_path = '{}';",
-        workspace_root.replace('\'', "''")
-    ))
-    .map_err(|e| DataQueryError::QueryFailed(format!("Failed to set file_search_path: {}", e)))?;
-
     Ok(conn)
+}
+
+fn escape_sql_string(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn rewrite_query_file_literals(sql: &str, workspace_root: &Path) -> Result<String, DataQueryError> {
+    let mut rewritten = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\'' {
+            rewritten.push(ch);
+            continue;
+        }
+
+        let mut raw_literal = String::new();
+        let mut original_literal = String::from("'");
+
+        loop {
+            let Some(next) = chars.next() else {
+                return Err(DataQueryError::QueryFailed(
+                    "Query contains an unterminated string literal".to_string(),
+                ));
+            };
+
+            original_literal.push(next);
+            if next == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    original_literal.push('\'');
+                    raw_literal.push('\'');
+                    continue;
+                }
+                break;
+            }
+
+            raw_literal.push(next);
+        }
+
+        if let Some(path_literal) = resolve_workspace_file_literal(&raw_literal, workspace_root)? {
+            rewritten.push('\'');
+            rewritten.push_str(&escape_sql_string(&path_literal));
+            rewritten.push('\'');
+        } else {
+            rewritten.push_str(&original_literal);
+        }
+    }
+
+    Ok(rewritten)
+}
+
+fn resolve_workspace_file_literal(
+    literal: &str,
+    workspace_root: &Path,
+) -> Result<Option<String>, DataQueryError> {
+    if !looks_like_file_literal(literal) {
+        return Ok(None);
+    }
+
+    let requested = Path::new(literal);
+    let candidate = if requested.is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        workspace_root.join(requested)
+    };
+    let resolved = resolve_literal_path(&candidate, workspace_root, literal)?;
+
+    Ok(Some(resolved.to_string_lossy().to_string()))
+}
+
+fn looks_like_file_literal(literal: &str) -> bool {
+    let trimmed = literal.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return false;
+    }
+
+    trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.starts_with('.')
+        || trimmed.contains('*')
+        || trimmed.contains('?')
+        || trimmed
+            .rsplit_once('.')
+            .map(|(_, ext)| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "csv" | "tsv" | "parquet" | "json" | "jsonl" | "ndjson" | "duckdb" | "db"
+                )
+            })
+            .unwrap_or(false)
+}
+
+fn resolve_literal_path(
+    candidate: &Path,
+    workspace_root: &Path,
+    original_literal: &str,
+) -> Result<PathBuf, DataQueryError> {
+    let resolved = if candidate.exists() && !has_glob_pattern(candidate) {
+        std::fs::canonicalize(candidate).map_err(|e| {
+            DataQueryError::PathNotAllowed(format!(
+                "Failed to resolve path '{original_literal}': {e}"
+            ))
+        })?
+    } else {
+        let parent = candidate.parent().unwrap_or(workspace_root);
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+            DataQueryError::PathNotAllowed(format!(
+                "Failed to resolve path '{original_literal}': {e}"
+            ))
+        })?;
+
+        let Some(file_name) = candidate.file_name() else {
+            return Err(DataQueryError::PathNotAllowed(format!(
+                "Path '{original_literal}' is not a file path"
+            )));
+        };
+
+        canonical_parent.join(file_name)
+    };
+
+    if !resolved.starts_with(workspace_root) {
+        return Err(DataQueryError::PathNotAllowed(format!(
+            "Access denied: path '{original_literal}' is outside the workspace root"
+        )));
+    }
+
+    Ok(resolved)
+}
+
+fn has_glob_pattern(path: &Path) -> bool {
+    path.to_string_lossy()
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
 }
 
 /// Format DuckDB query results as a markdown table.
@@ -207,10 +347,7 @@ fn value_to_string(val: &duckdb::types::Value) -> String {
 }
 
 fn format_markdown_cell(value: &str) -> (String, bool) {
-    let mut normalized = value
-        .replace('\r', " ")
-        .replace('\n', " ")
-        .replace('\t', " ");
+    let mut normalized = value.replace(['\r', '\n', '\t'], " ");
     let shortened = normalized.chars().count() > MAX_MARKDOWN_CELL_CHARS;
     if shortened {
         normalized = normalized
@@ -307,15 +444,17 @@ impl Tool for QueryDataTool {
             .max_rows
             .unwrap_or(DEFAULT_QUERY_MAX_ROWS)
             .clamp(1, MAX_QUERY_MAX_ROWS);
-        let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
+        let workspace_root = self.service.workspace_root().to_path_buf();
         let query = args.query.clone();
 
         info!(query = %args.query, max_rows, "Executing data query");
 
         let (markdown_table, columns, row_count, truncated, shortened_values) =
             tokio::task::spawn_blocking(move || {
-                let conn = sandboxed_connection(&workspace_root)?;
-                results_to_markdown(&conn, &query, max_rows)
+                let workspace_root_str = workspace_root.to_string_lossy().to_string();
+                let rewritten_query = rewrite_query_file_literals(&query, &workspace_root)?;
+                let conn = sandboxed_connection(&workspace_root_str)?;
+                results_to_markdown(&conn, &rewritten_query, max_rows)
             })
             .await
             .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
@@ -523,7 +662,7 @@ impl Tool for DescribeDataTool {
         let (columns, row_count) = tokio::task::spawn_blocking(move || {
             let conn = sandboxed_connection(&workspace_root)?;
 
-            let escaped = file_path_owned.replace('\'', "''");
+            let escaped = escape_sql_string(&file_path_owned);
 
             // Get schema via DESCRIBE
             let describe_sql = match format_owned.as_str() {
@@ -698,18 +837,9 @@ fn profile_data_file(
     file_path: &str,
     format: &str,
     sample_rows: u32,
-) -> Result<
-    (
-        Vec<ColumnInfo>,
-        u64,
-        String,
-        Vec<ColumnProfile>,
-        Vec<String>,
-    ),
-    DataQueryError,
-> {
+) -> Result<ProfileDataSummary, DataQueryError> {
     let conn = sandboxed_connection(workspace_root)?;
-    let escaped = file_path.replace('\'', "''");
+    let escaped = escape_sql_string(file_path);
     let source = data_source_sql(format, &escaped);
 
     let columns = describe_source(&conn, &source)?;
@@ -1007,6 +1137,11 @@ fn is_complex_type(upper_data_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use rig::tool::Tool;
+
+    use crate::services::filesystem_service::FileSystemService;
 
     #[tokio::test]
     async fn profile_data_returns_compact_generic_summary() {
@@ -1105,5 +1240,73 @@ mod tests {
         assert!(names.contains(&"aci"));
         assert!(names.contains(&"acquirer_country"));
         assert!(!names.contains(&"email_address"));
+    }
+
+    #[tokio::test]
+    async fn query_data_reads_workspace_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("sales.csv"),
+            "category,amount\nbook,10\ngame,30\n",
+        )
+        .unwrap();
+
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = QueryDataTool::new(service);
+
+        let output = tool
+            .call(QueryDataArgs {
+                query: "SELECT * FROM 'data/sales.csv' ORDER BY amount".to_string(),
+                max_rows: Some(10),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.row_count, 2);
+        assert_eq!(output.column_count, 2);
+        assert!(output.markdown_table.contains("book"));
+        assert!(output.markdown_table.contains("game"));
+    }
+
+    #[tokio::test]
+    async fn query_data_rejects_files_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "secret\nvalue\n").unwrap();
+
+        let service = Arc::new(
+            FileSystemService::new(workspace.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = QueryDataTool::new(service);
+        let outside_path = escape_sql_string(&outside.path().to_string_lossy());
+
+        let result = tool
+            .call(QueryDataArgs {
+                query: format!("SELECT * FROM read_csv('{outside_path}', header=true)"),
+                max_rows: Some(10),
+            })
+            .await;
+
+        match result {
+            Err(DataQueryError::PathNotAllowed(message)) => {
+                assert!(message.contains("outside the workspace root"));
+            }
+            Err(DataQueryError::QueryFailed(message)) => {
+                assert!(
+                    message.contains("Permission")
+                        || message.contains("disabled")
+                        || message.contains("external")
+                );
+            }
+            other => panic!("expected permission failure, got {other:?}"),
+        }
     }
 }

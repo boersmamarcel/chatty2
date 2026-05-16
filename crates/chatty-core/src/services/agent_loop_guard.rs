@@ -194,8 +194,8 @@ impl AgentLoopGuard {
     /// call in the current turn).
     ///
     /// Returns `true` when the soft verbosity limit is exceeded — the frontend
-    /// should stop the stream and inject a recovery prompt.  Only fires once
-    /// per turn (subsequent chunks return `false` even if bytes keeps growing).
+    /// should inject a recovery prompt once the stream finishes. Callers that
+    /// only want to react once per turn should de-duplicate the `true` result.
     pub fn on_text_chunk(&mut self, bytes: usize) -> bool {
         if self.tool_called_this_turn {
             return false;

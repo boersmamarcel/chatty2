@@ -121,7 +121,7 @@ impl FileSystemService {
             returned_start_line: Some(start_line),
             returned_end_line: Some(returned_end_line),
             truncated,
-            next_start_line: line_truncated.then_some(returned_end_line + 1),
+            next_start_line: truncated.then_some(returned_end_line + 1),
         })
     }
 
@@ -182,6 +182,19 @@ impl FileSystemService {
     ///
     /// Suitable for images and PDFs. The file must be within the workspace root and under 10MB.
     pub async fn read_binary(&self, path: &str) -> Result<String> {
+        let (_, bytes) = self.read_binary_bytes(path).await?;
+
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &bytes,
+        ))
+    }
+
+    /// Read a binary file and return its canonical path plus raw bytes.
+    ///
+    /// Suitable for internal tool implementations that need the original bytes.
+    /// The file must be within the workspace root and under 10MB.
+    pub async fn read_binary_bytes(&self, path: &str) -> Result<(PathBuf, Vec<u8>)> {
         let canonical = self.validator.validate(path).await?;
         self.validator.validate_file_size(&canonical).await?;
 
@@ -191,10 +204,7 @@ impl FileSystemService {
             .await
             .map_err(|e| anyhow!("Failed to read binary file '{}': {}", path, e))?;
 
-        Ok(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &bytes,
-        ))
+        Ok((canonical, bytes))
     }
 
     /// List contents of a directory.
@@ -567,6 +577,30 @@ mod tests {
 
         assert!(result.truncated);
         assert!(result.content.chars().count() < 6_200);
+        assert!(result.content.contains("read_file output truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_char_only_truncation_sets_next_start_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("wide.txt");
+        let content = (1..=25)
+            .map(|n| format!("line {n} {}\n", "x".repeat(500)))
+            .collect::<String>();
+        fs::write(&test_file, content).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let result = service
+            .read_file_range("wide.txt", Some(1), Some(12))
+            .await
+            .unwrap();
+
+        assert!(result.truncated);
+        assert_eq!(result.returned_start_line, Some(1));
+        assert_eq!(result.returned_end_line, Some(12));
+        assert_eq!(result.next_start_line, Some(13));
         assert!(result.content.contains("read_file output truncated"));
     }
 

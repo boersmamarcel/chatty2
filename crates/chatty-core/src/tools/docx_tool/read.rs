@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -81,42 +80,15 @@ impl Tool for ReadDocxTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let canonical = self.service.resolve_path(&args.path).await?;
+        let (canonical, bytes) = self.service.read_binary_bytes(&args.path).await?;
         let max_chars = args.max_chars.unwrap_or(50_000);
         let include_tables = args.include_tables.unwrap_or(true);
-
-        // Read file bytes
-        let bytes = std::fs::read(&canonical)
-            .with_context(|| format!("Failed to read '{}'", canonical.display()))?;
-
-        // Parse DOCX
-        let docx = docx_rs::read_docx(&bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse DOCX '{}': {:?}", args.path, e))?;
-
-        let mut output_parts: Vec<String> = Vec::new();
-        let mut paragraph_count = 0usize;
-
-        for child in &docx.document.children {
-            match child {
-                docx_rs::DocumentChild::Paragraph(para) => {
-                    let rendered = render_paragraph(para);
-                    if !rendered.is_empty() {
-                        output_parts.push(rendered);
-                        paragraph_count += 1;
-                    }
-                }
-                docx_rs::DocumentChild::Table(table) if include_tables => {
-                    let rendered = render_table(table);
-                    if !rendered.is_empty() {
-                        output_parts.push(rendered);
-                        paragraph_count += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let full_text = output_parts.join("\n\n");
+        let requested_path = args.path.clone();
+        let (full_text, paragraph_count) = tokio::task::spawn_blocking(move || {
+            parse_docx_bytes(bytes, include_tables, &requested_path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse DOCX '{}': {}", args.path, e))??;
         let char_count = full_text.chars().count();
         let truncated = char_count > max_chars;
         let text = if truncated {
@@ -133,6 +105,40 @@ impl Tool for ReadDocxTool {
             paragraph_count,
         })
     }
+}
+
+fn parse_docx_bytes(
+    bytes: Vec<u8>,
+    include_tables: bool,
+    requested_path: &str,
+) -> anyhow::Result<(String, usize)> {
+    let docx = docx_rs::read_docx(&bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to parse DOCX '{}': {:?}", requested_path, e))?;
+
+    let mut output_parts: Vec<String> = Vec::new();
+    let mut paragraph_count = 0usize;
+
+    for child in &docx.document.children {
+        match child {
+            docx_rs::DocumentChild::Paragraph(para) => {
+                let rendered = render_paragraph(para);
+                if !rendered.is_empty() {
+                    output_parts.push(rendered);
+                    paragraph_count += 1;
+                }
+            }
+            docx_rs::DocumentChild::Table(table) if include_tables => {
+                let rendered = render_table(table);
+                if !rendered.is_empty() {
+                    output_parts.push(rendered);
+                    paragraph_count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok((output_parts.join("\n\n"), paragraph_count))
 }
 
 /// Render a docx paragraph to a markdown string.

@@ -262,7 +262,7 @@ fn stage1_budget_reduction(
                     })
                     .collect::<Vec<_>>();
                 Message::User {
-                    content: to_one_or_many(content),
+                    content: to_user_content(content),
                 }
             }
             other => other,
@@ -294,7 +294,7 @@ fn trim_tool_result_content(
             other => other,
         })
         .collect();
-    to_one_or_many(items)
+    to_tool_result_content(items)
 }
 
 /// Stage 2: Snip — drop the oldest middle messages when total is too large.
@@ -379,7 +379,7 @@ fn stage3_micro_compact(
                         })
                         .collect::<Vec<_>>();
                     Message::User {
-                        content: to_one_or_many(content),
+                        content: to_user_content(content),
                     }
                 }
                 other => other,
@@ -410,7 +410,7 @@ fn micro_compact_tool_result(mut tr: ToolResult) -> (ToolResult, usize) {
                 other => other,
             })
             .collect();
-        to_one_or_many(items)
+        to_tool_result_content(items)
     };
 
     (tr, freed)
@@ -509,16 +509,23 @@ fn message_chars(msg: &Message) -> usize {
     }
 }
 
-/// Helper: convert a `Vec<T>` into a `OneOrMany<T>`.
-///
-/// Falls back to an empty text placeholder if the vec is empty so we never
-/// produce an invalid message.
-fn to_one_or_many<T>(items: Vec<T>) -> OneOrMany<T>
-where
-    T: Clone + std::fmt::Debug,
-{
+/// Helper: convert user content into a non-empty `OneOrMany`.
+fn to_user_content(items: Vec<UserContent>) -> OneOrMany<UserContent> {
     match items.len() {
-        0 => unreachable!("to_one_or_many called with empty vec"),
+        0 => OneOrMany::one(UserContent::Text(Text {
+            text: "[CONTEXT SHAPER: empty user message omitted]".to_string(),
+        })),
+        1 => OneOrMany::one(items.into_iter().next().unwrap()),
+        _ => OneOrMany::many(items).expect("non-empty vec always produces OneOrMany"),
+    }
+}
+
+/// Helper: convert tool-result content into a non-empty `OneOrMany`.
+fn to_tool_result_content(items: Vec<ToolResultContent>) -> OneOrMany<ToolResultContent> {
+    match items.len() {
+        0 => OneOrMany::one(ToolResultContent::Text(Text {
+            text: "[CONTEXT SHAPER: empty tool result omitted]".to_string(),
+        })),
         1 => OneOrMany::one(items.into_iter().next().unwrap()),
         _ => OneOrMany::many(items).expect("non-empty vec always produces OneOrMany"),
     }
@@ -577,6 +584,32 @@ mod tests {
 
     fn big_tool_result(id: &str, size: usize) -> Message {
         tool_result_msg(id, &"x".repeat(size))
+    }
+
+    #[test]
+    fn empty_user_content_gets_placeholder() {
+        let content = to_user_content(Vec::new());
+        let items = content.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            UserContent::Text(text) => assert!(text.text.contains("empty user message omitted")),
+            other => panic!("expected placeholder text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tool_result_content_gets_placeholder() {
+        let content = to_tool_result_content(Vec::new());
+        let items = content.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            ToolResultContent::Text(text) => {
+                assert!(text.text.contains("empty tool result omitted"))
+            }
+            other => panic!("expected placeholder text, got {other:?}"),
+        }
     }
 
     fn settings_low_thresholds() -> ContextShaperSettings {

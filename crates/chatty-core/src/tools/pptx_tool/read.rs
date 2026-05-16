@@ -82,69 +82,15 @@ impl Tool for ReadPptxTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let canonical = self.service.resolve_path(&args.path).await?;
+        let (canonical, bytes) = self.service.read_binary_bytes(&args.path).await?;
         let max_chars = args.max_chars.unwrap_or(50_000);
         let include_notes = args.include_notes.unwrap_or(false);
-
-        let bytes = std::fs::read(&canonical)
-            .with_context(|| format!("Failed to read '{}'", canonical.display()))?;
-
-        let cursor = std::io::Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .with_context(|| format!("'{}' is not a valid PPTX/ZIP file", args.path))?;
-
-        // Collect and sort slide entries: ppt/slides/slide*.xml
-        let file_names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
-        let mut slide_entries: Vec<(usize, String)> = file_names
-            .iter()
-            .filter_map(|name| parse_slide_number(name).map(|n| (n, name.clone())))
-            .collect();
-        slide_entries.sort_by_key(|(n, _)| *n);
-
-        let slide_count = slide_entries.len();
-        let mut sections: Vec<String> = Vec::new();
-
-        for (slide_num, slide_name) in &slide_entries {
-            let slide_xml = read_zip_entry(&mut archive, slide_name)?;
-            let content = extract_slide_content(&slide_xml)?;
-
-            let mut section = format!("## Slide {}", slide_num);
-            if let Some(title) = &content.title {
-                section.push_str(&format!(": {}", title));
-            }
-            section.push('\n');
-
-            if !content.body.trim().is_empty() {
-                section.push('\n');
-                section.push_str(content.body.trim());
-                section.push('\n');
-            }
-
-            for table_md in &content.tables {
-                section.push('\n');
-                section.push_str(table_md);
-                section.push('\n');
-            }
-
-            if include_notes {
-                let notes_name =
-                    slide_name.replace("ppt/slides/slide", "ppt/notesSlides/notesSlide");
-                if file_names.contains(&notes_name) {
-                    if let Ok(notes_xml) = read_zip_entry(&mut archive, &notes_name) {
-                        let notes_text = extract_notes_text(&notes_xml);
-                        if !notes_text.trim().is_empty() {
-                            section.push_str("\n_Notes:_ ");
-                            section.push_str(notes_text.trim());
-                            section.push('\n');
-                        }
-                    }
-                }
-            }
-
-            sections.push(section);
-        }
-
-        let full_text = sections.join("\n");
+        let requested_path = args.path.clone();
+        let (slide_count, full_text) = tokio::task::spawn_blocking(move || {
+            parse_pptx_bytes(bytes, include_notes, &requested_path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse PPTX '{}': {}", args.path, e))??;
         let char_count = full_text.chars().count();
         let truncated = char_count > max_chars;
         let text = if truncated {
@@ -161,6 +107,68 @@ impl Tool for ReadPptxTool {
             truncated,
         })
     }
+}
+
+fn parse_pptx_bytes(
+    bytes: Vec<u8>,
+    include_notes: bool,
+    requested_path: &str,
+) -> anyhow::Result<(usize, String)> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .with_context(|| format!("'{}' is not a valid PPTX/ZIP file", requested_path))?;
+
+    // Collect and sort slide entries: ppt/slides/slide*.xml
+    let file_names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let mut slide_entries: Vec<(usize, String)> = file_names
+        .iter()
+        .filter_map(|name| parse_slide_number(name).map(|n| (n, name.clone())))
+        .collect();
+    slide_entries.sort_by_key(|(n, _)| *n);
+
+    let slide_count = slide_entries.len();
+    let mut sections: Vec<String> = Vec::new();
+
+    for (slide_num, slide_name) in &slide_entries {
+        let slide_xml = read_zip_entry(&mut archive, slide_name)?;
+        let content = extract_slide_content(&slide_xml)?;
+
+        let mut section = format!("## Slide {}", slide_num);
+        if let Some(title) = &content.title {
+            section.push_str(&format!(": {}", title));
+        }
+        section.push('\n');
+
+        if !content.body.trim().is_empty() {
+            section.push('\n');
+            section.push_str(content.body.trim());
+            section.push('\n');
+        }
+
+        for table_md in &content.tables {
+            section.push('\n');
+            section.push_str(table_md);
+            section.push('\n');
+        }
+
+        if include_notes {
+            let notes_name = slide_name.replace("ppt/slides/slide", "ppt/notesSlides/notesSlide");
+            if file_names.contains(&notes_name)
+                && let Ok(notes_xml) = read_zip_entry(&mut archive, &notes_name)
+            {
+                let notes_text = extract_notes_text(&notes_xml);
+                if !notes_text.trim().is_empty() {
+                    section.push_str("\n_Notes:_ ");
+                    section.push_str(notes_text.trim());
+                    section.push('\n');
+                }
+            }
+        }
+
+        sections.push(section);
+    }
+
+    Ok((slide_count, sections.join("\n")))
 }
 
 /// Parse slide number from "ppt/slides/slide3.xml" → Some(3).
