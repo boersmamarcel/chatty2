@@ -143,20 +143,40 @@ pub async fn shape_context(
     let (history, s1_freed) = stage1_budget_reduction(history, settings);
     let after_s1 = total_chars(&history);
     if s1_freed > 0 {
-        debug!(freed = s1_freed, after = after_s1, "context shaper stage1: budget reduction");
+        debug!(
+            freed = s1_freed,
+            after = after_s1,
+            "context shaper stage1: budget reduction"
+        );
     }
     if after_s1 <= settings.snip_threshold_chars {
-        return shaped(history, if s1_freed > 0 { Some(ContextShaperStage::BudgetReduction) } else { None }, original_chars);
+        return shaped(
+            history,
+            if s1_freed > 0 {
+                Some(ContextShaperStage::BudgetReduction)
+            } else {
+                None
+            },
+            original_chars,
+        );
     }
 
     // Stage 2: Snip — drop oldest middle messages.
     let (history, s2_freed) = stage2_snip(history, settings);
     let after_s2 = total_chars(&history);
     if s2_freed > 0 {
-        debug!(freed = s2_freed, after = after_s2, "context shaper stage2: snip");
+        debug!(
+            freed = s2_freed,
+            after = after_s2,
+            "context shaper stage2: snip"
+        );
     }
     if after_s2 <= settings.micro_compact_threshold_chars {
-        let stage = if s2_freed > 0 { ContextShaperStage::Snip } else { ContextShaperStage::BudgetReduction };
+        let stage = if s2_freed > 0 {
+            ContextShaperStage::Snip
+        } else {
+            ContextShaperStage::BudgetReduction
+        };
         return shaped(history, Some(stage), original_chars);
     }
 
@@ -164,7 +184,11 @@ pub async fn shape_context(
     let (history, s3_freed) = stage3_micro_compact(history, settings);
     let after_s3 = total_chars(&history);
     if s3_freed > 0 {
-        debug!(freed = s3_freed, after = after_s3, "context shaper stage3: micro-compact");
+        debug!(
+            freed = s3_freed,
+            after = after_s3,
+            "context shaper stage3: micro-compact"
+        );
     }
     if after_s3 <= settings.collapse_threshold_chars || agent.is_none() {
         let stage = pick_stage(s1_freed, s2_freed, s3_freed);
@@ -177,10 +201,18 @@ pub async fn shape_context(
     let (history, s4_freed) = stage4_collapse(history, settings, agent).await;
     let after_s4 = total_chars(&history);
     if s4_freed > 0 {
-        debug!(freed = s4_freed, after = after_s4, "context shaper stage4: collapse");
+        debug!(
+            freed = s4_freed,
+            after = after_s4,
+            "context shaper stage4: collapse"
+        );
     }
     if after_s4 <= settings.auto_compact_threshold_chars {
-        let stage = if s4_freed > 0 { Some(ContextShaperStage::Collapse) } else { pick_stage(s1_freed, s2_freed, s3_freed) };
+        let stage = if s4_freed > 0 {
+            Some(ContextShaperStage::Collapse)
+        } else {
+            pick_stage(s1_freed, s2_freed, s3_freed)
+        };
         return shaped(history, stage, original_chars);
     }
 
@@ -188,9 +220,17 @@ pub async fn shape_context(
     let (history, s5_freed) = stage5_auto_compact(history, agent).await;
     let after_s5 = total_chars(&history);
     if s5_freed > 0 {
-        debug!(freed = s5_freed, after = after_s5, "context shaper stage5: auto-compact");
+        debug!(
+            freed = s5_freed,
+            after = after_s5,
+            "context shaper stage5: auto-compact"
+        );
     }
-    let stage = if s5_freed > 0 { Some(ContextShaperStage::AutoCompact) } else { pick_stage(s1_freed, s2_freed, s3_freed) };
+    let stage = if s5_freed > 0 {
+        Some(ContextShaperStage::AutoCompact)
+    } else {
+        pick_stage(s1_freed, s2_freed, s3_freed)
+    };
     shaped(history, stage, original_chars)
 }
 
@@ -245,9 +285,8 @@ fn trim_tool_result_content(
                 // Preview is at most half the limit or 200 chars, whichever is smaller.
                 let preview_chars = (limit / 2).min(200);
                 let preview: String = t.text.chars().take(preview_chars).collect();
-                let stub_text = format!(
-                    "[tool result truncated — {original_len} chars]\n{preview}…"
-                );
+                let stub_text =
+                    format!("[tool result truncated — {original_len} chars]\n{preview}…");
                 // freed = chars removed (original minus the stub we wrote).
                 *freed += original_len.saturating_sub(stub_text.len());
                 ToolResultContent::Text(Text { text: stub_text })
@@ -262,10 +301,7 @@ fn trim_tool_result_content(
 ///
 /// Keeps `snip_keep_head` messages at the start and `snip_keep_tail` at the
 /// end, replacing the dropped block with a single marker message.
-fn stage2_snip(
-    history: Vec<Message>,
-    settings: &ContextShaperSettings,
-) -> (Vec<Message>, usize) {
+fn stage2_snip(history: Vec<Message>, settings: &ContextShaperSettings) -> (Vec<Message>, usize) {
     let head = settings.snip_keep_head;
     let tail = settings.snip_keep_tail;
 
@@ -401,9 +437,8 @@ async fn stage4_collapse(
 
     match summarize_oldest_half(agent, &middle).await {
         Ok(result) => {
-            let saved = middle_chars.saturating_sub(
-                result.new_history.iter().map(message_chars).sum::<usize>(),
-            );
+            let saved = middle_chars
+                .saturating_sub(result.new_history.iter().map(message_chars).sum::<usize>());
             let mut new_history = Vec::with_capacity(head + result.new_history.len() + tail);
             new_history.extend_from_slice(&history[..head]);
             new_history.extend(result.new_history);
@@ -418,10 +453,7 @@ async fn stage4_collapse(
 }
 
 /// Stage 5: Auto-compact — full `summarize_oldest_half` on the entire history.
-async fn stage5_auto_compact(
-    history: Vec<Message>,
-    agent: &AgentClient,
-) -> (Vec<Message>, usize) {
+async fn stage5_auto_compact(history: Vec<Message>, agent: &AgentClient) -> (Vec<Message>, usize) {
     let original_chars: usize = history.iter().map(message_chars).sum();
 
     match summarize_oldest_half(agent, &history).await {
@@ -467,7 +499,9 @@ fn message_chars(msg: &Message) -> usize {
             .iter()
             .map(|item| match item {
                 AssistantContent::Text(t) => t.text.len(),
-                AssistantContent::ToolCall(tc) => tc.function.arguments.to_string().len() + tc.function.name.len(),
+                AssistantContent::ToolCall(tc) => {
+                    tc.function.arguments.to_string().len() + tc.function.name.len()
+                }
                 _ => 0,
             })
             .sum(),
@@ -502,7 +536,11 @@ fn pick_stage(s1: usize, s2: usize, s3: usize) -> Option<ContextShaperStage> {
     }
 }
 
-fn shaped(messages: Vec<Message>, stage_applied: Option<ContextShaperStage>, original_chars: usize) -> ShapedContext {
+fn shaped(
+    messages: Vec<Message>,
+    stage_applied: Option<ContextShaperStage>,
+    original_chars: usize,
+) -> ShapedContext {
     let new_chars = total_chars(&messages);
     ShapedContext {
         chars_freed: original_chars.saturating_sub(new_chars),

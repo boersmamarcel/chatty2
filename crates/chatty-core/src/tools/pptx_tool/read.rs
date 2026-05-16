@@ -127,8 +127,8 @@ impl Tool for ReadPptxTool {
             }
 
             if include_notes {
-                let notes_name = slide_name
-                    .replace("ppt/slides/slide", "ppt/notesSlides/notesSlide");
+                let notes_name =
+                    slide_name.replace("ppt/slides/slide", "ppt/notesSlides/notesSlide");
                 if file_names.contains(&notes_name) {
                     if let Ok(notes_xml) = read_zip_entry(&mut archive, &notes_name) {
                         let notes_text = extract_notes_text(&notes_xml);
@@ -192,8 +192,8 @@ struct SlideContent {
 }
 
 fn extract_slide_content(xml: &str) -> anyhow::Result<SlideContent> {
-    let doc = roxmltree::Document::parse(xml)
-        .map_err(|e| anyhow::anyhow!("XML parse error: {}", e))?;
+    let doc =
+        roxmltree::Document::parse(xml).map_err(|e| anyhow::anyhow!("XML parse error: {}", e))?;
     let root = doc.root_element();
 
     let mut title: Option<String> = None;
@@ -256,7 +256,11 @@ fn extract_txbody_text(sp: &roxmltree::Node) -> String {
                 .filter_map(|t| t.text())
                 .collect::<Vec<_>>()
                 .join("");
-            if text.trim().is_empty() { None } else { Some(text.trim().to_string()) }
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.trim().to_string())
+            }
         })
         .collect();
 
@@ -297,7 +301,10 @@ fn render_table_as_markdown(tbl: &roxmltree::Node) -> String {
             .collect();
         lines.push(format!("| {} |", padded.join(" | ")));
         if i == 0 {
-            let sep = (0..col_count).map(|_| "---").collect::<Vec<_>>().join(" | ");
+            let sep = (0..col_count)
+                .map(|_| "---")
+                .collect::<Vec<_>>()
+                .join(" | ");
             lines.push(format!("| {} |", sep));
         }
     }

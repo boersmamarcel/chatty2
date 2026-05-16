@@ -247,7 +247,10 @@ mod tests {
     fn no_pivot_when_calls_differ() {
         let mut g = guard();
         g.on_tool_completed("search_web", "rust async");
-        assert!(g.on_tool_completed("search_web", "different query").is_none());
+        assert!(
+            g.on_tool_completed("search_web", "different query")
+                .is_none()
+        );
     }
 
     #[test]

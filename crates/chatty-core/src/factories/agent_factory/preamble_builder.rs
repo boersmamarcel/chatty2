@@ -103,7 +103,10 @@ pub(super) fn build_preamble(
         if tools.docx_write {
             docx_desc.push("**write_docx**");
         }
-        tool_sections.push(format!("- {} (.docx Word documents)", docx_desc.join(" / ")));
+        tool_sections.push(format!(
+            "- {} (.docx Word documents)",
+            docx_desc.join(" / ")
+        ));
     }
     if tools.pptx_read {
         tool_sections.push("- **read_pptx** (.pptx PowerPoint presentations)".to_string());

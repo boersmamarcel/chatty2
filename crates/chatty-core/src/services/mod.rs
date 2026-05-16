@@ -23,8 +23,8 @@
 
 pub mod a2a_client;
 pub mod agent_loop_guard;
-pub mod context_shaper;
 pub mod chart_svg_renderer;
+pub mod context_shaper;
 pub mod embedding_service;
 pub mod error_collector_layer;
 pub mod filesystem_service;

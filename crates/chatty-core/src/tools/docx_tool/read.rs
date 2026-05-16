@@ -120,8 +120,7 @@ impl Tool for ReadDocxTool {
         let char_count = full_text.chars().count();
         let truncated = char_count > max_chars;
         let text = if truncated {
-            full_text.chars().take(max_chars).collect::<String>()
-                + "\n\n[... truncated ...]"
+            full_text.chars().take(max_chars).collect::<String>() + "\n\n[... truncated ...]"
         } else {
             full_text
         };
@@ -221,7 +220,11 @@ fn render_table(table: &docx_rs::Table) -> String {
                         .filter_map(|c| {
                             if let docx_rs::TableCellContent::Paragraph(p) = c {
                                 let t = collect_paragraph_text(p);
-                                if t.trim().is_empty() { None } else { Some(t.trim().to_string()) }
+                                if t.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(t.trim().to_string())
+                                }
                             } else {
                                 None
                             }
@@ -252,7 +255,10 @@ fn render_table(table: &docx_rs::Table) -> String {
         lines.push(format!("| {} |", padded.join(" | ")));
         if i == 0 {
             // separator
-            let sep = (0..col_count).map(|_| "---").collect::<Vec<_>>().join(" | ");
+            let sep = (0..col_count)
+                .map(|_| "---")
+                .collect::<Vec<_>>()
+                .join(" | ");
             lines.push(format!("| {} |", sep));
         }
     }

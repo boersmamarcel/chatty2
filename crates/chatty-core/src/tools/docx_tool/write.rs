@@ -132,9 +132,7 @@ fn build_docx(content: &str) -> Result<(Vec<u8>, usize), DocxToolError> {
                 paragraphs_written += 1;
             }
         } else if let Some(level) = heading_level(trimmed) {
-            let text = trimmed
-                .trim_start_matches('#')
-                .trim();
+            let text = trimmed.trim_start_matches('#').trim();
             let style = match level {
                 1 => "Heading1",
                 2 => "Heading2",
@@ -192,12 +190,19 @@ fn split_into_blocks(content: &str) -> Vec<String> {
 }
 
 fn heading_level(line: &str) -> Option<u8> {
-    if line.starts_with("##### ") { Some(5) }
-    else if line.starts_with("#### ") { Some(4) }
-    else if line.starts_with("### ") { Some(3) }
-    else if line.starts_with("## ") { Some(2) }
-    else if line.starts_with("# ") { Some(1) }
-    else { None }
+    if line.starts_with("##### ") {
+        Some(5)
+    } else if line.starts_with("#### ") {
+        Some(4)
+    } else if line.starts_with("### ") {
+        Some(3)
+    } else if line.starts_with("## ") {
+        Some(2)
+    } else if line.starts_with("# ") {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn is_bullet_list(block: &str) -> bool {
@@ -226,7 +231,11 @@ fn try_parse_table(block: &str) -> Option<docx_rs::Table> {
         .iter()
         .filter(|l| {
             let t = l.trim();
-            t.starts_with('|') && !t.trim_matches('|').chars().all(|c| c == '-' || c == ' ' || c == ':' || c == '|')
+            t.starts_with('|')
+                && !t
+                    .trim_matches('|')
+                    .chars()
+                    .all(|c| c == '-' || c == ' ' || c == ':' || c == '|')
         })
         .map(|l| {
             l.trim()
