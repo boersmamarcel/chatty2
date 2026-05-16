@@ -177,6 +177,12 @@ const SLASH_COMMANDS: &[SlashCommandEntry] = &[
         insert_text: "/cd ",
         execute_immediately: false,
     },
+    SlashCommandEntry {
+        command: "/quit",
+        description: "Quit Chatty",
+        insert_text: "/quit",
+        execute_immediately: true,
+    },
 ];
 
 /// A combined item in the TUI slash-command picker: either a built-in command

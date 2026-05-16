@@ -13,12 +13,78 @@ use crate::settings::views::user_secrets_page::user_secrets_page;
 use gpui::*;
 
 use gpui_component::{
-    ActiveTheme, Root, Sizable, Size, Theme, ThemeMode,
+    ActiveTheme, Disableable, Root, Sizable, Size, Theme, ThemeMode,
     button::Button,
     group_box::GroupBoxVariant,
     menu::{DropdownMenu, PopupMenuItem},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
+
+#[cfg(not(target_os = "macos"))]
+fn cli_group() -> SettingGroup {
+    use crate::cli_installer::{CliInstallState, CliInstallStatus};
+
+    SettingGroup::new()
+        .title("CLI Tool")
+        .description("Install the chatty-tui command-line interface so you can use Chatty from your terminal.")
+        .items(vec![SettingItem::render(|_options, _window, cx| {
+            let status = cx
+                .try_global::<CliInstallState>()
+                .map(|s| s.status.clone())
+                .unwrap_or_default();
+
+            match status {
+                CliInstallStatus::Idle => Button::new("install-cli")
+                    .label("Install CLI…")
+                    .outline()
+                    .on_click(|_event, _window, cx| {
+                        crate::cli_installer::install_cli(cx);
+                    })
+                    .into_any_element(),
+                CliInstallStatus::Installing => Button::new("install-cli")
+                    .label("Installing…")
+                    .outline()
+                    .disabled(true)
+                    .into_any_element(),
+                CliInstallStatus::Installed(msg) => div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(cx.theme().success)
+                            .child(msg),
+                    )
+                    .child(
+                        Button::new("reinstall-cli")
+                            .label("Reinstall CLI")
+                            .outline()
+                            .on_click(|_event, _window, cx| {
+                                crate::cli_installer::install_cli(cx);
+                            }),
+                    )
+                    .into_any_element(),
+                CliInstallStatus::Failed(err) => div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(cx.theme().danger)
+                            .child(format!("Installation failed: {err}")),
+                    )
+                    .child(
+                        Button::new("retry-install-cli")
+                            .label("Retry")
+                            .outline()
+                            .on_click(|_event, _window, cx| {
+                                crate::cli_installer::install_cli(cx);
+                            }),
+                    )
+                    .into_any_element(),
+            }
+        })])
+}
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -131,6 +197,8 @@ impl Render for SettingsView {
                             )
                             .description("Adjust the default font size."),
                         ]),
+                        #[cfg(not(target_os = "macos"))]
+                        cli_group(),
                     ]),
                 SettingPage::new("Models")
                     .description("Configure AI models and their parameters")

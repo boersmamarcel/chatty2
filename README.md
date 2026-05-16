@@ -277,6 +277,16 @@ Each installed extension displays a badge showing its type (**Agent**, **MCP**, 
 
 **Switching execution mode** — for WASM agent modules that support both local and cloud execution, a **Switch to Local** / **Switch to Cloud** button appears next to the module. Cloud execution runs the module on a Hive runner without requiring a local WASM binary. Modules marked as cloud-only do not have this toggle.
 
+**Built-in external integrations** — Chatty ships a curated catalog of well-known external MCP servers pre-loaded into the **Installed** section. All entries are disabled by default; click **Enable** to connect.
+
+| Integration | What it provides | Auth |
+|:------------|:-----------------|:-----|
+| **Hugging Face** | Models, datasets, and Spaces via the Hub MCP server | Optional access token for private repos / higher rate limits |
+| **Notion** | Search and edit pages, databases, and comments | OAuth — sign in with your Notion workspace |
+| **Atlassian** | Search Jira issues and Confluence pages | OAuth — Atlassian Cloud sign-in in the browser |
+
+> **Note:** Notion and Atlassian use Server-Sent Events (SSE). The built-in MCP client speaks streamable HTTP; connecting to those endpoints may require an SSE-capable transport bridge until native SSE support is added.
+
 **Add a custom MCP server manually:**
 
 1. Start your MCP server process separately (Chatty connects to it; it does not launch it)
@@ -332,6 +342,21 @@ Once added, enable or disable it independently from any other MCP server using t
 Search and update Jira issues and Confluence pages via Atlassian's hosted remote MCP server (`https://mcp.atlassian.com/v1/sse`). No local server needs to be started — the entry is preconfigured in **Settings > Extensions** but **disabled by default**.
 
 Enable it to trigger Atlassian's OAuth flow on first connect; you'll be redirected through your Atlassian SSO and the resulting token is cached locally. Access is scoped to whatever Jira and Confluence sites your Atlassian account can reach. Enterprise tenants may need an admin to approve the MCP app — see [Atlassian's remote MCP docs](https://www.atlassian.com/platform/remote-mcp-server) for the supported scopes and admin controls.
+
+#### Google Calendar — built in
+Read and manage Google Calendar events via Google's official MCP server. The entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Google OAuth on first connect; sign in with your Google account and grant the Calendar API scope when prompted. See [Google Calendar API docs](https://developers.google.com/calendar) for scope details.
+
+#### Gmail — built in
+Read, search, and send Gmail messages via Google's official MCP server. The entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Google OAuth on first connect; sign in with your Google account and grant the Gmail API scope when prompted. See [Gmail API docs](https://developers.google.com/gmail) for scope details.
+
+#### Google Drive — built in
+Browse, search, and manage files in Google Drive via Google's official MCP server. The entry is preconfigured in **Settings > Extensions** but **disabled by default**.
+
+Enable it to trigger Google OAuth on first connect; sign in with your Google account and grant the Drive API scope when prompted. See [Google Drive API docs](https://developers.google.com/drive) for scope details.
 
 > **Tip:** You can write your own MCP servers in any language. See the [MCP specification](https://modelcontextprotocol.io/) for details.
 
@@ -619,7 +644,7 @@ chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key 
 
 ### Installing chatty-tui
 
-**From the desktop app** — the easiest option. Open Chatty's menu and choose **Install CLI**. On macOS, the menu is in the system menu bar at the top of the screen. On Linux and Windows, it appears as a dropdown in the app's title bar. This copies the bundled `chatty-tui` binary to `/usr/local/bin` (macOS/Linux) or your user bin directory.
+**From the desktop app** — the easiest option. On macOS, open the **Chatty** menu in the system menu bar and choose **Install CLI**. On Linux and Windows, go to **Settings → General** and click the **Install CLI…** button. This copies the bundled `chatty-tui` binary to `~/.local/bin` (Linux) or your user bin directory (Windows).
 
 **From releases** — download the same release package as the desktop app; `chatty-tui` is included.
 
@@ -662,6 +687,7 @@ When you launch `chatty-tui` in interactive mode with an empty conversation, a w
 | `/copy` | Copy the latest agent response to system clipboard |
 | `/update` | Trigger CLI auto-update (Linux: refreshes `~/.local/bin/chatty-tui` from the running binary) |
 | `/cwd`, `/cd [directory]` | Show or change the agent's working directory |
+| `/quit`, `/exit` | Quit the application (works even while a response is streaming) |
 
 > **Note:** `chatty-tui` reads providers and models from the same config files as the desktop app (`~/.config/chatty/` or platform equivalent). Run the desktop app once to set up your providers and models, then use `chatty-tui` anywhere — in scripts, CI, or as a sub-agent. Alternatively, use `--ollama` or `--openai-compat-url` to skip configuration entirely and connect directly to a running server.
 

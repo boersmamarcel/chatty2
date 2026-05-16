@@ -410,17 +410,23 @@ fn handle_key_event(
 
         // Enter: send message or handle command
         KeyCode::Enter if key.modifiers.is_empty() => {
-            if !input_state.is_empty() && !engine.is_streaming {
+            if !input_state.is_empty() {
                 let text = input_state.peek_input();
-                // Check for slash commands
-                if let Some(cmd) = engine.try_handle_command(&text) {
-                    input_state.take_input(); // consume the input
-                    if let Some(action) = map_command_to_action(cmd, engine) {
-                        return action;
-                    }
+                // /quit and /exit work even while streaming
+                if let Some(Command::Quit) = engine.try_handle_command(&text) {
+                    return KeyAction::Quit;
                 }
-                let text = input_state.take_input();
-                engine.send_message(text);
+                if !engine.is_streaming {
+                    // Check for slash commands
+                    if let Some(cmd) = engine.try_handle_command(&text) {
+                        input_state.take_input(); // consume the input
+                        if let Some(action) = map_command_to_action(cmd, engine) {
+                            return action;
+                        }
+                    }
+                    let text = input_state.take_input();
+                    engine.send_message(text);
+                }
             }
             KeyAction::None
         }
@@ -503,6 +509,7 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Update => Some(KeyAction::UpdateCli),
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
+        Command::Quit => Some(KeyAction::Quit),
     }
 }
 
