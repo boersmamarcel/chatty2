@@ -2,8 +2,6 @@ use rig::tool::ToolDyn;
 
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
-#[cfg(feature = "pptx")]
-use crate::tools::{ReadPptxTool, WritePptxTool};
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
     DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
@@ -22,6 +20,8 @@ use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 #[cfg(feature = "docx")]
 use crate::tools::{ReadDocxTool, WriteDocxTool};
+#[cfg(feature = "pptx")]
+use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use super::mcp_helpers::McpTools;
 

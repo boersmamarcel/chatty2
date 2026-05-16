@@ -1,10 +1,9 @@
 use std::fs;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use pptx_writer::Presentation;
 use pptx_writer::WriteXml;
-use pptx_writer::dml::color::ColorFormat;
 use pptx_writer::dml::fill::FillFormat;
 use pptx_writer::dml::line::LineFormat;
 use pptx_writer::enums::shapes::PpPlaceholderType;
@@ -221,7 +220,7 @@ impl Tool for WritePptxTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if args.slides.is_empty() {
-            bail!("slides must contain at least one slide");
+            return Err(anyhow!("slides must contain at least one slide").into());
         }
 
         let canonical = self.service.resolve_new_path(&args.path).await?;
@@ -287,7 +286,12 @@ fn populate_slide(
     let mut updated_xml = slide_xml;
     let mut shapes_written = 0usize;
 
-    if let Some(title) = slide.title.as_deref().map(str::trim).filter(|title| !title.is_empty()) {
+    if let Some(title) = slide
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
         let shape = build_title_shape(next_shape_id, title)?;
         updated_xml = insert_shape_xml(&updated_xml, &shape.to_xml_string())?;
         next_shape_id += 1;
@@ -359,7 +363,10 @@ fn build_shape_xml(shape_id: u32, shape: &PptxShapeSpec) -> Result<String, PptxT
                 fill: Some(FillFormat::no_fill()),
                 ..LineFormat::new()
             });
-            shape.text_frame = Some(build_text_frame(text, style.as_ref().unwrap_or(&TextStyleSpec::default()))?);
+            shape.text_frame = Some(build_text_frame(
+                text,
+                style.as_ref().unwrap_or(&TextStyleSpec::default()),
+            )?);
             Ok(shape.to_xml_string())
         }
         PptxShapeSpec::BulletList {
@@ -371,7 +378,7 @@ fn build_shape_xml(shape_id: u32, shape: &PptxShapeSpec) -> Result<String, PptxT
             style,
         } => {
             if items.is_empty() {
-                bail!("bullet_list.items must contain at least one entry");
+                return Err(anyhow!("bullet_list.items must contain at least one entry").into());
             }
 
             let mut shape = AutoShape::textbox(
@@ -473,11 +480,11 @@ fn build_table_shape_xml(
     rows: &[Vec<String>],
 ) -> Result<String, PptxToolError> {
     if rows.is_empty() {
-        bail!("table.rows must contain at least one row");
+        return Err(anyhow!("table.rows must contain at least one row").into());
     }
     let col_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     if col_count == 0 {
-        bail!("table.rows must contain at least one column");
+        return Err(anyhow!("table.rows must contain at least one column").into());
     }
 
     let width_emu = inches_to_emu(width, "table.width", true)?;
@@ -507,7 +514,7 @@ fn apply_text_style(
     style: &TextStyleSpec,
 ) -> Result<(), PptxToolError> {
     if let Some(size) = style.font_size {
-        font.set_size(size)?;
+        font.set_size(size).map_err(anyhow::Error::from)?;
     }
     font.bold = style.bold;
     font.italic = style.italic;
@@ -519,18 +526,20 @@ fn apply_text_style(
 
 fn parse_rgb_color(color: &str) -> Result<RgbColor, PptxToolError> {
     let normalized = color.trim().trim_start_matches('#');
-    Ok(RgbColor::from_hex(normalized)?)
+    RgbColor::from_hex(normalized)
+        .map_err(anyhow::Error::from)
+        .map_err(Into::into)
 }
 
 fn inches_to_emu(value: f64, field: &str, strictly_positive: bool) -> Result<Emu, PptxToolError> {
     if !value.is_finite() {
-        bail!("{field} must be a finite number");
+        return Err(anyhow!("{field} must be a finite number").into());
     }
     if value < 0.0 {
-        bail!("{field} must be 0 or greater");
+        return Err(anyhow!("{field} must be 0 or greater").into());
     }
     if strictly_positive && value <= 0.0 {
-        bail!("{field} must be greater than 0");
+        return Err(anyhow!("{field} must be greater than 0").into());
     }
     Ok(Inches(value).into())
 }
