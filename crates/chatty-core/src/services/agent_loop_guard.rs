@@ -174,10 +174,9 @@ impl AgentLoopGuard {
         if remaining <= LATE_GAME_THRESHOLD {
             self.late_game_injected = true;
             self.pending_deadline = Some(format!(
-                "DEADLINE: Only {remaining} turn(s) remaining and no answer file has been written yet. \
-                 You MUST call `final_answer` NOW with your best current answer — do NOT keep \
-                 researching. Use whatever you found so far. \
-                 Call final_answer with output_path=/app/answer.txt immediately."
+                "DEADLINE: Only {remaining} turn(s) remaining and required output is still missing. \
+                 Provide your best final answer now instead of continuing to research. \
+                 Use the available response tool/output channel immediately."
             ));
         } else {
             self.pending_deadline = None;

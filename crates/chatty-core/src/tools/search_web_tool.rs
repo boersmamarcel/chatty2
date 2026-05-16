@@ -309,8 +309,6 @@ impl Tool for SearchWebTool {
                 self.search_duckduckgo_fallback(&query, max_results).await?
             }
         };
-        let results = filter_low_quality_results(results);
-
         let result_count = results.len();
         if result_count == 0 {
             warn!(query = %query, "Web search returned no results");
@@ -322,63 +320,6 @@ impl Tool for SearchWebTool {
             result_count,
         })
     }
-}
-
-fn filter_low_quality_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
-    results
-        .into_iter()
-        .filter(|result| !looks_like_benchmark_leak_or_spam(result))
-        .collect()
-}
-
-fn looks_like_benchmark_leak_or_spam(result: &SearchResult) -> bool {
-    let title = result.title.to_ascii_lowercase();
-    let url = result.url.to_ascii_lowercase();
-    let snippet = result.snippet.to_ascii_lowercase();
-    let combined = format!("{title}\n{url}\n{snippet}");
-
-    let leak_markers = [
-        "expected answer",
-        "final answer",
-        "agent answer",
-        "task_id",
-        "task id",
-        "facts to look up",
-        "next_speaker",
-        "is_progress_being_made",
-        "websurfer",
-        "\"answer\"",
-        "benchmark answer",
-    ];
-    if leak_markers.iter().any(|marker| combined.contains(marker)) {
-        return true;
-    }
-
-    if (url.contains("huggingface.co/datasets") || url.contains("github.com"))
-        && ["gaia", "benchmark", "dataset", "hand-crafted", "expected"]
-            .iter()
-            .any(|marker| combined.contains(marker))
-    {
-        return true;
-    }
-
-    if snippet.starts_with("new ") && snippet.contains("jobs added") {
-        return true;
-    }
-
-    // Common SEO spam pattern: generated pages that start with "New <question...>"
-    // and paste a benchmark-style question plus an unsupported short answer.
-    snippet.starts_with("new ")
-        && [
-            " what ",
-            " which ",
-            " who ",
-            " where ",
-            " when ",
-            " from what ",
-        ]
-        .iter()
-        .any(|marker| snippet.contains(marker))
 }
 
 /// Parse search results from DuckDuckGo lite HTML.
@@ -597,45 +538,5 @@ mod tests {
         assert_eq!(results[0].url, "https://example.com");
         assert_eq!(results[0].title, "Example Title");
         assert_eq!(results[0].snippet, "Some snippet text here");
-    }
-
-    #[test]
-    fn filters_benchmark_leak_results() {
-        let result = SearchResult {
-            title: "Who&When/Hand-Crafted/33.json".to_string(),
-            url: "https://huggingface.co/datasets/example/blob/main/file.json".to_string(),
-            snippet: "FACTS TO LOOK UP: next_speaker WebSurfer expected answer".to_string(),
-        };
-        assert!(looks_like_benchmark_leak_or_spam(&result));
-    }
-
-    #[test]
-    fn filters_generated_question_spam() {
-        let result = SearchResult {
-            title: "base bielefeld ddc 633 articles".to_string(),
-            url: "https://random-example.invalid/".to_string(),
-            snippet: "New Under Ddc 633 On Bielefeld University Library's Base As Of 2020 From What Country Was The Unknown Language Article With A Flag Unique From The Others Canada".to_string(),
-        };
-        assert!(looks_like_benchmark_leak_or_spam(&result));
-    }
-
-    #[test]
-    fn filters_generated_jobs_added_spam() {
-        let result = SearchResult {
-            title: "base bielefeld ddc 633 articles".to_string(),
-            url: "https://random-example.invalid/".to_string(),
-            snippet: "New The Unknown Language Article With A Flag Unique From The Others Under Ddc 633 On Bielefeld University Library's Base As Of 2020 jobs added".to_string(),
-        };
-        assert!(looks_like_benchmark_leak_or_spam(&result));
-    }
-
-    #[test]
-    fn keeps_primary_source_results() {
-        let result = SearchResult {
-            title: "Can Hiccup Supply Enough Fish to Maintain a Dragon's Diet?".to_string(),
-            url: "https://journals.le.ac.uk/index.php/jist/article/view/733".to_string(),
-            snippet: "Journal article page with abstract and PDF download link.".to_string(),
-        };
-        assert!(!looks_like_benchmark_leak_or_spam(&result));
     }
 }
