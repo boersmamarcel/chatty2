@@ -37,8 +37,8 @@ setup:
 		echo "Automated setup is only provided for Linux."; \
 		echo "On macOS: install Xcode CLT, then 'rustup target add wasm32-wasip2'."; \
 		echo "On Windows: see README.md and 'rustup target add wasm32-wasip2'."; \
+		rustup target add wasm32-wasip2; \
 	fi
-	rustup target add wasm32-wasip2
 
 build:
 	cargo build
