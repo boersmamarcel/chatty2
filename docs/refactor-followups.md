@@ -13,31 +13,41 @@ items below are what remains.
 
 ---
 
-## 1. Oversized files still pending splits (Tier 4)
+## 1. Oversized files — splits completed and remaining
 
-Tier 4 of the audit identified ~10 files above the 1000-LOC guideline
-that warrant splitting. Two were split on this branch (the
-`app_controller/message_ops.rs` and `app_controller/conversation_ops.rs`
-pair); the rest were left in place because they share a common risk
-profile that the audit itself flagged: **test coverage is too thin to
-catch behavioural regressions introduced by a mechanical split**, and a
-silent regression in any of them would surface only at runtime in the
-desktop or terminal app.
+Tier 4 of the audit identified ~10 files above the 1000-LOC guideline.
+The visual / UI files where the user reported real bugs have now been
+split. Several non-UI files remain deferred because they share a common
+risk profile that the audit itself flagged: **test coverage is too thin
+to catch behavioural regressions introduced by a mechanical split**.
 
-### Files
+### Completed on this branch
+
+| File | Before | After (`mod.rs`) | Split into |
+|---|---:|---:|---|
+| `chat_view.rs` | 1966 | 852 | `chat_view/{handlers, sub_agent, history, start_screen}.rs` |
+| `chat_input.rs` | 1711 | 415 | `chat_input/{render, slash, at_mention}.rs` |
+| `trace_components.rs` | 1474 | 147 | `trace_components/{badges, blocks, inline}.rs` |
+| `app_controller.rs` (Tier 4 earlier) | — | — | `app_controller/{message_ops, conversation_ops, …}.rs` |
+
+The pattern used in all three: a `*/mod.rs` retains the struct
+definition, lifecycle, and (for UI) the `Render` impl; sibling modules
+own one category of behaviour each (event handling, history loading,
+sub-views, sub-pickers). Cross-module method calls use `pub(super)`,
+which surfaces the seam-crossing dependency at the import site instead
+of hiding it inside a 1700-line scope.
+
+### Files still pending splits
 
 | File | LOC | Why a split is risky today |
 |---|---:|---|
-| `crates/chatty-gpui/src/chatty/views/chat_view.rs` | ~1900 | Owns the bulk of message rendering, scroll restoration, and tool-call expansion state. The render path mutates internal caches; an extracted submodule must keep those mutations local or scroll/streaming state will silently desync. There are no rendering tests today. |
-| `crates/chatty-gpui/src/chatty/views/chat_input.rs` | ~1700 | Owns IME composition, attachment handling, slash-command suggestions, model picker, and skill picker — five subsystems that share `Context<Self>` mutations. Refactoring by responsibility risks breaking key-binding ordering. No keyboard-level tests. |
-| `crates/chatty-gpui/src/chatty/views/trace_components.rs` | ~1500 | Branchy tool-call / trace renderer that varies per provider (Anthropic, OpenAI, Gemini, Ollama). Many of those branches lack tests; an extraction would need golden snapshots first. |
-| `crates/chatty-gpui/src/settings/views/models_page.rs` | ~1400 | Mixed form state + provider-specific UI. Same concern as `chat_input.rs`. |
+| `crates/chatty-gpui/src/settings/views/models_page.rs` | ~1400 | Mixed form state + provider-specific UI; safer to extract per-provider sections only after the provider abstraction in `ProviderType::default_capabilities` covers more of the form logic. |
 | `crates/chatty-core/src/tools/data_query_tool.rs` | 1332 | Single tool dispatcher with many ad-hoc parsing branches; tests cover happy paths but not the dispatch table. |
 | `crates/chatty-core/src/tools/daytona_tool.rs` | 1239 | Talks to an external Daytona sandbox; HTTP error-handling branches are not mocked. |
 | `crates/chatty-core/src/services/shell_service.rs` | 1225 | PTY allocation + signal handling + approval flow + output capping. Splitting without race tests is unsafe. |
 | `crates/chatty-core/src/exporters/atif_exporter.rs` | 1283 | Format spec is in code; the file *is* the spec. Tests cover the round-trip but not byte-level layout. |
-| `crates/chatty-gpui/src/auto_updater/mod.rs` | 1522 | Update lifecycle (download → verify → stage → install) across three OSes. The platform `#[cfg]` branches make a flat file easier to reason about than a multi-file split until per-OS golden tests exist. |
-| `crates/chatty-gpui/src/main.rs` | 1471 | Mostly the action / keybinding / startup wiring; clean seams exist but the file is essentially one long startup script. A split would primarily move boilerplate and provides little context-window relief during edits because callers usually open the whole file. |
+| `crates/chatty-gpui/src/auto_updater/mod.rs` | 1522 | Update lifecycle across three OSes; the platform `#[cfg]` branches make a flat file easier to reason about than a multi-file split until per-OS golden tests exist. |
+| `crates/chatty-gpui/src/main.rs` | 1471 | Mostly action / keybinding / startup wiring; clean seams exist but the file is essentially one long startup script. A split would primarily move boilerplate and provides little context-window relief during edits because callers usually open the whole file. |
 | `crates/chatty-tui/src/headless.rs` | 1424 | 50+ private helpers around stream-recovery heuristics. The helpers are individually trivial but their *ordering* matters for benchmark stability; splitting without characterization tests on full benchmark runs risks subtle scoring regressions. |
 
 ### Recommended next steps for each file
