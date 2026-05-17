@@ -5,7 +5,7 @@ hardest to reproduce in `crates/chatty-gpui/src/chatty/views/chat_view/`:
 
 1. **Excessive vertical whitespace during streaming** — large empty gaps
    appear inside an assistant message while tool traces are streaming
-   in, then collapse once the stream finalises.
+   in, then collapse once the stream finalizes.
 2. **Overlapping content** — two siblings (e.g. a table from the
    previous message and a heading from the next) visibly draw on top of
    each other for one or more frames.
@@ -176,10 +176,10 @@ whitespace.
 
 The most likely culprits, in priority order:
 
-1. **Streaming → finalised layout switch.**
+1. **Streaming → finalized layout switch.**
    In `message_component.rs::render_message`, streaming markdown wraps
    children in `div().flex().flex_col().w_full()` (line ~729); the
-   finalised path returns elements *directly* as `container.children(...)`
+   finalized path returns elements *directly* as `container.children(...)`
    on a container that is **not** explicitly flex_col. The container
    is created at line ~684:
 
@@ -188,7 +188,7 @@ The most likely culprits, in priority order:
    ```
 
    The transition from "wrapped flex_col" to "unwrapped block" on
-   finalise changes the layout context and has been observed to leave
+   finalize changes the layout context and has been observed to leave
    stale geometry for one frame.
 
    Mitigation applied in this commit: the container is now created
@@ -252,7 +252,7 @@ What has worked in past investigations:
 |---|---|
 | Skeleton flashes before first token | `chat_view/mod.rs::is_awaiting_response`, `start_screen.rs::render_loading_skeleton` |
 | Whitespace grows as tool calls arrive | `message_component.rs::render_interleaved_content` |
-| Tool-call card overlapping with text | `message_component.rs::render_message` (the streaming/finalised branch around line ~714 and ~779) |
+| Tool-call card overlapping with text | `message_component.rs::render_message` (the streaming/finalized branch around line ~714 and ~779) |
 | Whole messages overlap (table on top of next heading) | `chat_view/mod.rs::render_message_list` (scroll container + flex_col children) |
 | Sub-agent progress block overlaps with main response | `chat_view/sub_agent.rs::finalize_sub_agent_progress` |
 
