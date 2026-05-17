@@ -472,7 +472,7 @@ where
                     on_diff_clone(msg_idx, tool_idx, cx);
                 };
 
-            container = container.child(div().mt_2().mb_2().child(
+            container = container.child(div().mt_2().mb_2().w_full().child(
                 super::trace_components::render_tool_call_inline(
                     super::trace_components::InlineToolCallRenderArgs {
                         tool_call,

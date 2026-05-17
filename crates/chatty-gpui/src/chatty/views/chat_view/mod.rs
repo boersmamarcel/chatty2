@@ -56,6 +56,7 @@ use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::SystemTrace;
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
+use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -96,6 +97,12 @@ pub struct ChatView {
     /// receives live progress lines while a sub-agent subprocess is running.
     /// `None` when no sub-agent is active.
     sub_agent_progress_msg_idx: Option<usize>,
+    /// Animated "Thinking…" indicator entity. Owns its own rotation
+    /// timer so the spinner + label keep updating even when no stream
+    /// events are arriving (typical while a tool runs silently).
+    /// Reset on every new assistant message so the elapsed counter
+    /// makes sense per-turn.
+    thinking_indicator: Entity<ThinkingIndicator>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -247,6 +254,7 @@ impl ChatView {
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
             sub_agent_progress_msg_idx: None,
+            thinking_indicator: new_thinking_indicator(cx),
         }
     }
 
@@ -312,6 +320,11 @@ impl ChatView {
             feedback: None,
             history_index: None,
         });
+
+        // Reset the thinking indicator so the elapsed counter restarts
+        // and the user sees a fresh word for the new turn.
+        self.thinking_indicator
+            .update(cx, |indicator, cx| indicator.reset(cx));
 
         trace!(
             target: "chatty_gpui::render::stream",
@@ -561,6 +574,37 @@ impl ChatView {
         })
     }
 
+    /// Whether to show the animated "thinking" indicator at the bottom
+    /// of the message list. Broader than [`Self::is_awaiting_response`]
+    /// — also true while a tool is currently running (so the user sees
+    /// a live spinner during silent tool execution rather than nothing).
+    fn is_thinking_indicator_visible(&self) -> bool {
+        use super::message_types::{ToolCallState, TraceItem};
+        self.messages.last().is_some_and(|msg| {
+            if !msg.is_streaming {
+                return false;
+            }
+            // Awaiting first token / first trace item.
+            if msg.content.is_empty()
+                && !msg
+                    .live_trace
+                    .as_ref()
+                    .is_some_and(|trace| trace.has_items())
+            {
+                return true;
+            }
+            // A tool is currently running — keep the indicator up.
+            msg.live_trace.as_ref().is_some_and(|trace| {
+                trace.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        TraceItem::ToolCall(tc) if matches!(tc.state, ToolCallState::Running)
+                    )
+                })
+            })
+        })
+    }
+
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
@@ -756,6 +800,9 @@ impl ChatView {
         self.collapsed_tool_calls = collapsed_tool_calls;
         self.diff_expanded = diff_expanded;
 
+        let thinking_visible = self.is_thinking_indicator_visible();
+        let thinking_indicator = self.thinking_indicator.clone();
+
         div()
             .flex_1()
             .min_h_0()
@@ -776,9 +823,7 @@ impl ChatView {
                             })
                             .when(!show_start_screen, |this| this.gap_4())
                             .children(rendered)
-                            .when(is_awaiting, |this| {
-                                this.child(self.render_loading_skeleton())
-                            }),
+                            .when(thinking_visible, |this| this.child(thinking_indicator)),
                     ),
             )
             .vertical_scrollbar(&self.scroll_handle)
