@@ -50,6 +50,29 @@ impl ChatView {
             .map(|msg| msg.content.clone())
             .unwrap_or_default();
 
+        let had_trace_view = self
+            .messages
+            .last()
+            .and_then(|m| m.system_trace_view.as_ref())
+            .is_some();
+        let live_trace_items = self
+            .messages
+            .last()
+            .and_then(|m| m.live_trace.as_ref())
+            .map(|t| t.items.len())
+            .unwrap_or(0);
+
+        tracing::trace!(
+            target: "chatty_gpui::render::handler",
+            event = "tool_call_started",
+            tool_id = %id,
+            tool_name = %name,
+            text_before_len = text_before.len(),
+            had_trace_view,
+            live_trace_items,
+            "tool_call_started",
+        );
+
         debug!(
             tool_id = %id,
             tool_name = %name,
