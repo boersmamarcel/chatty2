@@ -699,7 +699,7 @@ impl ChatView {
             visible = visible_messages.len(),
             filtered = total_messages - visible_messages.len(),
             is_awaiting = is_awaiting,
-            skeleton_visible = is_awaiting,
+            thinking_visible = is_awaiting,
             conversation_id = ?self.conversation_id,
             "render_message_list",
         );

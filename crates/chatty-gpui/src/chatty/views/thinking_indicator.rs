@@ -13,6 +13,7 @@
 //! re-render when text/tool chunks arrive, leaving the indicator
 //! visually frozen during long silent tool calls.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -50,6 +51,16 @@ const THINKING_WORDS: &[&str] = &[
 /// How often the label rotates to the next word.
 const ROTATE_INTERVAL: Duration = Duration::from_millis(1800);
 
+/// Process-wide monotonic counter that picks the starting word for each
+/// new indicator (or `reset()` call). Using a counter instead of an RNG
+/// keeps the dependency footprint zero while still ensuring that
+/// consecutive turns visibly start on a different word.
+static START_OFFSET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn next_start_offset() -> usize {
+    START_OFFSET_COUNTER.fetch_add(1, Ordering::Relaxed) % THINKING_WORDS.len()
+}
+
 pub struct ThinkingIndicator {
     /// Starting offset into `THINKING_WORDS` so two consecutive streams
     /// don't always begin with "Thinking".
@@ -68,13 +79,9 @@ pub struct ThinkingIndicator {
 
 impl ThinkingIndicator {
     pub fn new(_cx: &mut Context<Self>) -> Self {
-        // Use the low bits of the start instant as a pseudo-random offset
-        // — perfectly fine for cosmetic variety, no need for `rand`.
-        let now = Instant::now();
-        let offset = (now.elapsed().subsec_nanos() as usize) % THINKING_WORDS.len();
         Self {
-            start_offset: offset,
-            started_at: now,
+            start_offset: next_start_offset(),
+            started_at: Instant::now(),
             tick: 0,
             timer_started: false,
         }
@@ -84,9 +91,8 @@ impl ThinkingIndicator {
     /// when a new assistant turn begins so the "Xs" counter doesn't
     /// keep counting from the previous turn.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        self.start_offset = (now.elapsed().subsec_nanos() as usize) % THINKING_WORDS.len();
-        self.started_at = now;
+        self.start_offset = next_start_offset();
+        self.started_at = Instant::now();
         self.tick = 0;
         cx.notify();
     }

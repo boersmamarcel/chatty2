@@ -28,7 +28,7 @@ CHATTY_DEBUG_UI=1 \
 Then reproduce the issue and grep:
 
 ```bash
-grep -E "render_message_list|finalize_assistant_message|append_assistant_text|render_interleaved|skeleton_visible" /tmp/chatty-render.log
+grep -E "render_message_list|finalize_assistant_message|append_assistant_text|render_interleaved|thinking_visible" /tmp/chatty-render.log
 ```
 
 The overlay in the top-right of the window (enabled by
@@ -55,7 +55,7 @@ Key events, in the order they fire during a streaming turn:
 | `start_assistant_message` | `chat_view/mod.rs::start_assistant_message` | `total_messages` |
 | `append_assistant_text` | `chat_view/mod.rs::append_assistant_text` | `delta_len`, `new_content_len`, `last_msg_streaming` |
 | `tool_call_started` | `chat_view/handlers.rs::handle_tool_call_started` | `tool_id`, `tool_name`, `had_trace_view`, `live_trace_items` |
-| `render_message_list` | `chat_view/mod.rs::render_message_list` | `total`, `visible`, `filtered`, `is_awaiting`, `skeleton_visible` |
+| `render_message_list` | `chat_view/mod.rs::render_message_list` | `total`, `visible`, `filtered`, `is_awaiting`, `thinking_visible` |
 | `render_message` | `message_component.rs::render_message` | `index`, `role`, `is_streaming`, `is_markdown`, `should_interleave`, `content_len`, `trace_items` |
 | `interleave_segment` | `message_component.rs::render_interleaved_content` | `tool_idx`, `tool_name`, `text_before_len`, `last_text_end`, `remaining_after_tools_len` |
 | `finalize_assistant_message` | `chat_view/mod.rs::finalize_assistant_message` | `had_live_trace`, `cleared_streaming_cache` |
@@ -77,7 +77,7 @@ window. It lists, for each visible message:
 
 ```
 ChatView debug
-  msgs: 4 visible / 5 total   awaiting: false   skeleton: false
+  msgs: 4 visible / 5 total   awaiting: false   thinking: false
   [0] User       n=23
   [1] Assistant  s=1 m=1 ti=2 c=148  trace=open
   [2] Sub-agent  s=0 c=812
@@ -94,9 +94,9 @@ Legend:
 - `filtered` (in the header) — count of messages excluded by the
   empty-streaming-message filter at `chat_view/mod.rs::render_message_list`
 
-If you see `skeleton: true` simultaneously with `s=1 c=0` for the last
+If you see `thinking: true` simultaneously with `s=1 c=0` for the last
 assistant message, that is the *expected* "awaiting first token" state
-described in bug #1 below — the skeleton and the message are mutually
+described in bug #1 below — the thinking indicator and the message are mutually
 exclusive but the layout jump between the two is the perceived
 "whitespace".
 
@@ -113,7 +113,7 @@ zero-cost.
 The same predicate appears in two places:
 
 ```rust
-// is_awaiting_response — fires skeleton when true
+// is_awaiting_response — fires thinking indicator when true
 msg.is_streaming
     && msg.content.is_empty()
     && !msg.live_trace.as_ref().is_some_and(|t| t.has_items())
@@ -122,12 +122,12 @@ msg.is_streaming
 ```
 
 So while we're waiting for the very first token (or first trace item),
-the empty streaming message is **hidden** and the loading skeleton is
-shown instead. The skeleton is ~80px tall
-(`crates/chatty-gpui/src/chatty/views/chat_view/start_screen.rs::render_loading_skeleton`).
+the empty streaming message is **hidden** and the thinking indicator is
+shown instead. The thinking indicator is a `Spinner` + rotating word
+rendered by `crates/chatty-gpui/src/chatty/views/thinking_indicator.rs`.
 When the first token arrives the message becomes visible and the
-skeleton disappears in the same frame, which on slow streams reads as
-a "block of whitespace that collapses".
+thinking indicator disappears in the same frame, which on slow streams
+can read as a small layout shift.
 
 When tool traces are involved the symptom is worse, because the trace
 adds items *before* any assistant text — the message becomes visible
@@ -140,8 +140,8 @@ trace box", which can shift a lot of vertical space.
 Look for a transition like this in the log:
 
 ```
-chatty_gpui::render::list  render_message_list total=2 visible=1 filtered=1 is_awaiting=true skeleton_visible=true
-chatty_gpui::render::list  render_message_list total=2 visible=2 filtered=0 is_awaiting=false skeleton_visible=false
+chatty_gpui::render::list  render_message_list total=2 visible=1 filtered=1 is_awaiting=true thinking_visible=true
+chatty_gpui::render::list  render_message_list total=2 visible=2 filtered=0 is_awaiting=false thinking_visible=false
 ```
 
 The frame in between those two events is where the visible jump
@@ -162,8 +162,8 @@ whitespace.
 ### Likely fixes (not applied — needs reproduction)
 
 - Render an inline placeholder for the empty streaming assistant
-  message *instead* of the separate floating skeleton, so the layout
-  doesn't have to swap between "skeleton block" and "message block".
+  message *instead* of the separate floating thinking indicator, so the layout
+  doesn't have to swap between "thinking-indicator block" and "message block".
 - Stop wrapping streaming markdown elements in an extra `flex_col`
   div (`message_component.rs` lines ~338–347 and ~729–742) once we
   confirm GPUI no longer needs the original workaround.
@@ -250,7 +250,7 @@ What has worked in past investigations:
 
 | Symptom in the screenshot | First file to read |
 |---|---|
-| Skeleton flashes before first token | `chat_view/mod.rs::is_awaiting_response`, `start_screen.rs::render_loading_skeleton` |
+| Thinking indicator flashes before first token | `chat_view/mod.rs::is_awaiting_response`, `start_screen.rs::render_thinking_indicator` |
 | Whitespace grows as tool calls arrive | `message_component.rs::render_interleaved_content` |
 | Tool-call card overlapping with text | `message_component.rs::render_message` (the streaming/finalized branch around line ~714 and ~779) |
 | Whole messages overlap (table on top of next heading) | `chat_view/mod.rs::render_message_list` (scroll container + flex_col children) |
