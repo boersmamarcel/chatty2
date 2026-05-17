@@ -78,7 +78,6 @@ impl ModelsListView {
     }
 }
 
-
 impl Focusable for ModelsListView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -128,7 +127,6 @@ impl Render for ModelsListView {
             )
     }
 }
-
 
 mod delegate;
 mod dialogs;

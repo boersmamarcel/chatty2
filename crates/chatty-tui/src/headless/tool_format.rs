@@ -4,9 +4,8 @@
 //! line-oriented output the CLI prints to stdout. No I/O, no async, no
 //! engine state mutation.
 
-use super::*;
-use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use crate::engine::{ToolCallInfo, ToolCallState};
+use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 
 pub(super) fn format_tool_call_lines(tc: &ToolCallInfo) -> Vec<String> {
     let mut lines = vec![format_tool_call_header(tc)];

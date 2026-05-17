@@ -369,10 +369,10 @@ impl ChattyApp {
 
             // Inject into conversation history.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
-                let user_entry = rig::completion::Message::User {
-                    content: rig::OneOrMany::one(rig::message::UserContent::text(format!(
-                        "[A2A task \u{2192} {agent_name}: {prompt_label}]"
-                    ))),
+                let user_entry = rig_core::completion::Message::User {
+                    content: rig_core::OneOrMany::one(rig_core::message::UserContent::text(
+                        format!("[A2A task \u{2192} {agent_name}: {prompt_label}]"),
+                    )),
                 };
                 let result_entry = format!("[A2A result from {agent_name}]\n\n{txt}");
                 cx.update(|cx| {
@@ -578,8 +578,8 @@ impl ChattyApp {
             // expect.  The User message describes the task that was delegated and the
             // Assistant message contains the sub-agent's output.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
-                let user_entry = rig::completion::Message::User {
-                    content: rig::OneOrMany::one(rig::message::UserContent::text(format!(
+                let user_entry = rig_core::completion::Message::User {
+                    content: rig_core::OneOrMany::one(rig_core::message::UserContent::text(format!(
                         "[Sub-agent task: {prompt_label}]",
                     ))),
                 };

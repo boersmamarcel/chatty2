@@ -1,6 +1,6 @@
 use calamine::{Reader, open_workbook_auto};
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;

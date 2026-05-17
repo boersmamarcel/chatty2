@@ -23,19 +23,19 @@ pub(super) fn render_outline_badge(text: String, color: Rgba) -> AnyElement {
 
 pub(super) fn tool_source_badge(source: &ToolSource) -> Option<(String, Rgba)> {
     match source {
-        ToolSource::HiveCloud => Some(("☁ Remote".to_string(), rgba(0x3B82F6ff))),
-        ToolSource::Internet { label } => Some((format!("↗ {label}"), rgba(0xF59E0Bff))),
-        ToolSource::ExternalService { name } => Some((format!("↗ {name}"), rgba(0xA855F7ff))),
+        ToolSource::HiveCloud => Some(("☁ Remote".to_string(), rgba(0x3B82F6FF))),
+        ToolSource::Internet { label } => Some((format!("↗ {label}"), rgba(0xF59E0BFF))),
+        ToolSource::ExternalService { name } => Some((format!("↗ {name}"), rgba(0xA855F7FF))),
         ToolSource::Local => None,
     }
 }
 
 pub(super) fn execution_engine_badge(engine: ExecutionEngine) -> (String, Rgba) {
     let color = match engine {
-        ExecutionEngine::Shell => rgba(0x6B7280ff),
-        ExecutionEngine::Monty => rgba(0x0EA5A4ff),
-        ExecutionEngine::Docker => rgba(0x2563EBff),
-        ExecutionEngine::Daytona => rgba(0x7C3AEDff),
+        ExecutionEngine::Shell => rgba(0x6B7280FF),
+        ExecutionEngine::Monty => rgba(0x0EA5A4FF),
+        ExecutionEngine::Docker => rgba(0x2563EBFF),
+        ExecutionEngine::Daytona => rgba(0x7C3AEDFF),
     };
     let label = match engine {
         ExecutionEngine::Shell => "shell (local)",
@@ -46,11 +46,15 @@ pub(super) fn execution_engine_badge(engine: ExecutionEngine) -> (String, Rgba) 
     (label.to_string(), color)
 }
 
-pub(super) fn render_mode_badge(label: &'static str, is_remote: bool, badge_text: Hsla) -> AnyElement {
+pub(super) fn render_mode_badge(
+    label: &'static str,
+    is_remote: bool,
+    badge_text: Hsla,
+) -> AnyElement {
     let bg = if is_remote {
-        rgba(0x3B82F6ff)
+        rgba(0x3B82F6FF)
     } else {
-        rgba(0x6B7280ff)
+        rgba(0x6B7280FF)
     };
 
     div()
@@ -100,4 +104,3 @@ pub(super) fn render_execution_mode_badge(engine: ExecutionEngine, badge_text: H
         .child(label)
         .into_any_element()
 }
-

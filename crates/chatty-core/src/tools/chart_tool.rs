@@ -1,5 +1,5 @@
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolError;
@@ -362,7 +362,7 @@ fn save_chart_png(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::tool::Tool;
+    use rig_core::tool::Tool;
 
     #[tokio::test]
     async fn test_bar_chart() {

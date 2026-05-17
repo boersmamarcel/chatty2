@@ -8,14 +8,14 @@ use chatty_core::factories::AgentClient;
 use chatty_core::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use chatty_core::services::{ChunkAction, StreamChunk, stream_prompt};
 use chatty_core::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
-use rig::message::UserContent;
+use rig_core::message::UserContent;
 use tokio::sync::mpsc;
 
 use crate::events::AppEvent;
 
 pub(super) struct StreamParams {
     pub agent: AgentClient,
-    pub history: Vec<rig::completion::Message>,
+    pub history: Vec<rig_core::completion::Message>,
     pub contents: Vec<UserContent>,
     pub cancel_flag: Arc<AtomicBool>,
     pub event_tx: mpsc::UnboundedSender<AppEvent>,

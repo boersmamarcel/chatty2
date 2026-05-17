@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
 
-use rig::OneOrMany;
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, Text};
+use rig_core::OneOrMany;
+use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, Text};
 
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;

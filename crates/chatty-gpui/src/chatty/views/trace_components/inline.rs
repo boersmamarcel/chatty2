@@ -13,35 +13,48 @@
 
 #![allow(clippy::collapsible_if)]
 
-use crate::assets::CustomIcon;
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
+use gpui_component::{ActiveTheme, text::TextView};
 use std::time::Duration;
 
-use super::badges::{
-    execution_engine_badge, is_code_execution_tool, render_execution_mode_badge,
-    render_mode_badge, render_outline_badge, render_sub_agent_mode_badge, tool_source_badge,
-};
 use super::super::code_block_component::CodeBlockComponent;
 use super::super::diff_view_component::DiffViewComponent;
-use super::super::message_types::{
-    ExecutionEngine, ToolCallBlock, ToolCallState, ToolSource,
+use super::super::message_types::{ToolCallBlock, ToolCallState};
+use super::badges::{
+    is_code_execution_tool, render_execution_mode_badge, render_sub_agent_mode_badge,
 };
 
-pub fn render_tool_call_inline<F, D>(
-    tool_call: &ToolCallBlock,
-    message_index: usize,
-    tool_index: usize,
-    collapsed: bool,
-    on_toggle: F,
-    diff_expanded: bool,
-    on_expand_diff: D,
-    cx: &App,
-) -> impl IntoElement
+pub struct InlineToolCallRenderArgs<'a, F, D>
 where
     F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     D: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 {
+    pub tool_call: &'a ToolCallBlock,
+    pub message_index: usize,
+    pub tool_index: usize,
+    pub collapsed: bool,
+    pub on_toggle: F,
+    pub diff_expanded: bool,
+    pub on_expand_diff: D,
+}
+
+pub fn render_tool_call_inline<'a, F, D>(
+    args: InlineToolCallRenderArgs<'a, F, D>,
+    cx: &'a App,
+) -> impl IntoElement + 'a
+where
+    F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    D: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+{
+    let InlineToolCallRenderArgs {
+        tool_call,
+        message_index,
+        tool_index,
+        collapsed,
+        on_toggle,
+        diff_expanded,
+        on_expand_diff,
+    } = args;
     use tracing::debug;
 
     debug!(
@@ -335,7 +348,10 @@ pub(super) fn render_full_command_box(
         .into_any_element()
 }
 
-pub(super) fn render_code_run_input(tool_call: &ToolCallBlock, block_index: usize) -> Option<AnyElement> {
+pub(super) fn render_code_run_input(
+    tool_call: &ToolCallBlock,
+    block_index: usize,
+) -> Option<AnyElement> {
     let (language, code) = extract_code_run_input(tool_call)?;
     Some(CodeBlockComponent::new(Some(language), code, block_index).into_any_element())
 }

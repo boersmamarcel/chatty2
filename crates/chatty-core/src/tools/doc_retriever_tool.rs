@@ -1,5 +1,5 @@
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -466,7 +466,7 @@ fn relative_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::tool::Tool;
+    use rig_core::tool::Tool;
 
     #[tokio::test]
     async fn retrieves_relevant_markdown_section() {

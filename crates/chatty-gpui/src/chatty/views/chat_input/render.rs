@@ -16,21 +16,21 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::Icon;
 use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::Icon;
 use std::path::{Path, PathBuf};
 
 use crate::assets::CustomIcon;
 use crate::settings::models::providers_store::ProviderType;
 
+use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
 use super::ThumbnailCache;
 use super::at_mention::{at_menu_items_for, render_at_menu};
 use super::slash::{render_slash_menu, slash_menu_items_with_skills};
-use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
 use super::{ChatInput, ChatInputEvent, ChatInputState};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 

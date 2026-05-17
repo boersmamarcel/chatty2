@@ -104,7 +104,10 @@ pub(super) fn compact_file_extraction_tool_result(
         && output.chars().count() <= 14_000
 }
 
-pub(super) fn build_compact_file_answer_prompt(engine: &ChatEngine, original_prompt: &str) -> String {
+pub(super) fn build_compact_file_answer_prompt(
+    engine: &ChatEngine,
+    original_prompt: &str,
+) -> String {
     let evidence = compact_tool_evidence(engine);
     format!(
         "Use the complete extracted file evidence below to answer the original task. \
@@ -144,7 +147,10 @@ pub(super) fn send_answer_file_finalization_prompt(engine: &mut ChatEngine, orig
     engine.send_message(prompt);
 }
 
-pub(super) fn build_answer_file_finalization_prompt(engine: &ChatEngine, original_prompt: &str) -> String {
+pub(super) fn build_answer_file_finalization_prompt(
+    engine: &ChatEngine,
+    original_prompt: &str,
+) -> String {
     let evidence = compact_tool_evidence(engine);
     format!(
         "Finalize this answer-file task using only the compact context below.\n\
@@ -348,7 +354,11 @@ pub(super) fn is_candidate_source_tool(name: &str) -> bool {
     )
 }
 
-pub(super) fn candidate_from_line(line: &str, original_prompt: &str, require_label: bool) -> Option<String> {
+pub(super) fn candidate_from_line(
+    line: &str,
+    original_prompt: &str,
+    require_label: bool,
+) -> Option<String> {
     let cleaned = clean_candidate(line);
     if cleaned.is_empty() {
         return None;
@@ -363,9 +373,7 @@ pub(super) fn candidate_from_line(line: &str, original_prompt: &str, require_lab
             .trim_start_matches([':', '=', '-', ' '])
             .trim()
             .to_string()
-    } else if require_label {
-        return None;
-    } else if !is_safe_unlabeled_candidate(&cleaned, original_prompt) {
+    } else if require_label || !is_safe_unlabeled_candidate(&cleaned, original_prompt) {
         return None;
     } else {
         cleaned
@@ -528,7 +536,10 @@ pub(super) fn is_number_like(value: &str) -> bool {
         && value.chars().any(|ch| ch.is_ascii_digit())
 }
 
-pub(super) fn write_inferred_answer_file(engine: &ChatEngine, candidate: &str) -> std::io::Result<PathBuf> {
+pub(super) fn write_inferred_answer_file(
+    engine: &ChatEngine,
+    candidate: &str,
+) -> std::io::Result<PathBuf> {
     let mut last_error = None;
     for path in answer_file_candidates(engine) {
         if let Some(parent) = path.parent()

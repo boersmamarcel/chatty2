@@ -34,8 +34,8 @@ mod settings;
 
 use assets::ChattyAssets;
 use auto_updater::AutoUpdater;
-use chatty_core::repositories::{ConversationRepository, ConversationSqliteRepository};
 use chatty::{ChattyApp, GlobalChattyApp};
+use chatty_core::repositories::{ConversationRepository, ConversationSqliteRepository};
 use settings::SettingsView;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1347,10 +1347,10 @@ fn main() {
 
             if let Some(ext) = loaded_ext.take() {
                 let count = ext.extensions.len();
-                if save_backfilled_extensions {
-                    if let Err(e) = chatty_core::extensions_repository().save(ext.clone()).await {
-                        warn!(error = ?e, "Failed to persist backfilled extension pricing metadata");
-                    }
+                if save_backfilled_extensions
+                    && let Err(e) = chatty_core::extensions_repository().save(ext.clone()).await
+                {
+                    warn!(error = ?e, "Failed to persist backfilled extension pricing metadata");
                 }
                 cx.update(|cx| {
                     info!(count, "Extensions loaded from disk");

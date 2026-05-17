@@ -27,7 +27,7 @@ impl ChatView {
         entries: &[chatty_core::models::MessageEntry],
         cx: &mut Context<Self>,
     ) {
-        use rig::completion::Message;
+        use rig_core::completion::Message;
 
         // Clear any pending approval from previous conversation
         self.pending_approval = None;
@@ -70,24 +70,23 @@ impl ChatView {
 
                     // Eagerly create trace view from persisted JSON so tool traces
                     // are visible when reopening a conversation.
-                    let system_trace_view =
-                        entry.system_trace.as_ref().and_then(|trace_json| {
-                            match serde_json::from_value::<SystemTrace>(trace_json.clone()) {
-                                Ok(trace) if trace.has_items() => Some(cx.new(|_cx| {
-                                    super::super::trace_components::SystemTraceView::new(trace)
-                                })),
-                                Ok(_) => None, // trace exists but has no items
-                                Err(e) => {
-                                    tracing::warn!(
-                                        idx,
-                                        error = ?e,
-                                        json_preview = %format!("{:.200}", trace_json),
-                                        "Failed to deserialize SystemTrace in load_history"
-                                    );
-                                    None
-                                }
+                    let system_trace_view = entry.system_trace.as_ref().and_then(|trace_json| {
+                        match serde_json::from_value::<SystemTrace>(trace_json.clone()) {
+                            Ok(trace) if trace.has_items() => Some(cx.new(|_cx| {
+                                super::super::trace_components::SystemTraceView::new(trace)
+                            })),
+                            Ok(_) => None, // trace exists but has no items
+                            Err(e) => {
+                                tracing::warn!(
+                                    idx,
+                                    error = ?e,
+                                    json_preview = %format!("{:.200}", trace_json),
+                                    "Failed to deserialize SystemTrace in load_history"
+                                );
+                                None
                             }
-                        });
+                        }
+                    });
 
                     let attachments = entry.attachment_paths.clone();
                     if !assistant_msg.text.is_empty() || !attachments.is_empty() {

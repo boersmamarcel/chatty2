@@ -943,4 +943,3 @@ impl ModelsListView {
         });
     }
 }
-

@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow};
-use rig::client::CompletionClient;
-use rig::tool::ToolDyn;
+use rig_core::client::CompletionClient;
+use rig_core::tool::ToolDyn;
 
 use crate::auth::{AzureTokenCache, azure_auth};
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
@@ -43,12 +43,12 @@ pub(super) async fn build_provider_agent(
                 api_key.ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
             let client = if let Some(ref url) = base_url {
-                rig::providers::openrouter::Client::builder()
+                rig_core::providers::openrouter::Client::builder()
                     .api_key(&key)
                     .base_url(url)
                     .build()?
             } else {
-                rig::providers::openrouter::Client::new(&key)?
+                rig_core::providers::openrouter::Client::new(&key)?
             };
 
             let mut builder = client
@@ -71,8 +71,8 @@ pub(super) async fn build_provider_agent(
         ProviderType::Ollama => {
             let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
 
-            let client = rig::providers::ollama::Client::builder()
-                .api_key(rig::client::Nothing)
+            let client = rig_core::providers::ollama::Client::builder()
+                .api_key(rig_core::client::Nothing)
                 .base_url(&url)
                 .build()?;
 
@@ -159,13 +159,13 @@ async fn build_azure_agent(
                     .context("Failed to fetch Entra ID token")?
             };
 
-            rig::providers::azure::AzureOpenAIAuth::Token(token)
+            rig_core::providers::azure::AzureOpenAIAuth::Token(token)
         }
         AzureAuthMethod::ApiKey => {
             tracing::info!("Using API Key authentication for Azure OpenAI");
             let key = api_key
                 .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
-            rig::providers::azure::AzureOpenAIAuth::ApiKey(key)
+            rig_core::providers::azure::AzureOpenAIAuth::ApiKey(key)
         }
     };
 
@@ -177,7 +177,7 @@ async fn build_azure_agent(
         "Building Azure OpenAI client"
     );
 
-    let client = rig::providers::azure::Client::builder()
+    let client = rig_core::providers::azure::Client::builder()
         .api_key(auth)
         .azure_endpoint(endpoint.clone())
         .api_version(api_version)

@@ -1,5 +1,5 @@
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -287,7 +287,7 @@ fn normalize_final_answer(
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(",");
         if normalized != answer {
             answer = normalized;
             notes.push("normalized comma-separated spacing".to_string());
@@ -301,13 +301,12 @@ fn normalize_final_answer(
             None
         }
     });
-    if let Some(places) = requested_places {
-        if is_plain_number(&answer)
-            && let Ok(value) = answer.replace(',', "").parse::<f64>()
-        {
-            answer = format!("{value:.places$}");
-            notes.push(format!("rounded numeric answer to {places} decimal places"));
-        }
+    if let Some(places) = requested_places
+        && is_plain_number(&answer)
+        && let Ok(value) = answer.replace(',', "").parse::<f64>()
+    {
+        answer = format!("{value:.places$}");
+        notes.push(format!("rounded numeric answer to {places} decimal places"));
     }
 
     (answer, notes)

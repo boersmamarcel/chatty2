@@ -214,4 +214,3 @@ pub(super) fn extract_output_paths(code: &str) -> Vec<String> {
     }
     paths
 }
-

@@ -12,7 +12,10 @@ pub(super) fn escape_sql_string(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-pub(super) fn rewrite_query_file_literals(sql: &str, workspace_root: &Path) -> Result<String, DataQueryError> {
+pub(super) fn rewrite_query_file_literals(
+    sql: &str,
+    workspace_root: &Path,
+) -> Result<String, DataQueryError> {
     let mut rewritten = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
 

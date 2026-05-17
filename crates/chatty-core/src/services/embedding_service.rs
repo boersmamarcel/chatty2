@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
-use rig::client::EmbeddingsClient;
-use rig::embeddings::EmbeddingModel;
+use rig_core::client::EmbeddingsClient;
+use rig_core::embeddings::EmbeddingModel;
 use tracing::{info, warn};
 
 use crate::settings::models::providers_store::ProviderType;
@@ -22,9 +22,9 @@ pub struct EmbeddingService {
 /// Concrete embedding model, one variant per supported provider.
 #[derive(Clone)]
 enum EmbeddingServiceInner {
-    OpenRouter(rig::providers::openrouter::EmbeddingModel),
-    Ollama(rig::providers::ollama::EmbeddingModel),
-    AzureOpenAI(rig::providers::azure::EmbeddingModel),
+    OpenRouter(rig_core::providers::openrouter::EmbeddingModel),
+    Ollama(rig_core::providers::ollama::EmbeddingModel),
+    AzureOpenAI(rig_core::providers::azure::EmbeddingModel),
 }
 
 impl EmbeddingService {
@@ -48,20 +48,20 @@ impl EmbeddingService {
                 let key =
                     api_key.ok_or_else(|| anyhow!("API key required for OpenRouter embeddings"))?;
                 let client = if let Some(url) = base_url {
-                    rig::providers::openrouter::Client::builder()
+                    rig_core::providers::openrouter::Client::builder()
                         .api_key(key)
                         .base_url(url)
                         .build()?
                 } else {
-                    rig::providers::openrouter::Client::new(key)?
+                    rig_core::providers::openrouter::Client::new(key)?
                 };
                 let model = client.embedding_model(model_name);
                 EmbeddingServiceInner::OpenRouter(model)
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or("http://localhost:11434");
-                let client = rig::providers::ollama::Client::builder()
-                    .api_key(rig::client::Nothing)
+                let client = rig_core::providers::ollama::Client::builder()
+                    .api_key(rig_core::client::Nothing)
                     .base_url(url)
                     .build()?;
                 let model = client.embedding_model(model_name);
@@ -69,9 +69,9 @@ impl EmbeddingService {
             }
             ProviderType::AzureOpenAI => {
                 let auth = if let Some(token) = azure_token {
-                    rig::providers::azure::AzureOpenAIAuth::Token(token)
+                    rig_core::providers::azure::AzureOpenAIAuth::Token(token)
                 } else if let Some(key) = api_key {
-                    rig::providers::azure::AzureOpenAIAuth::ApiKey(key.to_string())
+                    rig_core::providers::azure::AzureOpenAIAuth::ApiKey(key.to_string())
                 } else {
                     return Err(anyhow!(
                         "API key or Entra ID token required for Azure OpenAI embeddings"
@@ -79,7 +79,7 @@ impl EmbeddingService {
                 };
                 let endpoint = base_url
                     .ok_or_else(|| anyhow!("Endpoint URL required for Azure OpenAI embeddings"))?;
-                let client = rig::providers::azure::Client::builder()
+                let client = rig_core::providers::azure::Client::builder()
                     .api_key(auth)
                     .azure_endpoint(endpoint.to_string())
                     .build()

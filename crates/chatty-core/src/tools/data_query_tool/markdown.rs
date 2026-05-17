@@ -160,4 +160,3 @@ pub(super) fn format_markdown_cell(value: &str) -> (String, bool) {
 // ═══════════════════════════════════════════════════════════════════
 // QueryDataTool — Run SQL queries against local data files
 // ═══════════════════════════════════════════════════════════════════
-

@@ -289,22 +289,21 @@ async fn run_chat(
     };
 
     // Pre-invocation credit check for paid modules only
-    if let Some(ref guard) = state.credit_guard {
-        if state.paid_modules.contains(module_name) {
-            if let Err(e) = guard.has_credits(module_name).await {
-                drop(reg);
-                return (
-                    StatusCode::PAYMENT_REQUIRED,
-                    Json(json!({
-                        "error": {
-                            "message": e.to_string(),
-                            "type": "insufficient_credits",
-                        }
-                    })),
-                )
-                    .into_response();
-            }
-        }
+    if let Some(ref guard) = state.credit_guard
+        && state.paid_modules.contains(module_name)
+        && let Err(e) = guard.has_credits(module_name).await
+    {
+        drop(reg);
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({
+                "error": {
+                    "message": e.to_string(),
+                    "type": "insufficient_credits",
+                }
+            })),
+        )
+            .into_response();
     }
 
     match module.chat(req).await {

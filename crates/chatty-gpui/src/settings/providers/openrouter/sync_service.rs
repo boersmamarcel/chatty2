@@ -22,9 +22,6 @@ pub struct OpenRouterCatalog {
 impl Global for OpenRouterCatalog {}
 
 /// Synchronise curated OpenRouter models with the local store.
-/// Also populates the global `OpenRouterCatalog` with the full fetched list.
-
-/// Synchronise curated OpenRouter models with the local store.
 ///
 /// This runs **every startup** (asynchronously) whenever an OpenRouter provider
 /// with a non-empty API key is configured.  It:

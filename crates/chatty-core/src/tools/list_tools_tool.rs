@@ -1,7 +1,7 @@
 use crate::factories::agent_factory::ToolAvailability;
 use crate::tools::ToolError;
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 /// Arguments for the list_tools tool (no arguments needed)
@@ -490,7 +490,7 @@ impl Default for ListToolsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::tool::Tool;
+    use rig_core::tool::Tool;
 
     fn no_tools() -> ToolAvailability {
         ToolAvailability {

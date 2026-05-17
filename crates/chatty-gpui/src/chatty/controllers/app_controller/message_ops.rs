@@ -29,11 +29,11 @@
 //!
 //! See `docs/stream-manager.md` for the full stream architecture.
 
-use super::*;
 use super::message_ops_internals::{
     LlmStreamParams, attachment_to_user_content, run_llm_stream,
     select_recent_assistant_attachments,
 };
+use super::*;
 
 impl ChattyApp {
     /// Send a message to the LLM and stream the response.
@@ -244,8 +244,8 @@ impl ChattyApp {
                     .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
                 // PHASE 3: Prepare user content and start LLM stream
-                let mut contents = vec![rig::message::UserContent::Text(
-                    rig::completion::message::Text {
+                let mut contents = vec![rig_core::message::UserContent::Text(
+                    rig_core::completion::message::Text {
                         text: message.clone(),
                     },
                 )];
@@ -1219,7 +1219,7 @@ impl ChattyApp {
             }
             let history_context = history[..len - 1].to_vec();
             let user_contents = match &history[len - 1] {
-                rig::completion::Message::User { content, .. } => {
+                rig_core::completion::Message::User { content, .. } => {
                     content.iter().cloned().collect::<Vec<_>>()
                 }
                 _ => {

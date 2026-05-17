@@ -27,10 +27,9 @@ use profile::*;
 use sql::*;
 
 use duckdb::Connection;
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -557,7 +556,6 @@ impl Tool for ProfileDataTool {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests;

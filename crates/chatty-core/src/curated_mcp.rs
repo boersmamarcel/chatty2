@@ -101,7 +101,7 @@ impl CuratedMcpEntry {
 /// To add a provider, append a new [`CuratedMcpEntry`] here and document it
 /// in `docs/curated-mcp-catalog.md`.
 pub fn curated_catalog() -> &'static [CuratedMcpEntry] {
-    &CURATED_CATALOG
+    CURATED_CATALOG
 }
 
 const CURATED_CATALOG: &[CuratedMcpEntry] = &[

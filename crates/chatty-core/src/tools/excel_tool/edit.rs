@@ -1,6 +1,6 @@
 use calamine::{Reader, open_workbook_auto};
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -558,8 +558,8 @@ impl Tool for EditExcelTool {
 #[cfg(test)]
 mod tests {
     use super::edit_excel_parameters_schema;
-    use rig::completion::ToolDefinition;
-    use rig::providers::gemini::completion::gemini_api_types::{Schema, Tool};
+    use rig_core::completion::ToolDefinition;
+    use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
     use serde_json::Value;
 
     fn assert_no_empty_types(schema: &Schema) {

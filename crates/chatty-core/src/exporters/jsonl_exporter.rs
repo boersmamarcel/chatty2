@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, UserContent};
 
 use crate::models::conversation::RegenerationRecord;
 use crate::models::message_types::{SystemTrace, TraceItem};
@@ -227,7 +227,7 @@ pub fn conversation_to_dpo_jsonl(
 }
 
 /// Extract text-only content from user message, stripping images and documents.
-fn extract_user_text(content: &rig::OneOrMany<UserContent>) -> String {
+fn extract_user_text(content: &rig_core::OneOrMany<UserContent>) -> String {
     content
         .iter()
         .filter_map(|uc| match uc {
@@ -239,7 +239,7 @@ fn extract_user_text(content: &rig::OneOrMany<UserContent>) -> String {
 }
 
 /// Extract text-only content from assistant message, stripping tool calls.
-fn extract_assistant_text(content: &rig::OneOrMany<AssistantContent>) -> String {
+fn extract_assistant_text(content: &rig_core::OneOrMany<AssistantContent>) -> String {
     content
         .iter()
         .filter_map(|ac| match ac {
@@ -382,8 +382,8 @@ mod tests {
     use crate::models::conversation::{MessageFeedback, RegenerationRecord};
     use crate::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
     use crate::settings::models::providers_store::ProviderType;
-    use rig::OneOrMany;
-    use rig::completion::message::Text;
+    use rig_core::OneOrMany;
+    use rig_core::completion::message::Text;
     use std::collections::HashMap;
 
     fn make_conversation_data(
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn sft_strips_multimodal_content() {
-        use rig::completion::message::{DocumentSourceKind, Image, ImageMediaType};
+        use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
 
         let user_content = OneOrMany::many(vec![
             UserContent::Text(Text {
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn sft_includes_tool_calls() {
-        use rig::completion::message::{ToolCall, ToolFunction};
+        use rig_core::completion::message::{ToolCall, ToolFunction};
 
         let trace = crate::models::message_types::SystemTrace {
             items: vec![TraceItem::ToolCall(ToolCallBlock {

@@ -1,6 +1,6 @@
 use pdfium_render::prelude::*;
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -182,7 +182,7 @@ fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, ToolError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::tool::Tool;
+    use rig_core::tool::Tool;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;

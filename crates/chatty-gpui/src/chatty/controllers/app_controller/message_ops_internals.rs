@@ -13,8 +13,8 @@ use super::*;
 pub(super) struct LlmStreamParams {
     pub(super) conv_id: String,
     pub(super) agent: AgentClient,
-    pub(super) history: Vec<rig::completion::Message>,
-    pub(super) user_contents: Vec<rig::message::UserContent>,
+    pub(super) history: Vec<rig_core::completion::Message>,
+    pub(super) user_contents: Vec<rig_core::message::UserContent>,
     pub(super) add_user_message_to_model: bool,
     pub(super) attachment_paths: Vec<PathBuf>,
     pub(super) provider_type: chatty_core::settings::models::providers_store::ProviderType,
@@ -188,8 +188,8 @@ pub(super) async fn run_llm_stream(
 
     // 4. Optionally add user message to conversation model.
     if add_user_message_to_model {
-        let user_message = rig::completion::Message::User {
-            content: rig::OneOrMany::many(user_contents).map_err(|e| {
+        let user_message = rig_core::completion::Message::User {
+            content: rig_core::OneOrMany::many(user_contents).map_err(|e| {
                 anyhow::anyhow!("Failed to create user message from contents: {}", e)
             })?,
         };
@@ -550,8 +550,10 @@ pub(super) fn select_recent_assistant_attachments(
         return Vec::new();
     }
     for entry in entries.iter().rev() {
-        if matches!(entry.message, rig::completion::Message::Assistant { .. })
-            && !entry.attachment_paths.is_empty()
+        if matches!(
+            entry.message,
+            rig_core::completion::Message::Assistant { .. }
+        ) && !entry.attachment_paths.is_empty()
         {
             return entry
                 .attachment_paths
@@ -578,7 +580,7 @@ pub(super) fn select_recent_assistant_attachments(
 /// Convert a file attachment to a rig-core UserContent
 pub(super) async fn attachment_to_user_content(
     path: &Path,
-) -> anyhow::Result<rig::message::UserContent> {
+) -> anyhow::Result<rig_core::message::UserContent> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -588,35 +590,35 @@ pub(super) async fn attachment_to_user_content(
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
 
     match ext.as_str() {
-        "png" => Ok(rig::message::UserContent::image_base64(
+        "png" => Ok(rig_core::message::UserContent::image_base64(
             b64,
-            Some(rig::completion::message::ImageMediaType::PNG),
-            Some(rig::completion::message::ImageDetail::Auto),
+            Some(rig_core::completion::message::ImageMediaType::PNG),
+            Some(rig_core::completion::message::ImageDetail::Auto),
         )),
-        "jpg" | "jpeg" => Ok(rig::message::UserContent::image_base64(
+        "jpg" | "jpeg" => Ok(rig_core::message::UserContent::image_base64(
             b64,
-            Some(rig::completion::message::ImageMediaType::JPEG),
-            Some(rig::completion::message::ImageDetail::Auto),
+            Some(rig_core::completion::message::ImageMediaType::JPEG),
+            Some(rig_core::completion::message::ImageDetail::Auto),
         )),
-        "gif" => Ok(rig::message::UserContent::image_base64(
+        "gif" => Ok(rig_core::message::UserContent::image_base64(
             b64,
-            Some(rig::completion::message::ImageMediaType::GIF),
-            Some(rig::completion::message::ImageDetail::Auto),
+            Some(rig_core::completion::message::ImageMediaType::GIF),
+            Some(rig_core::completion::message::ImageDetail::Auto),
         )),
-        "webp" => Ok(rig::message::UserContent::image_base64(
+        "webp" => Ok(rig_core::message::UserContent::image_base64(
             b64,
-            Some(rig::completion::message::ImageMediaType::WEBP),
-            Some(rig::completion::message::ImageDetail::Auto),
+            Some(rig_core::completion::message::ImageMediaType::WEBP),
+            Some(rig_core::completion::message::ImageDetail::Auto),
         )),
-        "svg" => Ok(rig::message::UserContent::image_base64(
+        "svg" => Ok(rig_core::message::UserContent::image_base64(
             b64,
-            Some(rig::completion::message::ImageMediaType::SVG),
-            Some(rig::completion::message::ImageDetail::Auto),
+            Some(rig_core::completion::message::ImageMediaType::SVG),
+            Some(rig_core::completion::message::ImageDetail::Auto),
         )),
-        "pdf" => Ok(rig::message::UserContent::Document(
-            rig::completion::message::Document {
-                data: rig::completion::message::DocumentSourceKind::Base64(b64),
-                media_type: Some(rig::completion::message::DocumentMediaType::PDF),
+        "pdf" => Ok(rig_core::message::UserContent::Document(
+            rig_core::completion::message::Document {
+                data: rig_core::completion::message::DocumentSourceKind::Base64(b64),
+                media_type: Some(rig_core::completion::message::DocumentMediaType::PDF),
                 additional_params: None,
             },
         )),
@@ -631,9 +633,9 @@ mod tests {
 
     use super::*;
     use chatty_core::models::MessageEntry;
-    use rig::OneOrMany;
-    use rig::completion::message::{AssistantContent, Text};
-    use rig::message::{Message, UserContent};
+    use rig_core::OneOrMany;
+    use rig_core::completion::message::{AssistantContent, Text};
+    use rig_core::message::{Message, UserContent};
 
     fn user_msg(text: &str) -> Message {
         Message::User {

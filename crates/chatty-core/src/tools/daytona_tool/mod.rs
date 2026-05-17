@@ -19,8 +19,8 @@
 //!
 //! See `docs/monty-sandbox.md` for the broader sandbox architecture.
 
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -150,7 +150,7 @@ struct FileEntry {
     size: u64,
 }
 
-/// Check whether a filename has a recognized downloadable extension.
+// Check whether a filename has a recognized downloadable extension.
 // ── Tool implementation ──────────────────────────────────────────────────────
 
 /// Code execution tool powered by the Daytona cloud sandbox service.
@@ -909,7 +909,6 @@ impl Tool for DaytonaTool {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests;

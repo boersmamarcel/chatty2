@@ -8,8 +8,11 @@
 use duckdb::Connection;
 
 use super::markdown::{format_markdown_cell, results_to_markdown, value_to_string};
-use super::sql::{escape_sql_string, has_glob_pattern};
-use super::{ColumnInfo, ColumnProfile, DataQueryError, MAX_MARKDOWN_CELL_CHARS, MAX_PROFILE_COLUMNS, MAX_PROFILE_IMPORTANT_COLUMNS, MAX_PROFILE_SAMPLE_COLUMNS, ProfileDataSummary, TopValue, sandboxed_connection};
+use super::sql::escape_sql_string;
+use super::{
+    ColumnInfo, ColumnProfile, DataQueryError, MAX_PROFILE_COLUMNS, MAX_PROFILE_IMPORTANT_COLUMNS,
+    MAX_PROFILE_SAMPLE_COLUMNS, ProfileDataSummary, TopValue, sandboxed_connection,
+};
 
 pub(super) fn data_format_from_extension(ext: &str) -> Result<&'static str, DataQueryError> {
     match ext {
@@ -126,7 +129,10 @@ pub(super) fn is_likely_important_low_cardinality_column(column: &ColumnInfo) ->
         || name.contains("level")
 }
 
-pub(super) fn describe_source(conn: &Connection, source: &str) -> Result<Vec<ColumnInfo>, DataQueryError> {
+pub(super) fn describe_source(
+    conn: &Connection,
+    source: &str,
+) -> Result<Vec<ColumnInfo>, DataQueryError> {
     let mut stmt = conn
         .prepare(&format!("DESCRIBE SELECT * FROM {source}"))
         .map_err(|e| DataQueryError::QueryFailed(e.to_string()))?;
@@ -156,7 +162,11 @@ pub(super) fn count_source_rows(conn: &Connection, source: &str) -> Result<u64, 
     .map_err(|e| DataQueryError::QueryFailed(e.to_string()))
 }
 
-pub(super) fn profile_column(conn: &Connection, source: &str, column: &ColumnInfo) -> ColumnProfile {
+pub(super) fn profile_column(
+    conn: &Connection,
+    source: &str,
+    column: &ColumnInfo,
+) -> ColumnProfile {
     let ident = quote_identifier(&column.name);
     let mut notes = Vec::new();
     let null_count = conn
@@ -324,4 +334,3 @@ pub(super) fn is_complex_type(upper_data_type: &str) -> bool {
         || upper_data_type.contains("STRUCT")
         || upper_data_type.contains("MAP")
 }
-

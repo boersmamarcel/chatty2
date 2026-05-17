@@ -1,8 +1,8 @@
 use super::path_utils::resolve_output_path;
 use crate::services::typst_compiler_service::TypstCompilerService;
 use crate::tools::ToolError;
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -134,7 +134,7 @@ impl Tool for CompileTypstTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::tool::Tool;
+    use rig_core::tool::Tool;
 
     #[tokio::test]
     async fn test_definition_metadata() {

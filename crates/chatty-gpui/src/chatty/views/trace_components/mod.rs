@@ -28,20 +28,11 @@ mod inline;
 // Re-export the public API so external callers (chat_view,
 // message_component) see the same `trace_components::*` namespace as
 // before the split.
-pub use inline::render_tool_call_inline;
+pub use inline::{InlineToolCallRenderArgs, render_tool_call_inline};
 
-use crate::assets::CustomIcon;
-use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
-use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
-use std::time::Duration;
+use gpui::*;
 
-use super::code_block_component::CodeBlockComponent;
-use super::diff_view_component::DiffViewComponent;
-use super::message_types::{
-    ApprovalState, ExecutionEngine, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState,
-    ToolSource, TraceEvent, TraceItem,
-};
+use super::message_types::{SystemTrace, TraceEvent, TraceItem};
 use gpui::EventEmitter;
 
 pub struct SystemTraceView {
@@ -141,4 +132,3 @@ impl Render for SystemTraceView {
         container
     }
 }
-

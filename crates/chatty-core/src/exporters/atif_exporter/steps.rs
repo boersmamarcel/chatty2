@@ -14,8 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::message::{AssistantContent, UserContent};
 
 use crate::exporters::types::*;
 use crate::models::conversation::{MessageFeedback, RegenerationRecord};
@@ -79,7 +78,7 @@ pub(super) fn image_media_type(path: &Path) -> Option<&'static str> {
 
 pub(super) fn build_user_step(
     step_id: u32,
-    content: &rig::OneOrMany<UserContent>,
+    content: &rig_core::OneOrMany<UserContent>,
     timestamp: Option<i64>,
     attachment_paths: &[String],
 ) -> AtifStep {
@@ -128,7 +127,7 @@ pub(super) fn build_user_step(
 
 pub(super) fn build_agent_step(
     step_id: u32,
-    content: &rig::OneOrMany<AssistantContent>,
+    content: &rig_core::OneOrMany<AssistantContent>,
     timestamp: Option<i64>,
     trace_json: Option<serde_json::Value>,
     metrics: Option<AtifStepMetrics>,
@@ -196,7 +195,9 @@ pub(super) fn build_agent_step(
 }
 
 /// Parse a system trace JSON, returning (reasoning_text, tool_output_by_id).
-pub(super) fn parse_trace(trace_json: Option<serde_json::Value>) -> (Option<String>, HashMap<String, String>) {
+pub(super) fn parse_trace(
+    trace_json: Option<serde_json::Value>,
+) -> (Option<String>, HashMap<String, String>) {
     let mut outputs = HashMap::new();
     let trace_json = match trace_json {
         Some(v) => v,
@@ -261,4 +262,3 @@ pub(super) fn build_extra(
         regenerations: atif_regenerations,
     }
 }
-

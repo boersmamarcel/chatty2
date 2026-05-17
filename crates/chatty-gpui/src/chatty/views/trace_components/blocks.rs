@@ -16,22 +16,21 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Icon, Sizable, button::Button, text::TextView};
+use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 use std::time::Duration;
 
-use super::badges::{
-    execution_engine_badge, is_code_execution_tool, render_execution_mode_badge,
-    render_mode_badge, render_outline_badge, render_sub_agent_mode_badge, tool_source_badge,
-};
-use super::inline::{
-    SelectableText, extract_command_display, extract_full_command, format_tool_call_header,
-    format_tool_output, render_code_run_input, render_full_command_box,
-};
-use super::super::code_block_component::CodeBlockComponent;
 use super::super::message_types::{
-    ApprovalState, SystemTrace, ThinkingBlock, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+    ApprovalState, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem,
 };
 use super::SystemTraceView;
+use super::badges::{
+    execution_engine_badge, is_code_execution_tool, render_execution_mode_badge,
+    render_outline_badge, render_sub_agent_mode_badge, tool_source_badge,
+};
+use super::inline::{
+    SelectableText, extract_command_display, extract_full_command, format_tool_output,
+    render_code_run_input, render_full_command_box,
+};
 
 impl SystemTraceView {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {

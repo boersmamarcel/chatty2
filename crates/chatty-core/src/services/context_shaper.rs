@@ -27,10 +27,10 @@
 //! eprintln!("context shaper applied: {:?}", shaped.stage_applied);
 //! ```
 
-use rig::OneOrMany;
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, Text, ToolResult, ToolResultContent};
-use rig::message::UserContent;
+use rig_core::OneOrMany;
+use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, Text, ToolResult, ToolResultContent};
+use rig_core::message::UserContent;
 use tracing::debug;
 
 use crate::factories::AgentClient;

@@ -23,7 +23,7 @@ use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
 use chatty_core::tools::LocalModuleAgentSummary;
 
-use rig::message::UserContent;
+use rig_core::message::UserContent;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -597,8 +597,8 @@ impl ChatEngine {
         let contents = vec![UserContent::text(message.clone())];
 
         // Add user message to conversation history
-        let user_msg = rig::completion::Message::User {
-            content: rig::OneOrMany::one(UserContent::text(message)),
+        let user_msg = rig_core::completion::Message::User {
+            content: rig_core::OneOrMany::one(UserContent::text(message)),
         };
         conversation.add_user_message_with_attachments(user_msg, vec![]);
 

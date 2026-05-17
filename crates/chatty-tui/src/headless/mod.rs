@@ -22,13 +22,10 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
-use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::services::AgentLoopGuard;
-use std::collections::BTreeSet;
-use std::path::PathBuf;
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatEngine, ToolCallInfo, ToolCallState};
+use crate::engine::{ChatEngine, ToolCallState};
 use crate::events::AppEvent;
 
 const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;

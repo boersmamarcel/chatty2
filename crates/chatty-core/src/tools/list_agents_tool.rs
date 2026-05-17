@@ -1,5 +1,5 @@
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::models::a2a_store::A2aAgentConfig;

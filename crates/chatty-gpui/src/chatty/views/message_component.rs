@@ -462,13 +462,15 @@ where
 
             container = container.child(div().mt_2().mb_2().child(
                 super::trace_components::render_tool_call_inline(
-                    tool_call,
-                    index,
-                    tool_idx,
-                    is_collapsed,
-                    toggle_callback,
-                    is_diff_expanded,
-                    diff_callback,
+                    super::trace_components::InlineToolCallRenderArgs {
+                        tool_call,
+                        message_index: index,
+                        tool_index: tool_idx,
+                        collapsed: is_collapsed,
+                        on_toggle: toggle_callback,
+                        diff_expanded: is_diff_expanded,
+                        on_expand_diff: diff_callback,
+                    },
                     cx,
                 ),
             ));

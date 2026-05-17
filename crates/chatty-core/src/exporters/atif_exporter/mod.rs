@@ -16,21 +16,14 @@
 //!   JSONL for SFT/DPO).
 //! - Persistence — the caller writes the returned JSON to disk.
 
-use std::collections::HashMap;
-use std::path::Path;
-
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::Message;
 
 use crate::exporters::types::*;
 use crate::models::conversation::{MessageFeedback, RegenerationRecord};
-use crate::models::message_types::{SystemTrace, TraceItem};
 use crate::models::token_usage::ConversationTokenUsage;
 use crate::repositories::ConversationData;
 use crate::settings::models::models_store::ModelConfig;
-use crate::settings::models::providers_store::ProviderType;
 
 /// ATIF schema version this exporter produces.
 const SCHEMA_VERSION: &str = "ATIF-v1.6";
@@ -123,10 +116,8 @@ pub fn conversation_to_atif(
     serde_json::to_value(&export).context("Failed to serialize ATIF export")
 }
 
-
 mod steps;
 use steps::*;
-
 
 #[cfg(test)]
 mod tests;

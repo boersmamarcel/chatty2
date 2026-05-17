@@ -27,15 +27,15 @@ mod slash;
 // Re-export the public surface for external callers and the unit-test
 // module so the `chat_input::*` namespace is unchanged after the
 // directory split.
-#[cfg(test)]
-pub use at_mention::{apply_at_to_input, at_menu_items_for, at_query_from};
 #[allow(unused_imports)] // load_files_for_dir is part of the public API
 pub use at_mention::load_files_for_dir;
+#[cfg(test)]
+pub use at_mention::{apply_at_to_input, at_menu_items_for, at_query_from};
+#[cfg(test)]
+pub use slash::slash_menu_items_for;
 pub use slash::{SkillEntry, slash_menu_items_with_skills};
 #[allow(unused_imports)] // SlashCommand / SlashMenuItem are part of the public API
 pub use slash::{SlashCommand, SlashMenuItem};
-#[cfg(test)]
-pub use slash::slash_menu_items_for;
 
 use gpui::*;
 use gpui_component::input::InputState;
@@ -372,7 +372,6 @@ impl ChatInputState {
             });
         }
     }
-
 
     /// Get the selected model ID
     pub fn selected_model_id(&self) -> Option<&String> {

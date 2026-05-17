@@ -116,11 +116,13 @@ impl ChattyApp {
             let trace_json = entry.system_trace.as_ref();
 
             match &entry.message {
-                rig::completion::Message::User { content, .. } => {
+                rig_core::completion::Message::User { content, .. } => {
                     let text = content
                         .iter()
                         .filter_map(|c| match c {
-                            rig::completion::message::UserContent::Text(t) => Some(t.text.as_str()),
+                            rig_core::completion::message::UserContent::Text(t) => {
+                                Some(t.text.as_str())
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -129,11 +131,11 @@ impl ChattyApp {
                         markdown.push_str(&format!("---\n\n**User**\n\n{text}\n\n"));
                     }
                 }
-                rig::completion::Message::Assistant { content, .. } => {
+                rig_core::completion::Message::Assistant { content, .. } => {
                     let text = content
                         .iter()
                         .filter_map(|c| match c {
-                            rig::completion::message::AssistantContent::Text(t) => {
+                            rig_core::completion::message::AssistantContent::Text(t) => {
                                 Some(t.text.as_str())
                             }
                             _ => None,
@@ -153,7 +155,7 @@ impl ChattyApp {
                         }
                     }
                 }
-                rig::completion::Message::System { .. } => {
+                rig_core::completion::Message::System { .. } => {
                     // System messages are not included in markdown export
                 }
             }

@@ -11,8 +11,8 @@ use pptx_writer::shapes::{AutoShape, PlaceholderFormat, ShapeTree};
 use pptx_writer::table::Table;
 use pptx_writer::text::{BulletFormat, Paragraph, RgbColor, TextFrame};
 use pptx_writer::units::{Emu, Inches, PlaceholderIndex, ShapeId};
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 use crate::services::filesystem_service::FileSystemService;

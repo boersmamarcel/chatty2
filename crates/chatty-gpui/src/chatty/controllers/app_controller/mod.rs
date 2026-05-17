@@ -7,24 +7,17 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use chatty_core::exporters::atif_exporter::conversation_to_atif;
-use chatty_core::exporters::jsonl_exporter::{
-    SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
-};
-use chatty_core::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
     StreamStatus,
 };
-use chatty_core::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::StreamChunk;
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
-use chatty_core::tools::LocalModuleAgentSummary;
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
@@ -40,7 +33,14 @@ use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use chatty_core::exporters::atif_exporter::conversation_to_atif;
+use chatty_core::exporters::jsonl_exporter::{
+    SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
+};
+use chatty_core::factories::AgentClient;
 use chatty_core::factories::agent_factory::AgentBuildContext;
+use chatty_core::repositories::{ConversationData, ConversationRepository};
+use chatty_core::tools::LocalModuleAgentSummary;
 
 mod conversation_ops;
 mod conversation_ops_modify;
@@ -784,27 +784,25 @@ pub(super) fn classify_agent_source(agent_name: &str, cx: &App) -> ToolSource {
     use chatty_core::settings::models::extensions_store::ExtensionsModel;
 
     // Remote WASM module on the Hive runner?
-    if let Some(discovered) = cx.try_global::<DiscoveredModulesModel>() {
-        if let Some(entry) = discovered.modules.iter().find(|m| m.name == agent_name) {
-            if entry.execution_mode == "remote" || entry.execution_mode == "remote_only" {
-                return ToolSource::HiveCloud;
-            }
-        }
+    if let Some(discovered) = cx.try_global::<DiscoveredModulesModel>()
+        && let Some(entry) = discovered.modules.iter().find(|m| m.name == agent_name)
+        && (entry.execution_mode == "remote" || entry.execution_mode == "remote_only")
+    {
+        return ToolSource::HiveCloud;
     }
 
     // Remote A2A agent with a non-localhost URL?
-    if let Some(extensions) = cx.try_global::<ExtensionsModel>() {
-        if let Some((_, cfg, _)) = extensions
+    if let Some(extensions) = cx.try_global::<ExtensionsModel>()
+        && let Some((_, cfg, _)) = extensions
             .all_a2a_agents()
             .into_iter()
             .find(|(_, cfg, _)| cfg.name == agent_name)
-        {
-            let is_local = cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
-            if !is_local {
-                return ToolSource::ExternalService {
-                    name: cfg.name.clone(),
-                };
-            }
+    {
+        let is_local = cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+        if !is_local {
+            return ToolSource::ExternalService {
+                name: cfg.name.clone(),
+            };
         }
     }
 

@@ -32,7 +32,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::services::filesystem_service::FileSystemService;
-    use rig::tool::Tool;
+    use rig_core::tool::Tool;
 
     #[test]
     fn test_parse_cell_ref() {

@@ -495,9 +495,6 @@ impl ChatView {
         cx.notify();
     }
 
-
-
-
     /// Activate sticky-scroll mode. While active, every render pass will
     /// re-assert scroll_to_bottom so that async content changes (image
     /// loading, SVG math rendering, code block expansion) never leave
@@ -518,7 +515,6 @@ impl ChatView {
         }
     }
 
-
     /// Check if we're awaiting a response (streaming message with no content yet
     /// and no tool calls in progress)
     fn is_awaiting_response(&self) -> bool {
@@ -531,7 +527,6 @@ impl ChatView {
                     .is_some_and(|trace| trace.has_items())
         })
     }
-
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -752,7 +747,6 @@ impl ChatView {
             .cloned()
     }
 }
-
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
