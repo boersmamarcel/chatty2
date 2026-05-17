@@ -868,6 +868,9 @@ where
     let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
     match msg.role {
         MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
+            .w_full()
+            .flex()
+            .flex_col()
             .child(final_container)
             .child(render_assistant_actions(
                 &msg.content,

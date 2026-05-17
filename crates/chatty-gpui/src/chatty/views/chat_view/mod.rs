@@ -575,34 +575,16 @@ impl ChatView {
     }
 
     /// Whether to show the animated "thinking" indicator at the bottom
-    /// of the message list. Broader than [`Self::is_awaiting_response`]
-    /// — also true while a tool is currently running (so the user sees
-    /// a live spinner during silent tool execution rather than nothing).
+    /// of the message list. We show it whenever the last assistant
+    /// message is still streaming, regardless of whether text or tool
+    /// chunks have already arrived. This matches Claude Code / Cursor
+    /// behaviour: a continuous "agent is working" signal until the
+    /// stream actually ends, so the user never sees a silent gap
+    /// between text chunks, between tool calls, or while a tool runs.
     fn is_thinking_indicator_visible(&self) -> bool {
-        use super::message_types::{ToolCallState, TraceItem};
-        self.messages.last().is_some_and(|msg| {
-            if !msg.is_streaming {
-                return false;
-            }
-            // Awaiting first token / first trace item.
-            if msg.content.is_empty()
-                && !msg
-                    .live_trace
-                    .as_ref()
-                    .is_some_and(|trace| trace.has_items())
-            {
-                return true;
-            }
-            // A tool is currently running — keep the indicator up.
-            msg.live_trace.as_ref().is_some_and(|trace| {
-                trace.items.iter().any(|item| {
-                    matches!(
-                        item,
-                        TraceItem::ToolCall(tc) if matches!(tc.state, ToolCallState::Running)
-                    )
-                })
-            })
-        })
+        self.messages
+            .last()
+            .is_some_and(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
     }
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
@@ -816,6 +798,7 @@ impl ChatView {
                     .child(
                         div()
                             .p_4()
+                            .w_full()
                             .flex()
                             .flex_col()
                             .when(show_start_screen, |this| {
