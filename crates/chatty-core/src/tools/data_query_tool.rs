@@ -1,3 +1,23 @@
+//! `data_query_tool` — query CSV / Parquet / JSON data files with DuckDB SQL.
+//!
+//! Exposes a single LLM tool that opens a DuckDB connection over the
+//! workspace filesystem, runs a user-provided SQL query, and returns the
+//! result as JSON with a row preview.
+//!
+//! # What lives here
+//!
+//! - The `DataQueryTool` rig-core tool implementation.
+//! - Format detection (CSV / Parquet / JSON / JSONL / Excel) and the
+//!   corresponding DuckDB read function.
+//! - Result formatting (column metadata + row preview, capped to keep
+//!   token usage bounded).
+//! - Path safety checks delegated to `FileSystemService`.
+//!
+//! # What does NOT live here
+//!
+//! - Filesystem permission policy — `services::filesystem_service`.
+//! - Tool registration with the agent — `factories::agent_factory`.
+
 use duckdb::Connection;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;

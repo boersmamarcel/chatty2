@@ -1,3 +1,28 @@
+//! Main chat view — the central pane that lists messages, attachments,
+//! tool-call trace components, and the chat input.
+//!
+//! # What lives here
+//!
+//! - `ChatView` entity + render path (message list, scroll handling,
+//!   skeleton placeholder, attachment thumbnails).
+//! - `ChatViewEvent` — events emitted up to `ChattyApp` (scroll, copy,
+//!   regenerate, edit, etc.).
+//! - Helpers for streaming text into the active assistant message
+//!   (`append_assistant_text`, `set_assistant_tool_call`, …).
+//!
+//! # What does NOT live here
+//!
+//! - Message data — `chatty_core::models::conversation::Message`.
+//! - The chat input field — `chat_input.rs`.
+//! - Individual message rendering — `message_component.rs`.
+//! - Stream lifecycle — `chatty::models::stream_manager`; this view only
+//!   receives already-decoded text/tool-call chunks via `ChattyApp` event
+//!   handlers.
+//! - Code blocks, diff views, math, mermaid — dedicated `*_component.rs`
+//!   files under this directory.
+//!
+//! See `docs/rendering-system.md` and `docs/stream-manager.md`.
+
 #![allow(clippy::collapsible_if)]
 
 use gpui::prelude::FluentBuilder;

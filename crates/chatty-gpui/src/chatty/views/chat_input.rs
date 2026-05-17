@@ -1,3 +1,25 @@
+//! Chat input field — the bottom composition area of the chat view.
+//!
+//! # What lives here
+//!
+//! - `ChatInputState` entity — text buffer, attachment list, selected
+//!   model/provider, capabilities (image/PDF support), slash-command and
+//!   skill (`@`-mention) popovers.
+//! - `ChatInputEvent` — events emitted to `ChattyApp` / `ChatView`
+//!   (send, model change, attachment added/removed, slash command, …).
+//! - Keyboard handling, drag-and-drop, paste of images/files, autocomplete
+//!   popovers, and the model picker.
+//!
+//! # What does NOT live here
+//!
+//! - Message rendering / scrolling — `chat_view.rs`.
+//! - Slash-command dispatch — `chatty::controllers::app_controller::slash_commands`.
+//! - Capability data — looked up from `ModelsModel` (chatty-core).
+//!
+//! Capability propagation flows `ModelsModel -> set_capabilities() ->
+//! UI button visibility -> send-time filter` (see CLAUDE.md "Model
+//! Capability Architecture").
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::Button;

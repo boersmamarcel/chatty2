@@ -1,3 +1,21 @@
+//! ATIF (Agent Trace Interchange Format) exporter.
+//!
+//! Converts a chatty `Conversation` (with full message history, tool calls,
+//! and feedback) into the ATIF JSON schema for sharing or training.
+//!
+//! # What lives here
+//!
+//! - Top-level `conversation_to_atif` and helpers that map each message,
+//!   tool call, attachment, and feedback record into the ATIF type system.
+//! - Schema versioning, metadata stamping, and tool-call ordering rules.
+//!
+//! # What does NOT live here
+//!
+//! - The ATIF type definitions themselves — `exporters::types`.
+//! - Other export formats — sibling files in `exporters/` (markdown, PDF,
+//!   JSONL for SFT/DPO).
+//! - Persistence — the caller writes the returned JSON to disk.
+
 use std::collections::HashMap;
 use std::path::Path;
 

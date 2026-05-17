@@ -67,6 +67,9 @@ make setup            # one-time: install Linux deps + wasm32-wasip2 target
 make build            # cargo build (debug)
 make test             # cargo test --all-features -- --test-threads=1  (matches CI)
 make test-fast        # cargo test -p chatty-core --lib  (quick inner loop)
+make test-tui         # cargo test -p chatty-tui          (TUI changes only)
+make test-gpui        # cargo test -p chatty-gpui         (GPUI changes only)
+make test-gateway     # cargo test -p chatty-protocol-gateway  (gateway changes only)
 make lint             # cargo clippy -- -D warnings
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check

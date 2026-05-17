@@ -1,3 +1,26 @@
+//! Headless / pipe modes for `chatty-tui`.
+//!
+//! The TUI binary supports running without the Ratatui UI for scripting and
+//! testing scenarios:
+//!
+//! - **`--headless`** — drive a single conversation programmatically with
+//!   flags (model, prompt, tools), print the final assistant message to
+//!   stdout, exit.
+//! - **`--pipe`** — read a JSON-encoded request from stdin, run the
+//!   conversation, write a JSON-encoded response to stdout.
+//!
+//! # What lives here
+//!
+//! - `run_headless`, `run_pipe` — the two entry functions called from `main`.
+//! - Helpers that wire `ChatEngine` events into stdout-only output (tool
+//!   call summaries, token usage, errors).
+//!
+//! # What does NOT live here
+//!
+//! - The interactive Ratatui UI — `ui/`.
+//! - The shared chat engine — `engine.rs`.
+//! - LLM streaming primitives — `chatty_core::services` and `factories`.
+
 use anyhow::Result;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::services::AgentLoopGuard;

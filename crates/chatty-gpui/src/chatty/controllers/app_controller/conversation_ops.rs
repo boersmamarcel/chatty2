@@ -1,3 +1,23 @@
+//! Conversation lifecycle operations for `ChattyApp`.
+//!
+//! Sibling to `message_ops`, `export_ops`, `slash_commands` — all extension
+//! modules adding methods to `impl ChattyApp` under `app_controller/`.
+//!
+//! # What lives here
+//!
+//! - Creating, loading, restoring, deleting, and renaming conversations.
+//! - Restoring a conversation from persisted `ConversationData` (resolving
+//!   the right `ModelConfig` + provider from the in-memory globals).
+//! - Reloading the conversation list into the sidebar.
+//!
+//! # What does NOT live here
+//!
+//! - The conversation **data model** itself — `chatty_core::models::conversation`.
+//! - On-disk persistence — `chatty_core::repositories::conversation_*`.
+//! - Streaming and message send — `message_ops`.
+//!
+//! See `docs/architecture-overview.md` for the higher-level conversation flow.
+
 use super::*;
 
 impl ChattyApp {

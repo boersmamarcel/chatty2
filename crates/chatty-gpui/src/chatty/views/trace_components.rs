@@ -1,3 +1,24 @@
+//! Tool-call trace UI components — the expandable cards that visualize an
+//! assistant's tool calls inline in the chat view.
+//!
+//! # What lives here
+//!
+//! - `TraceComponent` and its subviews — header row, args summary,
+//!   expandable JSON, result preview, error banner, approval prompt, …
+//! - Visual treatment for each tool kind (shell, filesystem, MCP, etc.).
+//! - User interactions (approve / deny via `ExecutionApprovalStore`,
+//!   copy, expand/collapse).
+//!
+//! # What does NOT live here
+//!
+//! - The underlying trace data — `chatty_core::models::message_types::ToolCall`
+//!   and friends.
+//! - Code-block / diff rendering — `code_block_component`, `diff_view_component`.
+//! - The actual tool implementations — `chatty_core::tools::*`.
+//!
+//! See `docs/rendering-system.md` for how these components fit into the
+//! overall message rendering pipeline.
+
 #![allow(clippy::collapsible_if)]
 
 use crate::assets::CustomIcon;

@@ -1,3 +1,24 @@
+//! `daytona_tool` — execute code in a Daytona cloud sandbox.
+//!
+//! Provides an LLM tool that creates/uses Daytona workspaces to run code
+//! safely off-host. Used by the agent when the user picks Daytona as the
+//! execution backend instead of local shell or Docker.
+//!
+//! # What lives here
+//!
+//! - `DaytonaTool` rig-core tool implementation (request shape, response,
+//!   error handling).
+//! - HTTP client glue against the Daytona API.
+//! - Long-running workspace management (create/start/stop/destroy).
+//!
+//! # What does NOT live here
+//!
+//! - Local shell execution — `services::shell_service`.
+//! - Docker-backed sandbox — `sandbox/` module.
+//! - User-facing settings (API key, default workspace) — settings UI.
+//!
+//! See `docs/monty-sandbox.md` for the broader sandbox architecture.
+
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};

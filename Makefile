@@ -11,8 +11,9 @@
 # Behavior must not diverge from .github/workflows/ci.yml. When CI changes,
 # update this file too.
 
-.PHONY: help setup build build-release test test-fast lint fmt fmt-check \
-        typecheck wasm-modules run-gpui run-tui ci clean
+.PHONY: help setup build build-release test test-fast test-tui test-gpui \
+        test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
+        run-tui ci clean
 
 help:
 	@echo "Common targets:"
@@ -21,6 +22,9 @@ help:
 	@echo "  make build-release cargo build --release"
 	@echo "  make test          Full test suite (matches CI: --all-features --test-threads=1)"
 	@echo "  make test-fast     cargo test -p chatty-core --lib (quick inner loop)"
+	@echo "  make test-tui      cargo test -p chatty-tui (TUI changes only)"
+	@echo "  make test-gpui     cargo test -p chatty-gpui (GPUI changes only)"
+	@echo "  make test-gateway  cargo test -p chatty-protocol-gateway (gateway changes only)"
 	@echo "  make lint          cargo clippy -- -D warnings"
 	@echo "  make fmt           cargo fmt"
 	@echo "  make fmt-check     cargo fmt --check"
@@ -56,6 +60,17 @@ test:
 # on tools / services / settings models. Run `make test` before pushing.
 test-fast:
 	cargo test -p chatty-core --lib
+
+# Per-crate test recipes — useful when you only touched one frontend.
+# Run `make test` before pushing to verify the full suite still passes.
+test-tui:
+	cargo test -p chatty-tui
+
+test-gpui:
+	cargo test -p chatty-gpui
+
+test-gateway:
+	cargo test -p chatty-protocol-gateway
 
 lint:
 	cargo clippy -- -D warnings

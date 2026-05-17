@@ -1,3 +1,32 @@
+//! Message-sending operations for `ChattyApp`.
+//!
+//! This file is one of the four `impl ChattyApp` extension modules under
+//! `app_controller/` (sibling to `conversation_ops`, `export_ops`,
+//! `slash_commands`). Splitting them across files keeps each one focused;
+//! they share the controller's full state via `impl ChattyApp` blocks.
+//!
+//! # What lives here
+//!
+//! - `send_message` — the top-level entry point that creates / resumes a
+//!   conversation, validates attachments against the selected model's
+//!   capabilities, kicks off the stream, and wires the response back through
+//!   `StreamManager`.
+//! - `regenerate_*`, `edit_message`, `delete_message` — variants that mutate
+//!   the conversation history before re-streaming.
+//! - Helpers that filter attachments by provider capabilities and update the
+//!   UI placeholder while streaming.
+//!
+//! # What does NOT live here
+//!
+//! - Stream lifecycle (cancellation, finalization, event routing) — that's
+//!   `chatty::models::stream_manager` and the `handle_stream_manager_event`
+//!   path on `ChattyApp`. The stream loop in this file only forwards chunks;
+//!   all UI updates are emitted as `StreamManagerEvent`s.
+//! - Conversation persistence — `conversation_ops`.
+//! - Slash-command dispatch — `slash_commands`.
+//!
+//! See `docs/stream-manager.md` for the full stream architecture.
+
 use super::*;
 
 impl ChattyApp {

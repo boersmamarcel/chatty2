@@ -1,3 +1,23 @@
+// chatty-gpui — desktop binary entry point.
+//
+// Responsibilities (in order):
+// 1. Set up the Tokio runtime that backs all async work; enter its guard
+//    for the entire app lifetime.
+// 2. Initialize logging / panic handler.
+// 3. Run first-launch installation tasks (see chatty_core::install).
+// 4. Boot GPUI, register globals, async-load settings/providers/models.
+// 5. Construct the `ChattyApp` root entity and open the main window.
+// 6. Spawn the auto-updater background task.
+//
+// What does NOT live here:
+//   - Any view rendering (see `chatty/views/`).
+//   - Conversation / message logic (see `chatty/controllers/app_controller/`).
+//   - Settings UI (see `settings/views/`).
+//   - The auto-update download/install machinery itself (`auto_updater/`).
+//
+// On Windows release builds the `windows_subsystem = "windows"` attribute
+// hides the console window.
+
 // Hide console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

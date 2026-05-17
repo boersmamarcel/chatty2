@@ -1,3 +1,23 @@
+//! `shell_service` — persistent shell session for the agent.
+//!
+//! Spawns a long-running shell child process and exposes a streaming
+//! send-input / read-output API on top of it. Used by the shell tool when
+//! the user enables local execution.
+//!
+//! # What lives here
+//!
+//! - `ShellService` — owns the child `Child`, stdin/stdout pipes, and a
+//!   mutex-protected reader loop.
+//! - Cross-platform process spawning (bash on Unix, PowerShell on Windows).
+//! - Output framing, timeouts, and graceful shutdown.
+//!
+//! # What does NOT live here
+//!
+//! - The user-facing shell tool — `tools::shell_tool` (registers this
+//!   service with the agent and shapes its tool calls).
+//! - Approval prompts — `models::execution_approval_store`.
+//! - Sandboxed execution (Docker / Daytona) — `sandbox/` and `tools::daytona_tool`.
+
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 #[cfg(target_os = "linux")]

@@ -1,3 +1,24 @@
+//! Settings → Models page.
+//!
+//! Lets users browse, add, edit, and delete LLM model configurations,
+//! grouped by provider. Includes the Azure OpenAI deployment-id flow and
+//! the OpenRouter curated catalog picker.
+//!
+//! # What lives here
+//!
+//! - `ModelsPage` view + render path.
+//! - Add / edit modal flows for each provider type (Anthropic, OpenAI,
+//!   Azure, Ollama, Mistral, Gemini, OpenRouter, …).
+//! - Capability toggles (image / PDF / temperature) per model.
+//! - OpenRouter catalog search & one-click import.
+//!
+//! # What does NOT live here
+//!
+//! - The underlying data model — `chatty_core::settings::models::models_store::ModelConfig`.
+//! - Persistence — `chatty_core::settings::repositories::models_repository`.
+//! - Capability defaults per provider — `ProviderType::default_capabilities`.
+//! - The actual LLM agent construction — `chatty_core::factories::agent_factory`.
+
 use crate::settings::controllers::models_controller;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::{ProviderModel, ProviderType};
