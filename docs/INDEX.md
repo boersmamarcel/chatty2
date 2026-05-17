@@ -34,6 +34,7 @@ for coding patterns and behavioural rules read
 |---|---|
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release (version bump, changelog, GitHub Release) |
 | [`monty-sandbox.md`](monty-sandbox.md) | Docker-backed sandbox runtime |
+| [`refactor-followups.md`](refactor-followups.md) | Open items from the agent-friendliness refactor (deferred Tier 4 splits + Tier 5 recommendations) |
 
 ---
 
