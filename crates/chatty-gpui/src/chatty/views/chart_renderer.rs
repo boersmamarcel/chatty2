@@ -1,7 +1,7 @@
 use crate::assets::CustomIcon;
 use crate::chatty::services::MermaidRendererService;
 use crate::chatty::services::chart_svg_renderer;
-use crate::chatty::tools::chart_tool::{CandlestickDataPoint, ChartSpec, SeriesData};
+use chatty_core::tools::chart_tool::{CandlestickDataPoint, ChartSpec, SeriesData};
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};

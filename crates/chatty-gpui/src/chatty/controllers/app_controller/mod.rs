@@ -7,24 +7,24 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::exporters::atif_exporter::conversation_to_atif;
-use crate::chatty::exporters::jsonl_exporter::{
+use chatty_core::exporters::atif_exporter::conversation_to_atif;
+use chatty_core::exporters::jsonl_exporter::{
     SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
 };
-use crate::chatty::factories::AgentClient;
+use chatty_core::factories::AgentClient;
 use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
     StreamStatus,
 };
-use crate::chatty::repositories::{ConversationData, ConversationRepository};
+use chatty_core::repositories::{ConversationData, ConversationRepository};
 use crate::chatty::services::StreamChunk;
 use crate::chatty::services::{generate_title, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
-use crate::chatty::tools::LocalModuleAgentSummary;
+use chatty_core::tools::LocalModuleAgentSummary;
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
@@ -43,8 +43,10 @@ use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 use chatty_core::factories::agent_factory::AgentBuildContext;
 
 mod conversation_ops;
+mod conversation_ops_modify;
 mod export_ops;
 mod message_ops;
+mod message_ops_internals;
 mod slash_commands;
 
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to

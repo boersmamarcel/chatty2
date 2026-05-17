@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 
 use crate::chatty::services::StreamChunk;
-use crate::chatty::tools::PendingArtifacts;
+use chatty_core::tools::PendingArtifacts;
 
 /// Status of a stream lifecycle
 #[derive(Clone, Debug)]

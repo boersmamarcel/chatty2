@@ -34,7 +34,7 @@ mod settings;
 
 use assets::ChattyAssets;
 use auto_updater::AutoUpdater;
-use chatty::repositories::{ConversationRepository, ConversationSqliteRepository};
+use chatty_core::repositories::{ConversationRepository, ConversationSqliteRepository};
 use chatty::{ChattyApp, GlobalChattyApp};
 use settings::SettingsView;
 use std::path::PathBuf;
@@ -792,7 +792,7 @@ fn main() {
         // Safe to background because MCP connections (the first PATH consumers) don't
         // start until providers are loaded asynchronously, which takes longer.
         std::thread::spawn(|| {
-            chatty::auth::azure_auth::augment_gui_app_path();
+            chatty_core::auth::azure_auth::augment_gui_app_path();
         });
 
         // Initialize MCP service for managing MCP server connections
@@ -856,7 +856,7 @@ fn main() {
                         if needs_cache {
                             tracing::info!("Pre-initializing Azure token cache");
                             cx.spawn(|_cx: &mut AsyncApp| async move {
-                                if let Ok(cache) = chatty::auth::AzureTokenCache::new() {
+                                if let Ok(cache) = chatty_core::auth::AzureTokenCache::new() {
                                     // Pre-warm cache with initial token
                                     if let Err(e) = cache.get_token().await {
                                         tracing::warn!(error = ?e, "Failed to pre-fetch Azure token");
