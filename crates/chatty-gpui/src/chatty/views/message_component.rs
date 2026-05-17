@@ -401,6 +401,18 @@ where
             // Render text that came before this tool call
             let text_before = &tool_call.text_before;
 
+            tracing::trace!(
+                target: "chatty_gpui::render::message",
+                event = "interleave_segment",
+                msg_index = index,
+                tool_idx = tool_idx,
+                tool_name = %tool_call.tool_name,
+                text_before_len = text_before.len(),
+                last_text_end = last_text_end,
+                will_render_segment = text_before.len() > last_text_end,
+                "interleave_segment: tool call",
+            );
+
             debug!(
                 tool_idx = tool_idx,
                 tool_name = %tool_call.tool_name,
@@ -460,7 +472,7 @@ where
                     on_diff_clone(msg_idx, tool_idx, cx);
                 };
 
-            container = container.child(div().mt_2().mb_2().child(
+            container = container.child(div().mt_2().mb_2().w_full().child(
                 super::trace_components::render_tool_call_inline(
                     super::trace_components::InlineToolCallRenderArgs {
                         tool_call,
@@ -537,6 +549,17 @@ where
     }
 
     // Render any remaining text after the last tool call
+    let remaining_after_tools_len = full_content.len().saturating_sub(last_text_end);
+    tracing::trace!(
+        target: "chatty_gpui::render::message",
+        event = "interleave_segment",
+        msg_index = index,
+        kind = "remaining",
+        last_text_end = last_text_end,
+        full_content_len = full_content.len(),
+        remaining_after_tools_len = remaining_after_tools_len,
+        "interleave_segment: remaining text after last tool call",
+    );
     if last_text_end < full_content.len() {
         let remaining_text = &full_content[last_text_end..];
         if !remaining_text.is_empty() {
@@ -680,9 +703,19 @@ where
 {
     let is_dark = cx.theme().mode.is_dark();
 
-    // Full render for messages in viewport
+    // Full render for messages in viewport.
+    //
+    // The container is `flex_col` so the layout context is identical between
+    // the streaming and finalized render branches. Without this, finalizing
+    // a streaming markdown message would switch the container from "flex
+    // column with a wrapped flex_col child" to "block with N direct
+    // children", which produced a one-frame layout reflow that has been
+    // observed as overlapping rendering. See `docs/debug_ui.md`.
     let mut container = div()
         .max_w(relative(1.)) // Max 100% of container width
+        .flex()
+        .flex_col()
+        .w_full()
         .p_3()
         .rounded_lg();
 
@@ -767,6 +800,30 @@ where
     // Markdown is rendered through the full pipeline for both streaming and finalized;
     // finalized content is cached, streaming content is parsed fresh each render.
 
+    let trace_items_count = msg
+        .live_trace
+        .as_ref()
+        .map(|t| t.items.len())
+        .or_else(|| {
+            msg.system_trace_view
+                .as_ref()
+                .map(|v| v.read(cx).get_trace().items.len())
+        })
+        .unwrap_or(0);
+
+    tracing::trace!(
+        target: "chatty_gpui::render::message",
+        index = index,
+        role = ?msg.role,
+        is_streaming = msg.is_streaming,
+        is_markdown = msg.is_markdown,
+        should_interleave = should_interleave,
+        content_len = msg.content.len(),
+        trace_items = trace_items_count,
+        attachments = msg.attachments.len(),
+        "render_message",
+    );
+
     debug!(
         index = index,
         is_markdown = msg.is_markdown,
@@ -811,6 +868,9 @@ where
     let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
     match msg.role {
         MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
+            .w_full()
+            .flex()
+            .flex_col()
             .child(final_container)
             .child(render_assistant_actions(
                 &msg.content,

@@ -2,7 +2,6 @@
 //!
 //! # What lives here
 //!
-//! - `render_loading_skeleton` — placeholder shown while messages load.
 //! - `render_start_screen` — the welcome / capability-summary screen
 //!   shown when a conversation has no messages yet.
 //! - `render_status_badge` / `summarize_workspace` — helpers used only
@@ -15,7 +14,6 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::skeleton::Skeleton;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -28,18 +26,6 @@ use crate::settings::models::{
 use super::ChatView;
 
 impl ChatView {
-    /// Render loading skeleton indicator
-    pub(super) fn render_loading_skeleton(&self) -> impl IntoElement {
-        div()
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(Skeleton::new().w(px(280.)).h(px(16.)).rounded(px(4.)))
-            .child(Skeleton::new().w(px(220.)).h(px(16.)).rounded(px(4.)))
-            .child(Skeleton::new().w(px(180.)).h(px(16.)).rounded(px(4.)))
-    }
-
     /// Render a desktop-adapted onboarding screen for a new/empty chat.
     pub(super) fn render_start_screen(&self, cx: &Context<Self>) -> impl IntoElement {
         let (workspace_override, skill_count) = {

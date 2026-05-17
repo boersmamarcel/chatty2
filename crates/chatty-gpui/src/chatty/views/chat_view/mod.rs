@@ -56,6 +56,7 @@ use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::SystemTrace;
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
+use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -96,6 +97,12 @@ pub struct ChatView {
     /// receives live progress lines while a sub-agent subprocess is running.
     /// `None` when no sub-agent is active.
     sub_agent_progress_msg_idx: Option<usize>,
+    /// Animated "Thinking…" indicator entity. Owns its own rotation
+    /// timer so the spinner + label keep updating even when no stream
+    /// events are arriving (typical while a tool runs silently).
+    /// Reset on every new assistant message so the elapsed counter
+    /// makes sense per-turn.
+    thinking_indicator: Entity<ThinkingIndicator>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -247,6 +254,7 @@ impl ChatView {
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
             sub_agent_progress_msg_idx: None,
+            thinking_indicator: new_thinking_indicator(cx),
         }
     }
 
@@ -313,9 +321,16 @@ impl ChatView {
             history_index: None,
         });
 
-        debug!(
+        // Reset the thinking indicator so the elapsed counter restarts
+        // and the user sees a fresh word for the new turn.
+        self.thinking_indicator
+            .update(cx, |indicator, cx| indicator.reset(cx));
+
+        trace!(
+            target: "chatty_gpui::render::stream",
             total_messages = self.messages.len(),
-            "Assistant message started"
+            conversation_id = ?self.conversation_id,
+            "start_assistant_message",
         );
         cx.notify();
         self.activate_sticky_scroll();
@@ -323,33 +338,50 @@ impl ChatView {
 
     /// Append text to the current streaming assistant message
     pub fn append_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        debug!(
-            text_len = text.len(),
-            total_messages = self.messages.len(),
-            "append_assistant_text called"
-        );
+        let last_msg_streaming = self
+            .messages
+            .last()
+            .map(|m| m.is_streaming)
+            .unwrap_or(false);
+        let content_len_before = self.messages.last().map(|m| m.content.len()).unwrap_or(0);
+
         if let Some(last) = self.messages.last_mut() {
-            debug!(
-                is_streaming = last.is_streaming,
-                content_len = last.content.len(),
-                "Last message details"
-            );
             if last.is_streaming {
                 last.content.push_str(text);
-                debug!(new_content_len = last.content.len(), "Text appended");
+                trace!(
+                    target: "chatty_gpui::render::stream",
+                    delta_len = text.len(),
+                    content_len_before,
+                    new_content_len = last.content.len(),
+                    last_msg_streaming,
+                    conversation_id = ?self.conversation_id,
+                    "append_assistant_text",
+                );
                 cx.notify();
                 self.scroll_if_sticky();
             } else {
-                warn!("Last message NOT streaming, text dropped");
+                warn!(
+                    target: "chatty_gpui::render::stream",
+                    delta_len = text.len(),
+                    "append_assistant_text dropped: last message not streaming",
+                );
             }
         } else {
-            warn!("No messages in view, text dropped");
+            warn!(
+                target: "chatty_gpui::render::stream",
+                delta_len = text.len(),
+                "append_assistant_text dropped: no messages in view",
+            );
         }
     }
 
     /// Finalize the current streaming assistant message
     pub fn finalize_assistant_message(&mut self, cx: &mut Context<Self>) {
         if let Some(last) = self.messages.last_mut() {
+            let had_live_trace = last.live_trace.is_some();
+            let had_streaming_cache = self.streaming_parse_cache.is_some();
+            let content_len = last.content.len();
+
             last.is_streaming = false;
 
             // Finalize live trace - push final state to view entity
@@ -376,7 +408,21 @@ impl ChatView {
             // streaming render, so the scroll position needs to be updated.
             self.activate_sticky_scroll();
 
+            trace!(
+                target: "chatty_gpui::render::stream",
+                had_live_trace,
+                cleared_streaming_cache = had_streaming_cache,
+                content_len,
+                conversation_id = ?self.conversation_id,
+                "finalize_assistant_message",
+            );
+
             cx.notify();
+        } else {
+            warn!(
+                target: "chatty_gpui::render::stream",
+                "finalize_assistant_message called with no messages",
+            );
         }
     }
 
@@ -528,6 +574,19 @@ impl ChatView {
         })
     }
 
+    /// Whether to show the animated "thinking" indicator at the bottom
+    /// of the message list. We show it whenever the last assistant
+    /// message is still streaming, regardless of whether text or tool
+    /// chunks have already arrived. This matches Claude Code / Cursor
+    /// behaviour: a continuous "agent is working" signal until the
+    /// stream actually ends, so the user never sees a silent gap
+    /// between text chunks, between tool calls, or while a tool runs.
+    fn is_thinking_indicator_visible(&self) -> bool {
+        self.messages
+            .last()
+            .is_some_and(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
+    }
+
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
@@ -601,6 +660,7 @@ impl ChatView {
         let mut parsed_cache = std::mem::take(&mut self.parsed_cache);
         let mut streaming_cache = self.streaming_parse_cache.take();
 
+        let total_messages = self.messages.len();
         let visible_messages: Vec<(usize, &DisplayMessage)> = self
             .messages
             .iter()
@@ -614,6 +674,17 @@ impl ChatView {
                         .is_some_and(|trace| trace.has_items()))
             })
             .collect();
+
+        trace!(
+            target: "chatty_gpui::render::list",
+            total = total_messages,
+            visible = visible_messages.len(),
+            filtered = total_messages - visible_messages.len(),
+            is_awaiting = is_awaiting,
+            thinking_visible = is_awaiting,
+            conversation_id = ?self.conversation_id,
+            "render_message_list",
+        );
 
         let last_visible_assistant_idx = visible_messages
             .iter()
@@ -711,6 +782,9 @@ impl ChatView {
         self.collapsed_tool_calls = collapsed_tool_calls;
         self.diff_expanded = diff_expanded;
 
+        let thinking_visible = self.is_thinking_indicator_visible();
+        let thinking_indicator = self.thinking_indicator.clone();
+
         div()
             .flex_1()
             .min_h_0()
@@ -724,6 +798,7 @@ impl ChatView {
                     .child(
                         div()
                             .p_4()
+                            .w_full()
                             .flex()
                             .flex_col()
                             .when(show_start_screen, |this| {
@@ -731,9 +806,7 @@ impl ChatView {
                             })
                             .when(!show_start_screen, |this| this.gap_4())
                             .children(rendered)
-                            .when(is_awaiting, |this| {
-                                this.child(self.render_loading_skeleton())
-                            }),
+                            .when(thinking_visible, |this| this.child(thinking_indicator)),
                     ),
             )
             .vertical_scrollbar(&self.scroll_handle)
@@ -746,7 +819,96 @@ impl ChatView {
             .filter(|approval| self.conversation_id.as_ref() == Some(&approval.conversation_id))
             .cloned()
     }
+
+    /// Render the `CHATTY_DEBUG_UI` overlay (top-right of the chat pane) when
+    /// the env var is set at process start. Lists per-message render state so
+    /// rendering bugs can be diagnosed live without grepping logs.
+    ///
+    /// See [`docs/debug_ui.md`](../../../../../../docs/debug_ui.md) for the
+    /// field legend.
+    fn render_debug_overlay(&self, cx: &App) -> Option<AnyElement> {
+        if !*DEBUG_UI_ENABLED {
+            return None;
+        }
+
+        let total = self.messages.len();
+        let visible = self
+            .messages
+            .iter()
+            .filter(|msg| {
+                !(msg.is_streaming
+                    && msg.content.is_empty()
+                    && !msg
+                        .live_trace
+                        .as_ref()
+                        .is_some_and(|trace| trace.has_items()))
+            })
+            .count();
+        let filtered = total - visible;
+        let is_awaiting = self.is_awaiting_response();
+
+        let header = format!(
+            "ChatView debug\n  msgs: {visible} visible / {total} total   awaiting: {is_awaiting}   skeleton: {is_awaiting}   filtered: {filtered}"
+        );
+
+        let mut lines: Vec<String> = vec![header];
+        for (idx, msg) in self.messages.iter().enumerate() {
+            let role = match msg.role {
+                MessageRole::User => "User     ",
+                MessageRole::Assistant => "Assistant",
+            };
+            let trace_items = msg
+                .live_trace
+                .as_ref()
+                .map(|t| t.items.len())
+                .or_else(|| {
+                    msg.system_trace_view
+                        .as_ref()
+                        .map(|v| v.read(cx).get_trace().items.len())
+                })
+                .unwrap_or(0);
+            let trace_state = if let Some(view) = msg.system_trace_view.as_ref() {
+                // Note: `is_collapsed` is private; infer from existence + items.
+                let _ = view;
+                if trace_items > 0 { "open" } else { "empty" }
+            } else if msg.live_trace.is_some() {
+                "live"
+            } else {
+                "none"
+            };
+            lines.push(format!(
+                "  [{idx}] {role}  s={} m={} ti={} c={}  trace={}",
+                msg.is_streaming as u8,
+                msg.is_markdown as u8,
+                trace_items,
+                msg.content.len(),
+                trace_state,
+            ));
+        }
+
+        Some(
+            div()
+                .absolute()
+                .top_2()
+                .right_2()
+                .p_2()
+                .rounded_md()
+                .bg(gpui::black().opacity(0.7))
+                .text_color(gpui::white())
+                .text_xs()
+                .child(lines.join("\n"))
+                .into_any_element(),
+        )
+    }
 }
+
+/// Process-wide flag for the `CHATTY_DEBUG_UI` env var. Read once at startup
+/// so each render call is a single atomic load rather than a syscall.
+static DEBUG_UI_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var("CHATTY_DEBUG_UI")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+});
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -766,6 +928,7 @@ impl Render for ChatView {
             .w_full()
             .flex()
             .flex_col()
+            .relative()
             .bg(cx.theme().background)
             .overflow_hidden()
             .when(cfg!(target_os = "macos"), |this| this.pt(px(24.)))
@@ -817,6 +980,9 @@ impl Render for ChatView {
                 })
             })
             .child(self.render_message_list(cx))
+            .when_some(self.render_debug_overlay(cx), |this, overlay| {
+                this.child(overlay)
+            })
             .when_some(self.active_approval_for_display(), |this, pending| {
                 let view_entity = cx.entity();
                 this.child(

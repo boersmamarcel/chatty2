@@ -279,6 +279,7 @@ where
         .flex()
         .flex_col()
         .gap_1()
+        .w_full()
         .px_3()
         .py_2()
         .border_1()
