@@ -23,6 +23,7 @@
 
 pub mod a2a_client;
 pub mod agent_loop_guard;
+pub mod agent_task_controller;
 pub mod chart_svg_renderer;
 pub mod context_shaper;
 pub mod embedding_service;
@@ -55,6 +56,9 @@ pub mod typst_compiler_service;
 
 pub use a2a_client::{A2aClient, A2aStreamEvent};
 pub use agent_loop_guard::AgentLoopGuard;
+pub use agent_task_controller::{
+    AgentTaskController, AgentTaskResponse, AgentTaskSnapshot, AgentTodo, AgentTodoStatus,
+};
 pub use context_shaper::{ContextShaperSettings, ShapedContext, shape_context};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;

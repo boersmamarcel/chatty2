@@ -12,6 +12,7 @@ use rig_core::client::CompletionClient;
 use rig_core::tool::ToolDyn;
 
 use crate::auth::{AzureTokenCache, azure_auth};
+use crate::services::AgentTaskController;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
@@ -33,6 +34,7 @@ pub(super) async fn build_provider_agent(
     tool_vec: Vec<Box<dyn ToolDyn>>,
     mcp_tools: Option<McpToolSet>,
     native_tool_names: &HashSet<String>,
+    task_controller: AgentTaskController,
 ) -> Result<AgentClient> {
     let api_key = provider_config.api_key.clone();
     let base_url = provider_config.base_url.clone();
@@ -66,7 +68,10 @@ pub(super) async fn build_provider_agent(
             let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
             let agent =
                 build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::OpenRouter(agent))
+            Ok(AgentClient::OpenRouter {
+                agent,
+                task_controller,
+            })
         }
         ProviderType::Ollama => {
             let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -83,7 +88,10 @@ pub(super) async fn build_provider_agent(
 
             let agent =
                 build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::Ollama(agent))
+            Ok(AgentClient::Ollama {
+                agent,
+                task_controller,
+            })
         }
         ProviderType::AzureOpenAI => {
             build_azure_agent(
@@ -93,6 +101,7 @@ pub(super) async fn build_provider_agent(
                 tool_vec,
                 mcp_tools,
                 native_tool_names,
+                task_controller,
                 api_key,
                 base_url,
             )
@@ -111,6 +120,7 @@ async fn build_azure_agent(
     tool_vec: Vec<Box<dyn ToolDyn>>,
     mcp_tools: Option<McpToolSet>,
     native_tool_names: &HashSet<String>,
+    task_controller: AgentTaskController,
     api_key: Option<String>,
     base_url: Option<String>,
 ) -> Result<AgentClient> {
@@ -204,7 +214,10 @@ async fn build_azure_agent(
 
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
     let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-    Ok(AgentClient::AzureOpenAI(agent))
+    Ok(AgentClient::AzureOpenAI {
+        agent,
+        task_controller,
+    })
 }
 
 /// Normalize Azure endpoint URL:

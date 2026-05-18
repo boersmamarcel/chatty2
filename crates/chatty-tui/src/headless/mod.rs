@@ -357,6 +357,15 @@ pub async fn run_headless(
                 }
                 break;
             }
+            AppEvent::AgentProtocolFollowUp(prompt) => {
+                engine.handle_event(AppEvent::AgentProtocolFollowUp(prompt.clone()));
+                eprintln!("Agent protocol follow-up injected.");
+                tool_results_since_finalization = 0;
+                failed_tool_results_since_finalization = 0;
+                tool_budget_stop_requested = false;
+                failure_budget_stop_requested = false;
+                continue;
+            }
             AppEvent::StreamError(error) => {
                 engine.handle_event(AppEvent::StreamError(error.clone()));
                 eprintln!("Error: {}", error);

@@ -27,7 +27,8 @@ use crate::tools::{
     ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
     MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
     RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, WriteFileTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, UpdateTodoTool,
+    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -80,9 +81,18 @@ pub struct AgentBuildContext {
 /// Enum-based agent wrapper for multi-provider support
 #[derive(Clone)]
 pub enum AgentClient {
-    OpenRouter(Agent<rig_core::providers::openrouter::CompletionModel>),
-    Ollama(Agent<rig_core::providers::ollama::CompletionModel>),
-    AzureOpenAI(Agent<rig_core::providers::azure::CompletionModel>),
+    OpenRouter {
+        agent: Agent<rig_core::providers::openrouter::CompletionModel>,
+        task_controller: crate::services::AgentTaskController,
+    },
+    Ollama {
+        agent: Agent<rig_core::providers::ollama::CompletionModel>,
+        task_controller: crate::services::AgentTaskController,
+    },
+    AzureOpenAI {
+        agent: Agent<rig_core::providers::azure::CompletionModel>,
+        task_controller: crate::services::AgentTaskController,
+    },
 }
 
 impl AgentClient {
@@ -93,9 +103,23 @@ impl AgentClient {
     /// across title generation, summarization, and other non-streaming calls.
     pub async fn prompt(&self, prompt: &str) -> Result<String> {
         match self {
-            AgentClient::OpenRouter(agent) => Ok(agent.prompt(prompt).await?),
-            AgentClient::Ollama(agent) => Ok(agent.prompt(prompt).await?),
-            AgentClient::AzureOpenAI(agent) => Ok(agent.prompt(prompt).await?),
+            AgentClient::OpenRouter { agent, .. } => Ok(agent.prompt(prompt).await?),
+            AgentClient::Ollama { agent, .. } => Ok(agent.prompt(prompt).await?),
+            AgentClient::AzureOpenAI { agent, .. } => Ok(agent.prompt(prompt).await?),
+        }
+    }
+
+    pub fn task_controller(&self) -> crate::services::AgentTaskController {
+        match self {
+            AgentClient::OpenRouter {
+                task_controller, ..
+            }
+            | AgentClient::Ollama {
+                task_controller, ..
+            }
+            | AgentClient::AzureOpenAI {
+                task_controller, ..
+            } => task_controller.clone(),
         }
     }
 
@@ -867,6 +891,12 @@ impl AgentClient {
         // Create list_tools tool (always available)
         let list_tools = ListToolsTool::new_with_config(&tool_availability, mcp_tool_info.clone());
 
+        // Create agent todo protocol tools (always available, scoped to this agent build)
+        let agent_task_controller = crate::services::AgentTaskController::new();
+        let write_todos_tool = WriteTodosTool::new(agent_task_controller.clone());
+        let update_todo_tool = UpdateTodoTool::new(agent_task_controller.clone());
+        let verify_completion_tool = VerifyCompletionTool::new(agent_task_controller.clone());
+
         // Create list_agents tool (always available)
         let list_agents_tool =
             ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
@@ -912,6 +942,9 @@ impl AgentClient {
         // Build native tools once (all providers use the same set)
         let tool_vec = native_tools!(
             list_tools: list_tools,
+            write_todos_tool: write_todos_tool,
+            update_todo_tool: update_todo_tool,
+            verify_completion_tool: verify_completion_tool,
             fs_read: fs_read_tools,
             doc_retriever: doc_retriever_tool,
             fs_write: fs_write_tools,
@@ -955,6 +988,7 @@ impl AgentClient {
             tool_vec,
             mcp_tools,
             &native_tool_names,
+            agent_task_controller,
         )
         .await?;
 
@@ -965,9 +999,9 @@ impl AgentClient {
     #[allow(dead_code)]
     pub fn provider_name(&self) -> &'static str {
         match self {
-            AgentClient::OpenRouter(_) => "OpenRouter",
-            AgentClient::Ollama(_) => "Ollama",
-            AgentClient::AzureOpenAI(_) => "Azure OpenAI",
+            AgentClient::OpenRouter { .. } => "OpenRouter",
+            AgentClient::Ollama { .. } => "Ollama",
+            AgentClient::AzureOpenAI { .. } => "Azure OpenAI",
         }
     }
 }

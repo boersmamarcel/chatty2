@@ -6,9 +6,10 @@ use std::sync::atomic::AtomicBool;
 use anyhow::{Context, Result};
 use chatty_core::factories::AgentClient;
 use chatty_core::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
-use chatty_core::services::{ChunkAction, StreamChunk, stream_prompt};
+use chatty_core::services::{AgentTaskController, ChunkAction, StreamChunk, stream_prompt};
 use chatty_core::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 use rig_core::message::UserContent;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::events::AppEvent;
@@ -28,6 +29,10 @@ pub(super) struct StreamParams {
 /// Maps [`StreamChunk`] and [`InvokeAgentProgress`] events to [`AppEvent`]s.
 struct TuiStreamHandler {
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    task_controller: AgentTaskController,
+    pending_tool_names: HashMap<String, String>,
+    pending_follow_up: Option<String>,
+    cancelled: bool,
 }
 
 impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
@@ -42,6 +47,7 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallStarted { id, name } => {
+                self.pending_tool_names.insert(id.clone(), name.clone());
                 let _ = self.event_tx.send(AppEvent::ToolCallStarted { id, name });
                 Ok(ChunkAction::Continue)
             }
@@ -52,10 +58,22 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallResult { id, result } => {
+                if let Some(name) = self.pending_tool_names.remove(&id)
+                    && let Some(prompt) = self.task_controller.observe_tool_result(&name)
+                {
+                    self.pending_follow_up = Some(prompt);
+                    return Ok(ChunkAction::Break);
+                }
                 let _ = self.event_tx.send(AppEvent::ToolCallResult { id, result });
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallError { id, error } => {
+                if let Some(name) = self.pending_tool_names.remove(&id)
+                    && let Some(prompt) = self.task_controller.observe_tool_result(&name)
+                {
+                    self.pending_follow_up = Some(prompt);
+                    return Ok(ChunkAction::Break);
+                }
                 let _ = self.event_tx.send(AppEvent::ToolCallError { id, error });
                 Ok(ChunkAction::Continue)
             }
@@ -124,11 +142,20 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
     }
 
     fn on_cancelled(&mut self) {
+        self.cancelled = true;
         let _ = self.event_tx.send(AppEvent::StreamCancelled);
     }
 
     fn on_stream_ended(&mut self) {
         let _ = self.event_tx.send(AppEvent::StreamCompleted);
+        let follow_up = self.pending_follow_up.take().or_else(|| {
+            (!self.cancelled)
+                .then(|| self.task_controller.stream_end_follow_up())
+                .flatten()
+        });
+        if let Some(prompt) = follow_up {
+            let _ = self.event_tx.send(AppEvent::AgentProtocolFollowUp(prompt));
+        }
     }
 }
 
@@ -144,6 +171,7 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         max_agent_turns,
         invoke_agent_progress_slot,
     } = params;
+    let task_controller = agent.task_controller();
     let (mut stream, _user_message) = stream_prompt(
         &agent,
         &history,
@@ -157,7 +185,13 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
 
     let mut progress_rx =
         chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
-    let mut handler = TuiStreamHandler { event_tx };
+    let mut handler = TuiStreamHandler {
+        event_tx,
+        task_controller,
+        pending_tool_names: HashMap::new(),
+        pending_follow_up: None,
+        cancelled: false,
+    };
 
     chatty_core::services::run_stream_loop(
         &mut stream,
@@ -166,4 +200,101 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         &mut handler,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatty_core::services::{AgentTaskController, AgentTodoStatus, StreamChunkHandler};
+
+    fn handler() -> (
+        TuiStreamHandler,
+        mpsc::UnboundedReceiver<AppEvent>,
+        AgentTaskController,
+    ) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let task_controller = AgentTaskController::new();
+        (
+            TuiStreamHandler {
+                event_tx,
+                task_controller: task_controller.clone(),
+                pending_tool_names: HashMap::new(),
+                pending_follow_up: None,
+                cancelled: false,
+            },
+            event_rx,
+            task_controller,
+        )
+    }
+
+    #[test]
+    fn emits_follow_up_after_repeated_tools_without_todos() {
+        let (mut handler, mut event_rx, _controller) = handler();
+
+        handler
+            .on_chunk(Ok(StreamChunk::ToolCallStarted {
+                id: "a".into(),
+                name: "read_file".into(),
+            }))
+            .unwrap();
+        handler
+            .on_chunk(Ok(StreamChunk::ToolCallResult {
+                id: "a".into(),
+                result: "ok".into(),
+            }))
+            .unwrap();
+        handler
+            .on_chunk(Ok(StreamChunk::ToolCallStarted {
+                id: "b".into(),
+                name: "search_code".into(),
+            }))
+            .unwrap();
+        let action = handler
+            .on_chunk(Ok(StreamChunk::ToolCallResult {
+                id: "b".into(),
+                result: "ok".into(),
+            }))
+            .unwrap();
+        assert!(matches!(action, ChunkAction::Break));
+
+        handler.on_stream_ended();
+        let events = drain_events(&mut event_rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::AgentProtocolFollowUp(prompt) if prompt.contains("write_todos")))
+        );
+    }
+
+    #[test]
+    fn emits_follow_up_when_stream_ends_before_verification() {
+        let (mut handler, mut event_rx, controller) = handler();
+        controller
+            .write_todos(
+                "Ship".into(),
+                vec![("t1".into(), "Implement".into(), "Implement change".into())],
+            )
+            .unwrap();
+        controller
+            .update_todo("t1".into(), AgentTodoStatus::Done, None, None)
+            .unwrap();
+
+        handler.on_stream_ended();
+        let events = drain_events(&mut event_rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::AgentProtocolFollowUp(prompt) if prompt.contains("verify_completion")))
+        );
+    }
+
+    fn drain_events(event_rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> Vec<AppEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
 }

@@ -772,6 +772,13 @@ impl ChatEngine {
                 self.reset_stream_state();
                 EngineAction::Redraw
             }
+            AppEvent::AgentProtocolFollowUp(prompt) => {
+                self.add_system_message(format!("Agent protocol follow-up: {}", prompt));
+                if !self.is_streaming {
+                    self.send_message(prompt);
+                }
+                EngineAction::Redraw
+            }
             AppEvent::StreamCancelled => {
                 if let Some(last) = self.messages.last_mut() {
                     last.push_text("\n\n[Cancelled]");

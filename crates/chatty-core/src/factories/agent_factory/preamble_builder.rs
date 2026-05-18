@@ -181,6 +181,10 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
     // read_skill is always present
     tool_sections
         .push("- **read_skill** (load full skill instructions before executing)".to_string());
+    tool_sections.push(
+        "- **write_todos / update_todo / verify_completion** (required lifecycle for multi-step tasks: plan once, mark one todo in progress before work, mark it done/blocked after, then verify evidence before the final reply)"
+            .to_string(),
+    );
     // Always present
     tool_sections
         .push("- **list_tools** (get full tool list with descriptions at any time)".to_string());
@@ -332,6 +336,12 @@ an extra tool call is always higher than the cost of a direct answer.\n\
 \n\
 **Failure budget**: After 3 failed or unhelpful tool calls on the same sub-problem, stop trying \
 that approach. Switch strategy or make a best-guess decision. Infinite retries never converge.\n\
+\n\
+**Multi-step todo protocol**: For multi-step tasks, call `write_todos` once before doing work. \
+Then handle one todo at a time: call `update_todo` with `status=\"in_progress\"`, do that todo's \
+work, and call `update_todo` with `status=\"done\"` or `status=\"blocked\"` before moving on. \
+When blocking a todo, include both `blocked_reason` and `reflection`, then retry with a different \
+approach. Call `verify_completion` with concrete evidence before writing your final reply.\n\
 \n\
 **Code iteration limit**: After 3 rounds of code that give contradictory, confusing, or oscillating \
 output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \

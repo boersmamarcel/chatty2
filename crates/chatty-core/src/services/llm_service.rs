@@ -335,7 +335,7 @@ pub async fn stream_prompt(
     let history_snapshot = history.to_vec();
 
     let stream: ResponseStream = match agent {
-        AgentClient::OpenRouter(agent) => {
+        AgentClient::OpenRouter { agent, .. } => {
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
@@ -348,7 +348,7 @@ pub async fn stream_prompt(
                 process_agent_stream!(stream)
             }
         }
-        AgentClient::Ollama(agent) => {
+        AgentClient::Ollama { agent, .. } => {
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
@@ -361,7 +361,7 @@ pub async fn stream_prompt(
                 process_agent_stream!(stream)
             }
         }
-        AgentClient::AzureOpenAI(agent) => {
+        AgentClient::AzureOpenAI { agent, .. } => {
             let mut stream = agent
                 .stream_prompt(user_message.clone())
                 .with_history(history_snapshot)
