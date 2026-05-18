@@ -161,6 +161,34 @@ fi
 
 log "App bundle replaced successfully"
 
+# Ensure pdfium dylib is present in the updated bundle before relaunching.
+# This prevents launching a partially-copied app where PDF tools fail at runtime.
+PDFIUM_SRC="$APP_IN_DMG/Contents/Frameworks/libpdfium.dylib"
+PDFIUM_DST="$APP_BUNDLE/Contents/Frameworks/libpdfium.dylib"
+
+if [ -f "$PDFIUM_SRC" ]; then
+    if [ ! -f "$PDFIUM_DST" ]; then
+        log "WARNING: libpdfium.dylib missing after rsync; attempting direct copy repair"
+        mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+        if ! cp "$PDFIUM_SRC" "$PDFIUM_DST"; then
+            log "ERROR: Failed to repair missing libpdfium.dylib"
+            hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+            exit 1
+        fi
+        chmod 755 "$PDFIUM_DST" || true
+    fi
+else
+    log "ERROR: Source DMG is missing libpdfium.dylib at $PDFIUM_SRC"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
+if [ ! -f "$PDFIUM_DST" ]; then
+    log "ERROR: libpdfium.dylib still missing after install (expected at $PDFIUM_DST)"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
 # Clear quarantine attributes so Gatekeeper won't block future launches.
 xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
 
