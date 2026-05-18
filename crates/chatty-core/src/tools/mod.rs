@@ -116,8 +116,8 @@ pub use typst_tool::CompileTypstTool;
 /// ever removed or if a new tool introduces a schema gap.
 #[cfg(test)]
 mod gemini_compat_tests {
-    use rig::completion::ToolDefinition;
-    use rig::providers::gemini::completion::gemini_api_types::{Schema, Tool};
+    use rig_core::completion::ToolDefinition;
+    use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
 
     /// Recursively assert that every [`Schema`] node has a non-empty `type`.
     fn assert_no_empty_types(schema: &Schema, path: &str) {
@@ -151,7 +151,7 @@ mod gemini_compat_tests {
     #[tokio::test]
     async fn fetch_tool_gemini_compat() {
         use crate::tools::fetch_tool::FetchTool;
-        use rig::tool::Tool as RigTool;
+        use rig_core::tool::Tool as RigTool;
         let tool = FetchTool::new(None);
         check_gemini_compat(tool.definition("".to_string()).await);
     }
@@ -159,7 +159,7 @@ mod gemini_compat_tests {
     #[tokio::test]
     async fn chart_tool_gemini_compat() {
         use crate::tools::chart_tool::CreateChartTool;
-        use rig::tool::Tool as RigTool;
+        use rig_core::tool::Tool as RigTool;
         let tool = CreateChartTool::new(None, None);
         check_gemini_compat(tool.definition("".to_string()).await);
     }
@@ -167,7 +167,7 @@ mod gemini_compat_tests {
     #[tokio::test]
     async fn daytona_tool_gemini_compat() {
         use crate::tools::daytona_tool::DaytonaTool;
-        use rig::tool::Tool as RigTool;
+        use rig_core::tool::Tool as RigTool;
         let tool = DaytonaTool::new("dummy".to_string(), None);
         check_gemini_compat(tool.definition("".to_string()).await);
     }
@@ -175,7 +175,7 @@ mod gemini_compat_tests {
     #[tokio::test]
     async fn search_web_tool_gemini_compat() {
         use crate::tools::search_web_tool::SearchWebTool;
-        use rig::tool::Tool as RigTool;
+        use rig_core::tool::Tool as RigTool;
         let tool = SearchWebTool::new_fallback(10);
         check_gemini_compat(tool.definition("".to_string()).await);
     }

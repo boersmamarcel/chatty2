@@ -265,13 +265,12 @@ async fn handle_message_send(
     };
 
     // Pre-invocation credit check
-    if let Some(ref guard) = state.credit_guard {
-        if state.paid_modules.contains(module_name) {
-            if let Err(e) = guard.has_credits(module_name).await {
-                drop(reg);
-                return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
-            }
-        }
+    if let Some(ref guard) = state.credit_guard
+        && state.paid_modules.contains(module_name)
+        && let Err(e) = guard.has_credits(module_name).await
+    {
+        drop(reg);
+        return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
     }
 
     match module.chat(req).await {
@@ -453,21 +452,19 @@ async fn handle_message_stream(
                         let metrics = m.last_invocation_metrics();
                         drop(reg);
 
-                        if result.is_ok() {
-                            if let Some(ref usage) = usage {
-                                let usage = Arc::clone(usage);
-                                let name = module_name.clone();
-                                tokio::spawn(async move {
-                                    usage.record_invocation(
-                                        &name,
-                                        "latest",
-                                        metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
-                                        metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
-                                        metrics.as_ref().map(|m| m.fuel_consumed),
-                                        metrics.as_ref().map(|m| m.execution_ms),
-                                    ).await;
-                                });
-                            }
+                        if result.is_ok() && let Some(ref usage) = usage {
+                            let usage = Arc::clone(usage);
+                            let name = module_name.clone();
+                            tokio::spawn(async move {
+                                usage.record_invocation(
+                                    &name,
+                                    "latest",
+                                    metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
+                                    metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
+                                    metrics.as_ref().map(|m| m.fuel_consumed),
+                                    metrics.as_ref().map(|m| m.execution_ms),
+                                ).await;
+                            });
                         }
 
                         result

@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
-use rig::completion::Message;
-use rig::completion::message::AssistantContent;
-use rig::message::UserContent;
+use rig_core::completion::Message;
+use rig_core::completion::message::AssistantContent;
+use rig_core::message::UserContent;
 use tracing::{debug, error};
 
 use crate::factories::AgentClient;

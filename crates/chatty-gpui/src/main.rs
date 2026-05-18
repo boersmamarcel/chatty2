@@ -1,3 +1,23 @@
+// chatty-gpui — desktop binary entry point.
+//
+// Responsibilities (in order):
+// 1. Set up the Tokio runtime that backs all async work; enter its guard
+//    for the entire app lifetime.
+// 2. Initialize logging / panic handler.
+// 3. Run first-launch installation tasks (see chatty_core::install).
+// 4. Boot GPUI, register globals, async-load settings/providers/models.
+// 5. Construct the `ChattyApp` root entity and open the main window.
+// 6. Spawn the auto-updater background task.
+//
+// What does NOT live here:
+//   - Any view rendering (see `chatty/views/`).
+//   - Conversation / message logic (see `chatty/controllers/app_controller/`).
+//   - Settings UI (see `settings/views/`).
+//   - The auto-update download/install machinery itself (`auto_updater/`).
+//
+// On Windows release builds the `windows_subsystem = "windows"` attribute
+// hides the console window.
+
 // Hide console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -14,8 +34,8 @@ mod settings;
 
 use assets::ChattyAssets;
 use auto_updater::AutoUpdater;
-use chatty::repositories::{ConversationRepository, ConversationSqliteRepository};
 use chatty::{ChattyApp, GlobalChattyApp};
+use chatty_core::repositories::{ConversationRepository, ConversationSqliteRepository};
 use settings::SettingsView;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,260 +83,14 @@ actions!(
     ]
 );
 
-fn get_themes_dir() -> PathBuf {
-    // Check CHATTY_DATA_DIR environment variable (set by AppImage)
-    if let Ok(data_dir) = std::env::var("CHATTY_DATA_DIR") {
-        let themes_path = PathBuf::from(data_dir).join("themes");
-        if themes_path.exists() {
-            return themes_path;
-        }
-    }
 
-    // Try to find themes directory relative to the executable
-    #[cfg(target_os = "macos")]
-    {
-        // On macOS, check in the app bundle's Resources directory
-        if let Ok(exe_path) = std::env::current_exe()
-            && let Some(app_bundle) = exe_path
-                .ancestors()
-                .find(|p| p.extension().map(|e| e == "app").unwrap_or(false))
-        {
-            let resources_themes = app_bundle.join("Contents/Resources/themes");
-            if resources_themes.exists() {
-                return resources_themes;
-            }
-        }
-    }
+mod actions;
+mod themes;
 
-    // Default to ./themes for development and Linux/Windows
-    PathBuf::from("./themes")
-}
-
-fn init_themes(cx: &mut App) {
-    let themes_dir = get_themes_dir();
-    info!(themes_dir = ?themes_dir, "Loading themes from directory");
-
-    // Just watch themes directory to load the registry
-    if let Err(err) = ThemeRegistry::watch_dir(themes_dir, cx, |_cx| {
-        // Empty callback - just loading themes into registry
-    }) {
-        warn!(error = ?err, "Failed to watch themes directory");
-    }
-
-    // Observe theme changes and persist base theme name + dark mode to GeneralSettingsModel
-    // Only persist after initialization is complete to avoid overwriting saved preferences
-    cx.observe_global::<Theme>(|cx| {
-        // Skip saving during initialization - settings haven't been loaded yet
-        if !THEME_INIT_COMPLETE.load(Ordering::SeqCst) {
-            debug!("Skipping theme save during initialization");
-            return;
-        }
-
-        let full_theme_name = cx.theme().theme_name().to_string();
-        let is_dark = cx.theme().mode.is_dark();
-
-        // Extract base theme name using shared utility
-        let base_theme_name = settings::utils::extract_base_theme_name(&full_theme_name);
-
-        // Update model with base name and dark mode
-        {
-            let settings = cx.global_mut::<settings::models::general_model::GeneralSettingsModel>();
-            settings.theme_name = Some(base_theme_name);
-            settings.dark_mode = Some(is_dark);
-        }
-
-        // Save async
-        let settings = cx
-            .global::<settings::models::general_model::GeneralSettingsModel>()
-            .clone();
-        cx.spawn(|_cx: &mut AsyncApp| async move {
-            let repo = chatty_core::general_settings_repository();
-            if let Err(e) = repo.save(settings).await {
-                warn!(error = ?e, "Failed to save theme preference");
-            }
-        })
-        .detach();
-    })
-    .detach();
-
-    cx.refresh_windows();
-}
-
-/// Apply theme from saved settings (called after settings are loaded from JSON)
-fn apply_theme_from_settings(cx: &mut App) {
-    let base_theme_name = cx
-        .global::<settings::models::general_model::GeneralSettingsModel>()
-        .theme_name
-        .clone()
-        .unwrap_or_else(|| "Ayu".to_string());
-
-    let is_dark = cx
-        .global::<settings::models::general_model::GeneralSettingsModel>()
-        .dark_mode
-        .unwrap_or(false);
-
-    info!(
-        theme = %base_theme_name,
-        dark_mode = is_dark,
-        "Applying theme from saved settings"
-    );
-
-    // Find the appropriate theme variant using shared utility
-    let full_theme_name = settings::utils::find_theme_variant(cx, &base_theme_name, is_dark);
-
-    if let Some(theme) = ThemeRegistry::global(cx)
-        .themes()
-        .get(&full_theme_name)
-        .cloned()
-    {
-        // Set the mode first
-        let mode = if is_dark {
-            ThemeMode::Dark
-        } else {
-            ThemeMode::Light
-        };
-        Theme::global_mut(cx).mode = mode;
-
-        // Then apply the theme
-        Theme::global_mut(cx).apply_config(&theme);
-        cx.refresh_windows();
-
-        info!(theme = %full_theme_name, "Theme applied successfully");
-    } else {
-        warn!(
-            theme = %full_theme_name,
-            "Theme not found in registry, keeping default"
-        );
-    }
-
-    // Mark initialization complete - now the observer can save user changes
-    THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
-    debug!("Theme initialization complete, observer now active");
-}
-
-fn register_actions(cx: &mut App) {
-    // Register open settings action with platform-specific keybindings
-    debug!("Action registered");
-
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
-        KeyBinding::new("cmd-n", NewConversation, None),
-        KeyBinding::new("cmd-up", PreviousConversation, None),
-        KeyBinding::new("cmd-down", NextConversation, None),
-        KeyBinding::new("alt-backspace", DeleteActiveConversation, None),
-        KeyBinding::new("cmd-backspace", DeleteActiveConversation, None),
-    ]);
-
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([
-        KeyBinding::new("ctrl-,", OpenSettings, None),
-        KeyBinding::new("ctrl-q", Quit, None),
-        KeyBinding::new("ctrl-b", ToggleSidebar, None),
-        KeyBinding::new("ctrl-n", NewConversation, None),
-        KeyBinding::new("ctrl-up", PreviousConversation, None),
-        KeyBinding::new("ctrl-down", NextConversation, None),
-        KeyBinding::new("ctrl-backspace", DeleteActiveConversation, None),
-    ]);
-    cx.on_action(|_: &OpenSettings, cx: &mut App| {
-        debug!("Action triggered");
-        SettingsView::open_or_focus_settings_window(cx);
-    });
-    cx.on_action(|_: &Quit, cx: &mut App| {
-        debug!("Quit action triggered");
-        chatty::services::cleanup_thumbnails();
-
-        // Stop all active streams gracefully
-        if let Some(manager) = cx
-            .try_global::<chatty::models::GlobalStreamManager>()
-            .and_then(|g| g.get())
-        {
-            manager.update(cx, |mgr, cx| {
-                mgr.stop_all(cx);
-            });
-        }
-
-        // Disconnect from all MCP servers on quit.
-        let mcp_service = cx.global::<chatty::services::McpService>().clone();
-        cx.spawn(|_cx: &mut AsyncApp| async move {
-            if let Err(e) = mcp_service.disconnect_all().await {
-                error!(error = ?e, "Failed to disconnect MCP servers during shutdown");
-            }
-        })
-        .detach();
-
-        // Mandatory auto-update: if an update has been downloaded and is ready,
-        // install it silently before quitting so the next launch runs the new
-        // version. install_on_quit() does NOT relaunch — the user intended to
-        // quit, so we respect that while still ensuring the update is applied.
-        if let Some(updater) = cx.try_global::<AutoUpdater>()
-            && matches!(updater.status(), auto_updater::AutoUpdateStatus::Ready(..))
-        {
-            info!("Pending update found on quit — installing before exit");
-            cx.update_global::<AutoUpdater, _>(|updater, cx| {
-                updater.install_on_quit(cx);
-            });
-            return;
-        }
-
-        cx.quit();
-    });
-    cx.on_action(|_: &ToggleSidebar, cx: &mut App| {
-        debug!("Toggle sidebar action triggered");
-        with_chatty_app(cx, |app, cx| {
-            app.sidebar_view.update(cx, |sidebar, cx| {
-                sidebar.toggle_collapsed(cx);
-            });
-        });
-    });
-    cx.on_action(|_: &NewConversation, cx: &mut App| {
-        debug!("New conversation action triggered");
-        with_chatty_app(cx, |app, cx| {
-            app.start_new_conversation(cx);
-        });
-    });
-    cx.on_action(|_: &PreviousConversation, cx: &mut App| {
-        debug!("Previous conversation action triggered");
-        with_chatty_app(cx, |app, cx| {
-            app.navigate_conversation(-1, cx);
-        });
-    });
-    cx.on_action(|_: &NextConversation, cx: &mut App| {
-        debug!("Next conversation action triggered");
-        with_chatty_app(cx, |app, cx| {
-            app.navigate_conversation(1, cx);
-        });
-    });
-    cx.on_action(|_: &DeleteActiveConversation, cx: &mut App| {
-        debug!("Delete active conversation action triggered");
-        with_chatty_app(cx, |app, cx| {
-            app.delete_active_conversation(cx);
-        });
-    });
-    cx.on_action(|_: &InstallCli, cx: &mut App| {
-        debug!("Install CLI action triggered");
-        cli_installer::install_cli(cx);
-    });
-}
-
+use actions::register_actions;
 #[cfg(target_os = "macos")]
-fn set_app_menus(cx: &mut App) {
-    cx.set_menus(vec![Menu {
-        name: "Chatty".into(),
-        items: vec![
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Settings", OpenSettings),
-            MenuItem::action("Toggle Sidebar", ToggleSidebar),
-            MenuItem::separator(),
-            MenuItem::action("Install CLI\u{2026}", InstallCli),
-            MenuItem::separator(),
-            MenuItem::action("Quit", Quit),
-        ],
-    }]);
-}
+use actions::set_app_menus;
+use themes::{apply_theme_from_settings, init_themes};
 
 fn main() {
     // Initialize error collector layer
@@ -772,7 +546,7 @@ fn main() {
         // Safe to background because MCP connections (the first PATH consumers) don't
         // start until providers are loaded asynchronously, which takes longer.
         std::thread::spawn(|| {
-            chatty::auth::azure_auth::augment_gui_app_path();
+            chatty_core::auth::azure_auth::augment_gui_app_path();
         });
 
         // Initialize MCP service for managing MCP server connections
@@ -836,7 +610,7 @@ fn main() {
                         if needs_cache {
                             tracing::info!("Pre-initializing Azure token cache");
                             cx.spawn(|_cx: &mut AsyncApp| async move {
-                                if let Ok(cache) = chatty::auth::AzureTokenCache::new() {
+                                if let Ok(cache) = chatty_core::auth::AzureTokenCache::new() {
                                     // Pre-warm cache with initial token
                                     if let Err(e) = cache.get_token().await {
                                         tracing::warn!(error = ?e, "Failed to pre-fetch Azure token");
@@ -1327,10 +1101,10 @@ fn main() {
 
             if let Some(ext) = loaded_ext.take() {
                 let count = ext.extensions.len();
-                if save_backfilled_extensions {
-                    if let Err(e) = chatty_core::extensions_repository().save(ext.clone()).await {
-                        warn!(error = ?e, "Failed to persist backfilled extension pricing metadata");
-                    }
+                if save_backfilled_extensions
+                    && let Err(e) = chatty_core::extensions_repository().save(ext.clone()).await
+                {
+                    warn!(error = ?e, "Failed to persist backfilled extension pricing metadata");
                 }
                 cx.update(|cx| {
                     info!(count, "Extensions loaded from disk");

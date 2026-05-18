@@ -4,7 +4,17 @@ A high-level guide to Chatty's module structure, data flow, and key design decis
 
 ## Workspace Structure
 
-Chatty is organized as a Cargo workspace with three crates:
+Chatty is organized as a Cargo workspace. The three crates documented in
+depth below (`chatty-core`, `chatty-gpui`, `chatty-tui`) hold the bulk of
+the application logic. Additional crates support WASM agent modules and
+ancillary services — see [`AGENTS.md`](../AGENTS.md#workspace-map) for the
+full list:
+
+- `chatty-wasm-runtime` — Wasmtime runtime for WASM agent modules
+- `chatty-module-registry` — module discovery, manifest, lifecycle
+- `chatty-protocol-gateway` — HTTP gateway exposing modules via OpenAI/MCP/A2A
+- `chatty-module-sdk` — standalone SDK for building `wasm32-wasip2` modules
+- `hive-client`, `hive-billing-sdk` — Hive registry client and billing SDK
 
 ```
 Cargo.toml                       # Workspace root

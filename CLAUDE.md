@@ -179,6 +179,7 @@ sudo apt-get install -y \
 | **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated | Automated AI code review via Claude. |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
 | **Update README** (`update-readme.yml`) | PR merged to `main` | Claude analyzes the diff; if user-facing features changed, opens a follow-up PR with README updates. Add `skip-readme` label to opt out. |
+| **Update Agent Docs** (`update-agent-docs.yml`) | PR merged to `main` | Claude analyzes the merged PR for guidance drift and opens a follow-up PR to sync `CLAUDE.md` / `AGENTS.md` when needed. Add `skip-agent-docs` label to opt out. |
 | **UI Sync Check** (`ui-sync-check.yml`) | PR merged to `main` | Claude checks if one UI crate (chatty-gpui/chatty-tui) changed without the other; creates `ui-sync` labeled issue if sync needed. Add `skip-sync-check` label to opt out. |
 | **Dependency Check** (`dependency-check.yml`) | Weekly (Monday 9:00 UTC) or manual | Checks crates.io for dependency updates, creates grouped tech-debt issues. |
 

@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use rig::OneOrMany;
-use rig::completion::Message;
-use rig::message::UserContent;
-use rig::streaming::StreamingPrompt;
+use rig_core::OneOrMany;
+use rig_core::completion::Message;
+use rig_core::message::UserContent;
+use rig_core::streaming::StreamingPrompt;
 use tokio::sync::mpsc;
 
 use crate::factories::AgentClient;
@@ -56,12 +56,12 @@ macro_rules! process_agent_stream {
         Box::pin(async_stream::stream! {
             while let Some(item) = $stream.next().await {
                 match item {
-                    Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                    Ok(rig_core::agent::MultiTurnStreamItem::StreamAssistantItem(content)) => {
                         match content {
-                            rig::streaming::StreamedAssistantContent::Text(text) => {
+                            rig_core::streaming::StreamedAssistantContent::Text(text) => {
                                 yield Ok(StreamChunk::Text(text.text));
                             }
-                            rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
+                            rig_core::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                 use tracing::info;
                                 // Resolve a unique tool call ID.
                                 // Priority: provider's call_id > rig's internal_call_id
@@ -91,9 +91,9 @@ macro_rules! process_agent_stream {
                             _ => {}
                         }
                     }
-                    Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(user_content)) => {
-                        use rig::streaming::StreamedUserContent;
-                        use rig::completion::message::ToolResultContent;
+                    Ok(rig_core::agent::MultiTurnStreamItem::StreamUserItem(user_content)) => {
+                        use rig_core::streaming::StreamedUserContent;
+                        use rig_core::completion::message::ToolResultContent;
 
                         let StreamedUserContent::ToolResult { tool_result, internal_call_id } = user_content;
                         let content_text = tool_result.content.iter()
@@ -137,7 +137,7 @@ macro_rules! process_agent_stream {
                             });
                         }
                     }
-                    Ok(rig::agent::MultiTurnStreamItem::FinalResponse(final_response)) => {
+                    Ok(rig_core::agent::MultiTurnStreamItem::FinalResponse(final_response)) => {
                         // Extract token usage from the final response
                         let usage = final_response.usage();
                         let input_tokens = usage.input_tokens as u32;
@@ -172,12 +172,12 @@ macro_rules! process_agent_stream_with_approvals {
                     // Process agent stream items
                     item = agent_stream.next() => {
                         match item {
-                            Some(Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(content))) => {
+                            Some(Ok(rig_core::agent::MultiTurnStreamItem::StreamAssistantItem(content))) => {
                                 match content {
-                                    rig::streaming::StreamedAssistantContent::Text(text) => {
+                                    rig_core::streaming::StreamedAssistantContent::Text(text) => {
                                         yield Ok(StreamChunk::Text(text.text));
                                     }
-                                    rig::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
+                                    rig_core::streaming::StreamedAssistantContent::ToolCall { tool_call, internal_call_id } => {
                                         use tracing::info;
                                         // Resolve a unique tool call ID.
                                         // Priority: provider's call_id > rig's internal_call_id
@@ -209,9 +209,9 @@ macro_rules! process_agent_stream_with_approvals {
                                     _ => {}
                                 }
                             }
-                            Some(Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(user_content))) => {
-                                use rig::streaming::StreamedUserContent;
-                                use rig::completion::message::ToolResultContent;
+                            Some(Ok(rig_core::agent::MultiTurnStreamItem::StreamUserItem(user_content))) => {
+                                use rig_core::streaming::StreamedUserContent;
+                                use rig_core::completion::message::ToolResultContent;
 
                                 let StreamedUserContent::ToolResult { tool_result, internal_call_id } = user_content;
                                 let content_text = tool_result.content.iter()
@@ -255,7 +255,7 @@ macro_rules! process_agent_stream_with_approvals {
                                     });
                                 }
                             }
-                            Some(Ok(rig::agent::MultiTurnStreamItem::FinalResponse(final_response))) => {
+                            Some(Ok(rig_core::agent::MultiTurnStreamItem::FinalResponse(final_response))) => {
                                 let usage = final_response.usage();
                                 yield Ok(StreamChunk::TokenUsage {
                                     input_tokens: usage.input_tokens as u32,

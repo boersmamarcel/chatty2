@@ -1,4 +1,4 @@
-use rig::tool::ToolDyn;
+use rig_core::tool::ToolDyn;
 
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;

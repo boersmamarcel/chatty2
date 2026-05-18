@@ -124,7 +124,7 @@ pub struct SnapshotInputs {
     pub model_context_limit: usize,
     pub response_reserve: usize,
     pub preamble: String,
-    pub history: Vec<rig::completion::Message>,
+    pub history: Vec<rig_core::completion::Message>,
     pub user_message_text: String,
     // Populated for potential future use (e.g. re-running tool estimation in-task).
     #[allow(dead_code)]
@@ -295,11 +295,11 @@ pub fn check_pressure(
 
 // ── Helpers for use from app_controller.rs ────────────────────────────────────
 
-/// Extract plain text from a slice of `rig::message::UserContent`.
+/// Extract plain text from a slice of `rig_core::message::UserContent`.
 ///
 /// Concatenates all `Text` variants with a single space. Non-text content
 /// (images, PDFs) is skipped — we only want to count the message text tokens.
-pub fn extract_user_message_text(contents: &[rig::message::UserContent]) -> String {
+pub fn extract_user_message_text(contents: &[rig_core::message::UserContent]) -> String {
     chatty_core::services::extract_user_text(contents)
 }
 
@@ -314,7 +314,7 @@ pub fn extract_user_message_text(contents: &[rig::message::UserContent]) -> Stri
 pub fn gather_snapshot_inputs(
     conv_id: &str,
     user_message_text: String,
-    history: Vec<rig::completion::Message>,
+    history: Vec<rig_core::completion::Message>,
     cx: &mut gpui::App,
 ) -> Option<SnapshotInputs> {
     use crate::chatty::models::ConversationsStore;
@@ -472,8 +472,8 @@ mod tests {
 
     #[test]
     fn extract_user_message_text_gets_text_content() {
-        use rig::completion::message::Text;
-        use rig::message::UserContent;
+        use rig_core::completion::message::Text;
+        use rig_core::message::UserContent;
         let contents = vec![UserContent::Text(Text {
             text: "Hello, world!".to_string(),
         })];
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn extract_user_message_text_empty_on_no_text_content() {
-        let contents: Vec<rig::message::UserContent> = vec![];
+        let contents: Vec<rig_core::message::UserContent> = vec![];
         assert_eq!(extract_user_message_text(&contents), "");
     }
 

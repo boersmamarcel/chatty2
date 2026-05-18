@@ -1,8 +1,8 @@
 use anyhow::Result;
-use rig::OneOrMany;
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, Text};
-use rig::message::UserContent;
+use rig_core::OneOrMany;
+use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, Text};
+use rig_core::message::UserContent;
 use tracing::{debug, info};
 
 use crate::factories::AgentClient;

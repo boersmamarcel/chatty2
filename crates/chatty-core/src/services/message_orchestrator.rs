@@ -1,4 +1,4 @@
-use rig::message::UserContent;
+use rig_core::message::UserContent;
 use tracing::info;
 
 /// Extract the text portion of user contents for memory query.

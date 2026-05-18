@@ -157,13 +157,12 @@ async fn handle_tools_call(
     };
 
     // Pre-invocation credit check for paid modules only
-    if let Some(ref guard) = state.credit_guard {
-        if state.paid_modules.contains(module_name) {
-            if let Err(e) = guard.has_credits(module_name).await {
-                drop(reg);
-                return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
-            }
-        }
+    if let Some(ref guard) = state.credit_guard
+        && state.paid_modules.contains(module_name)
+        && let Err(e) = guard.has_credits(module_name).await
+    {
+        drop(reg);
+        return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
     }
 
     match module.invoke_tool(&tool_name, &args).await {

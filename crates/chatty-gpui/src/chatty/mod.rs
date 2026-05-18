@@ -1,9 +1,14 @@
-// Fully delegated to chatty-core
-pub use chatty_core::auth;
-pub use chatty_core::exporters;
-pub use chatty_core::factories;
-pub use chatty_core::repositories;
-pub use chatty_core::tools;
+// chatty-gpui::chatty — desktop frontend root.
+//
+// Locally-defined (GPUI-specific):
+//   controllers/   models/   services/   token_budget/   views/
+//
+// For UI-agnostic core types (auth, exporters, factories, repositories,
+// tools), import directly from `chatty_core::…`. Earlier versions of this
+// crate re-exported those modules here; the re-exports were removed because
+// they hid which crate a definition lived in. If you grep for a definition
+// and find nothing under this directory, it lives under
+// `crates/chatty-core/src/`.
 
 // Partially local (gpui-specific files + re-exports from core)
 pub mod controllers;

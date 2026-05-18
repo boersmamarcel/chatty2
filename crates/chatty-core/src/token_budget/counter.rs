@@ -1,4 +1,4 @@
-use rig::completion::Message;
+use rig_core::completion::Message;
 use std::sync::LazyLock;
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 

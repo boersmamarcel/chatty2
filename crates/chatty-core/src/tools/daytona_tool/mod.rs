@@ -1,8 +1,32 @@
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
+//! `daytona_tool` — execute code in a Daytona cloud sandbox.
+//!
+//! Provides an LLM tool that creates/uses Daytona workspaces to run code
+//! safely off-host. Used by the agent when the user picks Daytona as the
+//! execution backend instead of local shell or Docker.
+//!
+//! # What lives here
+//!
+//! - `DaytonaTool` rig-core tool implementation (request shape, response,
+//!   error handling).
+//! - HTTP client glue against the Daytona API.
+//! - Long-running workspace management (create/start/stop/destroy).
+//!
+//! # What does NOT live here
+//!
+//! - Local shell execution — `services::shell_service`.
+//! - Docker-backed sandbox — `sandbox/` module.
+//! - User-facing settings (API key, default workspace) — settings UI.
+//!
+//! See `docs/monty-sandbox.md` for the broader sandbox architecture.
+
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
+
+mod helpers;
+use helpers::*;
 
 use crate::models::message_types::ExecutionEngine;
 
@@ -126,215 +150,7 @@ struct FileEntry {
     size: u64,
 }
 
-/// Check whether a filename has a recognized downloadable extension.
-fn has_downloadable_extension(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    DOWNLOADABLE_EXTENSIONS
-        .iter()
-        .any(|ext| lower.ends_with(&format!(".{}", ext)))
-}
-
-/// Common Python standard library modules that should NOT be pip-installed.
-const PYTHON_STDLIB: &[&str] = &[
-    "abc",
-    "argparse",
-    "ast",
-    "asyncio",
-    "base64",
-    "bisect",
-    "calendar",
-    "cmath",
-    "collections",
-    "colorsys",
-    "concurrent",
-    "configparser",
-    "contextlib",
-    "copy",
-    "csv",
-    "ctypes",
-    "dataclasses",
-    "datetime",
-    "decimal",
-    "difflib",
-    "email",
-    "enum",
-    "errno",
-    "fcntl",
-    "fileinput",
-    "fnmatch",
-    "fractions",
-    "ftplib",
-    "functools",
-    "gc",
-    "getpass",
-    "glob",
-    "gzip",
-    "hashlib",
-    "heapq",
-    "hmac",
-    "html",
-    "http",
-    "imaplib",
-    "importlib",
-    "inspect",
-    "io",
-    "ipaddress",
-    "itertools",
-    "json",
-    "keyword",
-    "linecache",
-    "locale",
-    "logging",
-    "lzma",
-    "math",
-    "mimetypes",
-    "multiprocessing",
-    "numbers",
-    "operator",
-    "os",
-    "pathlib",
-    "pickle",
-    "platform",
-    "plistlib",
-    "pprint",
-    "pdb",
-    "queue",
-    "random",
-    "re",
-    "readline",
-    "reprlib",
-    "secrets",
-    "select",
-    "shelve",
-    "shlex",
-    "shutil",
-    "signal",
-    "site",
-    "smtplib",
-    "socket",
-    "sqlite3",
-    "ssl",
-    "stat",
-    "statistics",
-    "string",
-    "struct",
-    "subprocess",
-    "sys",
-    "syslog",
-    "tempfile",
-    "textwrap",
-    "threading",
-    "time",
-    "timeit",
-    "tkinter",
-    "token",
-    "tokenize",
-    "tomllib",
-    "traceback",
-    "tty",
-    "turtle",
-    "types",
-    "typing",
-    "unicodedata",
-    "unittest",
-    "urllib",
-    "uuid",
-    "venv",
-    "warnings",
-    "wave",
-    "weakref",
-    "webbrowser",
-    "xml",
-    "xmlrpc",
-    "zipfile",
-    "zipimport",
-    "zlib",
-    // Also exclude _ prefixed and __future__
-    "__future__",
-    "_thread",
-];
-
-/// Map import names to pip package names for common mismatches.
-fn pip_package_name(import_name: &str) -> &str {
-    match import_name {
-        "cv2" => "opencv-python",
-        "PIL" => "Pillow",
-        "sklearn" => "scikit-learn",
-        "bs4" => "beautifulsoup4",
-        "yaml" => "pyyaml",
-        "attr" => "attrs",
-        "dateutil" => "python-dateutil",
-        "dotenv" => "python-dotenv",
-        "gi" => "PyGObject",
-        "lxml" => "lxml",
-        "wx" => "wxPython",
-        _ => import_name,
-    }
-}
-
-/// Extract top-level Python import names from source code.
-fn extract_python_imports(code: &str) -> Vec<String> {
-    let mut imports = std::collections::HashSet::new();
-    for line in code.lines() {
-        let trimmed = line.trim();
-        // `import foo`, `import foo.bar`, `import foo as f`
-        if let Some(rest) = trimmed.strip_prefix("import ") {
-            for part in rest.split(',') {
-                let module = part.split_whitespace().next().unwrap_or("");
-                let top = module.split('.').next().unwrap_or("");
-                if !top.is_empty() {
-                    imports.insert(top.to_string());
-                }
-            }
-        }
-        // `from foo import bar`, `from foo.bar import baz`
-        if let Some(rest) = trimmed.strip_prefix("from ") {
-            let module = rest.split_whitespace().next().unwrap_or("");
-            let top = module.split('.').next().unwrap_or("");
-            if !top.is_empty() {
-                imports.insert(top.to_string());
-            }
-        }
-    }
-
-    imports
-        .into_iter()
-        .filter(|name| !PYTHON_STDLIB.contains(&name.as_str()))
-        .collect()
-}
-
-/// Extract file paths that the code writes to (e.g., savefig, write_html, to_csv).
-///
-/// Returns paths as written in the code — may be absolute or relative.
-fn extract_output_paths(code: &str) -> Vec<String> {
-    use std::sync::LazyLock;
-
-    static RE_SAVE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(
-            r#"(?:savefig|write_html|write_image|to_csv|to_excel|to_parquet|to_json|\.save)\s*\(\s*['"]([^'"]+)['"]"#
-        ).unwrap()
-    });
-    static RE_OPEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"open\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]"#).unwrap()
-    });
-
-    let mut paths = Vec::new();
-    for cap in RE_SAVE.captures_iter(code) {
-        if let Some(m) = cap.get(1) {
-            paths.push(m.as_str().to_string());
-        }
-    }
-    for cap in RE_OPEN.captures_iter(code) {
-        if let Some(m) = cap.get(1) {
-            let path = m.as_str();
-            if has_downloadable_extension(path) {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    paths
-}
-
+// Check whether a filename has a recognized downloadable extension.
 // ── Tool implementation ──────────────────────────────────────────────────────
 
 /// Code execution tool powered by the Daytona cloud sandbox service.
@@ -1095,124 +911,4 @@ impl Tool for DaytonaTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_daytona_tool_definition() {
-        let tool = DaytonaTool::new("test-key".into(), None);
-        let def = tool.definition("test".to_string()).await;
-        assert_eq!(def.name, "daytona_run");
-        assert!(def.description.contains("sandbox"));
-    }
-
-    #[tokio::test]
-    async fn test_daytona_tool_empty_code() {
-        let tool = DaytonaTool::new("test-key".into(), None);
-        let args = DaytonaToolArgs {
-            code: "   ".to_string(),
-            language: None,
-        };
-        let result = tool.call(args).await;
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_api_error_auth() {
-        let tool = DaytonaTool::new("test-key".into(), None);
-        let body = r#"{"statusCode":401,"message":"Invalid API key"}"#;
-        let err = tool.parse_api_error(reqwest::StatusCode::UNAUTHORIZED, body);
-        assert!(matches!(err, DaytonaToolError::AuthenticationFailed(_)));
-    }
-
-    #[test]
-    fn test_parse_api_error_quota() {
-        let tool = DaytonaTool::new("test-key".into(), None);
-        let body = r#"{"statusCode":403,"message":"quota exceeded for your account"}"#;
-        let err = tool.parse_api_error(reqwest::StatusCode::FORBIDDEN, body);
-        assert!(matches!(err, DaytonaToolError::QuotaExceeded(_)));
-    }
-
-    #[test]
-    fn test_parse_api_error_generic() {
-        let tool = DaytonaTool::new("test-key".into(), None);
-        let body = "Internal Server Error";
-        let err = tool.parse_api_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body);
-        assert!(matches!(err, DaytonaToolError::ApiError(_)));
-    }
-
-    #[test]
-    fn test_has_downloadable_extension() {
-        assert!(has_downloadable_extension("chart.png"));
-        assert!(has_downloadable_extension("PHOTO.JPG"));
-        assert!(has_downloadable_extension("data.csv"));
-        assert!(has_downloadable_extension("report.pdf"));
-        assert!(!has_downloadable_extension("script.py"));
-        assert!(!has_downloadable_extension("data.json"));
-        assert!(!has_downloadable_extension("readme.txt"));
-    }
-
-    #[test]
-    fn test_file_entry_deserialization() {
-        let json = r#"[
-            {"name": "chart.png", "isDir": false, "size": 12345},
-            {"name": "subdir", "isDir": true, "size": 0}
-        ]"#;
-        let entries: Vec<FileEntry> = serde_json::from_str(json).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "chart.png");
-        assert!(!entries[0].is_dir);
-        assert_eq!(entries[0].size, 12345);
-        assert!(entries[1].is_dir);
-    }
-
-    #[test]
-    fn test_extract_python_imports() {
-        let code = r#"
-import matplotlib.pyplot as plt
-import plotly.express as px
-from numpy import array
-import os
-import json
-import pandas as pd
-from PIL import Image
-"#;
-        let imports = extract_python_imports(code);
-        assert!(imports.contains(&"matplotlib".to_string()));
-        assert!(imports.contains(&"plotly".to_string()));
-        assert!(imports.contains(&"numpy".to_string()));
-        assert!(imports.contains(&"pandas".to_string()));
-        assert!(imports.contains(&"PIL".to_string()));
-        // stdlib should be excluded
-        assert!(!imports.contains(&"os".to_string()));
-        assert!(!imports.contains(&"json".to_string()));
-    }
-
-    #[test]
-    fn test_pip_package_name_mapping() {
-        assert_eq!(pip_package_name("PIL"), "Pillow");
-        assert_eq!(pip_package_name("sklearn"), "scikit-learn");
-        assert_eq!(pip_package_name("cv2"), "opencv-python");
-        assert_eq!(pip_package_name("yaml"), "pyyaml");
-        // Unmapped names pass through
-        assert_eq!(pip_package_name("plotly"), "plotly");
-        assert_eq!(pip_package_name("pandas"), "pandas");
-    }
-
-    #[test]
-    fn test_extract_output_paths() {
-        let code = r#"
-import plotly.graph_objects as go
-fig = go.Figure()
-fig.write_html("lorenz_attractor.html")
-fig.write_image("/tmp/chart.png")
-plt.savefig('population_chart.png')
-df.to_csv('/tmp/results.csv')
-"#;
-        let paths = extract_output_paths(code);
-        assert!(paths.contains(&"lorenz_attractor.html".to_string()));
-        assert!(paths.contains(&"/tmp/chart.png".to_string()));
-        assert!(paths.contains(&"population_chart.png".to_string()));
-        assert!(paths.contains(&"/tmp/results.csv".to_string()));
-    }
-}
+mod tests;

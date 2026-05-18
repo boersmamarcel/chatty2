@@ -5,8 +5,8 @@ mod tool_collector;
 mod tool_registry;
 
 use anyhow::Result;
-use rig::agent::Agent;
-use rig::completion::Prompt;
+use rig_core::agent::Agent;
+use rig_core::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::filesystem_service::FileSystemService;
@@ -80,9 +80,9 @@ pub struct AgentBuildContext {
 /// Enum-based agent wrapper for multi-provider support
 #[derive(Clone)]
 pub enum AgentClient {
-    OpenRouter(Agent<rig::providers::openrouter::CompletionModel>),
-    Ollama(Agent<rig::providers::ollama::CompletionModel>),
-    AzureOpenAI(Agent<rig::providers::azure::CompletionModel>),
+    OpenRouter(Agent<rig_core::providers::openrouter::CompletionModel>),
+    Ollama(Agent<rig_core::providers::ollama::CompletionModel>),
+    AzureOpenAI(Agent<rig_core::providers::azure::CompletionModel>),
 }
 
 impl AgentClient {

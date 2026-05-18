@@ -20,6 +20,7 @@ pub mod parsed_cache;
 pub mod search_conversations_dialog;
 pub mod sidebar_view;
 pub mod syntax_highlighter;
+pub mod thinking_indicator;
 pub mod titlebar;
 pub mod trace_components;
 

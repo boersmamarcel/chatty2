@@ -585,11 +585,11 @@ impl UserMessage {
     }
 
     /// Convert from rig UserContent to UserMessage
-    pub fn from_rig_content(content: &rig::OneOrMany<rig::message::UserContent>) -> Self {
+    pub fn from_rig_content(content: &rig_core::OneOrMany<rig_core::message::UserContent>) -> Self {
         let text: String = content
             .iter()
             .filter_map(|uc| match uc {
-                rig::message::UserContent::Text(t) => Some(t.text.clone()),
+                rig_core::message::UserContent::Text(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -602,12 +602,12 @@ impl UserMessage {
 impl AssistantMessage {
     /// Convert from rig AssistantContent to AssistantMessage
     pub fn from_rig_content(
-        content: &rig::OneOrMany<rig::completion::message::AssistantContent>,
+        content: &rig_core::OneOrMany<rig_core::completion::message::AssistantContent>,
     ) -> Self {
         let text: String = content
             .iter()
             .filter_map(|ac| match ac {
-                rig::completion::message::AssistantContent::Text(t) => Some(t.text.clone()),
+                rig_core::completion::message::AssistantContent::Text(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
