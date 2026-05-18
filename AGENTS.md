@@ -167,11 +167,12 @@ examples.
    it; chatty-tui does not. If a `Global` impl is missing, add it in
    `crates/chatty-core/src/gpui_globals.rs`.
 
-7. **Oversized files.** Several files exceed 1500 lines
-   (`message_ops.rs`, `chat_view.rs`, `chat_input.rs`,
-   `auto_updater/mod.rs`, etc.). Read the file's module-level docstring
-   first to scope what you need; you usually don't need to load the
-   whole file.
+7. **Large module directories.** Several complex areas have been split
+   into sub-module directories (`chat_view/`, `chat_input/`,
+   `auto_updater/`, `trace_components/`, etc.). Start with the `mod.rs`
+   and its module-level docstring to scope what you need before loading
+   sibling files. The largest single files are `message_ops.rs` (~1260
+   lines) and `main.rs` (~1225 lines).
 
 ## Deeper reading
 
