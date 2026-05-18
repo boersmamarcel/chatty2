@@ -1,3 +1,4 @@
+pub mod agent_todo_panel;
 pub mod app_view;
 pub mod approval_prompt_bar;
 pub use chatty_core::models::attachment_validation;

@@ -382,6 +382,24 @@ pub(super) async fn run_llm_stream(
                     Ok(StreamChunk::ToolCallResult { ref id, .. }) => {
                         let tool_name = pending_tool_name.remove(id).unwrap_or_default();
                         let tool_args = pending_tool_args.remove(id).unwrap_or_default();
+                        if is_agent_todo_tool(&tool_name) {
+                            let snapshot = agent_task_controller.snapshot();
+                            chat_view
+                                .update(cx, |view, cx| {
+                                    if view.conversation_id().map(|id| id.as_str())
+                                        == Some(conv_id.as_str())
+                                    {
+                                        view.set_agent_task_snapshot(snapshot, cx);
+                                    }
+                                })
+                                .map_err(|e| {
+                                    warn!(
+                                        error = ?e,
+                                        "Failed to update agent todo panel after todo tool result"
+                                    )
+                                })
+                                .ok();
+                        }
                         if pending_follow_up.is_none()
                             && let Some(prompt) =
                                 agent_task_controller.observe_tool_result(&tool_name)
@@ -549,6 +567,13 @@ pub(super) fn should_refresh_azure_auth(
         provider_type,
         chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
     ) && is_auth_stream_error(err)
+}
+
+fn is_agent_todo_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "write_todos" | "update_todo" | "verify_completion"
+    )
 }
 
 /// Select attachment paths from the most recent assistant message that the

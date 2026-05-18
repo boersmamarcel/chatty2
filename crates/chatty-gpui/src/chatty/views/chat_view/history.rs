@@ -31,6 +31,7 @@ impl ChatView {
 
         // Clear any pending approval from previous conversation
         self.pending_approval = None;
+        self.clear_agent_task_snapshot(cx);
 
         // Clear collapsed tool calls state from previous conversation
         self.collapsed_tool_calls.clear();
