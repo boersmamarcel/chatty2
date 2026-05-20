@@ -56,7 +56,14 @@ fn self_heal_copy(source_dir: &Path) {
         debug!("pdfium: self-heal skipped — no user data dir available");
         return;
     };
+    copy_into_cache(source_dir, &target_dir);
+}
 
+/// Inner helper that performs the actual copy from `source_dir` into `target_dir`.
+///
+/// Extracted from [`self_heal_copy`] so tests can exercise it against arbitrary directories
+/// without needing to override `dirs::data_dir()` globally.
+fn copy_into_cache(source_dir: &Path, target_dir: &Path) {
     let lib_name = Pdfium::pdfium_platform_library_name();
     let source = source_dir.join(&lib_name);
     let target = target_dir.join(&lib_name);
@@ -78,7 +85,7 @@ fn self_heal_copy(source_dir: &Path) {
         return;
     }
 
-    if let Err(e) = std::fs::create_dir_all(&target_dir) {
+    if let Err(e) = std::fs::create_dir_all(target_dir) {
         warn!(
             dir = %target_dir.display(),
             error = %e,
@@ -87,9 +94,15 @@ fn self_heal_copy(source_dir: &Path) {
         return;
     }
 
-    // Use a temp file + rename to avoid partial-copy races between concurrent processes
-    // (e.g. main app + chatty-tui sub-agent starting around the same time).
-    let tmp = target_dir.join(format!("{}.tmp", lib_name.to_string_lossy()));
+    // Use a per-process temp file + rename to avoid partial-copy races and temp-name
+    // collisions between concurrent processes (e.g. main app + chatty-tui sub-agent
+    // self-healing at the same time). Including the PID guarantees a unique temp path
+    // even if multiple processes start within the same nanosecond.
+    let tmp = target_dir.join(format!(
+        "{}.{}.tmp",
+        lib_name.to_string_lossy(),
+        std::process::id()
+    ));
     match std::fs::copy(&source, &tmp) {
         Ok(_) => match std::fs::rename(&tmp, &target) {
             Ok(_) => info!(
@@ -405,47 +418,62 @@ mod tests {
     }
 
     #[test]
-    fn self_heal_copy_seeds_cache_when_missing() {
-        // Verify the copy semantics with a fake source dir + isolated target.
+    fn copy_into_cache_seeds_target_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let source_dir = tmp.path().join("source");
+        let target_dir = tmp.path().join("data").join("chatty").join("lib");
         fs::create_dir_all(&source_dir).unwrap();
-        let src_file = source_dir.join(lib_name());
-        fs::write(&src_file, b"fake-pdfium-bytes-for-test").unwrap();
+        let src = source_dir.join(lib_name());
+        fs::write(&src, b"fake-pdfium-bytes-for-test").unwrap();
 
-        // Redirect the user-data dir for this test via XDG_DATA_HOME (Linux) / HOME (macOS).
-        // We don't override platform dirs globally; instead we verify self_heal_copy's
-        // no-op behavior when target already exists, and its copy behavior when missing.
-        let target_dir = tmp.path().join("target_data").join("chatty").join("lib");
+        // Target dir does not exist yet — copy_into_cache must create it.
+        assert!(!target_dir.exists());
+        copy_into_cache(&source_dir, &target_dir);
 
-        // Manually exercise the copy semantics by reimplementing the core logic against
-        // an explicit target — the production function uses dirs::data_dir() which we
-        // can't stub portably. The logic under test is straightforward filesystem ops.
-        fs::create_dir_all(&target_dir).unwrap();
-        let target = target_dir.join(lib_name());
-        assert!(!target.exists());
-        fs::copy(&src_file, &target).unwrap();
-        assert!(target.exists());
-        let copied = fs::read(&target).unwrap();
-        assert_eq!(copied, b"fake-pdfium-bytes-for-test");
+        let dst = target_dir.join(lib_name());
+        assert!(dst.exists(), "expected target file to be created");
+        assert_eq!(fs::read(&dst).unwrap(), b"fake-pdfium-bytes-for-test");
+
+        // No stray temp files left behind.
+        let leftover_tmp: Vec<_> = fs::read_dir(&target_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "expected no leftover .tmp files, found {} entries",
+            leftover_tmp.len()
+        );
     }
 
     #[test]
-    fn self_heal_copy_is_no_op_when_source_equals_target() {
-        // self_heal_copy should not error when source and target resolve to the same file.
-        // We verify the canonicalize-equality guard by calling it with the user-data dir
-        // itself: if the cache happens to already contain the file, the function must
-        // not corrupt it.
-        let Some(cache_dir) = user_data_lib_dir() else {
-            return;
-        };
-        if !cache_dir.join(lib_name()).exists() {
-            // Nothing to test if cache is empty.
-            return;
-        }
-        // Calling with cache_dir as source should be a no-op (target already exists).
-        self_heal_copy(&cache_dir);
-        // File should still exist after the call.
-        assert!(cache_dir.join(lib_name()).exists());
+    fn copy_into_cache_is_noop_when_target_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_dir = tmp.path().join("source");
+        let target_dir = tmp.path().join("target");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(source_dir.join(lib_name()), b"new").unwrap();
+        let dst = target_dir.join(lib_name());
+        fs::write(&dst, b"existing").unwrap();
+
+        copy_into_cache(&source_dir, &target_dir);
+
+        // Existing target must not be overwritten.
+        assert_eq!(fs::read(&dst).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn copy_into_cache_is_noop_when_source_equals_target() {
+        // Calling with source == target must not corrupt the file.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(lib_name());
+        fs::write(&file, b"contents").unwrap();
+
+        copy_into_cache(&dir, &dir);
+        assert_eq!(fs::read(&file).unwrap(), b"contents");
     }
 }
