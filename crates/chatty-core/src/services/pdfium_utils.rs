@@ -9,6 +9,12 @@ fn compile_time_lib_path() -> Option<PathBuf> {
     Some(PathBuf::from(lib_dir))
 }
 
+/// Get the path to the pdfium library directory from runtime environment overrides.
+fn runtime_env_lib_path() -> Option<PathBuf> {
+    let lib_dir = std::env::var("CHATTY_PDFIUM_LIB_DIR").ok()?;
+    Some(PathBuf::from(lib_dir))
+}
+
 fn canonicalize_existing_dir(dir: &Path) -> Option<PathBuf> {
     if !dir.is_dir() {
         return None;
@@ -41,6 +47,21 @@ fn macos_frameworks_from_bundle(exe_path: &Path, lib_name: &OsStr) -> Option<Pat
             }
         }
         current = dir.parent();
+    }
+    None
+}
+
+fn macos_default_install_frameworks(lib_name: &OsStr) -> Option<PathBuf> {
+    // Best-effort fallback for standard packaged installs.
+    // This is intentionally lower-priority than exe-relative detection and runtime override
+    // (`CHATTY_PDFIUM_LIB_DIR`) so non-standard install locations remain configurable.
+    let frameworks = Path::new("/Applications/chatty.app/Contents/Frameworks");
+    debug!(
+        path = %frameworks.display(),
+        "pdfium: trying default install Frameworks path"
+    );
+    if frameworks.join(lib_name).exists() {
+        return canonicalize_existing_dir(frameworks);
     }
     None
 }
@@ -105,6 +126,9 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
         if let Some(path) = macos_frameworks_from_bundle(&exe, &lib_name) {
             return Some(path);
         }
+        if let Some(path) = macos_default_install_frameworks(&lib_name) {
+            return Some(path);
+        }
 
         // Last macOS fallback: look for the library next to the executable.
         let exe_for_beside = canonical_exe.as_ref().unwrap_or(&exe);
@@ -156,8 +180,9 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
 ///
 /// Search order:
 /// 1. Executable-relative path (app bundle / AppImage)
-/// 2. Compile-time `PDFIUM_LIB_DIR` (development builds)
-/// 3. System library fallback
+/// 2. Runtime env `CHATTY_PDFIUM_LIB_DIR` override
+/// 3. Compile-time `PDFIUM_LIB_DIR` (development builds)
+/// 4. System library fallback
 ///
 /// In pdfium-render 0.9, the pdfium bindings are stored in a process-global `OnceLock` and
 /// `Pdfium::new()` asserts that the global is unset. If a prior call has already bound the
@@ -167,7 +192,11 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
 pub fn create_pdfium() -> anyhow::Result<Pdfium> {
     let lib_name = Pdfium::pdfium_platform_library_name();
 
-    let candidate_dirs = [exe_relative_lib_path(), compile_time_lib_path()];
+    let candidate_dirs = [
+        exe_relative_lib_path(),
+        runtime_env_lib_path(),
+        compile_time_lib_path(),
+    ];
 
     let mut last_err = None;
     for dir in candidate_dirs.into_iter().flatten() {

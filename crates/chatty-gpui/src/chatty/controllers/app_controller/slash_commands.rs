@@ -488,6 +488,13 @@ impl ChattyApp {
                     .arg(&prompt)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
+                #[cfg(target_os = "macos")]
+                if let Some(exe_dir) = exe.parent() {
+                    let frameworks_dir = exe_dir.join("../Frameworks");
+                    if frameworks_dir.join("libpdfium.dylib").exists() {
+                        cmd.env("CHATTY_PDFIUM_LIB_DIR", frameworks_dir);
+                    }
+                }
                 if !model_id.is_empty() {
                     cmd.arg("--model").arg(&model_id);
                 }
