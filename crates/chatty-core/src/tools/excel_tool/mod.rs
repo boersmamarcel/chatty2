@@ -589,4 +589,66 @@ mod tests {
             other => panic!("Expected numeric age in B2, got {:?}", other),
         }
     }
+
+    #[tokio::test]
+    async fn test_edit_excel_tool_preserves_source_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_path = create_test_xlsx(tmp.path(), "template.xlsx");
+
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let write_approvals = WriteApprovalStore::new().get_pending_approvals();
+        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
+        let tool = EditExcelTool::new(service.clone(), write_approvals);
+
+        let output = tool
+            .call(EditExcelArgs {
+                path: input_path.to_str().unwrap().to_string(),
+                output_path: None,
+                operations: vec![EditOperation::SetCell {
+                    sheet: "Data".to_string(),
+                    cell: "B2".to_string(),
+                    value: Value::Number(31.into()),
+                }],
+            })
+            .await
+            .unwrap();
+
+        assert!(output.path.ends_with("template.edited.xlsx"));
+        let edited_path = tmp.path().join("template.edited.xlsx");
+        assert!(edited_path.exists());
+        assert!(input_path.exists());
+
+        let read_tool = ReadExcelTool::new(service.clone());
+        let original = read_tool
+            .call(read::ReadExcelArgs {
+                path: input_path.to_str().unwrap().to_string(),
+                sheet: None,
+                range: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap();
+        let edited = read_tool
+            .call(read::ReadExcelArgs {
+                path: edited_path.to_str().unwrap().to_string(),
+                sheet: None,
+                range: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap();
+
+        match &original.data[1][1] {
+            Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 30.0),
+            other => panic!("Expected numeric age in original workbook, got {:?}", other),
+        }
+        match &edited.data[1][1] {
+            Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
+            other => panic!("Expected numeric age in edited workbook, got {:?}", other),
+        }
+    }
 }

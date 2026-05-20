@@ -4,6 +4,7 @@ use rig_core::tool::Tool;
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -57,7 +58,7 @@ fn edit_excel_parameters_schema() -> Value {
             },
             "output_path": {
                 "type": "string",
-                "description": "Optional output path. Defaults to overwriting the input file."
+                "description": "Optional output path for the edited workbook. If omitted, saves as '<original-name>.edited.xlsx' next to the source file."
             },
             "operations": {
                 "type": "array",
@@ -232,7 +233,7 @@ impl Tool for EditExcelTool {
         ToolDefinition {
             name: "edit_excel".to_string(),
             description: "Edit an existing Excel file by applying targeted modifications.\n\
-                         Reads the file, applies operations, and writes back.\n\
+                         Reads the file, applies operations, and writes to a separate workbook so the original file is preserved.\n\
                          \n\
                          WARNING: This tool reads data with calamine and rewrites with rust_xlsxwriter.\n\
                          Original formatting, macros, charts, images, and formulas may be lost.\n\
@@ -254,8 +255,22 @@ impl Tool for EditExcelTool {
         let output_canonical = if let Some(ref out) = args.output_path {
             self.service.resolve_new_path(out).await?
         } else {
-            canonical.clone()
+            let mut default_output = PathBuf::from(&canonical);
+            let stem = default_output
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("edited");
+            default_output.set_file_name(format!("{}.edited.xlsx", stem));
+            self.service
+                .resolve_new_path(default_output.to_string_lossy().as_ref())
+                .await?
         };
+
+        if output_canonical == canonical {
+            return Err(ExcelToolError::OperationError(anyhow::anyhow!(
+                "Refusing to overwrite source workbook. Provide a different output_path."
+            )));
+        }
 
         // Request approval
         let op_summary = args
@@ -543,8 +558,9 @@ impl Tool for EditExcelTool {
             operations_applied: ops_count,
             sheets: final_sheet_names,
             message: format!(
-                "Applied {} operation(s) to '{}' and saved.",
+                "Applied {} operation(s) to '{}' and saved to '{}'.",
                 ops_count,
+                canonical.display(),
                 output_canonical.display()
             ),
             warning: Some(
