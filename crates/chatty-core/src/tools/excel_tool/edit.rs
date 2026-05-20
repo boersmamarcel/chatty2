@@ -224,7 +224,7 @@ struct SheetData {
     formats: Vec<(String, CellFormatSpec)>,
 }
 
-fn is_xlsx_path(path: &Path) -> bool {
+fn has_xlsx_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("xlsx"))
@@ -253,7 +253,8 @@ fn write_umya_cell_value(cell: &mut umya_spreadsheet::Cell, value: &Value) {
         Value::Null => {
             cell.set_blank();
         }
-        _ => {
+        Value::Array(_) | Value::Object(_) => {
+            warn!("Writing complex JSON value to Excel cell as stringified JSON");
             cell.set_value_string(value.to_string());
         }
     }
@@ -346,7 +347,7 @@ fn apply_preserving_template_edits(
             }
             EditOperation::FormatRange { .. } => {
                 return Err(ExcelToolError::OperationError(anyhow::anyhow!(
-                    "format_range is not supported by style-preserving edit path"
+                    "format_range operations require legacy edit mode"
                 )));
             }
         }
@@ -463,13 +464,13 @@ impl Tool for EditExcelTool {
         }
 
         let ops_count = args.operations.len();
-        let can_preserve_template = is_xlsx_path(&canonical)
+        let use_style_preserving_mode = has_xlsx_extension(&canonical)
             && args
                 .operations
                 .iter()
                 .all(|op| !matches!(op, EditOperation::FormatRange { .. }));
 
-        if can_preserve_template {
+        if use_style_preserving_mode {
             let final_sheet_names =
                 apply_preserving_template_edits(&canonical, &output_canonical, &args.operations)?;
             return Ok(EditExcelOutput {
