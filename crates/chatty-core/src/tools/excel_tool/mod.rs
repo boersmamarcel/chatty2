@@ -30,7 +30,7 @@ mod tests {
     };
     use super::*;
     use calamine::{Data, Reader, open_workbook_auto};
-    use rust_xlsxwriter::Workbook;
+    use rust_xlsxwriter::{Format, Workbook};
     use serde_json::Value;
     use std::sync::Arc;
 
@@ -176,6 +176,50 @@ mod tests {
         sheet.write_string(2, 2, "LA").unwrap();
         workbook.save(&path).unwrap();
         path
+    }
+
+    fn create_styled_test_xlsx(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+        let path = dir.join(filename);
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet().set_name("Data").unwrap();
+        let style = Format::new()
+            .set_bold()
+            .set_background_color(0xFFF2CC)
+            .set_font_color(0x9C0006);
+        sheet
+            .write_string_with_format(0, 0, "Name", &style)
+            .unwrap();
+        sheet.write_string(0, 1, "Age").unwrap();
+        sheet.write_string(1, 0, "Alice").unwrap();
+        sheet.write_number(1, 1, 30.0).unwrap();
+        workbook.save(&path).unwrap();
+        path
+    }
+
+    fn read_style_signature(
+        path: &std::path::Path,
+        sheet: &str,
+        cell: &str,
+    ) -> (bool, String, String) {
+        let workbook = umya_spreadsheet::reader::xlsx::read(path).unwrap();
+        let worksheet = workbook.get_sheet_by_name(sheet).unwrap();
+        let styled_cell = worksheet.get_cell(cell).unwrap();
+        let style = styled_cell.get_style();
+        let bold = style
+            .get_font()
+            .map(|font| *font.get_bold())
+            .unwrap_or(false);
+        let font_color = style
+            .get_font()
+            .map(|font| font.get_color().get_argb().to_string())
+            .unwrap_or_default();
+        let bg_color = style
+            .get_fill()
+            .and_then(|fill| fill.get_pattern_fill())
+            .and_then(|pattern| pattern.get_foreground_color())
+            .map(|color| color.get_argb().to_string())
+            .unwrap_or_default();
+        (bold, font_color, bg_color)
     }
 
     #[tokio::test]
@@ -591,9 +635,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_excel_tool_preserves_source_by_default() {
+    async fn test_edit_excel_tool_preserves_template_when_editing_in_place() {
         let tmp = tempfile::tempdir().unwrap();
-        let input_path = create_test_xlsx(tmp.path(), "template.xlsx");
+        let input_path = create_styled_test_xlsx(tmp.path(), "template.xlsx");
+        let style_before = read_style_signature(&input_path, "Data", "A1");
 
         let service = Arc::new(
             FileSystemService::new(tmp.path().to_str().unwrap())
@@ -617,13 +662,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(output.path.ends_with("template.edited.xlsx"));
-        let edited_path = tmp.path().join("template.edited.xlsx");
-        assert!(edited_path.exists());
-        assert!(input_path.exists());
+        assert_eq!(output.path, input_path.display().to_string());
+        let style_after = read_style_signature(&input_path, "Data", "A1");
+        assert_eq!(style_before, style_after);
 
         let read_tool = ReadExcelTool::new(service.clone());
-        let original = read_tool
+        let edited = read_tool
             .call(read::ReadExcelArgs {
                 path: input_path.to_str().unwrap().to_string(),
                 sheet: None,
@@ -632,20 +676,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let edited = read_tool
-            .call(read::ReadExcelArgs {
-                path: edited_path.to_str().unwrap().to_string(),
-                sheet: None,
-                range: None,
-                max_rows: None,
-            })
-            .await
-            .unwrap();
-
-        match &original.data[1][1] {
-            Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 30.0),
-            other => panic!("Expected numeric age in original workbook, got {:?}", other),
-        }
         match &edited.data[1][1] {
             Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
             other => panic!("Expected numeric age in edited workbook, got {:?}", other),
