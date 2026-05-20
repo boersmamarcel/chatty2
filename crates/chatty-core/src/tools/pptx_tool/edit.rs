@@ -16,7 +16,7 @@ use super::write::{
     PptxShapeSpec, TextStyleSpec, build_shape_xml, build_title_shape_xml, insert_shape_xml,
 };
 
-fn operation_type_schema(operation: &str) -> Value {
+fn operation_type_discriminator_schema(operation: &str) -> Value {
     serde_json::json!({
         "type": "string",
         "enum": [operation]
@@ -65,7 +65,7 @@ fn edit_pptx_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": operation_type_schema("set_slide_title"),
+                                "type": operation_type_discriminator_schema("set_slide_title"),
                                 "slide": { "type": "integer", "description": "1-based slide index" },
                                 "title": { "type": "string" }
                             },
@@ -74,7 +74,7 @@ fn edit_pptx_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": operation_type_schema("add_text_box"),
+                                "type": operation_type_discriminator_schema("add_text_box"),
                                 "slide": { "type": "integer", "description": "1-based slide index" },
                                 "x": { "type": "number" },
                                 "y": { "type": "number" },
@@ -88,7 +88,7 @@ fn edit_pptx_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": operation_type_schema("add_bullet_list"),
+                                "type": operation_type_discriminator_schema("add_bullet_list"),
                                 "slide": { "type": "integer", "description": "1-based slide index" },
                                 "x": { "type": "number" },
                                 "y": { "type": "number" },
@@ -105,7 +105,7 @@ fn edit_pptx_parameters_schema() -> Value {
                         {
                             "type": "object",
                             "properties": {
-                                "type": operation_type_schema("add_table"),
+                                "type": operation_type_discriminator_schema("add_table"),
                                 "slide": { "type": "integer", "description": "1-based slide index" },
                                 "x": { "type": "number" },
                                 "y": { "type": "number" },
@@ -441,7 +441,10 @@ fn apply_slide_operations(
 
 fn next_shape_id(slide_xml: &[u8]) -> Result<u32, PptxToolError> {
     let tree = ShapeTree::from_slide_xml(slide_xml).context("Failed to parse slide XML")?;
-    Ok(tree.max_shape_id().0.saturating_add(1))
+    tree.max_shape_id()
+        .0
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("No available shape IDs remain on this slide").into())
 }
 
 /// Parse slide number from "ppt/slides/slide3.xml" -> Some(3).
@@ -453,7 +456,7 @@ fn parse_slide_number(name: &str) -> Option<usize> {
 
 fn replace_title_text(slide_xml: &str, title: &str) -> Option<String> {
     let mut cursor = 0usize;
-    while let Some(start_rel) = slide_xml[cursor..].find("<p:sp") {
+    while let Some(start_rel) = slide_xml[cursor..].find("<p:sp>") {
         let start = cursor + start_rel;
         let end_rel = slide_xml[start..].find("</p:sp>")?;
         let end = start + end_rel + "</p:sp>".len();
@@ -464,20 +467,48 @@ fn replace_title_text(slide_xml: &str, title: &str) -> Option<String> {
             continue;
         }
 
-        let text_start_rel = shape.find("<a:t>")?;
-        let text_start = start + text_start_rel + "<a:t>".len();
-        let text_end_rel = slide_xml[text_start..].find("</a:t>")?;
-        let text_end = text_start + text_end_rel;
-
         let escaped = escape_xml_text(title);
-        let mut replaced = String::with_capacity(slide_xml.len() + escaped.len());
-        replaced.push_str(&slide_xml[..text_start]);
-        replaced.push_str(&escaped);
-        replaced.push_str(&slide_xml[text_end..]);
+        let replaced_shape = replace_text_runs_in_shape(shape, &escaped)?;
+
+        let mut replaced = String::with_capacity(
+            slide_xml.len() + replaced_shape.len().saturating_sub(shape.len()),
+        );
+        replaced.push_str(&slide_xml[..start]);
+        replaced.push_str(&replaced_shape);
+        replaced.push_str(&slide_xml[end..]);
         return Some(replaced);
     }
 
     None
+}
+
+fn replace_text_runs_in_shape(shape_xml: &str, escaped_title: &str) -> Option<String> {
+    let mut cursor = 0usize;
+    let mut replaced_any = false;
+    let mut wrote_title = false;
+    let mut out = String::with_capacity(shape_xml.len() + escaped_title.len());
+
+    while let Some(start_rel) = shape_xml[cursor..].find("<a:t>") {
+        let start = cursor + start_rel;
+        let content_start = start + "<a:t>".len();
+        let end_rel = shape_xml[content_start..].find("</a:t>")?;
+        let content_end = content_start + end_rel;
+
+        out.push_str(&shape_xml[cursor..content_start]);
+        if !wrote_title {
+            out.push_str(escaped_title);
+            wrote_title = true;
+        }
+        cursor = content_end;
+        replaced_any = true;
+    }
+
+    if !replaced_any {
+        return None;
+    }
+
+    out.push_str(&shape_xml[cursor..]);
+    Some(out)
 }
 
 fn escape_xml_text(value: &str) -> String {
