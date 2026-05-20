@@ -1,11 +1,48 @@
 use pdfium_render::prelude::*;
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Get the path to the pdfium library directory set by build.rs (compile-time path).
 fn compile_time_lib_path() -> Option<PathBuf> {
     let lib_dir = option_env!("PDFIUM_LIB_DIR")?;
     Some(PathBuf::from(lib_dir))
+}
+
+fn canonicalize_existing_dir(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+
+    match std::fs::canonicalize(dir) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            warn!(
+                path = %dir.display(),
+                error = %e,
+                "pdfium: failed to canonicalize directory, using raw path"
+            );
+            Some(dir.to_path_buf())
+        }
+    }
+}
+
+fn macos_frameworks_from_bundle(exe_path: &Path, lib_name: &OsStr) -> Option<PathBuf> {
+    let mut current = exe_path.parent();
+    while let Some(dir) = current {
+        if dir.file_name().is_some_and(|name| name == "Contents") {
+            let frameworks = dir.join("Frameworks");
+            debug!(
+                path = %frameworks.display(),
+                "pdfium: trying bundle-derived Frameworks path"
+            );
+            if frameworks.join(lib_name).exists() {
+                return canonicalize_existing_dir(&frameworks);
+            }
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 /// Resolve the pdfium library directory relative to the running executable.
@@ -43,18 +80,42 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
         {
             let frameworks = exe_dir.join("../Frameworks");
             debug!(path = %frameworks.display(), "pdfium: trying canonical Frameworks path");
-            if frameworks.is_dir() && frameworks.join(&lib_name).exists() {
-                return Some(frameworks);
+            if frameworks.join(&lib_name).exists()
+                && let Some(path) = canonicalize_existing_dir(&frameworks)
+            {
+                return Some(path);
             }
         }
         // Fallback: raw (non-canonical) path
         if let Some(exe_dir) = exe.parent() {
             let frameworks = exe_dir.join("../Frameworks");
             debug!(path = %frameworks.display(), "pdfium: trying raw Frameworks path");
-            if frameworks.is_dir() && frameworks.join(&lib_name).exists() {
-                return Some(frameworks);
+            if frameworks.join(&lib_name).exists()
+                && let Some(path) = canonicalize_existing_dir(&frameworks)
+            {
+                return Some(path);
             }
         }
+
+        if let Some(ref canon) = canonical_exe
+            && let Some(path) = macos_frameworks_from_bundle(canon, &lib_name)
+        {
+            return Some(path);
+        }
+        if let Some(path) = macos_frameworks_from_bundle(&exe, &lib_name) {
+            return Some(path);
+        }
+
+        // Last macOS fallback: look for the library next to the executable.
+        let exe_for_beside = canonical_exe.as_ref().unwrap_or(&exe);
+        if let Some(exe_dir) = exe_for_beside.parent() {
+            let beside_exe = exe_dir.join(&lib_name);
+            debug!(path = %beside_exe.display(), "pdfium: trying macOS library beside executable");
+            if beside_exe.exists() {
+                return Some(exe_dir.to_path_buf());
+            }
+        }
+        return None;
     }
 
     if cfg!(target_os = "windows") {

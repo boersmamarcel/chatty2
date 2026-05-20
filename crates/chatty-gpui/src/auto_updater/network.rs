@@ -99,7 +99,11 @@ pub(super) async fn fetch_latest_release(
 
 /// Find a matching asset for the current platform using simple naming convention
 /// Expected format: chatty-{os}-{arch}.{ext}
-pub(super) fn find_matching_asset(assets: &[GitHubAsset], os: &str, arch: &str) -> Option<GitHubAsset> {
+pub(super) fn find_matching_asset(
+    assets: &[GitHubAsset],
+    os: &str,
+    arch: &str,
+) -> Option<GitHubAsset> {
     // Build expected asset name based on platform
     let expected_name = match (os, arch) {
         ("macos", "aarch64") => "chatty-macos-aarch64.dmg",

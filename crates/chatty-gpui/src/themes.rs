@@ -137,4 +137,3 @@ pub(crate) fn apply_theme_from_settings(cx: &mut App) {
     THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
     debug!("Theme initialization complete, observer now active");
 }
-
