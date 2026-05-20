@@ -23,15 +23,21 @@ pub enum ExcelToolError {
 
 #[cfg(test)]
 mod tests {
+    use super::edit::EditExcelArgs;
     use super::parsing::*;
-    use super::write::{CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, write_sheet};
+    use super::write::{
+        CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, WriteExcelArgs, write_sheet,
+    };
     use super::*;
     use calamine::{Data, Reader, open_workbook_auto};
     use rust_xlsxwriter::Workbook;
     use serde_json::Value;
     use std::sync::Arc;
 
+    use crate::models::write_approval_store::WriteApprovalStore;
     use crate::services::filesystem_service::FileSystemService;
+    use crate::settings::models::execution_settings::ApprovalMode;
+    use crate::tools::filesystem_write_tool::set_global_write_approval_mode;
     use rig_core::tool::Tool;
 
     #[test]
@@ -499,6 +505,88 @@ mod tests {
         match age {
             Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
             _ => panic!("Expected number, got {:?}", age),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_excel_tool_creates_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let write_approvals = WriteApprovalStore::new().get_pending_approvals();
+        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
+        let tool = WriteExcelTool::new(service, write_approvals);
+
+        let output = tool
+            .call(WriteExcelArgs {
+                path: "example.xlsx".to_string(),
+                sheets: vec![SheetSpec {
+                    name: "Sheet1".to_string(),
+                    data: vec![vec![
+                        Value::String("Name".to_string()),
+                        Value::String("Age".to_string()),
+                    ]],
+                    column_widths: vec![],
+                    formatting: None,
+                    cell_formats: vec![],
+                    merged_cells: vec![],
+                    formulas: vec![],
+                }],
+            })
+            .await
+            .unwrap();
+
+        let file_path = tmp.path().join("example.xlsx");
+        assert!(file_path.exists());
+        assert_eq!(output.sheets_written, 1);
+    }
+
+    #[tokio::test]
+    async fn test_edit_excel_tool_creates_new_output_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_path = create_test_xlsx(tmp.path(), "input.xlsx");
+        std::fs::create_dir_all(tmp.path().join("out")).unwrap();
+
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let write_approvals = WriteApprovalStore::new().get_pending_approvals();
+        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
+        let tool = EditExcelTool::new(service.clone(), write_approvals);
+
+        tool.call(EditExcelArgs {
+            path: input_path.to_str().unwrap().to_string(),
+            output_path: Some("out/edited.xlsx".to_string()),
+            operations: vec![EditOperation::SetCell {
+                sheet: "Data".to_string(),
+                cell: "B2".to_string(),
+                value: Value::Number(31.into()),
+            }],
+        })
+        .await
+        .unwrap();
+
+        let output_path = tmp.path().join("out/edited.xlsx");
+        assert!(output_path.exists());
+
+        let read_tool = ReadExcelTool::new(service);
+        let output = read_tool
+            .call(read::ReadExcelArgs {
+                path: output_path.to_str().unwrap().to_string(),
+                sheet: None,
+                range: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap();
+        match &output.data[1][1] {
+            Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
+            other => panic!("Expected numeric age in B2, got {:?}", other),
         }
     }
 }

@@ -252,7 +252,7 @@ impl Tool for EditExcelTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
         let output_canonical = if let Some(ref out) = args.output_path {
-            self.service.resolve_path(out).await?
+            self.service.resolve_new_path(out).await?
         } else {
             canonical.clone()
         };
