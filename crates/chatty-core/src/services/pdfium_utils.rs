@@ -52,6 +52,9 @@ fn macos_frameworks_from_bundle(exe_path: &Path, lib_name: &OsStr) -> Option<Pat
 }
 
 fn macos_default_install_frameworks(lib_name: &OsStr) -> Option<PathBuf> {
+    // Best-effort fallback for standard packaged installs.
+    // This is intentionally lower-priority than exe-relative detection and runtime override
+    // (`CHATTY_PDFIUM_LIB_DIR`) so non-standard install locations remain configurable.
     let frameworks = Path::new("/Applications/chatty.app/Contents/Frameworks");
     debug!(
         path = %frameworks.display(),
