@@ -259,7 +259,7 @@ impl Tool for EditExcelTool {
             let stem = default_output
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or("edited");
+                .unwrap_or("workbook");
             default_output.set_file_name(format!("{}.edited.xlsx", stem));
             self.service
                 .resolve_new_path(default_output.to_string_lossy().as_ref())
@@ -268,7 +268,8 @@ impl Tool for EditExcelTool {
 
         if output_canonical == canonical {
             return Err(ExcelToolError::OperationError(anyhow::anyhow!(
-                "Refusing to overwrite source workbook. Provide a different output_path."
+                "Refusing to overwrite source workbook at '{}'. Provide a different output_path.",
+                canonical.display()
             )));
         }
 
