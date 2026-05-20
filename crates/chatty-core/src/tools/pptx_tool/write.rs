@@ -344,7 +344,10 @@ fn build_title_shape(shape_id: u32, title: &str) -> Result<AutoShape, PptxToolEr
     Ok(shape)
 }
 
-pub(super) fn build_shape_xml(shape_id: u32, shape: &PptxShapeSpec) -> Result<String, PptxToolError> {
+pub(super) fn build_shape_xml(
+    shape_id: u32,
+    shape: &PptxShapeSpec,
+) -> Result<String, PptxToolError> {
     match shape {
         PptxShapeSpec::TextBox {
             x,
@@ -548,7 +551,10 @@ fn inches_to_emu(value: f64, field: &str, strictly_positive: bool) -> Result<Emu
     Ok(Inches(value).into())
 }
 
-pub(super) fn insert_shape_xml(slide_xml: &[u8], shape_xml: &str) -> Result<Vec<u8>, PptxToolError> {
+pub(super) fn insert_shape_xml(
+    slide_xml: &[u8],
+    shape_xml: &str,
+) -> Result<Vec<u8>, PptxToolError> {
     let slide_str = std::str::from_utf8(slide_xml).context("Slide XML is not valid UTF-8")?;
     let insert_at = slide_str
         .find("</p:spTree>")

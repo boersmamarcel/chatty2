@@ -17,12 +17,12 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "pptx")]
+use crate::tools::{EditPptxTool, ReadPptxTool, WritePptxTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 #[cfg(feature = "docx")]
 use crate::tools::{ReadDocxTool, WriteDocxTool};
-#[cfg(feature = "pptx")]
-use crate::tools::{EditPptxTool, ReadPptxTool, WritePptxTool};
 
 use super::mcp_helpers::McpTools;
 

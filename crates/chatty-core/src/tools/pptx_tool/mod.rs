@@ -128,7 +128,12 @@ mod tests {
                 .unwrap(),
         );
 
-        let path = tmp.path().join("editable.pptx").to_str().unwrap().to_string();
+        let path = tmp
+            .path()
+            .join("editable.pptx")
+            .to_str()
+            .unwrap()
+            .to_string();
 
         let write_tool = WritePptxTool::new(service.clone());
         write_tool

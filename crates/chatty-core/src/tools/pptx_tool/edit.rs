@@ -516,12 +516,16 @@ mod tests {
     #[test]
     fn edit_pptx_schema_uses_anyof_not_oneof() {
         let schema = edit_pptx_parameters_schema();
-        assert!(schema["properties"]["operations"]["items"]
-            .get("anyOf")
-            .is_some());
-        assert!(schema["properties"]["operations"]["items"]
-            .get("oneOf")
-            .is_none());
+        assert!(
+            schema["properties"]["operations"]["items"]
+                .get("anyOf")
+                .is_some()
+        );
+        assert!(
+            schema["properties"]["operations"]["items"]
+                .get("oneOf")
+                .is_none()
+        );
     }
 
     #[test]
