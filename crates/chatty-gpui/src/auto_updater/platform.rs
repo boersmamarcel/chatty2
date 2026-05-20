@@ -189,6 +189,24 @@ if [ ! -f "$PDFIUM_DST" ]; then
     exit 1
 fi
 
+# Seed the user-data-dir backup copy. This is the robust fallback location that
+# pdfium_utils::create_pdfium() also checks first — having a copy here means PDF
+# tools keep working even if a future update damages the bundle layout or the
+# bundle ends up in an unexpected location (translocation, manual move, etc.).
+# The copy preserves the embedded codesignature so library validation still
+# allows loading it under hardened runtime.
+USER_LIB_DIR="$HOME/Library/Application Support/chatty/lib"
+USER_LIB_DST="$USER_LIB_DIR/libpdfium.dylib"
+if mkdir -p "$USER_LIB_DIR" 2>>"$LOG_FILE"; then
+    if cp "$PDFIUM_DST" "$USER_LIB_DST" 2>>"$LOG_FILE"; then
+        log "Seeded user-data-dir pdfium cache at $USER_LIB_DST"
+    else
+        log "WARNING: failed to seed user-data-dir pdfium cache (non-fatal)"
+    fi
+else
+    log "WARNING: could not create $USER_LIB_DIR (non-fatal)"
+fi
+
 # Clear quarantine attributes so Gatekeeper won't block future launches.
 xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
 
