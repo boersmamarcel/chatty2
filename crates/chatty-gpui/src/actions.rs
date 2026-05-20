@@ -129,4 +129,3 @@ pub(crate) fn set_app_menus(cx: &mut App) {
         ],
     }]);
 }
-

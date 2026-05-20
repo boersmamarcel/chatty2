@@ -661,17 +661,16 @@ impl AutoUpdater {
 }
 
 /// Fetch the latest release from GitHub API
-
 mod download;
 mod network;
 mod platform;
 
 use download::download_update;
 use network::{fetch_latest_release, find_matching_asset};
-#[cfg(target_os = "linux")]
-use platform::relaunch_linux_process;
 #[cfg(target_os = "macos")]
 pub use platform::launch_macos_install_helper;
+#[cfg(target_os = "linux")]
+use platform::relaunch_linux_process;
 
 #[cfg(test)]
 mod tests;
