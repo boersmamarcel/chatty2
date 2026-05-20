@@ -10,7 +10,8 @@ use crate::tools::{
     ListAgentsTool, ListDirectoryTool, ListToolsTool, MoveFileTool, PublishModuleTool,
     ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool,
     SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
-    ShellStatusTool, SubAgentTool, WriteFileTool,
+    ShellStatusTool, SubAgentTool, UpdateTodoTool, VerifyCompletionTool, WriteFileTool,
+    WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -85,6 +86,9 @@ pub(super) type DataQueryTools = (
 /// branching.
 pub(super) struct NativeTools {
     pub list_tools: ListToolsTool,
+    pub write_todos_tool: WriteTodosTool,
+    pub update_todo_tool: UpdateTodoTool,
+    pub verify_completion_tool: VerifyCompletionTool,
     pub fs_read: Option<FsReadTools>,
     pub doc_retriever: Option<DocRetrieverTool>,
     pub fs_write: Option<FsWriteTools>,
@@ -134,10 +138,14 @@ pub(super) struct NativeTools {
 impl NativeTools {
     /// Consume self and produce a flat `Vec<Box<dyn ToolDyn>>`.
     pub fn into_tool_vec(self) -> Vec<Box<dyn ToolDyn>> {
-        let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
-        tools.push(Box::new(self.list_tools)); // always present
-        tools.push(Box::new(self.list_agents_tool)); // always present
-        tools.push(Box::new(self.invoke_agent_tool)); // always present
+        let mut tools: Vec<Box<dyn ToolDyn>> = vec![
+            Box::new(self.list_tools),             // always present
+            Box::new(self.write_todos_tool),       // always present
+            Box::new(self.update_todo_tool),       // always present
+            Box::new(self.verify_completion_tool), // always present
+            Box::new(self.list_agents_tool),       // always present
+            Box::new(self.invoke_agent_tool),      // always present
+        ];
         if let Some(t) = self.mcp_mgmt.list {
             tools.push(Box::new(t));
         }
@@ -275,6 +283,9 @@ impl NativeTools {
 macro_rules! native_tools {
     (
         list_tools: $list_tools:expr,
+        write_todos_tool: $write_todos_tool:expr,
+        update_todo_tool: $update_todo_tool:expr,
+        verify_completion_tool: $verify_completion_tool:expr,
         fs_read: $fs_read:expr,
         doc_retriever: $doc_retriever:expr,
         fs_write: $fs_write:expr,
@@ -311,6 +322,9 @@ macro_rules! native_tools {
     ) => {
         NativeTools {
             list_tools: $list_tools,
+            write_todos_tool: $write_todos_tool,
+            update_todo_tool: $update_todo_tool,
+            verify_completion_tool: $verify_completion_tool,
             fs_read: $fs_read,
             doc_retriever: $doc_retriever,
             fs_write: $fs_write,

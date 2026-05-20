@@ -43,6 +43,7 @@ mod history;
 mod start_screen;
 mod sub_agent;
 
+use chatty_core::services::AgentTaskSnapshot;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -52,6 +53,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
+use super::agent_todo_panel::AgentTodoPanel;
 use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::SystemTrace;
@@ -103,6 +105,8 @@ pub struct ChatView {
     /// Reset on every new assistant message so the elapsed counter
     /// makes sense per-turn.
     thinking_indicator: Entity<ThinkingIndicator>,
+    agent_task_snapshot: Option<AgentTaskSnapshot>,
+    agent_task_panel_collapsed: bool,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -255,6 +259,8 @@ impl ChatView {
             _slash_menu_interceptor: slash_menu_interceptor,
             sub_agent_progress_msg_idx: None,
             thinking_indicator: new_thinking_indicator(cx),
+            agent_task_snapshot: None,
+            agent_task_panel_collapsed: false,
         }
     }
 
@@ -277,6 +283,52 @@ impl ChatView {
     /// Get the current conversation ID
     pub fn conversation_id(&self) -> Option<&String> {
         self.conversation_id.as_ref()
+    }
+
+    pub fn set_agent_task_snapshot(&mut self, snapshot: AgentTaskSnapshot, cx: &mut Context<Self>) {
+        if snapshot.write_todos_called {
+            let was_showing_plan = self.agent_task_snapshot.is_some();
+            let previous_was_verified = self
+                .agent_task_snapshot
+                .as_ref()
+                .is_some_and(|previous| previous.verified);
+            if snapshot.verified {
+                self.agent_task_panel_collapsed = true;
+            } else if !was_showing_plan || previous_was_verified {
+                self.agent_task_panel_collapsed = false;
+            }
+            self.agent_task_snapshot = Some(snapshot);
+        } else {
+            self.agent_task_snapshot = None;
+        }
+        cx.notify();
+    }
+
+    pub fn clear_agent_task_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.agent_task_snapshot = None;
+        self.agent_task_panel_collapsed = false;
+        cx.notify();
+    }
+
+    fn toggle_agent_task_panel(&mut self, cx: &mut Context<Self>) {
+        self.agent_task_panel_collapsed = !self.agent_task_panel_collapsed;
+        cx.notify();
+    }
+
+    fn render_agent_task_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let snapshot = self.agent_task_snapshot.clone()?;
+        if !snapshot.write_todos_called {
+            return None;
+        }
+
+        let entity = cx.entity();
+        Some(
+            AgentTodoPanel::new(snapshot, self.agent_task_panel_collapsed)
+                .on_toggle(move |cx| {
+                    entity.update(cx, |view, cx| view.toggle_agent_task_panel(cx));
+                })
+                .into_any_element(),
+        )
     }
 
     /// Add a user message to the chat
@@ -1005,8 +1057,15 @@ impl Render for ChatView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .p_4()
-                    .child(ChatInput::new(self.chat_input_state.clone())),
+                    .pt_2()
+                    .pb_4()
+                    .child(
+                        div()
+                            .when_some(self.render_agent_task_panel(cx), |this, panel| {
+                                this.child(panel)
+                            })
+                            .child(div().px_4().child(ChatInput::new(self.chat_input_state.clone()))),
+                    )
             )
     }
 }

@@ -13,6 +13,7 @@ impl From<anyhow::Error> for ToolError {
 }
 
 pub mod add_attachment_tool;
+pub mod agent_todo_tool;
 pub mod browser_use_tool;
 pub mod chart_tool;
 #[cfg(feature = "duckdb")]
@@ -58,6 +59,7 @@ pub mod test_helpers;
 pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
+pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
 #[cfg(feature = "duckdb")]

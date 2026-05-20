@@ -44,6 +44,23 @@ impl ListToolsTool {
             description: "List all available tools (both native and MCP)".to_string(),
             source: "native".to_string(),
         }];
+        native_tools.extend(vec![
+            ToolInfo {
+                name: "write_todos".to_string(),
+                description: "Create the single ordered todo plan for a multi-step task before doing any work.".to_string(),
+                source: "native".to_string(),
+            },
+            ToolInfo {
+                name: "update_todo".to_string(),
+                description: "Update one todo status before and after working on it; use blocked with a reason and reflection when a step fails.".to_string(),
+                source: "native".to_string(),
+            },
+            ToolInfo {
+                name: "verify_completion".to_string(),
+                description: "Verify all todos with concrete evidence before writing the final reply; failed verification reopens work.".to_string(),
+                source: "native".to_string(),
+            },
+        ]);
 
         if tools.list_mcp {
             native_tools.push(ToolInfo {
@@ -425,6 +442,7 @@ impl Tool for ListToolsTool {
             description: "List all available tools including:\n\
                          - fetch: Fetch web URLs and return readable text content\n\
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
+                         - Agent todo tools: write_todos, update_todo, verify_completion for multi-step task tracking\n\
                          - Filesystem tools: read_file, final_answer, write_file, list_directory, optional doc_retriever, etc.\n\
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit\n\
                          - add_attachment: Display images or PDFs inline in chat responses\n\
@@ -567,6 +585,9 @@ mod tests {
         let names = tool_names(&output);
         assert!(names.contains(&"list_tools".to_string()));
         assert!(names.contains(&"read_skill".to_string()));
+        assert!(names.contains(&"write_todos".to_string()));
+        assert!(names.contains(&"update_todo".to_string()));
+        assert!(names.contains(&"verify_completion".to_string()));
     }
 
     #[tokio::test]
@@ -574,7 +595,7 @@ mod tests {
         let tool = ListToolsTool::new_with_config(&no_tools(), Vec::new());
         let output = tool.call(ListToolsArgs {}).await.unwrap();
         let names = tool_names(&output);
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"list_tools".to_string()));
         assert!(names.contains(&"read_skill".to_string()));
         assert_eq!(output.note, "These are the native tools available.");
@@ -591,8 +612,8 @@ mod tests {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
         assert!(!names.contains(&"doc_retriever".to_string()));
-        // 2 always-present + 4 fs_read
-        assert_eq!(names.len(), 6);
+        // 5 always-present + 4 fs_read
+        assert_eq!(names.len(), 9);
     }
 
     #[tokio::test]
@@ -616,8 +637,8 @@ mod tests {
         for expected in &["shell_execute", "shell_set_env", "shell_cd", "shell_status"] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
-        // 2 always-present + 4 shell
-        assert_eq!(names.len(), 6);
+        // 5 always-present + 4 shell
+        assert_eq!(names.len(), 9);
     }
 
     #[tokio::test]
@@ -627,6 +648,9 @@ mod tests {
         let names = tool_names(&output);
         let expected = vec![
             "list_tools",
+            "write_todos",
+            "update_todo",
+            "verify_completion",
             "read_skill",
             "list_mcp_services",
             "fetch",

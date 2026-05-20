@@ -174,6 +174,7 @@ pub(super) async fn run_llm_stream(
     };
 
     // 3b. Call stream_prompt with user contents directly (no auto-context injection)
+    let agent_task_controller = agent.task_controller();
     let llm_user_contents = user_contents.clone();
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _user_message) = stream_prompt(
@@ -330,6 +331,9 @@ pub(super) async fn run_llm_stream(
                                     .to_string(),
                             );
                         }
+                        if pending_follow_up.is_none() {
+                            pending_follow_up = agent_task_controller.stream_end_follow_up();
+                        }
                         // Forward to StreamManager before breaking
                         if let Some(ref sm) = stream_manager {
                             sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
@@ -378,6 +382,35 @@ pub(super) async fn run_llm_stream(
                     Ok(StreamChunk::ToolCallResult { ref id, .. }) => {
                         let tool_name = pending_tool_name.remove(id).unwrap_or_default();
                         let tool_args = pending_tool_args.remove(id).unwrap_or_default();
+                        if is_agent_todo_tool(&tool_name) {
+                            let snapshot = agent_task_controller.snapshot();
+                            chat_view
+                                .update(cx, |view, cx| {
+                                    if view.conversation_id().map(|id| id.as_str())
+                                        == Some(conv_id.as_str())
+                                    {
+                                        view.set_agent_task_snapshot(snapshot, cx);
+                                    }
+                                })
+                                .map_err(|e| {
+                                    warn!(
+                                        error = ?e,
+                                        "Failed to update agent todo panel after todo tool result"
+                                    )
+                                })
+                                .ok();
+                        }
+                        if pending_follow_up.is_none()
+                            && let Some(prompt) =
+                                agent_task_controller.observe_tool_result(&tool_name)
+                        {
+                            debug!(
+                                conv_id = %conv_id,
+                                "Agent todo protocol: multiple tool results observed before write_todos"
+                            );
+                            cancel_flag.store(true, Ordering::Relaxed);
+                            pending_follow_up = Some(prompt);
+                        }
                         if let Some(pivot) = loop_guard.on_tool_completed(&tool_name, &tool_args) {
                             debug!(conv_id = %conv_id, pivot = %pivot,
                                 "AgentLoopGuard loop detected; cancelling stream");
@@ -534,6 +567,13 @@ pub(super) fn should_refresh_azure_auth(
         provider_type,
         chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
     ) && is_auth_stream_error(err)
+}
+
+fn is_agent_todo_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "write_todos" | "update_todo" | "verify_completion"
+    )
 }
 
 /// Select attachment paths from the most recent assistant message that the

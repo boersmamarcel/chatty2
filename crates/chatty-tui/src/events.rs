@@ -54,6 +54,7 @@ pub enum AppEvent {
     StreamCompleted,
     StreamCancelled,
     StreamError(String),
+    AgentProtocolFollowUp(String),
 
     // ── Lifecycle events ─────────────────────────────────────────────────
     ConversationReady,
@@ -128,6 +129,9 @@ impl std::fmt::Debug for AppEvent {
             Self::StreamCompleted => write!(f, "StreamCompleted"),
             Self::StreamCancelled => write!(f, "StreamCancelled"),
             Self::StreamError(s) => f.debug_tuple("StreamError").field(s).finish(),
+            Self::AgentProtocolFollowUp(s) => {
+                f.debug_tuple("AgentProtocolFollowUp").field(s).finish()
+            }
             Self::ConversationReady => write!(f, "ConversationReady"),
             Self::ConversationInitialized { generation, .. } => f
                 .debug_struct("ConversationInitialized")

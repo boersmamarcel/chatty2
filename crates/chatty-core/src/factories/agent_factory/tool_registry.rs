@@ -38,6 +38,9 @@ pub struct ToolAvailability {
 pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<String> {
     let mut names = HashSet::from([
         String::from("list_tools"),
+        String::from("write_todos"),
+        String::from("update_todo"),
+        String::from("verify_completion"),
         String::from("read_skill"),
         String::from("list_agents"),
         String::from("invoke_agent"),
@@ -186,8 +189,8 @@ mod tests {
         for tool in ["read_skill", "list_tools", "list_agents", "invoke_agent"] {
             assert!(names.contains(tool), "{tool} must always be present");
         }
-        // Baseline count: 4 always-on tools
-        assert_eq!(names.len(), 4);
+        // Baseline count: 7 always-on tools
+        assert_eq!(names.len(), 7);
     }
 
     #[test]

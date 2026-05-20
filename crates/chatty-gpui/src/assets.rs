@@ -34,6 +34,8 @@ pub enum CustomIcon {
     Loader,        // loader.svg - Checking/Installing
     AlertCircle,   // alert-circle.svg - Errors
     CheckCircle,   // check-circle.svg - Update ready
+    CircleDashed,  // circle-dashed.svg - Planned item
+    CircleDot,     // circle-dot.svg - Completed item
     Copy,          // copy.svg - Copy button
     Lock,          // lock.svg - Sandboxed execution
     TriangleAlert, // triangle-alert.svg - Warning indicator
@@ -60,6 +62,8 @@ impl IconNamed for CustomIcon {
             CustomIcon::Loader => "icons/loader.svg",
             CustomIcon::AlertCircle => "icons/alert-circle.svg",
             CustomIcon::CheckCircle => "icons/check-circle.svg",
+            CustomIcon::CircleDashed => "icons/circle-dashed.svg",
+            CustomIcon::CircleDot => "icons/circle-dot.svg",
             CustomIcon::Copy => "icons/copy.svg",
             CustomIcon::Lock => "icons/lock.svg",
             CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
