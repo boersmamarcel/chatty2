@@ -216,6 +216,7 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 | `write_docx` | Create Word documents with headings, paragraphs, and tables from Markdown | ✓ |
 | `read_pptx` | Read PowerPoint presentations (.pptx) as structured text | — |
 | `write_pptx` | Create PowerPoint presentations with slides, text boxes, bullet lists, and tables | ✓ |
+| `edit_pptx` | Edit existing PowerPoint presentations with style-preserving slide updates | ✓ |
 | `pdf_to_image` | Convert PDF pages to PNG images and display them inline in chat (up to 20 pages) | — |
 | `pdf_info` | Get metadata and structural information about a PDF | — |
 | `pdf_extract_text` | Extract text from PDF pages (up to 50 pages) | — |

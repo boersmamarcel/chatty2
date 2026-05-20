@@ -274,11 +274,18 @@ impl ListToolsTool {
         }
 
         if tools.pptx_write {
-            native_tools.push(ToolInfo {
-                name: "write_pptx".to_string(),
-                description: "Create a new PowerPoint (.pptx) file from structured JSON slides containing titles, text boxes, bullet lists, and tables.".to_string(),
-                source: "native".to_string(),
-            });
+            native_tools.extend(vec![
+                ToolInfo {
+                    name: "write_pptx".to_string(),
+                    description: "Create a new PowerPoint (.pptx) file from structured JSON slides containing titles, text boxes, bullet lists, and tables.".to_string(),
+                    source: "native".to_string(),
+                },
+                ToolInfo {
+                    name: "edit_pptx".to_string(),
+                    description: "Edit an existing PowerPoint presentation with style-preserving slide updates (title updates and adding text boxes, bullet lists, or tables).".to_string(),
+                    source: "native".to_string(),
+                },
+            ]);
         }
 
         if tools.pdf_to_image {
@@ -685,6 +692,7 @@ mod tests {
             "edit_excel",
             "read_pptx",
             "write_pptx",
+            "edit_pptx",
             "pdf_to_image",
             "pdf_info",
             "pdf_extract_text",

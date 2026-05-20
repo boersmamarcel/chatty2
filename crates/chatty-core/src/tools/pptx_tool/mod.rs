@@ -1,6 +1,8 @@
+mod edit;
 mod read;
 mod write;
 
+pub use edit::EditPptxTool;
 pub use read::ReadPptxTool;
 pub use write::WritePptxTool;
 
@@ -20,6 +22,7 @@ mod tests {
 
     use crate::services::filesystem_service::FileSystemService;
 
+    use super::edit::{EditPptxArgs, EditPptxOperation};
     use super::read::ReadPptxArgs;
     use super::write::{PptxShapeSpec, PptxSlideSpec, TextStyleSpec, WritePptxArgs};
     use super::*;
@@ -114,5 +117,78 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_edit_then_read_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+
+        let path = tmp.path().join("editable.pptx").to_str().unwrap().to_string();
+
+        let write_tool = WritePptxTool::new(service.clone());
+        write_tool
+            .call(WritePptxArgs {
+                path: path.clone(),
+                slides: vec![PptxSlideSpec {
+                    title: Some("Original Title".to_string()),
+                    shapes: vec![PptxShapeSpec::TextBox {
+                        x: 0.8,
+                        y: 1.7,
+                        width: 8.0,
+                        height: 1.2,
+                        text: "Original body".to_string(),
+                        style: None,
+                    }],
+                }],
+            })
+            .await
+            .unwrap();
+
+        let edit_tool = EditPptxTool::new(service.clone());
+        let edit_output = edit_tool
+            .call(EditPptxArgs {
+                path: path.clone(),
+                output_path: None,
+                operations: vec![
+                    EditPptxOperation::SetSlideTitle {
+                        slide: 1,
+                        title: "Updated Title".to_string(),
+                    },
+                    EditPptxOperation::AddBulletList {
+                        slide: 1,
+                        x: 0.8,
+                        y: 3.0,
+                        width: 8.0,
+                        height: 1.8,
+                        items: vec!["First update".into(), "Second update".into()],
+                        style: None,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(edit_output.operations_applied, 2);
+        assert_eq!(edit_output.slide_count, 1);
+
+        let read_tool = ReadPptxTool::new(service);
+        let read_output = read_tool
+            .call(ReadPptxArgs {
+                path,
+                include_notes: None,
+                max_chars: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(read_output.text.contains("## Slide 1: Updated Title"));
+        assert!(read_output.text.contains("Original body"));
+        assert!(read_output.text.contains("First update"));
+        assert!(read_output.text.contains("Second update"));
     }
 }

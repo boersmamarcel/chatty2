@@ -124,7 +124,7 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
         names.insert(String::from("read_pptx"));
     }
     if tools.pptx_write {
-        names.insert(String::from("write_pptx"));
+        names.extend(["write_pptx", "edit_pptx"].into_iter().map(String::from));
     }
     if tools.pdf_to_image {
         names.insert(String::from("pdf_to_image"));
@@ -322,6 +322,7 @@ mod tests {
         });
         assert!(names.contains("read_pptx"), "read_pptx missing for pptx");
         assert!(names.contains("write_pptx"), "write_pptx missing for pptx");
+        assert!(names.contains("edit_pptx"), "edit_pptx missing for pptx");
     }
 
     #[test]
