@@ -130,6 +130,8 @@ You send a message
 
 You see every tool call, its inputs and outputs, and the agent's reasoning in real time — as collapsible trace blocks alongside the response.
 
+For multi-step tasks, the agent creates a **structured plan** before doing any work: a goal statement and an ordered list of todos. A collapsible **Agent plan** panel appears above the response, showing each step's status (pending, in-progress, done, or blocked) and an overall progress counter. The agent marks each step before and after working on it, then calls a verification step before writing its final reply — so you always know where it is in the work.
+
 ### What Agents Can Do
 
 With tools enabled, an agent can autonomously:
@@ -256,6 +258,9 @@ When code execution is enabled in Settings, your LLM agent can use these tools. 
 | Tool | What the agent can do | Approval |
 |:-----|:----------------------|:--------:|
 | `list_tools` | List all available tools and their schemas | — |
+| `write_todos` | Create a structured goal and ordered todo list for a multi-step task | — |
+| `update_todo` | Mark a todo as in-progress, done, or blocked (with reason and reflection) | — |
+| `verify_completion` | Verify all todos with concrete evidence before writing the final reply | — |
 | `sub_agent` | Spawn a headless `chatty-tui` sub-agent with its own tools and return the result | ✓ |
 | `publish_wasm_module` | Publish a WASM module to the Hive registry — provide the `.wasm` file path and a TOML manifest; the tool reads and encodes the binary automatically (available when a Hive MCP server is configured) | ✓ |
 
