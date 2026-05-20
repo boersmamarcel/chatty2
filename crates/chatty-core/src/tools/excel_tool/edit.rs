@@ -4,8 +4,10 @@ use rig_core::tool::Tool;
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
+use umya_spreadsheet::{reader, writer};
 
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
 use crate::services::filesystem_service::FileSystemService;
@@ -57,7 +59,7 @@ fn edit_excel_parameters_schema() -> Value {
             },
             "output_path": {
                 "type": "string",
-                "description": "Optional output path. Defaults to overwriting the input file."
+                "description": "Optional output path for the edited workbook. If omitted, the input file is edited in place."
             },
             "operations": {
                 "type": "array",
@@ -222,6 +224,150 @@ struct SheetData {
     formats: Vec<(String, CellFormatSpec)>,
 }
 
+fn has_xlsx_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("xlsx"))
+        .unwrap_or(false)
+}
+
+fn write_umya_cell_value(cell: &mut umya_spreadsheet::Cell, value: &Value) {
+    match value {
+        Value::String(s) => {
+            cell.set_value_string(s);
+        }
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                cell.set_value_number(i as f64);
+            } else if let Some(u) = n.as_u64() {
+                cell.set_value_number(u as f64);
+            } else if let Some(f) = n.as_f64() {
+                cell.set_value_number(f);
+            } else {
+                cell.set_blank();
+            }
+        }
+        Value::Bool(b) => {
+            cell.set_value_bool(*b);
+        }
+        Value::Null => {
+            cell.set_blank();
+        }
+        Value::Array(_) | Value::Object(_) => {
+            warn!("Writing complex JSON value to Excel cell as stringified JSON");
+            cell.set_value_string(value.to_string());
+        }
+    }
+}
+
+fn apply_preserving_template_edits(
+    canonical: &Path,
+    output_canonical: &Path,
+    operations: &[EditOperation],
+) -> Result<Vec<String>, ExcelToolError> {
+    let mut workbook = reader::xlsx::read(canonical).map_err(|e| {
+        ExcelToolError::OperationError(anyhow::anyhow!(
+            "Failed to open '{}' with style-preserving editor: {}",
+            canonical.display(),
+            e
+        ))
+    })?;
+
+    for op in operations {
+        match op {
+            EditOperation::SetCell { sheet, cell, value } => {
+                let ws = workbook.get_sheet_by_name_mut(sheet).ok_or_else(|| {
+                    ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
+                })?;
+                write_umya_cell_value(ws.get_cell_mut(cell.as_str()), value);
+            }
+            EditOperation::SetRange {
+                sheet,
+                start_cell,
+                data,
+            } => {
+                let (sr, sc) = parse_cell_ref(start_cell)?;
+                let ws = workbook.get_sheet_by_name_mut(sheet).ok_or_else(|| {
+                    ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
+                })?;
+                for (ri, row_data) in data.iter().enumerate() {
+                    for (ci, val) in row_data.iter().enumerate() {
+                        let row = sr + ri as u32 + 1;
+                        let col = sc as u32 + ci as u32 + 1;
+                        write_umya_cell_value(ws.get_cell_mut((col, row)), val);
+                    }
+                }
+            }
+            EditOperation::AddSheet { name, data } => {
+                if workbook.get_sheet_by_name(name).is_some() {
+                    warn!(sheet = %name, "Sheet already exists, skipping add_sheet");
+                    continue;
+                }
+                workbook.new_sheet(name).map_err(|e| {
+                    ExcelToolError::OperationError(anyhow::anyhow!(
+                        "Failed to add sheet '{}': {}",
+                        name,
+                        e
+                    ))
+                })?;
+                let ws = workbook.get_sheet_by_name_mut(name).ok_or_else(|| {
+                    ExcelToolError::OperationError(anyhow::anyhow!(
+                        "Failed to retrieve newly created sheet '{}'",
+                        name
+                    ))
+                })?;
+                for (ri, row_data) in data.iter().enumerate() {
+                    for (ci, val) in row_data.iter().enumerate() {
+                        write_umya_cell_value(ws.get_cell_mut((ci as u32 + 1, ri as u32 + 1)), val);
+                    }
+                }
+            }
+            EditOperation::DeleteRows {
+                sheet,
+                start_row,
+                count,
+            } => {
+                if workbook.get_sheet_by_name(sheet).is_none() {
+                    return Err(ExcelToolError::OperationError(anyhow::anyhow!(
+                        "Sheet '{}' not found",
+                        sheet
+                    )));
+                }
+                workbook.remove_row(sheet, &(*start_row as u32), &(*count as u32));
+            }
+            EditOperation::SetFormula {
+                sheet,
+                cell,
+                formula,
+            } => {
+                let ws = workbook.get_sheet_by_name_mut(sheet).ok_or_else(|| {
+                    ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
+                })?;
+                ws.get_cell_mut(cell.as_str()).set_formula(formula.as_str());
+            }
+            EditOperation::FormatRange { .. } => {
+                return Err(ExcelToolError::OperationError(anyhow::anyhow!(
+                    "format_range operations require legacy edit mode"
+                )));
+            }
+        }
+    }
+
+    writer::xlsx::write(&workbook, output_canonical).map_err(|e| {
+        ExcelToolError::WriteError(format!(
+            "Failed to save '{}' with style-preserving editor: {}",
+            output_canonical.display(),
+            e
+        ))
+    })?;
+
+    Ok(workbook
+        .get_sheet_collection_no_check()
+        .iter()
+        .map(|s| s.get_name().to_string())
+        .collect())
+}
+
 impl Tool for EditExcelTool {
     const NAME: &'static str = "edit_excel";
     type Error = ExcelToolError;
@@ -232,10 +378,11 @@ impl Tool for EditExcelTool {
         ToolDefinition {
             name: "edit_excel".to_string(),
             description: "Edit an existing Excel file by applying targeted modifications.\n\
-                         Reads the file, applies operations, and writes back.\n\
+                         Reads the file, applies operations, and writes the updated workbook.\n\
+                         For .xlsx files (except format_range operations), the tool preserves existing template formatting and workbook structures while editing.\n\
                          \n\
-                         WARNING: This tool reads data with calamine and rewrites with rust_xlsxwriter.\n\
-                         Original formatting, macros, charts, images, and formulas may be lost.\n\
+                         NOTE: When style-preserving editing isn't available, this tool falls back to calamine + rust_xlsxwriter.\n\
+                         In fallback mode, original formatting, macros, charts, images, and formulas may be lost.\n\
                          Only use when modifications are needed.\n\
                          \n\
                          Supported operations: set_cell, set_range, add_sheet, delete_rows, set_formula, format_range\n\
@@ -252,7 +399,7 @@ impl Tool for EditExcelTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
         let output_canonical = if let Some(ref out) = args.output_path {
-            self.service.resolve_path(out).await?
+            self.service.resolve_new_path(out).await?
         } else {
             canonical.clone()
         };
@@ -316,6 +463,30 @@ impl Tool for EditExcelTool {
             )));
         }
 
+        let ops_count = args.operations.len();
+        let use_style_preserving_mode = has_xlsx_extension(&canonical)
+            && args
+                .operations
+                .iter()
+                .all(|op| !matches!(op, EditOperation::FormatRange { .. }));
+
+        if use_style_preserving_mode {
+            let final_sheet_names =
+                apply_preserving_template_edits(&canonical, &output_canonical, &args.operations)?;
+            return Ok(EditExcelOutput {
+                path: output_canonical.display().to_string(),
+                operations_applied: ops_count,
+                sheets: final_sheet_names,
+                message: format!(
+                    "Applied {} operation(s) to '{}' and saved to '{}'.",
+                    ops_count,
+                    canonical.display(),
+                    output_canonical.display()
+                ),
+                warning: None,
+            });
+        }
+
         // PHASE 1: Read existing data with calamine
         let mut workbook = open_workbook_auto(&canonical).map_err(|e| {
             ExcelToolError::OperationError(anyhow::anyhow!("Failed to open '{}': {}", args.path, e))
@@ -355,7 +526,6 @@ impl Tool for EditExcelTool {
         }
 
         // PHASE 2: Apply operations
-        let ops_count = args.operations.len();
         for op in &args.operations {
             match op {
                 EditOperation::SetCell { sheet, cell, value } => {
@@ -543,8 +713,9 @@ impl Tool for EditExcelTool {
             operations_applied: ops_count,
             sheets: final_sheet_names,
             message: format!(
-                "Applied {} operation(s) to '{}' and saved.",
+                "Applied {} operation(s) to '{}' and saved to '{}'.",
                 ops_count,
+                canonical.display(),
                 output_canonical.display()
             ),
             warning: Some(

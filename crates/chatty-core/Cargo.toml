@@ -56,6 +56,7 @@ image = { workspace = true, optional = true }
 # Excel (optional — enable with "excel" feature)
 calamine = { workspace = true, optional = true }
 rust_xlsxwriter = { workspace = true, optional = true }
+umya-spreadsheet = { workspace = true, optional = true }
 
 # DOCX (optional — enable with "docx" feature)
 docx-rs = { workspace = true, optional = true }
@@ -112,7 +113,7 @@ mcp = ["rig-core/rmcp"]
 # A future TUI crate would NOT enable this feature.
 gpui-globals = ["dep:gpui"]
 # Optional tool/service feature groups
-excel = ["dep:calamine", "dep:rust_xlsxwriter"]
+excel = ["dep:calamine", "dep:rust_xlsxwriter", "dep:umya-spreadsheet"]
 docx = ["dep:docx-rs"]
 pdf = ["dep:pdfium-render", "dep:image"]
 pptx = ["dep:zip", "dep:roxmltree", "dep:pptx_writer"]

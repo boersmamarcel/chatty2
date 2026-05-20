@@ -304,7 +304,7 @@ impl Tool for WriteExcelTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let canonical = self.service.resolve_path(&args.path).await?;
+        let canonical = self.service.resolve_new_path(&args.path).await?;
         let is_overwrite = canonical.exists();
 
         // Request approval

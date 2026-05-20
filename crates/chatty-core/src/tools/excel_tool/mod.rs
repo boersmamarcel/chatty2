@@ -23,15 +23,21 @@ pub enum ExcelToolError {
 
 #[cfg(test)]
 mod tests {
+    use super::edit::EditExcelArgs;
     use super::parsing::*;
-    use super::write::{CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, write_sheet};
+    use super::write::{
+        CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, WriteExcelArgs, write_sheet,
+    };
     use super::*;
     use calamine::{Data, Reader, open_workbook_auto};
-    use rust_xlsxwriter::Workbook;
+    use rust_xlsxwriter::{Format, Workbook};
     use serde_json::Value;
     use std::sync::Arc;
 
+    use crate::models::write_approval_store::WriteApprovalStore;
     use crate::services::filesystem_service::FileSystemService;
+    use crate::settings::models::execution_settings::ApprovalMode;
+    use crate::tools::filesystem_write_tool::set_global_write_approval_mode;
     use rig_core::tool::Tool;
 
     #[test]
@@ -170,6 +176,50 @@ mod tests {
         sheet.write_string(2, 2, "LA").unwrap();
         workbook.save(&path).unwrap();
         path
+    }
+
+    fn create_styled_test_xlsx(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+        let path = dir.join(filename);
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet().set_name("Data").unwrap();
+        let style = Format::new()
+            .set_bold()
+            .set_background_color(0xFFF2CC)
+            .set_font_color(0x9C0006);
+        sheet
+            .write_string_with_format(0, 0, "Name", &style)
+            .unwrap();
+        sheet.write_string(0, 1, "Age").unwrap();
+        sheet.write_string(1, 0, "Alice").unwrap();
+        sheet.write_number(1, 1, 30.0).unwrap();
+        workbook.save(&path).unwrap();
+        path
+    }
+
+    fn read_style_signature(
+        path: &std::path::Path,
+        sheet: &str,
+        cell: &str,
+    ) -> (bool, String, String) {
+        let workbook = umya_spreadsheet::reader::xlsx::read(path).unwrap();
+        let worksheet = workbook.get_sheet_by_name(sheet).unwrap();
+        let styled_cell = worksheet.get_cell(cell).unwrap();
+        let style = styled_cell.get_style();
+        let bold = style
+            .get_font()
+            .map(|font| *font.get_bold())
+            .unwrap_or(false);
+        let font_color = style
+            .get_font()
+            .map(|font| font.get_color().get_argb().to_string())
+            .unwrap_or_default();
+        let bg_color = style
+            .get_fill()
+            .and_then(|fill| fill.get_pattern_fill())
+            .and_then(|pattern| pattern.get_foreground_color())
+            .map(|color| color.get_argb().to_string())
+            .unwrap_or_default();
+        (bold, font_color, bg_color)
     }
 
     #[tokio::test]
@@ -499,6 +549,136 @@ mod tests {
         match age {
             Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
             _ => panic!("Expected number, got {:?}", age),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_excel_tool_creates_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let write_approvals = WriteApprovalStore::new().get_pending_approvals();
+        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
+        let tool = WriteExcelTool::new(service, write_approvals);
+
+        let output = tool
+            .call(WriteExcelArgs {
+                path: "example.xlsx".to_string(),
+                sheets: vec![SheetSpec {
+                    name: "Sheet1".to_string(),
+                    data: vec![vec![
+                        Value::String("Name".to_string()),
+                        Value::String("Age".to_string()),
+                    ]],
+                    column_widths: vec![],
+                    formatting: None,
+                    cell_formats: vec![],
+                    merged_cells: vec![],
+                    formulas: vec![],
+                }],
+            })
+            .await
+            .unwrap();
+
+        let file_path = tmp.path().join("example.xlsx");
+        assert!(file_path.exists());
+        assert_eq!(output.sheets_written, 1);
+    }
+
+    #[tokio::test]
+    async fn test_edit_excel_tool_creates_new_output_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_path = create_test_xlsx(tmp.path(), "input.xlsx");
+        std::fs::create_dir_all(tmp.path().join("out")).unwrap();
+
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let write_approvals = WriteApprovalStore::new().get_pending_approvals();
+        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
+        let tool = EditExcelTool::new(service.clone(), write_approvals);
+
+        tool.call(EditExcelArgs {
+            path: input_path.to_str().unwrap().to_string(),
+            output_path: Some("out/edited.xlsx".to_string()),
+            operations: vec![EditOperation::SetCell {
+                sheet: "Data".to_string(),
+                cell: "B2".to_string(),
+                value: Value::Number(31.into()),
+            }],
+        })
+        .await
+        .unwrap();
+
+        let output_path = tmp.path().join("out/edited.xlsx");
+        assert!(output_path.exists());
+
+        let read_tool = ReadExcelTool::new(service);
+        let output = read_tool
+            .call(read::ReadExcelArgs {
+                path: output_path.to_str().unwrap().to_string(),
+                sheet: None,
+                range: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap();
+        match &output.data[1][1] {
+            Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
+            other => panic!("Expected numeric age in B2, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_edit_excel_tool_preserves_template_when_editing_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_path = create_styled_test_xlsx(tmp.path(), "template.xlsx");
+        let style_before = read_style_signature(&input_path, "Data", "A1");
+
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let write_approvals = WriteApprovalStore::new().get_pending_approvals();
+        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
+        let tool = EditExcelTool::new(service.clone(), write_approvals);
+
+        let output = tool
+            .call(EditExcelArgs {
+                path: input_path.to_str().unwrap().to_string(),
+                output_path: None,
+                operations: vec![EditOperation::SetCell {
+                    sheet: "Data".to_string(),
+                    cell: "B2".to_string(),
+                    value: Value::Number(31.into()),
+                }],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.path, input_path.display().to_string());
+        let style_after = read_style_signature(&input_path, "Data", "A1");
+        assert_eq!(style_before, style_after);
+
+        let read_tool = ReadExcelTool::new(service.clone());
+        let edited = read_tool
+            .call(read::ReadExcelArgs {
+                path: input_path.to_str().unwrap().to_string(),
+                sheet: None,
+                range: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap();
+        match &edited.data[1][1] {
+            Value::Number(n) => assert_eq!(n.as_f64().unwrap(), 31.0),
+            other => panic!("Expected numeric age in edited workbook, got {:?}", other),
         }
     }
 }
