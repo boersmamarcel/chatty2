@@ -166,6 +166,10 @@ sudo apt-get install -y \
   - Base SVGs (`{hash}.svg`) are cached indefinitely for reuse
   - Styled SVGs (`{hash}.styled.{color_hash}.svg`) are theme-specific variants that are cleaned up on app restart
   - The `inject_svg_color()` method strips inline color attributes and injects CSS to apply theme colors
+- **Pdfium Library Cache**: The pdfium native library is cached in a persistent user-data directory so it survives bundle corruption, app translocation, and partial auto-update rsyncs. Lookup order in `pdfium_utils::create_pdfium()`: user-data cache → exe-relative → `CHATTY_PDFIUM_LIB_DIR` env → compile-time `PDFIUM_LIB_DIR` → system. On every successful bind, the library is opportunistically copied to the cache (`self_heal_copy()`). Platform paths:
+  - **macOS**: `~/Library/Application Support/chatty/lib/`
+  - **Linux**: `~/.local/share/chatty/lib/` or `$XDG_DATA_HOME/chatty/lib/`
+  - **Windows**: `%APPDATA%\chatty\lib\`
 
 ## CI/CD
 
