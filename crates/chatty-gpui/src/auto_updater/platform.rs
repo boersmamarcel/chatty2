@@ -138,6 +138,35 @@ fi
 
 log "Found app bundle: $APP_IN_DMG"
 
+# Seed the user-data-dir backup copy from the DMG mount FIRST, before any rsync.
+# This is the most robust seeding point because:
+#   - $APP_IN_DMG is the freshly-mounted DMG, guaranteed to contain the dylib.
+#   - It runs even if the subsequent rsync writes to a translocated/wrong path.
+#   - It runs even if the bundle layout is unusual.
+#   - It runs even if codesign re-signing later corrupts the bundle.
+# pdfium_utils::create_pdfium() checks this cache path FIRST, so the new release
+# will find the library here regardless of what happens to the bundle.
+USER_LIB_DIR="$HOME/Library/Application Support/chatty/lib"
+USER_LIB_DST="$USER_LIB_DIR/libpdfium.dylib"
+PDFIUM_IN_DMG="$APP_IN_DMG/Contents/Frameworks/libpdfium.dylib"
+if [ -f "$PDFIUM_IN_DMG" ]; then
+    if mkdir -p "$USER_LIB_DIR" 2>>"$LOG_FILE"; then
+        # Use temp file + atomic rename so a concurrent reader never sees a partial file.
+        USER_LIB_TMP="$USER_LIB_DST.$$.tmp"
+        if cp "$PDFIUM_IN_DMG" "$USER_LIB_TMP" 2>>"$LOG_FILE" \
+                && mv -f "$USER_LIB_TMP" "$USER_LIB_DST" 2>>"$LOG_FILE"; then
+            log "Seeded user-data-dir pdfium cache at $USER_LIB_DST (from DMG)"
+        else
+            log "WARNING: failed to seed user-data-dir pdfium cache from DMG (non-fatal)"
+            rm -f "$USER_LIB_TMP" 2>/dev/null || true
+        fi
+    else
+        log "WARNING: could not create $USER_LIB_DIR (non-fatal)"
+    fi
+else
+    log "WARNING: DMG missing $PDFIUM_IN_DMG; user-data-dir cache not seeded"
+fi
+
 # Verify target bundle exists and is writable
 if [ ! -d "$APP_BUNDLE" ]; then
     log "ERROR: Target app bundle does not exist: $APP_BUNDLE"
@@ -187,24 +216,6 @@ if [ ! -f "$PDFIUM_DST" ]; then
     log "ERROR: libpdfium.dylib still missing after install (expected at $PDFIUM_DST)"
     hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
     exit 1
-fi
-
-# Seed the user-data-dir backup copy. This is the robust fallback location that
-# pdfium_utils::create_pdfium() also checks first — having a copy here means PDF
-# tools keep working even if a future update damages the bundle layout or the
-# bundle ends up in an unexpected location (translocation, manual move, etc.).
-# The copy preserves the embedded codesignature so library validation still
-# allows loading it under hardened runtime.
-USER_LIB_DIR="$HOME/Library/Application Support/chatty/lib"
-USER_LIB_DST="$USER_LIB_DIR/libpdfium.dylib"
-if mkdir -p "$USER_LIB_DIR" 2>>"$LOG_FILE"; then
-    if cp "$PDFIUM_DST" "$USER_LIB_DST" 2>>"$LOG_FILE"; then
-        log "Seeded user-data-dir pdfium cache at $USER_LIB_DST"
-    else
-        log "WARNING: failed to seed user-data-dir pdfium cache (non-fatal)"
-    fi
-else
-    log "WARNING: could not create $USER_LIB_DIR (non-fatal)"
 fi
 
 # Clear quarantine attributes so Gatekeeper won't block future launches.
