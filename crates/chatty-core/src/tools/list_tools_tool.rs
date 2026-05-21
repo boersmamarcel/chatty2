@@ -282,7 +282,7 @@ impl ListToolsTool {
                 },
                 ToolInfo {
                     name: "edit_pptx".to_string(),
-                    description: "Edit an existing PowerPoint presentation with style-preserving slide updates (title updates and adding text boxes, bullet lists, or tables).".to_string(),
+                    description: "Edit an existing PowerPoint presentation with style-preserving slide updates (title updates and adding text boxes, bullet lists, tables, or images).".to_string(),
                     source: "native".to_string(),
                 },
             ]);

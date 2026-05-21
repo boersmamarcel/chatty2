@@ -2,7 +2,9 @@ use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
+use pptx_writer::media::Image;
 use pptx_writer::shapes::ShapeTree;
+use pptx_writer::{Inches, Presentation};
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -42,6 +44,13 @@ fn table_rows_schema() -> Value {
             "type": "array",
             "items": { "type": "string" }
         }
+    })
+}
+
+fn image_path_schema() -> Value {
+    serde_json::json!({
+        "type": "string",
+        "description": "Path to an image file (png, jpg, jpeg, gif, bmp, tiff, webp, svg)"
     })
 }
 
@@ -114,6 +123,19 @@ fn edit_pptx_parameters_schema() -> Value {
                                 "rows": table_rows_schema()
                             },
                             "required": ["type", "slide", "x", "y", "width", "height", "rows"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": operation_type_discriminator_schema("add_image"),
+                                "slide": { "type": "integer", "description": "1-based slide index" },
+                                "x": { "type": "number" },
+                                "y": { "type": "number" },
+                                "width": { "type": "number" },
+                                "height": { "type": "number" },
+                                "image_path": image_path_schema()
+                            },
+                            "required": ["type", "slide", "x", "y", "width", "height", "image_path"]
                         }
                     ]
                 }
@@ -166,6 +188,14 @@ pub enum EditPptxOperation {
         height: f64,
         rows: Vec<Vec<String>>,
     },
+    AddImage {
+        slide: usize,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        image_path: String,
+    },
 }
 
 impl EditPptxOperation {
@@ -174,7 +204,8 @@ impl EditPptxOperation {
             Self::SetSlideTitle { slide, .. }
             | Self::AddTextBox { slide, .. }
             | Self::AddBulletList { slide, .. }
-            | Self::AddTable { slide, .. } => *slide,
+            | Self::AddTable { slide, .. }
+            | Self::AddImage { slide, .. } => *slide,
         }
     }
 }
@@ -210,7 +241,7 @@ impl Tool for EditPptxTool {
             description: "Edit an existing PowerPoint presentation (.pptx) with style-preserving operations.\n\
                          Applies targeted XML-level updates to specific slides while preserving the template and existing slide formatting.\n\
                          \n\
-                         Supported operations: set_slide_title, add_text_box, add_bullet_list, add_table.\n\
+                         Supported operations: set_slide_title, add_text_box, add_bullet_list, add_table, add_image.\n\
                          \n\
                          Examples:\n\
                          - Update title: {\"path\":\"deck.pptx\",\"operations\":[{\"type\":\"set_slide_title\",\"slide\":1,\"title\":\"Q2 Review\"}]}\n\
@@ -230,7 +261,13 @@ impl Tool for EditPptxTool {
 
         let source_bytes = std::fs::read(&canonical)
             .with_context(|| format!("Failed to read '{}'", canonical.display()))?;
-        let operations = args.operations.clone();
+        let mut operations = args.operations.clone();
+        for op in &mut operations {
+            if let EditPptxOperation::AddImage { image_path, .. } = op {
+                let resolved = self.service.resolve_path(image_path).await?;
+                *image_path = resolved.display().to_string();
+            }
+        }
         let requested_path = args.path.clone();
         let (edited_bytes, slide_count) = tokio::task::spawn_blocking(move || {
             apply_style_preserving_edits(source_bytes, &operations, &requested_path)
@@ -297,63 +334,160 @@ fn apply_style_preserving_edits(
         }
     }
 
-    let output = Cursor::new(Vec::<u8>::new());
-    let mut writer = zip::ZipWriter::new(output);
+    let xml_ops: Vec<EditPptxOperation> = operations
+        .iter()
+        .filter(|op| !matches!(op, EditPptxOperation::AddImage { .. }))
+        .cloned()
+        .collect();
+    let image_ops: Vec<EditPptxOperation> = operations
+        .iter()
+        .filter(|op| matches!(op, EditPptxOperation::AddImage { .. }))
+        .cloned()
+        .collect();
 
-    for idx in 0..archive.len() {
-        let mut entry = archive
-            .by_index(idx)
-            .with_context(|| format!("Failed to read archive entry at index {}", idx))?;
-        let name = entry.name().to_string();
-        let compression = entry.compression();
-        let unix_mode = entry.unix_mode().unwrap_or(0o644);
-        let is_dir = entry.is_dir();
+    let mut current_bytes = if xml_ops.is_empty() {
+        archive.into_inner().into_inner()
+    } else {
+        let output = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(output);
 
-        let options = SimpleFileOptions::default()
-            .compression_method(compression)
-            .unix_permissions(unix_mode);
+        for idx in 0..archive.len() {
+            let mut entry = archive
+                .by_index(idx)
+                .with_context(|| format!("Failed to read archive entry at index {}", idx))?;
+            let name = entry.name().to_string();
+            let compression = entry.compression();
+            let unix_mode = entry.unix_mode().unwrap_or(0o644);
+            let is_dir = entry.is_dir();
 
-        if is_dir {
-            writer
-                .add_directory(name.clone(), options)
-                .with_context(|| format!("Failed to add directory entry '{}'", name))?;
-            continue;
-        }
+            let options = SimpleFileOptions::default()
+                .compression_method(compression)
+                .unix_permissions(unix_mode);
 
-        writer
-            .start_file(name.clone(), options)
-            .with_context(|| format!("Failed to start archive entry '{}'", name))?;
-        let mut content = Vec::new();
-        entry
-            .read_to_end(&mut content)
-            .with_context(|| format!("Failed to read archive entry '{}'", name))?;
-
-        if let Some(slide_no) = parse_slide_number(&name) {
-            let ops_for_slide: Vec<&EditPptxOperation> = operations
-                .iter()
-                .filter(|op| op.slide_number() == slide_no)
-                .collect();
-            if !ops_for_slide.is_empty() {
-                let slide_xml = String::from_utf8(content).with_context(|| {
-                    format!("Slide {} XML entry '{}' is not valid UTF-8", slide_no, name)
-                })?;
-                let edited_xml = apply_slide_operations(&slide_xml, &ops_for_slide)?;
+            if is_dir {
                 writer
-                    .write_all(edited_xml.as_bytes())
-                    .with_context(|| format!("Failed to write edited slide entry '{}'", name))?;
+                    .add_directory(name.clone(), options)
+                    .with_context(|| format!("Failed to add directory entry '{}'", name))?;
                 continue;
             }
+
+            writer
+                .start_file(name.clone(), options)
+                .with_context(|| format!("Failed to start archive entry '{}'", name))?;
+            let mut content = Vec::new();
+            entry
+                .read_to_end(&mut content)
+                .with_context(|| format!("Failed to read archive entry '{}'", name))?;
+
+            if let Some(slide_no) = parse_slide_number(&name) {
+                let ops_for_slide: Vec<&EditPptxOperation> = xml_ops
+                    .iter()
+                    .filter(|op| op.slide_number() == slide_no)
+                    .collect();
+                if !ops_for_slide.is_empty() {
+                    let slide_xml = String::from_utf8(content).with_context(|| {
+                        format!("Slide {} XML entry '{}' is not valid UTF-8", slide_no, name)
+                    })?;
+                    let edited_xml = apply_slide_operations(&slide_xml, &ops_for_slide)?;
+                    writer.write_all(edited_xml.as_bytes()).with_context(|| {
+                        format!("Failed to write edited slide entry '{}'", name)
+                    })?;
+                    continue;
+                }
+            }
+
+            writer
+                .write_all(&content)
+                .with_context(|| format!("Failed to copy archive entry '{}'", name))?;
         }
 
-        writer
-            .write_all(&content)
-            .with_context(|| format!("Failed to copy archive entry '{}'", name))?;
+        let output_cursor = writer
+            .finish()
+            .context("Failed to finalize edited PPTX archive")?;
+        output_cursor.into_inner()
+    };
+
+    if !image_ops.is_empty() {
+        current_bytes = apply_image_operations(current_bytes, &image_ops)?;
     }
 
-    let output_cursor = writer
-        .finish()
-        .context("Failed to finalize edited PPTX archive")?;
-    Ok((output_cursor.into_inner(), available_slides.len()))
+    Ok((current_bytes, available_slides.len()))
+}
+
+const IMAGE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+
+fn apply_image_operations(
+    pptx_bytes: Vec<u8>,
+    operations: &[EditPptxOperation],
+) -> Result<Vec<u8>, PptxToolError> {
+    let mut presentation = Presentation::from_bytes(&pptx_bytes)
+        .map_err(|e| anyhow!("Failed to parse PPTX for image insertion: {}", e))?;
+    let slides = presentation
+        .slides()
+        .map_err(|e| anyhow!("Failed to resolve slide references: {}", e))?;
+
+    for op in operations {
+        if let EditPptxOperation::AddImage {
+            slide,
+            x,
+            y,
+            width,
+            height,
+            image_path,
+        } = op
+        {
+            let slide_ref = slides.get(slide.saturating_sub(1)).ok_or_else(|| {
+                anyhow!(
+                    "Slide {} does not exist for add_image operation ({} slides available)",
+                    slide,
+                    slides.len()
+                )
+            })?;
+
+            let image = Image::from_file(image_path).map_err(|e| {
+                anyhow!(
+                    "Failed to load image '{}' for add_image operation: {}",
+                    image_path,
+                    e
+                )
+            })?;
+            let image_partname = presentation
+                .add_image(&image)
+                .map_err(|e| anyhow!("Failed to add image media part: {}", e))?;
+            let image_part_uri = pptx_writer::opc::PackURI::new(&image_partname).map_err(|e| {
+                anyhow!(
+                    "Invalid generated image part URI '{}': {}",
+                    image_partname,
+                    e
+                )
+            })?;
+
+            let target_ref = image_part_uri.relative_ref(slide_ref.partname.base_uri());
+            let slide_part = presentation
+                .package_mut()
+                .part_mut(&slide_ref.partname)
+                .ok_or_else(|| anyhow!("Slide part '{}' not found", slide_ref.partname.as_str()))?;
+            let image_r_id = slide_part
+                .rels
+                .add_relationship(IMAGE_REL_TYPE, &target_ref, false);
+
+            let updated_slide_xml = ShapeTree::add_picture(
+                &slide_part.blob,
+                &image_r_id,
+                Inches(*x).into(),
+                Inches(*y).into(),
+                Inches(*width).into(),
+                Inches(*height).into(),
+            )
+            .map_err(|e| anyhow!("Failed to add image shape to slide {}: {}", slide, e))?;
+            slide_part.blob = updated_slide_xml;
+        }
+    }
+
+    presentation
+        .to_bytes()
+        .map_err(|e| anyhow!("Failed to serialize PPTX after image insertion: {}", e).into())
 }
 
 fn apply_slide_operations(
@@ -432,6 +566,7 @@ fn apply_slide_operations(
                 let shape_xml = build_shape_xml(next_shape_id(&updated)?, &shape)?;
                 updated = insert_shape_xml(&updated, &shape_xml)?;
             }
+            EditPptxOperation::AddImage { .. } => {}
         }
     }
 
