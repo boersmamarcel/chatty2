@@ -114,7 +114,7 @@ pub(super) fn build_preamble(
             pptx_desc.push("**read_pptx**");
         }
         if tools.pptx_write {
-            pptx_desc.push("**write_pptx**");
+            pptx_desc.push("**write_pptx** / **edit_pptx**");
         }
         tool_sections.push(format!(
             "- {} (.pptx PowerPoint presentations)",
@@ -687,6 +687,7 @@ mod tests {
         );
         assert!(result.contains("read_pptx"));
         assert!(result.contains("write_pptx"));
+        assert!(result.contains("edit_pptx"));
     }
 
     #[test]

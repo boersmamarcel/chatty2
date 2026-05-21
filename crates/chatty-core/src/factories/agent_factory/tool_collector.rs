@@ -17,12 +17,12 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "pptx")]
+use crate::tools::{EditPptxTool, ReadPptxTool, WritePptxTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 #[cfg(feature = "docx")]
 use crate::tools::{ReadDocxTool, WriteDocxTool};
-#[cfg(feature = "pptx")]
-use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use super::mcp_helpers::McpTools;
 
@@ -69,6 +69,8 @@ pub(super) type SearchTools = (SearchCodeTool, FindFilesTool, FindDefinitionTool
 /// Excel tool sets (gated on filesystem read/write settings)
 #[cfg(feature = "excel")]
 pub(super) type ExcelWriteTools = (WriteExcelTool, EditExcelTool);
+#[cfg(feature = "pptx")]
+pub(super) type PptxWriteTools = (WritePptxTool, EditPptxTool);
 
 /// DuckDB data query tools (gated on filesystem_read_enabled)
 #[cfg(feature = "duckdb")]
@@ -115,7 +117,7 @@ pub(super) struct NativeTools {
     #[cfg(feature = "pptx")]
     pub pptx_read: Option<ReadPptxTool>,
     #[cfg(feature = "pptx")]
-    pub pptx_write: Option<WritePptxTool>,
+    pub pptx_write: Option<PptxWriteTools>,
     #[cfg(feature = "duckdb")]
     pub data_query: Option<DataQueryTools>,
     pub chart_tool: Option<CreateChartTool>,
@@ -227,8 +229,9 @@ impl NativeTools {
             tools.push(Box::new(t));
         }
         #[cfg(feature = "pptx")]
-        if let Some(t) = self.pptx_write {
-            tools.push(Box::new(t));
+        if let Some((wt, et)) = self.pptx_write {
+            tools.push(Box::new(wt));
+            tools.push(Box::new(et));
         }
         #[cfg(feature = "duckdb")]
         if let Some((qt, dt, pt, fsd)) = self.data_query {

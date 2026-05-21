@@ -34,12 +34,12 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "pptx")]
+use crate::tools::{EditPptxTool, ReadPptxTool, WritePptxTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 #[cfg(feature = "docx")]
 use crate::tools::{ReadDocxTool, WriteDocxTool};
-#[cfg(feature = "pptx")]
-use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use mcp_helpers::{McpTools, filter_mcp_tool_info};
 use preamble_builder::build_preamble;
@@ -254,7 +254,7 @@ impl AgentClient {
         #[cfg(feature = "pptx")]
         let mut pptx_read_tool: Option<ReadPptxTool> = None;
         #[cfg(feature = "pptx")]
-        let mut pptx_write_tool: Option<WritePptxTool> = None;
+        let mut pptx_write_tools: Option<PptxWriteTools> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
@@ -390,7 +390,10 @@ impl AgentClient {
                     #[cfg(feature = "pptx")]
                     if write_tools.is_some() {
                         tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
-                        pptx_write_tool = Some(WritePptxTool::new(service.clone()));
+                        pptx_write_tools = Some((
+                            WritePptxTool::new(service.clone()),
+                            EditPptxTool::new(service.clone()),
+                        ));
                     }
 
                     // Data query tools
@@ -819,7 +822,7 @@ impl AgentClient {
             pptx_write: {
                 #[cfg(feature = "pptx")]
                 {
-                    pptx_write_tool.is_some()
+                    pptx_write_tools.is_some()
                 }
                 #[cfg(not(feature = "pptx"))]
                 {
@@ -962,7 +965,7 @@ impl AgentClient {
             docx_read: docx_read_tool,
             docx_write: docx_write_tool,
             pptx_read: pptx_read_tool,
-            pptx_write: pptx_write_tool,
+            pptx_write: pptx_write_tools,
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,
