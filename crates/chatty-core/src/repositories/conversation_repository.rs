@@ -37,6 +37,11 @@ fn default_none_working_dir() -> Option<String> {
     None
 }
 
+/// Default None agent task snapshot for backward compatibility
+fn default_none_agent_task_snapshot() -> Option<String> {
+    None
+}
+
 /// Lightweight conversation metadata used for the sidebar.
 /// Loaded at startup without deserializing full message history.
 #[derive(Debug, Clone)]
@@ -69,6 +74,8 @@ pub struct ConversationData {
     pub updated_at: i64, // Unix timestamp
     #[serde(default = "default_none_working_dir")]
     pub working_dir: Option<String>, // Per-conversation working directory override
+    #[serde(default = "default_none_agent_task_snapshot")]
+    pub agent_task_snapshot: Option<String>, // JSON-serialized AgentTaskSnapshot
 }
 
 impl ConversationData {

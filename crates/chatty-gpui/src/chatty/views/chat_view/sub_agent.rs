@@ -39,6 +39,9 @@ impl ChatView {
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         self.sub_agent_progress_msg_idx = None;
+        self.pending_approval = None;
+        self.agent_task_snapshot = None;
+        self.agent_task_panel_collapsed = false;
         cx.notify();
     }
 

@@ -13,6 +13,7 @@ use crate::factories::agent_factory::AgentBuildContext;
 use crate::models::message_types::{SystemTrace, ToolSource};
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
+use crate::services::AgentTaskSnapshot;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
@@ -82,6 +83,8 @@ pub struct Conversation {
     shell_session: Option<std::sync::Arc<ShellSession>>,
     /// Per-conversation working directory override (overrides the global workspace_dir setting)
     working_dir: Option<PathBuf>,
+    /// Latest persisted agent todo panel snapshot for this conversation.
+    agent_task_snapshot: Option<AgentTaskSnapshot>,
     /// Effective workspace directory the current agent was built with.
     agent_workspace_dir: Option<PathBuf>,
     /// Progress slot for the invoke_agent tool in this conversation's agent.
@@ -147,6 +150,7 @@ impl Conversation {
             pending_artifacts,
             shell_session,
             working_dir: None,
+            agent_task_snapshot: None,
             agent_workspace_dir,
             invoke_agent_progress_slot,
         })
@@ -234,6 +238,10 @@ impl Conversation {
         // Deserialize token usage (with fallback to empty if not present)
         let token_usage = Self::deserialize_token_usage(&data.token_usage)
             .unwrap_or_else(|_| ConversationTokenUsage::new());
+        let agent_task_snapshot = data
+            .agent_task_snapshot
+            .as_deref()
+            .and_then(|json| Self::deserialize_agent_task_snapshot(json).ok());
 
         // Convert Unix timestamps to SystemTime
         let created_at = UNIX_EPOCH + Duration::from_secs(data.created_at as u64);
@@ -255,6 +263,7 @@ impl Conversation {
             pending_artifacts,
             shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
+            agent_task_snapshot,
             agent_workspace_dir,
             invoke_agent_progress_slot,
         })
@@ -443,6 +452,20 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize message feedback")
     }
 
+    /// Serialize the persisted agent task snapshot to JSON.
+    pub fn serialize_agent_task_snapshot(&self) -> Result<Option<String>> {
+        self.agent_task_snapshot
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("Failed to serialize agent task snapshot")
+    }
+
+    /// Deserialize the persisted agent task snapshot from JSON.
+    pub fn deserialize_agent_task_snapshot(json: &str) -> Result<AgentTaskSnapshot> {
+        serde_json::from_str(json).context("Failed to deserialize agent task snapshot")
+    }
+
     /// Get regeneration records for this conversation
     #[allow(dead_code)]
     pub fn regeneration_records(&self) -> &[RegenerationRecord] {
@@ -604,6 +627,17 @@ impl Conversation {
     /// Set or clear the per-conversation working directory override
     pub fn set_working_dir(&mut self, dir: Option<PathBuf>) {
         self.working_dir = dir;
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Get the latest persisted agent todo panel snapshot for this conversation.
+    pub fn agent_task_snapshot(&self) -> Option<&AgentTaskSnapshot> {
+        self.agent_task_snapshot.as_ref()
+    }
+
+    /// Set or clear the persisted agent todo panel snapshot for this conversation.
+    pub fn set_agent_task_snapshot(&mut self, snapshot: Option<AgentTaskSnapshot>) {
+        self.agent_task_snapshot = snapshot;
         self.updated_at = SystemTime::now();
     }
 

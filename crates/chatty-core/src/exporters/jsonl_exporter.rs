@@ -408,6 +408,7 @@ mod tests {
             created_at: 1700000000,
             updated_at: 1700000100,
             working_dir: None,
+            agent_task_snapshot: None,
         }
     }
 
@@ -842,6 +843,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             working_dir: None,
+            agent_task_snapshot: None,
         };
         let opts = SftExportOptions::default();
         assert!(conversation_to_sft_jsonl(&conv, None, &opts).is_err());

@@ -763,6 +763,7 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
             .as_secs() as i64,
         updated_at: now,
         working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),
+        agent_task_snapshot: conv.serialize_agent_task_snapshot().unwrap_or(None),
     })
 }
 

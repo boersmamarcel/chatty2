@@ -384,18 +384,41 @@ pub(super) async fn run_llm_stream(
                         let tool_args = pending_tool_args.remove(id).unwrap_or_default();
                         if is_agent_todo_tool(&tool_name) {
                             let snapshot = agent_task_controller.snapshot();
+                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                                    conv.set_agent_task_snapshot(Some(snapshot.clone()));
+                                }
+                            })
+                            .map_err(|e| {
+                                warn!(
+                                    error = ?e,
+                                    "Failed to persist agent todo panel snapshot in conversation state"
+                                )
+                            })
+                            .ok();
                             chat_view
                                 .update(cx, |view, cx| {
                                     if view.conversation_id().map(|id| id.as_str())
                                         == Some(conv_id.as_str())
                                     {
-                                        view.set_agent_task_snapshot(snapshot, cx);
+                                        view.set_agent_task_snapshot(snapshot.clone(), cx);
                                     }
                                 })
                                 .map_err(|e| {
                                     warn!(
                                         error = ?e,
                                         "Failed to update agent todo panel after todo tool result"
+                                    )
+                                })
+                                .ok();
+                            weak_ctrl
+                                .update(&mut *cx, |app, cx| {
+                                    app.persist_conversation(&conv_id, cx);
+                                })
+                                .map_err(|e| {
+                                    warn!(
+                                        error = ?e,
+                                        "Failed to persist agent todo panel snapshot to disk"
                                     )
                                 })
                                 .ok();

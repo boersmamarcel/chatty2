@@ -27,7 +27,7 @@ pub struct AgentTodo {
     pub reflection: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTaskSnapshot {
     pub goal: Option<String>,
     pub todos: Vec<AgentTodo>,
