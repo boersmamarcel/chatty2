@@ -339,6 +339,9 @@ impl ChattyApp {
                                         working_dir: conv
                                             .working_dir()
                                             .map(|p| p.to_string_lossy().to_string()),
+                                        agent_task_snapshot: conv
+                                            .serialize_agent_task_snapshot()
+                                            .unwrap_or(None),
                                     })
                                 })
                             });

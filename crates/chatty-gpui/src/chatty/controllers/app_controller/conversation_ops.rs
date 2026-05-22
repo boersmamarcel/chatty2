@@ -436,6 +436,7 @@ impl ChattyApp {
                         working_dir: selected_working_dir
                             .as_ref()
                             .map(|path| path.to_string_lossy().to_string()),
+                        agent_task_snapshot: None,
                     };
 
                     repo.save(&conv_id, data)
@@ -601,6 +602,7 @@ impl ChattyApp {
                     conv.streaming_trace().cloned(),
                     conv.streaming_sub_agent_trace().cloned(),
                     conv.working_dir().cloned(),
+                    conv.agent_task_snapshot().cloned(),
                 )
             });
 
@@ -610,6 +612,7 @@ impl ChattyApp {
             streaming_trace,
             streaming_sub_agent_trace,
             conversation_working_dir,
+            agent_task_snapshot,
         )) = minimal_data
         {
             // Check if this conversation has an active stream via StreamManager
@@ -641,6 +644,9 @@ impl ChattyApp {
 
                 if let Some(entries) = entries {
                     view.load_history(&entries, cx);
+                }
+                if let Some(snapshot) = agent_task_snapshot.clone() {
+                    view.set_agent_task_snapshot(snapshot, cx);
                 }
 
                 // Update the selected model and capabilities in the chat input

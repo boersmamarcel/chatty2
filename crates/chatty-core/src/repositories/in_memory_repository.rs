@@ -102,6 +102,7 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
             working_dir: None,
+            agent_task_snapshot: None,
         };
 
         let loaded = repo.load_all().await.unwrap();
@@ -128,6 +129,7 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
             working_dir: None,
+            agent_task_snapshot: None,
         };
 
         repo.save("test-1", data).await.unwrap();
@@ -155,6 +157,7 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
             working_dir: None,
+            agent_task_snapshot: None,
         };
 
         let data2 = ConversationData {
@@ -171,6 +174,7 @@ mod tests {
             created_at: 2000,
             updated_at: 2000,
             working_dir: None,
+            agent_task_snapshot: None,
         };
 
         repo.save("test-1", data1).await.unwrap();
