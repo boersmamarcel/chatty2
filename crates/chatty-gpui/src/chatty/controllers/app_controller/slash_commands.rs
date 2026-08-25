@@ -370,9 +370,9 @@ impl ChattyApp {
             // Inject into conversation history.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
                 let user_entry = rig_core::completion::Message::User {
-                    content: rig_core::OneOrMany::one(rig_core::message::UserContent::text(
-                        format!("[A2A task \u{2192} {agent_name}: {prompt_label}]"),
-                    )),
+                    content: vec![rig_core::message::UserContent::text(format!(
+                        "[A2A task \u{2192} {agent_name}: {prompt_label}]"
+                    ))],
                 };
                 let result_entry = format!("[A2A result from {agent_name}]\n\n{txt}");
                 cx.update(|cx| {
@@ -586,9 +586,9 @@ impl ChattyApp {
             // Assistant message contains the sub-agent's output.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
                 let user_entry = rig_core::completion::Message::User {
-                    content: rig_core::OneOrMany::one(rig_core::message::UserContent::text(format!(
+                    content: vec![rig_core::message::UserContent::text(format!(
                         "[Sub-agent task: {prompt_label}]",
-                    ))),
+                    ))],
                 };
                 cx.update(|cx| {
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {

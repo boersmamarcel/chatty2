@@ -27,7 +27,6 @@
 //! eprintln!("context shaper applied: {:?}", shaped.stage_applied);
 //! ```
 
-use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::completion::message::{AssistantContent, Text, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
@@ -273,10 +272,10 @@ fn stage1_budget_reduction(
 }
 
 fn trim_tool_result_content(
-    content: OneOrMany<ToolResultContent>,
+    content: Vec<ToolResultContent>,
     limit: usize,
     freed: &mut usize,
-) -> OneOrMany<ToolResultContent> {
+) -> Vec<ToolResultContent> {
     let items: Vec<ToolResultContent> = content
         .into_iter()
         .map(|item| match item {
@@ -323,12 +322,12 @@ fn stage2_snip(history: Vec<Message>, settings: &ContextShaperSettings) -> (Vec<
         .sum();
 
     let marker = Message::User {
-        content: OneOrMany::one(UserContent::Text(Text {
+        content: vec![UserContent::Text(Text {
             text: format!(
                 "[CONTEXT SHAPER: {} messages snipped to reduce context size]",
                 drop_end - drop_start
             ),
-        })),
+        })],
     };
 
     let mut new_history = Vec::with_capacity(head + 1 + tail);
@@ -509,25 +508,25 @@ fn message_chars(msg: &Message) -> usize {
     }
 }
 
-/// Helper: convert user content into a non-empty `OneOrMany`.
-fn to_user_content(items: Vec<UserContent>) -> OneOrMany<UserContent> {
-    match items.len() {
-        0 => OneOrMany::one(UserContent::Text(Text {
+/// Helper: ensure user content is non-empty (empty messages get a placeholder).
+fn to_user_content(items: Vec<UserContent>) -> Vec<UserContent> {
+    if items.is_empty() {
+        vec![UserContent::Text(Text {
             text: "[CONTEXT SHAPER: empty user message omitted]".to_string(),
-        })),
-        1 => OneOrMany::one(items.into_iter().next().unwrap()),
-        _ => OneOrMany::many(items).expect("non-empty vec always produces OneOrMany"),
+        })]
+    } else {
+        items
     }
 }
 
-/// Helper: convert tool-result content into a non-empty `OneOrMany`.
-fn to_tool_result_content(items: Vec<ToolResultContent>) -> OneOrMany<ToolResultContent> {
-    match items.len() {
-        0 => OneOrMany::one(ToolResultContent::Text(Text {
+/// Helper: ensure tool-result content is non-empty (empty results get a placeholder).
+fn to_tool_result_content(items: Vec<ToolResultContent>) -> Vec<ToolResultContent> {
+    if items.is_empty() {
+        vec![ToolResultContent::Text(Text {
             text: "[CONTEXT SHAPER: empty tool result omitted]".to_string(),
-        })),
-        1 => OneOrMany::one(items.into_iter().next().unwrap()),
-        _ => OneOrMany::many(items).expect("non-empty vec always produces OneOrMany"),
+        })]
+    } else {
+        items
     }
 }
 
@@ -564,21 +563,23 @@ mod tests {
 
     fn user_text(s: &str) -> Message {
         Message::User {
-            content: OneOrMany::one(UserContent::Text(Text {
+            content: vec![UserContent::Text(Text {
                 text: s.to_string(),
-            })),
+            })],
         }
     }
 
     fn tool_result_msg(id: &str, content: &str) -> Message {
+        use rig_core::completion::message::ToolCallId;
         Message::User {
-            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                id: id.to_string(),
-                call_id: None,
-                content: OneOrMany::one(ToolResultContent::Text(Text {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new(id).unwrap(),
+                provider: None,
+                name: "test_tool".to_string(),
+                content: vec![ToolResultContent::Text(Text {
                     text: content.to_string(),
-                })),
-            })),
+                })],
+            })],
         }
     }
 

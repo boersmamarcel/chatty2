@@ -227,7 +227,7 @@ pub fn conversation_to_dpo_jsonl(
 }
 
 /// Extract text-only content from user message, stripping images and documents.
-fn extract_user_text(content: &rig_core::OneOrMany<UserContent>) -> String {
+fn extract_user_text(content: &[UserContent]) -> String {
     content
         .iter()
         .filter_map(|uc| match uc {
@@ -239,7 +239,7 @@ fn extract_user_text(content: &rig_core::OneOrMany<UserContent>) -> String {
 }
 
 /// Extract text-only content from assistant message, stripping tool calls.
-fn extract_assistant_text(content: &rig_core::OneOrMany<AssistantContent>) -> String {
+fn extract_assistant_text(content: &[AssistantContent]) -> String {
     content
         .iter()
         .filter_map(|ac| match ac {
@@ -382,7 +382,6 @@ mod tests {
     use crate::models::conversation::{MessageFeedback, RegenerationRecord};
     use crate::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
     use crate::settings::models::providers_store::ProviderType;
-    use rig_core::OneOrMany;
     use rig_core::completion::message::Text;
     use std::collections::HashMap;
 
@@ -434,18 +433,18 @@ mod tests {
 
     fn user_message(text: &str) -> Message {
         Message::User {
-            content: OneOrMany::one(UserContent::Text(Text {
+            content: vec![UserContent::Text(Text {
                 text: text.to_string(),
-            })),
+            })],
         }
     }
 
     fn assistant_message(text: &str) -> Message {
         Message::Assistant {
             id: None,
-            content: OneOrMany::one(AssistantContent::Text(Text {
+            content: vec![AssistantContent::Text(Text {
                 text: text.to_string(),
-            })),
+            })],
         }
     }
 
@@ -568,7 +567,7 @@ mod tests {
     fn sft_strips_multimodal_content() {
         use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
 
-        let user_content = OneOrMany::many(vec![
+        let user_content = vec![
             UserContent::Text(Text {
                 text: "Look at this".to_string(),
             }),
@@ -578,8 +577,7 @@ mod tests {
                 detail: None,
                 additional_params: None,
             }),
-        ])
-        .unwrap();
+        ];
 
         let history = vec![
             Message::User {
@@ -607,7 +605,7 @@ mod tests {
 
     #[test]
     fn sft_includes_tool_calls() {
-        use rig_core::completion::message::{ToolCall, ToolFunction};
+        use rig_core::completion::message::{ProviderCallId, ToolCall, ToolCallId, ToolFunction};
 
         let trace = crate::models::message_types::SystemTrace {
             items: vec![TraceItem::ToolCall(ToolCallBlock {
@@ -631,10 +629,10 @@ mod tests {
             user_message("Read the file"),
             Message::Assistant {
                 id: None,
-                content: OneOrMany::many(vec![
+                content: vec![
                     AssistantContent::ToolCall(ToolCall {
-                        id: "tc_1".to_string(),
-                        call_id: Some("call_abc".to_string()),
+                        id: ToolCallId::new("tc_1").unwrap(),
+                        provider: ProviderCallId::new("call_abc"),
                         function: ToolFunction {
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({"path": "/tmp/file.txt"}),
@@ -645,8 +643,7 @@ mod tests {
                     AssistantContent::Text(Text {
                         text: "Here is the file".to_string(),
                     }),
-                ])
-                .unwrap(),
+                ],
             },
         ];
 

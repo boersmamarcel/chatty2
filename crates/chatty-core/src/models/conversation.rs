@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
 
-use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::completion::message::{AssistantContent, Text};
 
@@ -318,9 +317,9 @@ impl Conversation {
     ) {
         let assistant_message = Message::Assistant {
             id: None,
-            content: OneOrMany::one(AssistantContent::Text(Text {
+            content: vec![AssistantContent::Text(Text {
                 text: response_text,
-            })),
+            })],
         };
 
         let now = SystemTime::now();

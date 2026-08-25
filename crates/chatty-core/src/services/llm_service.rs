@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use rig_core::OneOrMany;
+use rig_agent::agent::MultiTurnStreamItem;
+use rig_agent::streaming::StreamingPrompt;
 use rig_core::completion::Message;
 use rig_core::message::UserContent;
-use rig_core::streaming::StreamingPrompt;
 use tokio::sync::mpsc;
 
 use crate::factories::AgentClient;
@@ -56,7 +56,7 @@ macro_rules! process_agent_stream {
         Box::pin(async_stream::stream! {
             while let Some(item) = $stream.next().await {
                 match item {
-                    Ok(rig_core::agent::MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
                         match content {
                             rig_core::streaming::StreamedAssistantContent::Text(text) => {
                                 yield Ok(StreamChunk::Text(text.text));
@@ -65,12 +65,10 @@ macro_rules! process_agent_stream {
                                 use tracing::info;
                                 // Resolve a unique tool call ID.
                                 // Priority: provider's call_id > rig's internal_call_id
-                                //
-                                // `tool_call.id` is the Tool::NAME constant (e.g. "sub_agent"),
-                                // NOT a unique per-call identifier, so it is never used here.
-                                // `internal_call_id` is rig's unique correlation ID and is
-                                // always available + always unique.
-                                let tool_id = tool_call.call_id.clone()
+                                let tool_id = tool_call
+                                    .provider
+                                    .as_ref()
+                                    .map(|p| p.call_id.clone())
                                     .filter(|id| !id.is_empty())
                                     .unwrap_or_else(|| internal_call_id.clone());
                                 info!(
@@ -91,7 +89,7 @@ macro_rules! process_agent_stream {
                             _ => {}
                         }
                     }
-                    Ok(rig_core::agent::MultiTurnStreamItem::StreamUserItem(user_content)) => {
+                    Ok(MultiTurnStreamItem::StreamUserItem(user_content)) => {
                         use rig_core::streaming::StreamedUserContent;
                         use rig_core::completion::message::ToolResultContent;
 
@@ -100,12 +98,16 @@ macro_rules! process_agent_stream {
                             .filter_map(|c| match c {
                                 ToolResultContent::Text(text) => Some(text.text.clone()),
                                 ToolResultContent::Image(_) => Some("[Image result]".to_string()),
+                                ToolResultContent::Json { .. } => Some("[JSON result]".to_string()),
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
 
                         // Resolve a unique tool call ID (same logic as ToolCall arm above).
-                        let call_id = tool_result.call_id.clone()
+                        let call_id = tool_result
+                            .provider
+                            .as_ref()
+                            .map(|p| p.call_id.clone())
                             .filter(|id| !id.is_empty())
                             .unwrap_or(internal_call_id);
 
@@ -137,7 +139,7 @@ macro_rules! process_agent_stream {
                             });
                         }
                     }
-                    Ok(rig_core::agent::MultiTurnStreamItem::FinalResponse(final_response)) => {
+                    Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
                         // Extract token usage from the final response
                         let usage = final_response.usage();
                         let input_tokens = usage.input_tokens as u32;
@@ -172,7 +174,7 @@ macro_rules! process_agent_stream_with_approvals {
                     // Process agent stream items
                     item = agent_stream.next() => {
                         match item {
-                            Some(Ok(rig_core::agent::MultiTurnStreamItem::StreamAssistantItem(content))) => {
+                            Some(Ok(MultiTurnStreamItem::StreamAssistantItem(content))) => {
                                 match content {
                                     rig_core::streaming::StreamedAssistantContent::Text(text) => {
                                         yield Ok(StreamChunk::Text(text.text));
@@ -181,14 +183,10 @@ macro_rules! process_agent_stream_with_approvals {
                                         use tracing::info;
                                         // Resolve a unique tool call ID.
                                         // Priority: provider's call_id > rig's internal_call_id
-                                        //
-                                        // `tool_call.id` is the Tool::NAME constant (e.g. "sub_agent"),
-                                        // NOT a unique per-call identifier.  When the LLM invokes the
-                                        // same tool multiple times, every call would share that name,
-                                        // making it impossible to correlate results.
-                                        // `internal_call_id` is rig's unique correlation ID and is
-                                        // always available + always unique.
-                                        let tool_id = tool_call.call_id.clone()
+                                        let tool_id = tool_call
+                                            .provider
+                                            .as_ref()
+                                            .map(|p| p.call_id.clone())
                                             .filter(|id| !id.is_empty())
                                             .unwrap_or_else(|| internal_call_id.clone());
                                         info!(
@@ -209,7 +207,7 @@ macro_rules! process_agent_stream_with_approvals {
                                     _ => {}
                                 }
                             }
-                            Some(Ok(rig_core::agent::MultiTurnStreamItem::StreamUserItem(user_content))) => {
+                            Some(Ok(MultiTurnStreamItem::StreamUserItem(user_content))) => {
                                 use rig_core::streaming::StreamedUserContent;
                                 use rig_core::completion::message::ToolResultContent;
 
@@ -218,12 +216,16 @@ macro_rules! process_agent_stream_with_approvals {
                                     .filter_map(|c| match c {
                                         ToolResultContent::Text(text) => Some(text.text.clone()),
                                         ToolResultContent::Image(_) => Some("[Image result]".to_string()),
+                                        ToolResultContent::Json { .. } => Some("[JSON result]".to_string()),
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n");
 
                                 // Resolve a unique tool call ID (same logic as ToolCall arm above).
-                                let call_id = tool_result.call_id.clone()
+                                let call_id = tool_result
+                                    .provider
+                                    .as_ref()
+                                    .map(|p| p.call_id.clone())
                                     .filter(|id| !id.is_empty())
                                     .unwrap_or(internal_call_id);
 
@@ -255,7 +257,7 @@ macro_rules! process_agent_stream_with_approvals {
                                     });
                                 }
                             }
-                            Some(Ok(rig_core::agent::MultiTurnStreamItem::FinalResponse(final_response))) => {
+                            Some(Ok(MultiTurnStreamItem::FinalResponse(final_response))) => {
                                 let usage = final_response.usage();
                                 yield Ok(StreamChunk::TokenUsage {
                                     input_tokens: usage.input_tokens as u32,
@@ -328,53 +330,23 @@ pub async fn stream_prompt(
     resolution_rx: Option<mpsc::UnboundedReceiver<ApprovalResolution>>,
     max_agent_turns: usize,
 ) -> Result<(ResponseStream, Message)> {
-    let user_message = Message::User {
-        content: OneOrMany::many(contents).context("Failed to create message from contents")?,
-    };
+    let user_message = Message::User { content: contents };
 
     let history_snapshot = history.to_vec();
 
-    let stream: ResponseStream = match agent {
-        AgentClient::OpenRouter { agent, .. } => {
-            let mut stream = agent
-                .stream_prompt(user_message.clone())
-                .with_history(history_snapshot)
-                .multi_turn(max_agent_turns)
-                .await;
+    let mut stream = agent
+        .agent
+        .stream_prompt(user_message.clone())
+        .with_history(history_snapshot)
+        .multi_turn(max_agent_turns)
+        .await;
 
-            if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
-                process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx)
-            } else {
-                process_agent_stream!(stream)
-            }
-        }
-        AgentClient::Ollama { agent, .. } => {
-            let mut stream = agent
-                .stream_prompt(user_message.clone())
-                .with_history(history_snapshot)
-                .multi_turn(max_agent_turns)
-                .await;
-
-            if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
-                process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx)
-            } else {
-                process_agent_stream!(stream)
-            }
-        }
-        AgentClient::AzureOpenAI { agent, .. } => {
-            let mut stream = agent
-                .stream_prompt(user_message.clone())
-                .with_history(history_snapshot)
-                .multi_turn(max_agent_turns)
-                .await;
-
-            if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
-                process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx)
-            } else {
-                process_agent_stream!(stream)
-            }
-        }
-    };
+    let stream: ResponseStream =
+        if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
+            process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx)
+        } else {
+            process_agent_stream!(stream)
+        };
 
     Ok((stream, user_message))
 }

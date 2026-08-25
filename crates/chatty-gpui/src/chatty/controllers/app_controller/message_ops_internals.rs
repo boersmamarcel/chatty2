@@ -190,9 +190,7 @@ pub(super) async fn run_llm_stream(
     // 4. Optionally add user message to conversation model.
     if add_user_message_to_model {
         let user_message = rig_core::completion::Message::User {
-            content: rig_core::OneOrMany::many(user_contents).map_err(|e| {
-                anyhow::anyhow!("Failed to create user message from contents: {}", e)
-            })?,
+            content: user_contents,
         };
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
@@ -696,22 +694,21 @@ mod tests {
 
     use super::*;
     use chatty_core::models::MessageEntry;
-    use rig_core::OneOrMany;
     use rig_core::completion::message::{AssistantContent, Text};
     use rig_core::message::{Message, UserContent};
 
     fn user_msg(text: &str) -> Message {
         Message::User {
-            content: OneOrMany::one(UserContent::text(text)),
+            content: vec![UserContent::text(text)],
         }
     }
 
     fn assistant_msg(text: &str) -> Message {
         Message::Assistant {
             id: None,
-            content: OneOrMany::one(AssistantContent::Text(Text {
+            content: vec![AssistantContent::Text(Text {
                 text: text.to_string(),
-            })),
+            })],
         }
     }
 
