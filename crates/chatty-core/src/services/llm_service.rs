@@ -337,8 +337,8 @@ pub async fn stream_prompt(
     let mut stream = agent
         .agent
         .stream_prompt(user_message.clone())
-        .with_history(history_snapshot)
-        .multi_turn(max_agent_turns)
+        .history(history_snapshot)
+        .max_turns(max_agent_turns)
         .await;
 
     let stream: ResponseStream =

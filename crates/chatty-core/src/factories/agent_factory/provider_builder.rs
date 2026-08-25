@@ -8,8 +8,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow};
-use rig_core::client::CompletionClient;
-use rig_core::tool::ToolDyn;
+use rig_agent::client::AgentClientExt;
 
 use crate::auth::{AzureTokenCache, azure_auth};
 use crate::services::AgentTaskController;
@@ -18,6 +17,7 @@ use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, 
 
 use super::AgentClient;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
+use super::tool_collector::NativeTools;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -31,7 +31,7 @@ pub(super) async fn build_provider_agent(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
     preamble: &str,
-    tool_vec: Vec<Box<dyn ToolDyn>>,
+    native_tools: NativeTools,
     mcp_tools: Option<McpToolSet>,
     native_tool_names: &HashSet<String>,
     task_controller: AgentTaskController,
@@ -66,11 +66,12 @@ pub(super) async fn build_provider_agent(
             }
 
             let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-            let agent =
-                build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::OpenRouter {
+            let builder = native_tools.apply_to_builder(builder);
+            let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
+            Ok(AgentClient {
                 agent,
                 task_controller,
+                provider: ProviderType::OpenRouter,
             })
         }
         ProviderType::Ollama => {
@@ -86,11 +87,12 @@ pub(super) async fn build_provider_agent(
                 .preamble(preamble)
                 .temperature(model_config.temperature as f64);
 
-            let agent =
-                build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-            Ok(AgentClient::Ollama {
+            let builder = native_tools.apply_to_builder(builder);
+            let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
+            Ok(AgentClient {
                 agent,
                 task_controller,
+                provider: ProviderType::Ollama,
             })
         }
         ProviderType::AzureOpenAI => {
@@ -98,7 +100,7 @@ pub(super) async fn build_provider_agent(
                 model_config,
                 provider_config,
                 preamble,
-                tool_vec,
+                native_tools,
                 mcp_tools,
                 native_tool_names,
                 task_controller,
@@ -117,7 +119,7 @@ async fn build_azure_agent(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
     preamble: &str,
-    tool_vec: Vec<Box<dyn ToolDyn>>,
+    native_tools: NativeTools,
     mcp_tools: Option<McpToolSet>,
     native_tool_names: &HashSet<String>,
     task_controller: AgentTaskController,
@@ -213,10 +215,12 @@ async fn build_azure_agent(
     }
 
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-    let agent = build_with_mcp_tools!(builder.tools(tool_vec), mcp_tools, native_tool_names);
-    Ok(AgentClient::AzureOpenAI {
+    let builder = native_tools.apply_to_builder(builder);
+    let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
+    Ok(AgentClient {
         agent,
         task_controller,
+        provider: ProviderType::AzureOpenAI,
     })
 }
 

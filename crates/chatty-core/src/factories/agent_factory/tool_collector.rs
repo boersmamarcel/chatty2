@@ -1,4 +1,4 @@
-use rig_core::tool::ToolDyn;
+use rig_agent::agent::{AgentBuilder, WithBuilderTools};
 
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
@@ -79,11 +79,11 @@ pub(super) type DataQueryTools = (
     FileStructureTool,
 );
 
-/// Collect all optional native tools into a `Vec<Box<dyn ToolDyn>>`.
+/// Collect all optional native tools and register them on an [`AgentBuilder`].
 ///
-/// Replaces the former 16-branch `build_agent_with_tools!` macro. Adding a new
-/// optional tool only requires one new `if let Some` block here — no combinatorial
-/// branching.
+/// In rig 0.42, typed tools are registered via repeated `.tool(T)` calls —
+/// there is no public `ToolDyn` erasure. Adding a new optional tool only
+/// requires one new `if let Some` block here.
 pub(super) struct NativeTools {
     pub list_tools: ListToolsTool,
     pub write_todos_tool: WriteTodosTool,
@@ -136,143 +136,127 @@ pub(super) struct NativeTools {
 }
 
 impl NativeTools {
-    /// Consume self and produce a flat `Vec<Box<dyn ToolDyn>>`.
-    pub fn into_tool_vec(self) -> Vec<Box<dyn ToolDyn>> {
-        let mut tools: Vec<Box<dyn ToolDyn>> = vec![
-            Box::new(self.list_tools),             // always present
-            Box::new(self.write_todos_tool),       // always present
-            Box::new(self.update_todo_tool),       // always present
-            Box::new(self.verify_completion_tool), // always present
-            Box::new(self.list_agents_tool),       // always present
-            Box::new(self.invoke_agent_tool),      // always present
-        ];
+    /// Register every collected tool on `builder` via typed `.tool()` calls.
+    pub fn apply_to_builder(self, builder: AgentBuilder) -> AgentBuilder<WithBuilderTools> {
+        let mut b = builder
+            .tool(self.list_tools)
+            .tool(self.write_todos_tool)
+            .tool(self.update_todo_tool)
+            .tool(self.verify_completion_tool)
+            .tool(self.list_agents_tool)
+            .tool(self.invoke_agent_tool);
+
         if let Some(t) = self.mcp_mgmt.list {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some((rf, rb, ld, gs)) = self.fs_read {
-            tools.push(Box::new(rf));
-            tools.push(Box::new(rb));
-            tools.push(Box::new(ld));
-            tools.push(Box::new(gs));
+            b = b.tool(rf).tool(rb).tool(ld).tool(gs);
         }
         if let Some(dr) = self.doc_retriever {
-            tools.push(Box::new(dr));
+            b = b.tool(dr);
         }
         if let Some((wf, fa, cd, df, mf, ad)) = self.fs_write {
-            tools.push(Box::new(wf));
-            tools.push(Box::new(fa));
-            tools.push(Box::new(cd));
-            tools.push(Box::new(df));
-            tools.push(Box::new(mf));
-            tools.push(Box::new(ad));
+            b = b.tool(wf).tool(fa).tool(cd).tool(df).tool(mf).tool(ad);
         }
         if let Some(t) = self.add_attachment {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "pdf")]
         if let Some(t) = self.pdf_to_image {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "pdf")]
         if let Some(t) = self.pdf_info {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "pdf")]
         if let Some(t) = self.pdf_extract_text {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.fetch_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some((exec, set_env, cd, status)) = self.shell_tools {
-            tools.push(Box::new(exec));
-            tools.push(Box::new(set_env));
-            tools.push(Box::new(cd));
-            tools.push(Box::new(status));
+            b = b.tool(exec).tool(set_env).tool(cd).tool(status);
         }
         if let Some((status, diff, log, add, create_branch, switch_branch, commit)) = self.git_tools
         {
-            tools.push(Box::new(status));
-            tools.push(Box::new(diff));
-            tools.push(Box::new(log));
-            tools.push(Box::new(add));
-            tools.push(Box::new(create_branch));
-            tools.push(Box::new(switch_branch));
-            tools.push(Box::new(commit));
+            b = b
+                .tool(status)
+                .tool(diff)
+                .tool(log)
+                .tool(add)
+                .tool(create_branch)
+                .tool(switch_branch)
+                .tool(commit);
         }
         if let Some((sc, ff, fd)) = self.search_tools {
-            tools.push(Box::new(sc));
-            tools.push(Box::new(ff));
-            tools.push(Box::new(fd));
+            b = b.tool(sc).tool(ff).tool(fd);
         }
         #[cfg(feature = "excel")]
         if let Some(t) = self.excel_read {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "excel")]
         if let Some((wt, et)) = self.excel_write {
-            tools.push(Box::new(wt));
-            tools.push(Box::new(et));
+            b = b.tool(wt).tool(et);
         }
         #[cfg(feature = "docx")]
         if let Some(t) = self.docx_read {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "docx")]
         if let Some(t) = self.docx_write {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "pptx")]
         if let Some(t) = self.pptx_read {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "pptx")]
         if let Some(t) = self.pptx_write {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "duckdb")]
         if let Some((qt, dt, pt, fsd)) = self.data_query {
-            tools.push(Box::new(qt));
-            tools.push(Box::new(dt));
-            tools.push(Box::new(pt));
-            tools.push(Box::new(fsd));
+            b = b.tool(qt).tool(dt).tool(pt).tool(fsd);
         }
         if let Some(t) = self.chart_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         #[cfg(feature = "math-render")]
         if let Some(t) = self.typst_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.execute_code_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.remember_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.save_skill_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.search_memory_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
-        tools.push(Box::new(self.read_skill_tool));
+        b = b.tool(self.read_skill_tool);
         if let Some(t) = self.search_web_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.sub_agent_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.browser_use_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.daytona_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
         if let Some(t) = self.publish_module_tool {
-            tools.push(Box::new(t));
+            b = b.tool(t);
         }
-        tools
+        b
     }
 }
 

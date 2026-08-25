@@ -154,26 +154,41 @@ pub(super) fn sanitize_mcp_tools_for_openai(
 
 macro_rules! build_with_mcp_tools {
     ($builder:expr, $mcp_tools:expr, $reserved_tool_names:expr) => {{
-        match $mcp_tools {
-            Some(tools_list) => {
-                let deduped = $crate::factories::agent_factory::mcp_helpers::deduplicate_mcp_tools(
-                    tools_list,
-                    $reserved_tool_names,
-                );
-                let mut iter = deduped
-                    .into_iter()
-                    .filter(|(_name, t, _sink)| !t.is_empty());
-                if let Some((_first_name, first_tools, first_sink)) = iter.next() {
-                    let mut b = $builder.rmcp_tools(first_tools, first_sink);
-                    for (_name, tools, sink) in iter {
-                        b = b.rmcp_tools(tools, sink);
+        #[cfg(feature = "mcp")]
+        {
+            match $mcp_tools {
+                Some(tools_list) => {
+                    let deduped =
+                        $crate::factories::agent_factory::mcp_helpers::deduplicate_mcp_tools(
+                            tools_list,
+                            $reserved_tool_names,
+                        );
+                    let mut iter = deduped
+                        .into_iter()
+                        .filter(|(_name, t, _sink)| !t.is_empty());
+                    if let Some((_first_name, first_tools, first_sink)) = iter.next() {
+                        let mut b = $builder.rmcp_tools(first_tools, first_sink);
+                        for (_name, tools, sink) in iter {
+                            b = b.rmcp_tools(tools, sink);
+                        }
+                        b.build()
+                    } else {
+                        $builder.build()
                     }
-                    b.build()
-                } else {
-                    $builder.build()
                 }
+                None => $builder.build(),
             }
-            None => $builder.build(),
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            let _mcp_tools = $mcp_tools;
+            let _ = $reserved_tool_names;
+            if _mcp_tools.is_some() {
+                tracing::warn!(
+                    "MCP tools were provided but the `mcp` feature is disabled; ignoring"
+                );
+            }
+            $builder.build()
         }
     }};
 }
