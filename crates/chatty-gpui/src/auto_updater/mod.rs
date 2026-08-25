@@ -667,6 +667,9 @@ mod platform;
 
 use download::download_update;
 use network::fetch_latest_release;
+#[cfg(test)]
+#[allow(unused_imports)]
+use network::find_matching_asset;
 #[cfg(target_os = "macos")]
 pub use platform::launch_macos_install_helper;
 #[cfg(target_os = "linux")]
