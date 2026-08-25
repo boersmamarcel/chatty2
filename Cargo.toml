@@ -15,9 +15,14 @@ version = "0.3.24"
 edition = "2024"
 
 [workspace.dependencies]
-# Core agent dependencies
-rig-core = "0.37.0"
-rmcp = { version = "1.4", features = ["client", "macros", "transport-streamable-http-client-reqwest", "auth"] }
+# Core agent dependencies (rig 0.42 crate family — AGE-32)
+rig-core = "=0.42.0"
+rig-agent = { version = "=0.42.0", features = ["derive"] }
+rig-mcp = "=0.2.5"
+# rig-agent's `rmcp` feature requires rmcp ^2 (was 1.4 under rig-core 0.37).
+# Pin 2.1.0: 2.2.0 calls SseStream::from_bytes_stream which does not exist on
+# sse-stream 0.2.x (the method is from_byte_stream).
+rmcp = { version = "=2.1.0", features = ["client", "macros", "transport-streamable-http-client-reqwest", "auth"] }
 
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }

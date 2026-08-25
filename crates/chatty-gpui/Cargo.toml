@@ -20,6 +20,7 @@ gpui-component-assets.workspace = true
 
 # Core dependencies (needed directly by GPUI layer)
 rig-core.workspace = true
+rig-agent.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -59,4 +60,4 @@ tar = "0.4"
 
 [features]
 default = ["mcp"]
-mcp = ["chatty-core/mcp", "rig-core/rmcp"]
+mcp = ["chatty-core/mcp"]

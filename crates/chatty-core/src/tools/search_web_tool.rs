@@ -1,5 +1,6 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -258,31 +259,35 @@ impl Tool for SearchWebTool {
     type Args = SearchWebToolArgs;
     type Output = SearchWebToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "search_web".to_string(),
-            description: "Search the web and return relevant results. \
+    fn description(&self) -> String {
+        "Search the web and return relevant results. \
                          Use this to find up-to-date information, research topics, find documentation, \
                          or answer questions that require current web data."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query to look up on the web"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return. Defaults to the configured maximum."
-                    }
-                },
-                "required": ["query"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to look up on the web"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return. Defaults to the configured maximum."
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let query = args.query.trim().to_string();
         if query.is_empty() {
             return Err(ToolError::OperationFailed(
@@ -492,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_web_tool_definition() {
         let tool = SearchWebTool::new(SearchProvider::Tavily, "test-key".into(), 5);
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
         assert!(def.description.contains("Search the web"));
     }
@@ -504,14 +509,14 @@ mod tests {
             query: "  ".to_string(),
             max_results: None,
         };
-        let result = tool.call(args).await;
+        let result = tool.call(&mut ToolContext::new(), args).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_fallback_tool_definition() {
         let tool = SearchWebTool::new_fallback(5);
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
     }
 

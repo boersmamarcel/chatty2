@@ -11,8 +11,7 @@ use pptx_writer::shapes::{AutoShape, PlaceholderFormat, ShapeTree};
 use pptx_writer::table::Table;
 use pptx_writer::text::{BulletFormat, Paragraph, RgbColor, TextFrame};
 use pptx_writer::units::{Emu, Inches, PlaceholderIndex, ShapeId};
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::services::filesystem_service::FileSystemService;
@@ -106,10 +105,8 @@ impl Tool for WritePptxTool {
     type Args = WritePptxArgs;
     type Output = WritePptxOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "write_pptx".to_string(),
-            description: "Create a PowerPoint presentation (.pptx) from structured JSON slides.\n\
+    fn description(&self) -> String {
+        "Create a PowerPoint presentation (.pptx) from structured JSON slides.\n\
                          Supports slide titles plus three shape types: text_box, bullet_list, and table.\n\
                          Shape coordinates and sizes use inches.\n\
                          \n\
@@ -120,105 +117,111 @@ impl Tool for WritePptxTool {
                          \n\
                          Example:\n\
                          {\"path\":\"deck.pptx\",\"slides\":[{\"title\":\"Quarterly Review\",\"shapes\":[{\"type\":\"bullet_list\",\"x\":0.8,\"y\":1.7,\"width\":8.0,\"height\":2.2,\"items\":[\"Revenue grew 18%\",\"Enterprise led expansion\"]},{\"type\":\"table\",\"x\":0.8,\"y\":4.3,\"width\":8.0,\"height\":1.2,\"rows\":[[\"Metric\",\"Value\"],[\"ARR\",\"$2.1M\"]]}]}]}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to write the .pptx file, relative to workspace root or absolute within workspace"
-                    },
-                    "slides": {
-                        "type": "array",
-                        "description": "Slides to include in the presentation",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {
-                                    "type": "string",
-                                    "description": "Optional slide title rendered near the top of the slide"
-                                },
-                                "shapes": {
-                                    "type": "array",
-                                    "items": {
-                                        "anyOf": [
-                                            {
-                                                "type": "object",
-                                                "properties": {
-                                                    "type": { "type": "string", "enum": ["text_box"] },
-                                                    "x": { "type": "number" },
-                                                    "y": { "type": "number" },
-                                                    "width": { "type": "number" },
-                                                    "height": { "type": "number" },
-                                                    "text": { "type": "string" },
-                                                    "style": {
-                                                        "type": "object",
-                                                        "properties": {
-                                                            "font_size": { "type": "number" },
-                                                            "bold": { "type": "boolean" },
-                                                            "italic": { "type": "boolean" },
-                                                            "color": { "type": "string", "description": "Hex RGB, with or without leading #, e.g. FF0000" }
-                                                        }
+                .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to write the .pptx file, relative to workspace root or absolute within workspace"
+                },
+                "slides": {
+                    "type": "array",
+                    "description": "Slides to include in the presentation",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "Optional slide title rendered near the top of the slide"
+                            },
+                            "shapes": {
+                                "type": "array",
+                                "items": {
+                                    "anyOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "type": "string", "enum": ["text_box"] },
+                                                "x": { "type": "number" },
+                                                "y": { "type": "number" },
+                                                "width": { "type": "number" },
+                                                "height": { "type": "number" },
+                                                "text": { "type": "string" },
+                                                "style": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "font_size": { "type": "number" },
+                                                        "bold": { "type": "boolean" },
+                                                        "italic": { "type": "boolean" },
+                                                        "color": { "type": "string", "description": "Hex RGB, with or without leading #, e.g. FF0000" }
                                                     }
-                                                },
-                                                "required": ["type", "x", "y", "width", "height", "text"]
+                                                }
                                             },
-                                            {
-                                                "type": "object",
-                                                "properties": {
-                                                    "type": { "type": "string", "enum": ["bullet_list"] },
-                                                    "x": { "type": "number" },
-                                                    "y": { "type": "number" },
-                                                    "width": { "type": "number" },
-                                                    "height": { "type": "number" },
+                                            "required": ["type", "x", "y", "width", "height", "text"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "type": "string", "enum": ["bullet_list"] },
+                                                "x": { "type": "number" },
+                                                "y": { "type": "number" },
+                                                "width": { "type": "number" },
+                                                "height": { "type": "number" },
+                                                "items": {
+                                                    "type": "array",
+                                                    "items": { "type": "string" }
+                                                },
+                                                "style": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "font_size": { "type": "number" },
+                                                        "bold": { "type": "boolean" },
+                                                        "italic": { "type": "boolean" },
+                                                        "color": { "type": "string", "description": "Hex RGB, with or without leading #, e.g. FF0000" }
+                                                    }
+                                                }
+                                            },
+                                            "required": ["type", "x", "y", "width", "height", "items"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "type": "string", "enum": ["table"] },
+                                                "x": { "type": "number" },
+                                                "y": { "type": "number" },
+                                                "width": { "type": "number" },
+                                                "height": { "type": "number" },
+                                                "rows": {
+                                                    "type": "array",
                                                     "items": {
                                                         "type": "array",
                                                         "items": { "type": "string" }
-                                                    },
-                                                    "style": {
-                                                        "type": "object",
-                                                        "properties": {
-                                                            "font_size": { "type": "number" },
-                                                            "bold": { "type": "boolean" },
-                                                            "italic": { "type": "boolean" },
-                                                            "color": { "type": "string", "description": "Hex RGB, with or without leading #, e.g. FF0000" }
-                                                        }
                                                     }
-                                                },
-                                                "required": ["type", "x", "y", "width", "height", "items"]
+                                                }
                                             },
-                                            {
-                                                "type": "object",
-                                                "properties": {
-                                                    "type": { "type": "string", "enum": ["table"] },
-                                                    "x": { "type": "number" },
-                                                    "y": { "type": "number" },
-                                                    "width": { "type": "number" },
-                                                    "height": { "type": "number" },
-                                                    "rows": {
-                                                        "type": "array",
-                                                        "items": {
-                                                            "type": "array",
-                                                            "items": { "type": "string" }
-                                                        }
-                                                    }
-                                                },
-                                                "required": ["type", "x", "y", "width", "height", "rows"]
-                                            }
-                                        ]
-                                    }
+                                            "required": ["type", "x", "y", "width", "height", "rows"]
+                                        }
+                                    ]
                                 }
-                            },
-                            "required": ["shapes"]
-                        }
+                            }
+                        },
+                        "required": ["shapes"]
                     }
-                },
-                "required": ["path", "slides"]
-            }),
-        }
+                }
+            },
+            "required": ["path", "slides"]
+        })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         if args.slides.is_empty() {
             return Err(anyhow!("slides must contain at least one slide").into());
         }

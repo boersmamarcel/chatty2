@@ -1,11 +1,13 @@
 //! Tests for `daytona_tool` (extracted from the production file).
 
 use super::*;
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 
 #[tokio::test]
 async fn test_daytona_tool_definition() {
     let tool = DaytonaTool::new("test-key".into(), None);
-    let def = tool.definition("test".to_string()).await;
+    let def = tool_definition(&tool);
     assert_eq!(def.name, "daytona_run");
     assert!(def.description.contains("sandbox"));
 }
@@ -17,7 +19,7 @@ async fn test_daytona_tool_empty_code() {
         code: "   ".to_string(),
         language: None,
     };
-    let result = tool.call(args).await;
+    let result = tool.call(&mut ToolContext::new(), args).await;
     assert!(result.is_err());
 }
 

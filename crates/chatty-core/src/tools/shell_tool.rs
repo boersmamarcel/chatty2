@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -74,10 +73,8 @@ impl Tool for ShellExecuteTool {
     type Args = ShellExecuteArgs;
     type Output = ShellExecuteOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "shell_execute".to_string(),
-            description: "Execute a command in a persistent shell session. Unlike the 'bash' tool which \
+    fn description(&self) -> String {
+        "Execute a command in a persistent shell session. Unlike the 'bash' tool which \
                          runs each command in a fresh process, this tool maintains state across invocations: \
                          environment variables, working directory, and shell history persist between calls. \
                          \
@@ -97,21 +94,27 @@ impl Tool for ShellExecuteTool {
                          - Work in a specific directory across multiple operations\n\
                          \
                          The session is per-conversation and automatically cleaned up when the conversation ends."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The command to execute in the persistent shell session"
-                    }
-                },
-                "required": ["command"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The command to execute in the persistent shell session"
+                }
+            },
+            "required": ["command"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         if !self.settings.enabled {
             return Err(ToolError::OperationFailed(
                 "Code execution is disabled. Enable it in Settings → Execution.".to_string(),
@@ -164,30 +167,34 @@ impl Tool for ShellSetEnvTool {
     type Args = ShellSetEnvArgs;
     type Output = ShellSetEnvOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "shell_set_env".to_string(),
-            description: "Set an environment variable in the persistent shell session. \
+    fn description(&self) -> String {
+        "Set an environment variable in the persistent shell session. \
                          The variable will be available to all subsequent commands in this session."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": "The environment variable name (alphanumeric and underscore only)"
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "The value to set"
-                    }
-                },
-                "required": ["key", "value"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "The environment variable name (alphanumeric and underscore only)"
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The value to set"
+                }
+            },
+            "required": ["key", "value"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         if !self.settings.enabled {
             return Err(ToolError::OperationFailed(
                 "Code execution is disabled. Enable it in Settings → Execution.".to_string(),
@@ -241,27 +248,31 @@ impl Tool for ShellCdTool {
     type Args = ShellCdArgs;
     type Output = ShellCdOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "shell_cd".to_string(),
-            description: "Change the working directory in the persistent shell session. \
+    fn description(&self) -> String {
+        "Change the working directory in the persistent shell session. \
                          The new directory will persist for all subsequent commands. \
                          If a workspace is configured, the path must stay within the workspace bounds."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "The directory path to change to (absolute or relative)"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The directory path to change to (absolute or relative)"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         if !self.settings.enabled {
             return Err(ToolError::OperationFailed(
                 "Code execution is disabled. Enable it in Settings → Execution.".to_string(),
@@ -338,21 +349,25 @@ impl Tool for ShellStatusTool {
     type Args = ShellStatusArgs;
     type Output = ShellStatusOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "shell_status".to_string(),
-            description: "Get the current status of the persistent shell session, including \
+    fn description(&self) -> String {
+        "Get the current status of the persistent shell session, including \
                          working directory, environment variables, process ID, and uptime."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         tracing::debug!("Querying shell session status");
         let status = self.session.status().await?;
         let secret_keys = self.session.secret_key_names();

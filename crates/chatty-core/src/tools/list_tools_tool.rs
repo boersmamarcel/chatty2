@@ -1,7 +1,6 @@
 use crate::factories::agent_factory::ToolAvailability;
 use crate::tools::ToolError;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 /// Arguments for the list_tools tool (no arguments needed)
@@ -436,10 +435,8 @@ impl Tool for ListToolsTool {
     type Args = ListToolsArgs;
     type Output = ListToolsOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_tools".to_string(),
-            description: "List all available tools including:\n\
+    fn description(&self) -> String {
+        "List all available tools including:\n\
                          - fetch: Fetch web URLs and return readable text content\n\
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
                          - Agent todo tools: write_todos, update_todo, verify_completion for multi-step task tracking\n\
@@ -452,16 +449,22 @@ impl Tool for ListToolsTool {
                          \n\
                          Use this to discover what capabilities you have for task execution. \
                          The returned list reflects ONLY the tools currently available in this session."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Return all tools: native + MCP
         let mut all_tools = self.native_tools.clone();
         all_tools.extend(self.mcp_tools.clone());
@@ -508,7 +511,7 @@ impl Default for ListToolsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     fn no_tools() -> ToolAvailability {
         ToolAvailability {
@@ -581,7 +584,10 @@ mod tests {
     #[tokio::test]
     async fn test_default_has_list_tools_and_read_skill() {
         let tool = ListToolsTool::new();
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let names = tool_names(&output);
         assert!(names.contains(&"list_tools".to_string()));
         assert!(names.contains(&"read_skill".to_string()));
@@ -593,7 +599,10 @@ mod tests {
     #[tokio::test]
     async fn test_no_tools_returns_minimal_set() {
         let tool = ListToolsTool::new_with_config(&no_tools(), Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let names = tool_names(&output);
         assert_eq!(names.len(), 5);
         assert!(names.contains(&"list_tools".to_string()));
@@ -606,7 +615,10 @@ mod tests {
         let mut avail = no_tools();
         avail.fs_read = true;
         let tool = ListToolsTool::new_with_config(&avail, Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let names = tool_names(&output);
         for expected in &["read_file", "read_binary", "list_directory", "glob_search"] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
@@ -622,7 +634,10 @@ mod tests {
         avail.fs_read = true;
         avail.doc_retriever = true;
         let tool = ListToolsTool::new_with_config(&avail, Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let names = tool_names(&output);
         assert!(names.contains(&"doc_retriever".to_string()));
     }
@@ -632,7 +647,10 @@ mod tests {
         let mut avail = no_tools();
         avail.shell = true;
         let tool = ListToolsTool::new_with_config(&avail, Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let names = tool_names(&output);
         for expected in &["shell_execute", "shell_set_env", "shell_cd", "shell_status"] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
@@ -644,7 +662,10 @@ mod tests {
     #[tokio::test]
     async fn test_all_tools_includes_everything() {
         let tool = ListToolsTool::new_with_config(&all_tools(), Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let names = tool_names(&output);
         let expected = vec![
             "list_tools",
@@ -715,7 +736,10 @@ mod tests {
             "desc".to_string(),
         )];
         let tool = ListToolsTool::new_with_config(&no_tools(), mcp);
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         let mcp_tool = output.tools.iter().find(|t| t.name == "my_tool").unwrap();
         assert_eq!(mcp_tool.source, "mcp:my-server");
     }
@@ -726,7 +750,10 @@ mod tests {
         avail.shell = true;
         let mcp = vec![("srv".into(), "t".into(), "d".into())];
         let tool = ListToolsTool::new_with_config(&avail, mcp);
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         assert!(output.note.contains("shell_execute"));
         assert!(output.note.contains("MCP"));
     }
@@ -734,14 +761,20 @@ mod tests {
     #[tokio::test]
     async fn test_note_without_shell_or_mcp() {
         let tool = ListToolsTool::new_with_config(&no_tools(), Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         assert_eq!(output.note, "These are the native tools available.");
     }
 
     #[tokio::test]
     async fn test_all_native_tools_have_native_source() {
         let tool = ListToolsTool::new_with_config(&all_tools(), Vec::new());
-        let output = tool.call(ListToolsArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListToolsArgs {})
+            .await
+            .unwrap();
         for t in &output.tools {
             assert_eq!(t.source, "native", "{} has source {}", t.name, t.source);
         }

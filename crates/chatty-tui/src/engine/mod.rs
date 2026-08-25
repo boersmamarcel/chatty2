@@ -598,7 +598,7 @@ impl ChatEngine {
 
         // Add user message to conversation history
         let user_msg = rig_core::completion::Message::User {
-            content: rig_core::OneOrMany::one(UserContent::text(message)),
+            content: vec![UserContent::text(message)],
         };
         conversation.add_user_message_with_attachments(user_msg, vec![]);
 

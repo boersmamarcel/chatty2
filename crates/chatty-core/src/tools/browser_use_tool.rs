@@ -1,5 +1,6 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -168,30 +169,34 @@ impl Tool for BrowserUseTool {
     type Args = BrowserUseToolArgs;
     type Output = BrowserUseToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "browser_use".to_string(),
-            description: "Automate browser tasks using the browser-use cloud service. \
+    fn description(&self) -> String {
+        "Automate browser tasks using the browser-use cloud service. \
                          Describe what you want the browser agent to do in natural language \
                          (e.g., 'go to example.com and find the contact email', \
                          'search for the latest Python release on python.org'). \
                          The agent controls a real browser and returns the result."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "A natural-language description of the browser task to perform. \
-                                        Be specific about what information to retrieve or actions to take."
-                    }
-                },
-                "required": ["task"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "A natural-language description of the browser task to perform. \
+                                    Be specific about what information to retrieve or actions to take."
+                }
+            },
+            "required": ["task"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let task = args.task.trim().to_string();
         if task.is_empty() {
             return Err(ToolError::OperationFailed(
@@ -234,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn test_browser_use_tool_definition() {
         let tool = BrowserUseTool::new("test-key".into());
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "browser_use");
         assert!(def.description.contains("browser"));
     }
@@ -245,7 +250,7 @@ mod tests {
         let args = BrowserUseToolArgs {
             task: "  ".to_string(),
         };
-        let result = tool.call(args).await;
+        let result = tool.call(&mut ToolContext::new(), args).await;
         assert!(result.is_err());
     }
 }

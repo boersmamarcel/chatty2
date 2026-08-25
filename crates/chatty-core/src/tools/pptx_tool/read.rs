@@ -2,8 +2,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::Context;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::services::filesystem_service::FileSystemService;
@@ -47,10 +46,8 @@ impl Tool for ReadPptxTool {
     type Args = ReadPptxArgs;
     type Output = ReadPptxOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_pptx".to_string(),
-            description: "Read a PowerPoint presentation (.pptx) and return its text content.\n\
+    fn description(&self) -> String {
+        "Read a PowerPoint presentation (.pptx) and return its text content.\n\
                          Returns slide titles, body text, and tables formatted as markdown sections.\n\
                          \n\
                          Use this for .pptx files — do NOT use read_file (returns binary garbage).\n\
@@ -59,29 +56,35 @@ impl Tool for ReadPptxTool {
                          - Read full presentation: {\"path\": \"slides.pptx\"}\n\
                          - Include speaker notes: {\"path\": \"slides.pptx\", \"include_notes\": true}\n\
                          - Limit output: {\"path\": \"slides.pptx\", \"max_chars\": 10000}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the .pptx file, relative to workspace root or absolute within workspace"
-                    },
-                    "include_notes": {
-                        "type": "boolean",
-                        "description": "Include speaker notes for each slide. Defaults to false."
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "Maximum characters to return. Defaults to 50000."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .pptx file, relative to workspace root or absolute within workspace"
+                },
+                "include_notes": {
+                    "type": "boolean",
+                    "description": "Include speaker notes for each slide. Defaults to false."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return. Defaults to 50000."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let (canonical, bytes) = self.service.read_binary_bytes(&args.path).await?;
         let max_chars = args.max_chars.unwrap_or(50_000);
         let include_notes = args.include_notes.unwrap_or(false);

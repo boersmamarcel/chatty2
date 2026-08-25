@@ -79,13 +79,13 @@ impl SystemTraceView {
                         });
                     }
                 }
-                (TraceItem::Thinking(new_tb), Some(TraceItem::Thinking(old_tb))) => {
-                    if new_tb.state != old_tb.state {
-                        cx.emit(TraceEvent::ThinkingStateChanged {
-                            old_state: old_tb.state.clone(),
-                            new_state: new_tb.state.clone(),
-                        });
-                    }
+                (TraceItem::Thinking(new_tb), Some(TraceItem::Thinking(old_tb)))
+                    if new_tb.state != old_tb.state =>
+                {
+                    cx.emit(TraceEvent::ThinkingStateChanged {
+                        old_state: old_tb.state.clone(),
+                        new_state: new_tb.state.clone(),
+                    });
                 }
                 // New item with no old item at this index - no state change to report
                 _ => {}

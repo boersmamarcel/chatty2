@@ -1,6 +1,7 @@
 use pdfium_render::prelude::*;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -59,10 +60,8 @@ impl Tool for PdfInfoTool {
     type Args = PdfInfoArgs;
     type Output = PdfInfoOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "pdf_info".to_string(),
-            description: "Get metadata and structural information about a PDF file. \
+    fn description(&self) -> String {
+        "Get metadata and structural information about a PDF file. \
                          Returns page count, page dimensions, and document metadata \
                          (title, author, creation date, etc.). Use this to understand \
                          a PDF's structure before converting pages or extracting text.\n\
@@ -73,21 +72,27 @@ impl Tool for PdfInfoTool {
                          Examples:\n\
                          - Get PDF info: {\"path\": \"docs/report.pdf\"}\n\
                          - Check page count: {\"path\": \"scans/document.pdf\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
 
         let ext = canonical
@@ -182,7 +187,7 @@ fn get_pdf_info(pdf_path: &std::path::Path) -> Result<PdfInfoResult, ToolError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -260,7 +265,7 @@ startxref
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "pdf_info");
         assert!(def.description.contains("metadata"));
@@ -274,9 +279,12 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfInfoArgs {
-                path: "test_info.pdf".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfInfoArgs {
+                    path: "test_info.pdf".into(),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -296,9 +304,12 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(PdfInfoArgs {
-                path: "notes.txt".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfInfoArgs {
+                    path: "notes.txt".into(),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&txt_path);
@@ -309,9 +320,12 @@ startxref
     async fn test_rejects_nonexistent() {
         let (tool, _) = create_test_tool().await;
         let result = tool
-            .call(PdfInfoArgs {
-                path: "nonexistent.pdf".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfInfoArgs {
+                    path: "nonexistent.pdf".into(),
+                },
+            )
             .await;
         assert!(result.is_err());
     }

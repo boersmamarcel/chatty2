@@ -197,5 +197,6 @@ pub fn prewarm_statics() {
     // Fire-and-forget: each prewarm runs on its own OS thread so we don't
     // block the GPUI async executor that calls us.
     std::thread::spawn(token_budget::counter::prewarm);
+    #[cfg(feature = "mermaid")]
     std::thread::spawn(services::mermaid_renderer_service::prewarm_font_db);
 }

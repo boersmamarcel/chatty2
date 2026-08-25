@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -49,25 +48,29 @@ impl Tool for ListMcpTool {
     type Args = ListMcpToolArgs;
     type Output = ListMcpToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_mcp_services".to_string(),
-            description: "List all configured MCP (Model Context Protocol) server configurations. \
+    fn description(&self) -> String {
+        "List all configured MCP (Model Context Protocol) server configurations. \
                          Returns each server's name, URL, and enabled state. \
                          \n\n\
                          Call this BEFORE editing or deleting an MCP server to confirm the exact \
                          server name and current configuration. This prevents accidentally \
                          adding a duplicate instead of modifying an existing server."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let servers =
             self.repository.load_all().await.map_err(|e| {
                 ToolError::OperationFailed(format!("Failed to load servers: {}", e))
@@ -123,7 +126,7 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::new());
         let tool = ListMcpTool::new(repo);
 
-        let result = tool.call(ListMcpToolArgs {}).await;
+        let result = tool.call(&mut ToolContext::new(), ListMcpToolArgs {}).await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -138,7 +141,7 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
 
-        let result = tool.call(ListMcpToolArgs {}).await;
+        let result = tool.call(&mut ToolContext::new(), ListMcpToolArgs {}).await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -162,7 +165,10 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
 
-        let output = tool.call(ListMcpToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListMcpToolArgs {})
+            .await
+            .unwrap();
         let s = &output.servers[0];
         // API key is never exposed — only whether one is configured
         assert!(s.has_api_key);
@@ -177,7 +183,7 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::with_servers(servers));
         let tool = ListMcpTool::new(repo);
 
-        let result = tool.call(ListMcpToolArgs {}).await;
+        let result = tool.call(&mut ToolContext::new(), ListMcpToolArgs {}).await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -194,7 +200,10 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
 
-        let output = tool.call(ListMcpToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListMcpToolArgs {})
+            .await
+            .unwrap();
         let s = &output.servers[0];
         assert_eq!(s.url, "http://localhost:3000/mcp");
         assert!(!s.has_api_key);
@@ -213,7 +222,10 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::with_servers(vec![server]));
         let tool = ListMcpTool::new(repo);
 
-        let output = tool.call(ListMcpToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListMcpToolArgs {})
+            .await
+            .unwrap();
         assert!(!output.servers[0].enabled);
     }
 
@@ -222,7 +234,7 @@ mod tests {
         let repo = Arc::new(MockMcpRepository::with_load_error("disk read failure"));
         let tool = ListMcpTool::new(repo);
 
-        let result = tool.call(ListMcpToolArgs {}).await;
+        let result = tool.call(&mut ToolContext::new(), ListMcpToolArgs {}).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ToolError::OperationFailed(_)));
     }

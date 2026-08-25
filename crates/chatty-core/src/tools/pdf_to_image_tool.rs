@@ -1,6 +1,7 @@
 use pdfium_render::prelude::*;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,10 +64,8 @@ impl Tool for PdfToImageTool {
     type Args = PdfToImageArgs;
     type Output = PdfToImageOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "pdf_to_image".to_string(),
-            description: "Convert PDF pages to PNG images and display them inline in chat. \
+    fn description(&self) -> String {
+        "Convert PDF pages to PNG images and display them inline in chat. \
                          Renders specified pages (or all pages) of a PDF file as images. \
                          Use this when you need to visually inspect PDF content, show PDF pages \
                          to the user, or when the model doesn't support native PDF input.\n\
@@ -77,34 +76,40 @@ impl Tool for PdfToImageTool {
                          - Convert all pages: {\"path\": \"docs/report.pdf\"}\n\
                          - Convert specific pages: {\"path\": \"docs/report.pdf\", \"pages\": [0, 1, 2]}\n\
                          - High resolution: {\"path\": \"docs/chart.pdf\", \"pages\": [0], \"dpi\": 300}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
-                    },
-                    "pages": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Zero-indexed page numbers to convert. If omitted, converts all pages (up to 20)."
-                    },
-                    "dpi": {
-                        "type": "integer",
-                        "description": "Resolution in DPI (72-300). Default: 150. Higher values produce larger, sharper images."
-                    },
-                    "output_dir": {
-                        "type": "string",
-                        "description": "Workspace-relative directory to save the PNG files into (e.g. \"pdf_images/\"). Created automatically if it does not exist. If omitted, images are saved to a session temp directory and are not persisted to the workspace."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
+                },
+                "pages": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Zero-indexed page numbers to convert. If omitted, converts all pages (up to 20)."
+                },
+                "dpi": {
+                    "type": "integer",
+                    "description": "Resolution in DPI (72-300). Default: 150. Higher values produce larger, sharper images."
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Workspace-relative directory to save the PNG files into (e.g. \"pdf_images/\"). Created automatically if it does not exist. If omitted, images are saved to a session temp directory and are not persisted to the workspace."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
 
         // Validate it's a PDF
@@ -287,7 +292,7 @@ fn render_pdf_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
     use std::fs;
     use std::io::Write;
 
@@ -366,7 +371,7 @@ startxref
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _, _) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "pdf_to_image");
         assert!(def.description.contains("PDF pages to PNG"));
@@ -381,12 +386,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
-                path: "test_convert.pdf".into(),
-                pages: None,
-                dpi: 150,
-                output_dir: Some("out_all".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_convert.pdf".into(),
+                    pages: None,
+                    dpi: 150,
+                    output_dir: Some("out_all".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -406,12 +414,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
-                path: "test_specific.pdf".into(),
-                pages: Some(vec![0]),
-                dpi: 72,
-                output_dir: Some("out_specific".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_specific.pdf".into(),
+                    pages: Some(vec![0]),
+                    dpi: 72,
+                    output_dir: Some("out_specific".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -430,12 +441,15 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(PdfToImageArgs {
-                path: "notes.txt".into(),
-                pages: None,
-                dpi: 150,
-                output_dir: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "notes.txt".into(),
+                    pages: None,
+                    dpi: 150,
+                    output_dir: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&txt_path);
@@ -449,12 +463,15 @@ startxref
         let (tool, pending, _) = create_test_tool().await;
 
         let result = tool
-            .call(PdfToImageArgs {
-                path: "nonexistent.pdf".into(),
-                pages: None,
-                dpi: 150,
-                output_dir: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "nonexistent.pdf".into(),
+                    pages: None,
+                    dpi: 150,
+                    output_dir: None,
+                },
+            )
             .await;
 
         assert!(result.is_err());
@@ -469,12 +486,15 @@ startxref
 
         // Page 99 doesn't exist in a 1-page PDF - should be filtered out, page 0 kept
         let result = tool
-            .call(PdfToImageArgs {
-                path: "test_range.pdf".into(),
-                pages: Some(vec![0, 99]),
-                dpi: 150,
-                output_dir: Some("out_range".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_range.pdf".into(),
+                    pages: Some(vec![0, 99]),
+                    dpi: 150,
+                    output_dir: Some("out_range".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -493,12 +513,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
-                path: "test_allrange.pdf".into(),
-                pages: Some(vec![99, 100]),
-                dpi: 150,
-                output_dir: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_allrange.pdf".into(),
+                    pages: Some(vec![99, 100]),
+                    dpi: 150,
+                    output_dir: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -515,12 +538,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
-                path: "test_outdir.pdf".into(),
-                pages: None,
-                dpi: 72,
-                output_dir: Some("pdf_images".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_outdir.pdf".into(),
+                    pages: None,
+                    dpi: 72,
+                    output_dir: Some("pdf_images".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);

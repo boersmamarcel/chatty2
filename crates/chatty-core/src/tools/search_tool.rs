@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -36,10 +35,8 @@ impl Tool for SearchCodeTool {
     type Args = SearchCodeArgs;
     type Output = SearchResult;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "search_code".to_string(),
-            description: "Search for a text pattern or regex in the workspace using ripgrep. \
+    fn description(&self) -> String {
+        "Search for a text pattern or regex in the workspace using ripgrep. \
                          Returns matching lines with file paths and line numbers. \
                          Requires 'rg' (ripgrep) to be installed. \
                          Results are limited to max_results (default 100).\n\
@@ -49,33 +46,39 @@ impl Tool for SearchCodeTool {
                          - Case-insensitive search: {\"pattern\": \"TODO\", \"case_insensitive\": true}\n\
                          - Search only Rust files: {\"pattern\": \"use std\", \"file_type\": \"rust\"}\n\
                          - Limit results: {\"pattern\": \"error\", \"max_results\": 20}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "The search pattern (literal text or regex)"
-                    },
-                    "case_insensitive": {
-                        "type": "boolean",
-                        "description": "Whether to search case-insensitively (default: false)"
-                    },
-                    "file_type": {
-                        "type": "string",
-                        "description": "Filter by file type (e.g., 'rust', 'python', 'js', 'ts', 'cpp', 'go'). Uses ripgrep's --type flag."
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 100)"
-                    }
-                },
-                "required": ["pattern"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "The search pattern (literal text or regex)"
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Whether to search case-insensitively (default: false)"
+                },
+                "file_type": {
+                    "type": "string",
+                    "description": "Filter by file type (e.g., 'rust', 'python', 'js', 'ts', 'cpp', 'go'). Uses ripgrep's --type flag."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 100)"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let max_results = args.max_results.unwrap_or(100);
         let result = self
             .service
@@ -115,10 +118,8 @@ impl Tool for FindFilesTool {
     type Args = FindFilesArgs;
     type Output = GlobFilesResult;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "find_files".to_string(),
-            description: "Find files matching a glob pattern within the workspace. \
+    fn description(&self) -> String {
+        "Find files matching a glob pattern within the workspace. \
                          Returns matching file paths relative to the workspace root. \
                          Results are limited to 100 matches.\n\
                          \n\
@@ -131,21 +132,27 @@ impl Tool for FindFilesTool {
                          - Find all Rust files: {\"pattern\": \"**/*.rs\"}\n\
                          - Find test files: {\"pattern\": \"**/test_*.py\"}\n\
                          - Find config files: {\"pattern\": \"*.toml\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Glob pattern to match files against, relative to the workspace root"
-                    }
-                },
-                "required": ["pattern"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match files against, relative to the workspace root"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = self.service.glob_files(&args.pattern).await?;
         Ok(result)
     }
@@ -176,10 +183,8 @@ impl Tool for FindDefinitionTool {
     type Args = FindDefinitionArgs;
     type Output = DefinitionResult;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "find_definition".to_string(),
-            description: "Find definitions of a symbol (function, class, struct, etc.) \
+    fn description(&self) -> String {
+        "Find definitions of a symbol (function, class, struct, etc.) \
                          in the workspace. Searches Rust, JavaScript/TypeScript, and Python files \
                          using regex-based pattern matching.\n\
                          \n\
@@ -187,21 +192,27 @@ impl Tool for FindDefinitionTool {
                          - Find a Rust function: {\"symbol\": \"parse_config\"}\n\
                          - Find a Python class: {\"symbol\": \"FileManager\"}\n\
                          - Find a TypeScript interface: {\"symbol\": \"UserConfig\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "The symbol name to search for (function, class, struct, trait, etc.)"
-                    }
-                },
-                "required": ["symbol"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "The symbol name to search for (function, class, struct, trait, etc.)"
+                }
+            },
+            "required": ["symbol"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = self.service.find_definition(&args.symbol).await?;
         Ok(result)
     }

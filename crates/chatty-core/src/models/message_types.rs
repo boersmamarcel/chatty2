@@ -585,7 +585,7 @@ impl UserMessage {
     }
 
     /// Convert from rig UserContent to UserMessage
-    pub fn from_rig_content(content: &rig_core::OneOrMany<rig_core::message::UserContent>) -> Self {
+    pub fn from_rig_content(content: &[rig_core::message::UserContent]) -> Self {
         let text: String = content
             .iter()
             .filter_map(|uc| match uc {
@@ -601,9 +601,7 @@ impl UserMessage {
 
 impl AssistantMessage {
     /// Convert from rig AssistantContent to AssistantMessage
-    pub fn from_rig_content(
-        content: &rig_core::OneOrMany<rig_core::completion::message::AssistantContent>,
-    ) -> Self {
+    pub fn from_rig_content(content: &[rig_core::completion::message::AssistantContent]) -> Self {
         let text: String = content
             .iter()
             .filter_map(|ac| match ac {

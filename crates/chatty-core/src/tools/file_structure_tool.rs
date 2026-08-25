@@ -1,6 +1,5 @@
 use duckdb::Connection;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::VecDeque;
@@ -97,35 +96,39 @@ impl Tool for FileStructureTool {
     type Args = FileStructureArgs;
     type Output = FileStructureOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Inspect the workspace or a subdirectory and return a compact file structure map. \
+    fn description(&self) -> String {
+        "Inspect the workspace or a subdirectory and return a compact file structure map. \
                           For CSV/JSON/Parquet files it returns DuckDB schema, row count, and a tiny preview; \
                           for Markdown it returns heading outlines with line numbers; for JSON it also reports top-level shape. \
                           Use this before reading manuals or profiling many files in data-analysis tasks."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory to inspect, relative to workspace root. Defaults to workspace root."
-                    },
-                    "max_files": {
-                        "type": "integer",
-                        "description": "Maximum files to inspect. Default: 60. Max: 120."
-                    },
-                    "sample_rows": {
-                        "type": "integer",
-                        "description": "Preview rows for data files. Default: 2. Max: 3."
-                    }
-                }
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory to inspect, relative to workspace root. Defaults to workspace root."
+                },
+                "max_files": {
+                    "type": "integer",
+                    "description": "Maximum files to inspect. Default: 60. Max: 120."
+                },
+                "sample_rows": {
+                    "type": "integer",
+                    "description": "Preview rows for data files. Default: 2. Max: 3."
+                }
+            }
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let requested_path = args.path.unwrap_or_else(|| ".".to_string());
         let root = self
             .service
@@ -515,11 +518,14 @@ mod tests {
         );
         let tool = FileStructureTool::new(service);
         let output = tool
-            .call(FileStructureArgs {
-                path: None,
-                max_files: Some(10),
-                sample_rows: Some(2),
-            })
+            .call(
+                &mut ToolContext::new(),
+                FileStructureArgs {
+                    path: None,
+                    max_files: Some(10),
+                    sample_rows: Some(2),
+                },
+            )
             .await
             .unwrap();
 
