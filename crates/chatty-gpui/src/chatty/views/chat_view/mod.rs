@@ -33,6 +33,8 @@
 //! - [`handlers`] — stream-event handlers (tool calls, approvals,
 //!   thinking blocks, floating-approval keyboard shortcuts).
 //! - [`sub_agent`] — sub-agent progress trace and `add_info_message`.
+//! - [`parent_stream`] — locate the parent assistant bubble when a
+//!   sub-agent progress row is last.
 //! - [`history`] — `load_history` (conversation switching).
 //! - [`start_screen`] — onboarding / empty-state rendering.
 
@@ -40,6 +42,7 @@
 
 mod handlers;
 mod history;
+mod parent_stream;
 mod start_screen;
 mod sub_agent;
 
@@ -95,9 +98,9 @@ pub struct ChatView {
     /// Keystroke interceptor that handles ↑/↓ for the slash-command picker.
     /// Must be held here so it stays alive (dropping it unregisters the handler).
     _slash_menu_interceptor: Subscription,
-    /// Index into `messages` of the "Sub-agent: launching…" info message that
-    /// receives live progress lines while a sub-agent subprocess is running.
-    /// `None` when no sub-agent is active.
+    /// Index into `messages` of the sub-agent progress row. Retained after
+    /// the row is finalized so parent-stream updates skip it. `None` when
+    /// this conversation has no progress row.
     sub_agent_progress_msg_idx: Option<usize>,
     /// Animated "Thinking…" indicator entity. Owns its own rotation
     /// timer so the spinner + label keep updating even when no stream
@@ -390,92 +393,97 @@ impl ChatView {
 
     /// Append text to the current streaming assistant message
     pub fn append_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let last_msg_streaming = self
-            .messages
-            .last()
-            .map(|m| m.is_streaming)
-            .unwrap_or(false);
-        let content_len_before = self.messages.last().map(|m| m.content.len()).unwrap_or(0);
-
-        if let Some(last) = self.messages.last_mut() {
-            if last.is_streaming {
-                last.content.push_str(text);
-                trace!(
-                    target: "chatty_gpui::render::stream",
-                    delta_len = text.len(),
-                    content_len_before,
-                    new_content_len = last.content.len(),
-                    last_msg_streaming,
-                    conversation_id = ?self.conversation_id,
-                    "append_assistant_text",
-                );
-                cx.notify();
-                self.scroll_if_sticky();
-            } else {
+        let idx = match self.parent_streaming_assistant_index() {
+            Some(idx) => idx,
+            None if self.sub_agent_progress_msg_idx.is_some() => {
+                // Progress row is last; open a continuation bubble below it.
+                self.start_assistant_message(cx);
+                self.messages.len() - 1
+            }
+            None => {
                 warn!(
                     target: "chatty_gpui::render::stream",
                     delta_len = text.len(),
-                    "append_assistant_text dropped: last message not streaming",
+                    "append_assistant_text dropped: no parent streaming assistant",
                 );
+                return;
             }
-        } else {
-            warn!(
-                target: "chatty_gpui::render::stream",
-                delta_len = text.len(),
-                "append_assistant_text dropped: no messages in view",
-            );
-        }
+        };
+        let content_len_before = self.messages[idx].content.len();
+        self.messages[idx].content.push_str(text);
+        trace!(
+            target: "chatty_gpui::render::stream",
+            delta_len = text.len(),
+            content_len_before,
+            new_content_len = self.messages[idx].content.len(),
+            message_idx = idx,
+            conversation_id = ?self.conversation_id,
+            "append_assistant_text",
+        );
+        cx.notify();
+        self.scroll_if_sticky();
     }
 
     /// Finalize the current streaming assistant message
     pub fn finalize_assistant_message(&mut self, cx: &mut Context<Self>) {
-        if let Some(last) = self.messages.last_mut() {
-            let had_live_trace = last.live_trace.is_some();
-            let had_streaming_cache = self.streaming_parse_cache.is_some();
-            let content_len = last.content.len();
+        let Some(idx) = self.parent_streaming_assistant_index() else {
+            return;
+        };
 
-            last.is_streaming = false;
-
-            // Finalize live trace - push final state to view entity
-            if let Some(ref mut trace) = last.live_trace {
-                trace.clear_active_tool();
-                let trace_clone = trace.clone();
-                if let Some(ref view_entity) = last.system_trace_view {
-                    view_entity.update(cx, |view, cx| {
-                        view.update_trace(trace_clone, cx);
-                        cx.notify();
-                    });
-                }
-            }
-
-            // Clear live trace (it's now frozen in the view entity)
-            last.live_trace = None;
-
-            // Clear the streaming parse cache — finalized content uses the
-            // persistent ParsedContentCache instead.
+        let empty = self.messages[idx].content.is_empty()
+            && !self.messages[idx]
+                .live_trace
+                .as_ref()
+                .is_some_and(|t| t.has_items())
+            && self.messages[idx].system_trace_view.is_none();
+        if empty {
+            self.messages.remove(idx);
             self.streaming_parse_cache = None;
-
-            // Scroll to bottom after finalization. The cached render may produce
-            // different-height content (e.g. code blocks, math) compared to the
-            // streaming render, so the scroll position needs to be updated.
-            self.activate_sticky_scroll();
-
-            trace!(
-                target: "chatty_gpui::render::stream",
-                had_live_trace,
-                cleared_streaming_cache = had_streaming_cache,
-                content_len,
-                conversation_id = ?self.conversation_id,
-                "finalize_assistant_message",
-            );
-
             cx.notify();
-        } else {
-            warn!(
-                target: "chatty_gpui::render::stream",
-                "finalize_assistant_message called with no messages",
-            );
+            return;
         }
+
+        let last = &mut self.messages[idx];
+        let had_live_trace = last.live_trace.is_some();
+        let had_streaming_cache = self.streaming_parse_cache.is_some();
+        let content_len = last.content.len();
+
+        last.is_streaming = false;
+
+        // Finalize live trace - push final state to view entity
+        if let Some(ref mut trace) = last.live_trace {
+            trace.clear_active_tool();
+            let trace_clone = trace.clone();
+            if let Some(ref view_entity) = last.system_trace_view {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                    cx.notify();
+                });
+            }
+        }
+
+        // Clear live trace (it's now frozen in the view entity)
+        last.live_trace = None;
+
+        // Clear the streaming parse cache — finalized content uses the
+        // persistent ParsedContentCache instead.
+        self.streaming_parse_cache = None;
+
+        // Scroll to bottom after finalization. The cached render may produce
+        // different-height content (e.g. code blocks, math) compared to the
+        // streaming render, so the scroll position needs to be updated.
+        self.activate_sticky_scroll();
+
+        trace!(
+            target: "chatty_gpui::render::stream",
+            had_live_trace,
+            cleared_streaming_cache = had_streaming_cache,
+            content_len,
+            conversation_id = ?self.conversation_id,
+            "finalize_assistant_message",
+        );
+
+        cx.notify();
     }
 
     /// Set the history_index on the last assistant DisplayMessage.
@@ -489,11 +497,9 @@ impl ChatView {
         history_index: usize,
         cx: &mut Context<Self>,
     ) {
-        if let Some(last) = self.messages.last_mut() {
-            if matches!(last.role, MessageRole::Assistant) {
-                last.history_index = Some(history_index);
-                cx.notify();
-            }
+        if let Some(idx) = self.parent_assistant_index() {
+            self.messages[idx].history_index = Some(history_index);
+            cx.notify();
         }
     }
 
@@ -505,55 +511,62 @@ impl ChatView {
         attachments: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(last) = self.messages.last_mut() {
-            if matches!(last.role, MessageRole::Assistant) {
-                last.attachments = attachments;
-                cx.notify();
-            }
+        if let Some(idx) = self.parent_assistant_index() {
+            self.messages[idx].attachments = attachments;
+            cx.notify();
         }
     }
 
     /// Mark the current streaming message as cancelled by the user
     pub fn mark_message_cancelled(&mut self, cx: &mut Context<Self>) {
-        if let Some(last) = self.messages.last_mut() {
-            if last.is_streaming {
-                // Append cancellation notice to the message
-                if !last.content.is_empty() {
-                    last.content.push_str("\n\n");
-                }
-                last.content.push_str("*[Response cancelled by user]*");
-                last.is_streaming = false;
+        let Some(idx) = self.parent_streaming_assistant_index() else {
+            return;
+        };
+        let last = &mut self.messages[idx];
+        // Append cancellation notice to the message
+        if !last.content.is_empty() {
+            last.content.push_str("\n\n");
+        }
+        last.content.push_str("*[Response cancelled by user]*");
+        last.is_streaming = false;
 
-                // Clear streaming parse cache
-                self.streaming_parse_cache = None;
+        // Clear streaming parse cache
+        self.streaming_parse_cache = None;
 
-                // Finalize trace if present: cancel all Running tool calls
-                // so they don't stay stuck in the Running state permanently
-                if let Some(ref mut trace) = last.live_trace {
-                    trace.cancel_running_tool_calls();
-                    trace.clear_active_tool();
+        // Finalize trace if present: cancel all Running tool calls
+        // so they don't stay stuck in the Running state permanently
+        if let Some(ref mut trace) = last.live_trace {
+            trace.cancel_running_tool_calls();
+            trace.clear_active_tool();
 
-                    // Update the SystemTraceView with the final cancelled state
-                    let trace_clone = trace.clone();
-                    if let Some(ref view_entity) = last.system_trace_view {
-                        view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone, cx);
-                        });
-                    }
-                }
-                last.live_trace = None;
-
-                cx.notify();
+            // Update the SystemTraceView with the final cancelled state
+            let trace_clone = trace.clone();
+            if let Some(ref view_entity) = last.system_trace_view {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                });
             }
         }
+        last.live_trace = None;
+
+        cx.notify();
     }
 
     /// Extract the current trace before finalizing (for persistence)
     pub fn extract_current_trace(&mut self) -> Option<SystemTrace> {
-        if let Some(last) = self.messages.last_mut() {
-            if let Some(ref mut trace) = last.live_trace {
-                trace.clear_active_tool();
-                return Some(trace.clone());
+        // Prefer a trace that actually has items. The continuation bubble
+        // below a sub-agent card starts with an empty live_trace and must
+        // not hide the pre-tool parent's tool calls (or the Conversation
+        // model's streaming_trace fallback).
+        for i in (0..self.messages.len()).rev() {
+            if Some(i) == self.sub_agent_progress_msg_idx {
+                continue;
+            }
+            if let Some(ref mut trace) = self.messages[i].live_trace {
+                if trace.has_items() {
+                    trace.clear_active_tool();
+                    return Some(trace.clone());
+                }
             }
         }
         None
@@ -562,10 +575,10 @@ impl ChatView {
     /// Restore a live trace from a saved SystemTrace (e.g. when switching back to a streaming conversation).
     /// Creates the SystemTraceView entity and subscribes to its events.
     pub fn restore_live_trace(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
-        let last = match self.messages.last_mut() {
-            Some(msg) if msg.is_streaming => msg,
-            _ => return,
+        let Some(idx) = self.parent_streaming_assistant_index() else {
+            return;
         };
+        let last = &mut self.messages[idx];
 
         last.live_trace = Some(trace.clone());
 
@@ -613,30 +626,51 @@ impl ChatView {
         }
     }
 
+    /// Index of the parent streaming assistant bubble.
+    ///
+    /// Skips the dedicated sub-agent progress row, which is pushed *after*
+    /// the parent bubble and would otherwise steal `messages.last()`.
+    pub(super) fn parent_streaming_assistant_index(&self) -> Option<usize> {
+        parent_stream::index_of_parent_streaming_assistant(
+            &self.messages,
+            self.sub_agent_progress_msg_idx,
+        )
+    }
+
+    /// Last assistant bubble that is not the sub-agent progress row.
+    /// Used after the parent stream has already been finalized.
+    pub(super) fn parent_assistant_index(&self) -> Option<usize> {
+        parent_stream::index_of_parent_assistant(&self.messages, self.sub_agent_progress_msg_idx)
+    }
+
+    pub(super) fn parent_streaming_message_mut(&mut self) -> Option<&mut DisplayMessage> {
+        let idx = self.parent_streaming_assistant_index()?;
+        self.messages.get_mut(idx)
+    }
+
     /// Check if we're awaiting a response (streaming message with no content yet
     /// and no tool calls in progress)
     fn is_awaiting_response(&self) -> bool {
-        self.messages.last().is_some_and(|msg| {
-            msg.is_streaming
-                && msg.content.is_empty()
-                && !msg
-                    .live_trace
-                    .as_ref()
-                    .is_some_and(|trace| trace.has_items())
-        })
+        self.parent_streaming_assistant_index()
+            .and_then(|i| self.messages.get(i))
+            .is_some_and(|msg| {
+                msg.content.is_empty()
+                    && !msg
+                        .live_trace
+                        .as_ref()
+                        .is_some_and(|trace| trace.has_items())
+            })
     }
 
     /// Whether to show the animated "thinking" indicator at the bottom
-    /// of the message list. We show it whenever the last assistant
-    /// message is still streaming, regardless of whether text or tool
-    /// chunks have already arrived. This matches Claude Code / Cursor
-    /// behaviour: a continuous "agent is working" signal until the
-    /// stream actually ends, so the user never sees a silent gap
-    /// between text chunks, between tool calls, or while a tool runs.
+    /// of the message list. We show it whenever any assistant message is
+    /// still streaming (parent bubble or in-flight progress card). This
+    /// matches Claude Code / Cursor behaviour: a continuous "agent is
+    /// working" signal until the stream actually ends.
     fn is_thinking_indicator_visible(&self) -> bool {
         self.messages
-            .last()
-            .is_some_and(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
+            .iter()
+            .any(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
     }
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.

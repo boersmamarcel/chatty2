@@ -61,6 +61,10 @@ impl ChatView {
     }
 
     pub fn restore_sub_agent_progress(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
+        // Freeze or drop the pre-tool parent so follow-up tokens land in a
+        // new bubble *below* this progress row, not above it.
+        self.seal_parent_before_sub_agent_progress();
+
         let is_streaming = trace.active_tool_index.is_some();
 
         let trace_view = cx.new(|_cx| SystemTraceView::new(trace.clone()));
@@ -156,7 +160,37 @@ impl ChatView {
             cx.notify();
         }
 
-        self.sub_agent_progress_msg_idx = None;
+        // Keep `sub_agent_progress_msg_idx` so parent-stream updates skip this
+        // row. If the parent LLM stream is still active, open a continuation
+        // bubble below the trace for follow-up text.
+        if self.chat_input_state.read(cx).is_streaming()
+            && self.parent_streaming_assistant_index().is_none()
+        {
+            self.start_assistant_message(cx);
+        }
+    }
+
+    /// Freeze pre-tool assistant text (or drop an empty placeholder) before
+    /// inserting the sub-agent progress row.
+    fn seal_parent_before_sub_agent_progress(&mut self) {
+        let Some(idx) = self.messages.iter().enumerate().rev().find_map(|(i, m)| {
+            (matches!(m.role, MessageRole::Assistant) && m.is_streaming).then_some(i)
+        }) else {
+            return;
+        };
+
+        let empty = self.messages[idx].content.is_empty()
+            && !self.messages[idx]
+                .live_trace
+                .as_ref()
+                .is_some_and(|t| t.has_items())
+            && self.messages[idx].system_trace_view.is_none();
+
+        if empty {
+            self.messages.remove(idx);
+        } else {
+            self.messages[idx].is_streaming = false;
+        }
     }
 
     /// Add an informational message that appears as an assistant response.

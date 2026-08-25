@@ -43,22 +43,26 @@ impl ChatView {
     ) {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
-        // Capture current message content as "text_before" for interleaved rendering
-        let text_before = self
-            .messages
-            .last()
-            .map(|msg| msg.content.clone())
-            .unwrap_or_default();
+        let Some(parent_idx) = self.parent_streaming_assistant_index().or_else(|| {
+            if self.sub_agent_progress_msg_idx.is_some() {
+                self.start_assistant_message(cx);
+                Some(self.messages.len() - 1)
+            } else {
+                None
+            }
+        }) else {
+            debug!("No parent streaming assistant for tool call");
+            cx.notify();
+            return;
+        };
 
-        let had_trace_view = self
-            .messages
-            .last()
-            .and_then(|m| m.system_trace_view.as_ref())
-            .is_some();
-        let live_trace_items = self
-            .messages
-            .last()
-            .and_then(|m| m.live_trace.as_ref())
+        // Capture current message content as "text_before" for interleaved rendering
+        let text_before = self.messages[parent_idx].content.clone();
+
+        let had_trace_view = self.messages[parent_idx].system_trace_view.is_some();
+        let live_trace_items = self.messages[parent_idx]
+            .live_trace
+            .as_ref()
             .map(|t| t.items.len())
             .unwrap_or(0);
 
@@ -98,67 +102,61 @@ impl ChatView {
         };
 
         // Update live trace and create/update system_trace_view entity
-        let msg_count = self.messages.len();
         let mut new_tool_idx: Option<usize> = None;
-        if let Some(last) = self.messages.last_mut() {
-            debug!(
-                has_last_message = true,
-                is_streaming = last.is_streaming,
-                has_live_trace = last.live_trace.is_some(),
-                "Checking live_trace availability"
-            );
-            if last.is_streaming {
-                if let Some(ref mut trace) = last.live_trace {
-                    debug!("Adding tool call to live_trace");
-                    let index = trace.items.len();
-                    trace.add_tool_call(tool_call);
-                    trace.set_active_tool(index);
-                    new_tool_idx = Some(index);
+        let last = &mut self.messages[parent_idx];
+        debug!(
+            has_last_message = true,
+            is_streaming = last.is_streaming,
+            has_live_trace = last.live_trace.is_some(),
+            "Checking live_trace availability"
+        );
+        if let Some(ref mut trace) = last.live_trace {
+            debug!("Adding tool call to live_trace");
+            let index = trace.items.len();
+            trace.add_tool_call(tool_call);
+            trace.set_active_tool(index);
+            new_tool_idx = Some(index);
 
-                    // Create or update the trace view entity for rendering
-                    let trace_clone = trace.clone();
-                    if last.system_trace_view.is_none() {
-                        // Create new SystemTraceView entity
-                        let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+            // Create or update the trace view entity for rendering
+            let trace_clone = trace.clone();
+            if last.system_trace_view.is_none() {
+                // Create new SystemTraceView entity
+                let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
 
-                        // Subscribe to its events
-                        let chat_view_entity = cx.entity();
-                        cx.subscribe(
-                            &trace_view,
-                            move |_chat_view,
-                                  _trace_view,
-                                  event: &super::super::message_types::TraceEvent,
-                                  cx| {
-                                let event_clone = event.clone();
-                                let chat_view = chat_view_entity.clone();
-                                cx.defer(move |cx| {
-                                    chat_view.update(cx, |chat_view, cx| {
-                                        chat_view.handle_trace_event(&event_clone, cx);
-                                    });
-                                });
-                            },
-                        )
-                        .detach();
-
-                        last.system_trace_view = Some(trace_view);
-                    } else if let Some(ref view_entity) = last.system_trace_view {
-                        view_entity.update(cx, |view, cx| {
-                            view.update_trace(trace_clone, cx);
-                            cx.notify();
+                // Subscribe to its events
+                let chat_view_entity = cx.entity();
+                cx.subscribe(
+                    &trace_view,
+                    move |_chat_view,
+                          _trace_view,
+                          event: &super::super::message_types::TraceEvent,
+                          cx| {
+                        let event_clone = event.clone();
+                        let chat_view = chat_view_entity.clone();
+                        cx.defer(move |cx| {
+                            chat_view.update(cx, |chat_view, cx| {
+                                chat_view.handle_trace_event(&event_clone, cx);
+                            });
                         });
-                    }
-                }
-            } else {
-                debug!("live_trace not available for tool call");
+                    },
+                )
+                .detach();
+
+                last.system_trace_view = Some(trace_view);
+            } else if let Some(ref view_entity) = last.system_trace_view {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                    cx.notify();
+                });
             }
         } else {
-            debug!("Last message is not streaming");
+            debug!("live_trace not available for tool call");
         }
 
         // Ensure new tool calls start collapsed (outside the mutable borrow of self.messages)
         if let Some(idx) = new_tool_idx {
             self.collapsed_tool_calls
-                .entry((msg_count - 1, idx))
+                .entry((parent_idx, idx))
                 .or_insert(true);
         }
 
@@ -180,7 +178,11 @@ impl ChatView {
     where
         F: FnOnce(&mut ToolCallBlock),
     {
-        let last_message = match self.messages.last_mut() {
+        let Some(idx) = self.parent_streaming_assistant_index() else {
+            warn!("update_tool_call_by_id: No parent streaming assistant");
+            return false;
+        };
+        let last_message = match self.messages.get_mut(idx) {
             Some(msg) => msg,
             None => {
                 warn!("update_tool_call_by_id: No messages found");
@@ -222,7 +224,7 @@ impl ChatView {
         });
 
         // Update trace view - it will emit event if state changes
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref trace) = last.live_trace {
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
@@ -253,7 +255,7 @@ impl ChatView {
         });
 
         // Update trace view - it will emit ToolCallStateChanged event automatically
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref mut trace) = last.live_trace {
                 trace.clear_active_tool();
                 let trace_clone = trace.clone();
@@ -277,7 +279,7 @@ impl ChatView {
         });
 
         // Update trace view - it will emit ToolCallStateChanged event automatically
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref mut trace) = last.live_trace {
                 trace.clear_active_tool();
                 let trace_clone = trace.clone();
@@ -356,7 +358,7 @@ impl ChatView {
         };
 
         // Update live trace and create/update system_trace_view entity
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if last.is_streaming {
                 if let Some(ref mut trace) = last.live_trace {
                     debug!("Adding approval to live_trace");
@@ -416,7 +418,7 @@ impl ChatView {
         }
 
         // Update approval state in live trace
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref mut trace) = last.live_trace {
                 let new_state = if approved {
                     ApprovalState::Approved
@@ -455,7 +457,7 @@ impl ChatView {
         };
 
         // Update live trace
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             debug!(
                 has_last_message = true,
                 is_streaming = last.is_streaming,
@@ -486,14 +488,10 @@ impl ChatView {
     where
         F: FnOnce(&mut ThinkingBlock),
     {
-        let last_message = match self.messages.last_mut() {
+        let last_message = match self.parent_streaming_message_mut() {
             Some(msg) => msg,
             None => return false,
         };
-
-        if !last_message.is_streaming {
-            return false;
-        }
 
         let trace = match last_message.live_trace.as_mut() {
             Some(t) => t,
@@ -552,7 +550,7 @@ impl ChatView {
         });
 
         // Clear active tool after thinking completes
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref mut trace) = last.live_trace {
                 trace.clear_active_tool();
             }
@@ -604,7 +602,7 @@ impl ChatView {
     pub(super) fn expand_trace_to_approval(&mut self, cx: &mut Context<Self>) {
         trace!("expand_trace_to_approval called");
 
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref view_entity) = last.system_trace_view {
                 view_entity.update(cx, |view, cx| {
                     view.set_collapsed(false);

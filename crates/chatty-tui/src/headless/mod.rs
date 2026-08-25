@@ -79,8 +79,8 @@ pub async fn run_headless(
         match event {
             AppEvent::TextChunk(text) => {
                 engine.handle_event(AppEvent::TextChunk(text.clone()));
-                // Stream text chunks to stderr so parent process can show live progress.
-                eprint!("{}", text);
+                // Do not eprint assistant tokens: parent UIs want tool activity
+                // only (`CHATTY_PROGRESS`). The final answer still goes to stdout.
                 response.push_str(&text);
                 text_bytes_this_turn += text.len();
                 if answer_file_required
@@ -112,6 +112,7 @@ pub async fn run_headless(
                 text_bytes_this_turn = 0;
                 let name_str = name.clone();
                 engine.handle_event(event);
+                eprintln!("{}", format_progress_line("tool_started", &name_str, None));
                 if let Some(tc) = engine
                     .messages
                     .iter()
@@ -142,6 +143,15 @@ pub async fn run_headless(
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
+                    let status = if tool_result_looks_failed(tc) {
+                        "err"
+                    } else {
+                        "ok"
+                    };
+                    eprintln!(
+                        "{}",
+                        format_progress_line("tool_finished", &tc.name, Some(status))
+                    );
                     if tc.name == "final_answer" && answer_file_exists(&engine) {
                         if let Err(error) =
                             normalize_existing_answer_file_for_prompt(&engine, &message)
@@ -150,7 +160,7 @@ pub async fn run_headless(
                         }
                         called_final_answer = true;
                     }
-                    tool_failed = tool_result_looks_failed(tc);
+                    tool_failed = status == "err";
                     compact_file_extracted =
                         compact_file_extraction_tool_result(answer_file_required, tc);
                     // Check for repeated identical tool call (loop detection).
@@ -235,6 +245,10 @@ pub async fn run_headless(
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
+                    eprintln!(
+                        "{}",
+                        format_progress_line("tool_finished", &tc.name, Some("err"))
+                    );
                 }
                 tool_results_since_finalization += 1;
                 failed_tool_results_since_finalization += 1;

@@ -105,7 +105,7 @@ pub use search_memory_tool::{
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
-pub use sub_agent_tool::SubAgentTool;
+pub use sub_agent_tool::{CHATTY_PROGRESS_PREFIX, SubAgentTool, is_chatty_progress_line};
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
 

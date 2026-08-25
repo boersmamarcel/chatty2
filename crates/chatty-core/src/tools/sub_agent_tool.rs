@@ -1,8 +1,20 @@
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
 use std::path::PathBuf;
 use tracing::{info, warn};
+
+use crate::models::message_types::ToolSource;
+use crate::tools::ToolError;
+use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
+
+/// Prefix for structured headless progress lines on stderr.
+///
+/// Format:
+/// - `CHATTY_PROGRESS\ttool_started\t{name}`
+/// - `CHATTY_PROGRESS\ttool_finished\t{name}\t{ok|err}`
+pub const CHATTY_PROGRESS_PREFIX: &str = "CHATTY_PROGRESS\t";
 
 /// Maximum number of characters from stderr to include in error messages.
 const STDERR_PREVIEW_CHARS: usize = 500;
@@ -28,8 +40,6 @@ pub struct SubAgentOutput {
     pub success: bool,
 }
 
-use crate::tools::ToolError;
-
 /// Tool that spawns a sub-agent (chatty-tui in headless mode) to handle a
 /// delegated task autonomously.
 ///
@@ -47,15 +57,60 @@ pub struct SubAgentTool {
     auto_approve: bool,
     /// Available model IDs for validation (empty = skip validation).
     available_model_ids: Vec<String>,
+    /// Shared slot with `InvokeAgentTool` for compact live progress in the parent UI.
+    progress_slot: InvokeAgentProgressSlot,
 }
 
 impl SubAgentTool {
-    pub fn new(model_id: String, auto_approve: bool, available_model_ids: Vec<String>) -> Self {
+    pub fn new(
+        model_id: String,
+        auto_approve: bool,
+        available_model_ids: Vec<String>,
+        progress_slot: InvokeAgentProgressSlot,
+    ) -> Self {
         Self {
             model_id,
             auto_approve,
             available_model_ids,
+            progress_slot,
         }
+    }
+
+    fn send_progress(&self, event: InvokeAgentProgress) {
+        send_progress(&self.progress_slot, event);
+    }
+}
+
+/// Returns true when `line` is a structured headless progress event.
+pub fn is_chatty_progress_line(line: &str) -> bool {
+    line.starts_with(CHATTY_PROGRESS_PREFIX)
+}
+
+/// Parse a structured progress line into compact UI text.
+///
+/// Unprefixed token soup and human tool-format lines return `None`.
+fn parse_progress_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix(CHATTY_PROGRESS_PREFIX)?;
+    let mut parts = rest.split('\t');
+    let kind = parts.next()?;
+    let name = parts.next()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    match kind {
+        "tool_started" => Some(name.to_string()),
+        "tool_finished" => match parts.next().unwrap_or("ok") {
+            "ok" => Some(format!("\u{2713} {name}")),
+            _ => Some(format!("\u{2717} {name}")),
+        },
+        _ => None,
+    }
+}
+
+fn send_progress(slot: &InvokeAgentProgressSlot, event: InvokeAgentProgress) {
+    let guard = slot.lock();
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(event);
     }
 }
 
@@ -145,14 +200,20 @@ impl Tool for SubAgentTool {
             });
 
         let auto_approve = self.auto_approve;
+        let progress_slot = self.progress_slot.clone();
 
         // Run the subprocess in a blocking task to avoid blocking the async runtime.
-        let result =
-            tokio::task::spawn_blocking(move || run_sub_agent(exe, model_id, task, auto_approve))
-                .await
-                .map_err(|e| {
-                    ToolError::OperationFailed(format!("Sub-agent task failed to complete: {e}"))
-                })?;
+        let result = tokio::task::spawn_blocking(move || {
+            run_sub_agent_with_progress(exe, model_id, task, auto_approve, progress_slot)
+        })
+        .await
+        .map_err(|e| {
+            self.send_progress(InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(e.to_string()),
+            });
+            ToolError::OperationFailed(format!("Sub-agent task failed to complete: {e}"))
+        })?;
 
         match result {
             Ok(stdout) => {
@@ -177,12 +238,59 @@ impl Tool for SubAgentTool {
     }
 }
 
+/// Emit Started/Finished around the child process so the parent UI row
+/// never sticks on Running.
+fn run_sub_agent_with_progress(
+    executable: PathBuf,
+    model_id: String,
+    task: String,
+    auto_approve: bool,
+    progress_slot: InvokeAgentProgressSlot,
+) -> Result<String, String> {
+    send_progress(
+        &progress_slot,
+        InvokeAgentProgress::Started {
+            agent_name: "sub_agent".to_string(),
+            prompt: task.clone(),
+            source: ToolSource::Local,
+        },
+    );
+    let result = run_sub_agent(
+        executable,
+        model_id,
+        task,
+        auto_approve,
+        progress_slot.clone(),
+    );
+    match &result {
+        Ok(stdout) => send_progress(
+            &progress_slot,
+            InvokeAgentProgress::Finished {
+                success: true,
+                result: Some(stdout.clone()),
+            },
+        ),
+        Err(e) => send_progress(
+            &progress_slot,
+            InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(e.clone()),
+            },
+        ),
+    }
+    result
+}
+
 /// Spawn chatty-tui in headless mode and collect its output.
+///
+/// Stderr is drained live: only `CHATTY_PROGRESS` lines are forwarded to the
+/// parent UI. stdout is returned as the tool result for the parent model.
 fn run_sub_agent(
     executable: PathBuf,
     model_id: String,
     task: String,
     auto_approve: bool,
+    progress_slot: InvokeAgentProgressSlot,
 ) -> Result<String, String> {
     use std::process::{Command, Stdio};
 
@@ -209,23 +317,40 @@ fn run_sub_agent(
 
     info!(exe = ?executable, "Launching headless sub-agent");
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return Err(format!("Failed to launch sub-agent: {e}")),
     };
 
+    let stderr = child.stderr.take();
+    let slot_for_drain = progress_slot.clone();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut collected = String::new();
+        if let Some(stderr) = stderr {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                info!(sub_agent_progress = %line);
+                if !collected.is_empty() {
+                    collected.push('\n');
+                }
+                collected.push_str(&line);
+                if let Some(text) = parse_progress_line(&line) {
+                    send_progress(&slot_for_drain, InvokeAgentProgress::Text(text));
+                }
+            }
+        }
+        collected
+    });
+
     let output = match child.wait_with_output() {
         Ok(o) => o,
-        Err(e) => return Err(format!("Sub-agent process failed: {e}")),
+        Err(e) => {
+            let _ = stderr_thread.join();
+            return Err(format!("Sub-agent process failed: {e}"));
+        }
     };
 
-    // Log stderr for debugging (tool progress info)
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
-    if !stderr_str.is_empty() {
-        for line in stderr_str.lines() {
-            info!(sub_agent_progress = %line);
-        }
-    }
+    let stderr_str = stderr_thread.join().unwrap_or_default();
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -245,11 +370,50 @@ fn run_sub_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::install_progress_channel;
+    use parking_lot::Mutex;
     use rig_core::tool::Tool;
+    use std::sync::Arc;
+
+    fn dummy_slot() -> InvokeAgentProgressSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    #[test]
+    fn parse_progress_line_started_and_finished() {
+        assert_eq!(
+            parse_progress_line("CHATTY_PROGRESS\ttool_started\tread_file").as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(
+            parse_progress_line("CHATTY_PROGRESS\ttool_finished\tread_file\tok").as_deref(),
+            Some("✓ read_file")
+        );
+        assert_eq!(
+            parse_progress_line("CHATTY_PROGRESS\ttool_finished\tshell_execute\terr").as_deref(),
+            Some("✗ shell_execute")
+        );
+    }
+
+    #[test]
+    fn parse_progress_line_ignores_unprefixed_noise() {
+        assert_eq!(parse_progress_line("token soup without prefix"), None);
+        assert_eq!(
+            parse_progress_line("  [tool: read_file] \u{27f3} running"),
+            None
+        );
+        assert_eq!(parse_progress_line("CHATTY_PROGRESS\tunknown\tfoo"), None);
+        assert!(!is_chatty_progress_line("hello"));
+        assert!(is_chatty_progress_line(
+            "CHATTY_PROGRESS\ttool_started\tread_file"
+        ));
+    }
 
     #[tokio::test]
     async fn test_empty_task_rejected() {
-        let tool = SubAgentTool::new("model-1".into(), false, Vec::new());
+        let slot = dummy_slot();
+        let mut rx = install_progress_channel(&slot);
+        let tool = SubAgentTool::new("model-1".into(), false, Vec::new(), slot);
         let result = tool
             .call(SubAgentArgs {
                 task: "   ".to_string(),
@@ -261,6 +425,10 @@ mod tests {
             err.to_string().contains("cannot be empty"),
             "unexpected error: {err}"
         );
+        assert!(
+            rx.try_recv().is_err(),
+            "empty task must not emit progress events"
+        );
     }
 
     #[tokio::test]
@@ -269,6 +437,7 @@ mod tests {
             "default-model".into(),
             false,
             vec!["model-a".into(), "model-b".into()],
+            dummy_slot(),
         );
         let result = tool
             .call(SubAgentArgs {
@@ -291,6 +460,7 @@ mod tests {
             "default-model".into(),
             false,
             vec!["model-a".into(), "model-b".into()],
+            dummy_slot(),
         );
         // The model validation passes, but the call will fail later when
         // trying to spawn the chatty-tui binary (which doesn't exist in tests).
@@ -313,5 +483,81 @@ mod tests {
                 assert!(!output.success || !output.response.is_empty());
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_progress_forwards_prefixed_lines_and_returns_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let script = dir.path().join("fake-tui");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             printf 'token soup' >&2\n\
+             echo >&2\n\
+             echo 'CHATTY_PROGRESS\ttool_started\tread_file' >&2\n\
+             echo '  [tool: read_file] running' >&2\n\
+             echo 'CHATTY_PROGRESS\ttool_finished\tread_file\tok' >&2\n\
+             echo 'noise' >&2\n\
+             echo 'final answer'\n",
+        )
+        .expect("write fixture");
+        let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        let slot = dummy_slot();
+        let mut rx = install_progress_channel(&slot);
+        let stdout = run_sub_agent_with_progress(
+            script,
+            "model-1".into(),
+            "do the task".into(),
+            false,
+            slot,
+        )
+        .expect("fixture should succeed");
+        assert_eq!(stdout, "final answer");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            matches!(
+                events.first(),
+                Some(InvokeAgentProgress::Started {
+                    agent_name,
+                    prompt,
+                    source: ToolSource::Local,
+                }) if agent_name == "sub_agent" && prompt == "do the task"
+            ),
+            "expected Started first, got {events:?}"
+        );
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                InvokeAgentProgress::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["read_file", "✓ read_file"]);
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("token soup") || t.contains("noise")),
+            "unprefixed stderr must not be forwarded: {texts:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(InvokeAgentProgress::Finished {
+                    success: true,
+                    result: Some(result),
+                }) if result == "final answer"
+            ),
+            "expected Finished last, got {events:?}"
+        );
     }
 }

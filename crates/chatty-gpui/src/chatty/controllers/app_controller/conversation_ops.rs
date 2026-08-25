@@ -664,38 +664,30 @@ impl ChattyApp {
                 });
 
                 // Restore in-progress state from Conversation model if it exists.
-                // Sub-agent progress uses a dedicated message layout, so restore that
-                // first and only fall back to the generic streaming message/trace path
-                // when no running sub-agent trace is active.
+                // Parent stream and sub-agent progress are sibling messages: restore
+                // the parent bubble first, then the dedicated progress row.
                 if has_active_stream {
-                    let running_sub_agent_trace = streaming_trace
-                        .as_ref()
-                        .filter(|trace| trace.is_running_sub_agent())
-                        .cloned()
-                        .or(streaming_sub_agent_trace);
+                    if let Some(content) = streaming_content {
+                        debug!(conv_id = %conv_id, content_len = content.len(),
+                               "Restoring streaming message content from Conversation model");
+                        view.start_assistant_message(cx);
+                        view.append_assistant_text(&content, cx);
+                    } else {
+                        // Stream active but no content yet - show placeholder
+                        debug!(conv_id = %conv_id, "Stream active but no content yet, starting placeholder");
+                        view.start_assistant_message(cx);
+                    }
 
-                    if let Some(trace) = running_sub_agent_trace {
+                    if let Some(trace) = streaming_trace {
+                        debug!(conv_id = %conv_id, trace_items = trace.items.len(),
+                               "Restoring streaming trace from Conversation model");
+                        view.restore_live_trace(trace, cx);
+                    }
+
+                    if let Some(trace) = streaming_sub_agent_trace {
                         debug!(conv_id = %conv_id, trace_items = trace.items.len(),
                                "Restoring sub-agent progress trace from Conversation model");
                         view.restore_sub_agent_progress(trace, cx);
-                    } else {
-                        if let Some(content) = streaming_content {
-                            debug!(conv_id = %conv_id, content_len = content.len(),
-                                   "Restoring streaming message content from Conversation model");
-                            view.start_assistant_message(cx);
-                            view.append_assistant_text(&content, cx);
-                        } else {
-                            // Stream active but no content yet - show placeholder
-                            debug!(conv_id = %conv_id, "Stream active but no content yet, starting placeholder");
-                            view.start_assistant_message(cx);
-                        }
-
-                        // Restore in-progress tool trace from Conversation model
-                        if let Some(trace) = streaming_trace {
-                            debug!(conv_id = %conv_id, trace_items = trace.items.len(),
-                                   "Restoring streaming trace from Conversation model");
-                            view.restore_live_trace(trace, cx);
-                        }
                     }
                 }
             });

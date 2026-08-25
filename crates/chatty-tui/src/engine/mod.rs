@@ -286,7 +286,8 @@ pub struct ChatEngine {
     /// Index into `messages` of the system message showing sub-agent progress.
     /// `None` when no sub-agent is running.
     pub sub_agent_msg_idx: Option<usize>,
-    /// Tracks `invoke_agent` tool call IDs to suppress their ToolCallBlock rendering.
+    /// Tracks `invoke_agent` / `sub_agent` tool call IDs to suppress their
+    /// ToolCallBlock rendering (progress goes through the sub-agent channel).
     active_invoke_agent_ids: HashSet<String>,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -581,6 +582,7 @@ impl ChatEngine {
 
         // Reset scroll to bottom when sending
         self.pin_to_bottom();
+        self.sub_agent_msg_idx = None;
 
         let conversation = match self.conversation.as_mut() {
             Some(c) => c,
@@ -672,14 +674,19 @@ impl ChatEngine {
                 if let Some(conv) = self.conversation.as_mut() {
                     conv.append_streaming_content(&text);
                 }
-                // Append to display
-                if let Some(last) = self.messages.last_mut() {
-                    last.push_text(&text);
+                if let Some(msg) = self.streaming_assistant_mut() {
+                    msg.push_text(&text);
+                } else if self.sub_agent_msg_idx.is_some() {
+                    self.messages
+                        .push(DisplayMessage::new(MessageRole::Assistant, true));
+                    if let Some(msg) = self.messages.last_mut() {
+                        msg.push_text(&text);
+                    }
                 }
                 EngineAction::Redraw
             }
             AppEvent::ToolCallStarted { id, name } => {
-                if name == "invoke_agent" {
+                if name == "invoke_agent" || name == "sub_agent" {
                     self.active_invoke_agent_ids.insert(id);
                 } else {
                     let source = classify_tool_source(&name);
@@ -693,15 +700,21 @@ impl ChatEngine {
                         source,
                         execution_engine,
                     };
-                    if let Some(last) = self.messages.last_mut() {
+                    if let Some(last) = self.streaming_assistant_mut() {
                         last.push_tool_call(info);
+                    } else if self.sub_agent_msg_idx.is_some() {
+                        self.messages
+                            .push(DisplayMessage::new(MessageRole::Assistant, true));
+                        if let Some(last) = self.messages.last_mut() {
+                            last.push_tool_call(info);
+                        }
                     }
                 }
                 EngineAction::Redraw
             }
             AppEvent::ToolCallInput { id, arguments } => {
                 if !self.active_invoke_agent_ids.contains(&id)
-                    && let Some(last) = self.messages.last_mut()
+                    && let Some(last) = self.streaming_assistant_mut()
                     && let Some(tc) = last.tool_call_mut(&id)
                 {
                     tc.execution_engine =
@@ -712,8 +725,8 @@ impl ChatEngine {
             }
             AppEvent::ToolCallResult { id, result } => {
                 if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent result — sub-agent progress already handled
-                } else if let Some(last) = self.messages.last_mut()
+                    // invoke_agent / sub_agent result — sub-agent progress already handled
+                } else if let Some(last) = self.streaming_assistant_mut()
                     && let Some(tc) = last.tool_call_mut(&id)
                 {
                     tc.execution_engine = detect_execution_engine(&tc.name, &result);
@@ -724,8 +737,8 @@ impl ChatEngine {
             }
             AppEvent::ToolCallError { id, error } => {
                 if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent error — sub-agent progress already handled
-                } else if let Some(last) = self.messages.last_mut()
+                    // invoke_agent / sub_agent error — sub-agent progress already handled
+                } else if let Some(last) = self.streaming_assistant_mut()
                     && let Some(tc) = last.tool_call_mut(&id)
                 {
                     tc.output = Some(error.clone());
@@ -763,7 +776,7 @@ impl ChatEngine {
             }
             AppEvent::StreamError(error) => {
                 error!(error = %error, "Stream error");
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.streaming_assistant_mut() {
                     let prefix = if last.text().is_empty() { "" } else { "\n\n" };
                     last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
@@ -780,7 +793,7 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::StreamCancelled => {
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.streaming_assistant_mut() {
                     last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
@@ -842,7 +855,7 @@ impl ChatEngine {
                     return EngineAction::None;
                 }
                 if self.sub_agent_msg_idx.is_none() {
-                    // Auto-create system message for invoke_agent progress
+                    self.seal_parent_before_sub_agent_progress();
                     self.add_system_message(line);
                     self.sub_agent_msg_idx = Some(self.messages.len() - 1);
                 } else if let Some(idx) = self.sub_agent_msg_idx
@@ -854,8 +867,15 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::SubAgentFinished(message) => {
-                self.sub_agent_msg_idx = None;
-                self.add_system_message(message);
+                if let Some(idx) = self.sub_agent_msg_idx
+                    && let Some(msg) = self.messages.get_mut(idx)
+                {
+                    msg.push_text("\n");
+                    msg.push_text(&message);
+                } else {
+                    self.add_system_message(message);
+                    self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+                }
                 EngineAction::Redraw
             }
             AppEvent::TerminalInput(_) | AppEvent::Tick => {
@@ -902,9 +922,31 @@ impl ChatEngine {
             .push(DisplayMessage::with_text(MessageRole::System, text));
     }
 
+    fn streaming_assistant_index(&self) -> Option<usize> {
+        streaming_assistant_index(&self.messages, self.sub_agent_msg_idx)
+    }
+
+    fn streaming_assistant_mut(&mut self) -> Option<&mut DisplayMessage> {
+        let idx = self.streaming_assistant_index()?;
+        self.messages.get_mut(idx)
+    }
+
+    fn seal_parent_before_sub_agent_progress(&mut self) {
+        let Some(idx) = streaming_assistant_index(&self.messages, None) else {
+            return;
+        };
+        let empty = self.messages[idx].text().is_empty()
+            && self.messages[idx].tool_calls().next().is_none();
+        if empty {
+            self.messages.remove(idx);
+        } else {
+            self.messages[idx].is_streaming = false;
+        }
+    }
+
     fn finalize_stream(&mut self) {
         // Mark display message as done
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.streaming_assistant_mut() {
             last.is_streaming = false;
         }
 
@@ -978,4 +1020,47 @@ pub fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
     detached_head
         .map(|sha| format!("HEAD ({sha})"))
         .or_else(|| Some("HEAD (detached)".to_string()))
+}
+
+fn streaming_assistant_index(messages: &[DisplayMessage], after: Option<usize>) -> Option<usize> {
+    messages.iter().enumerate().rev().find_map(|(i, m)| {
+        if after.is_some_and(|a| i <= a) {
+            return None;
+        }
+        (matches!(m.role, MessageRole::Assistant) && m.is_streaming).then_some(i)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_assistant_before_progress_is_parent() {
+        let messages = vec![
+            DisplayMessage::new(MessageRole::Assistant, true),
+            DisplayMessage::with_text(MessageRole::System, "⟳ list_directory".to_string()),
+        ];
+        assert_eq!(streaming_assistant_index(&messages, None), Some(0));
+        assert_eq!(streaming_assistant_index(&messages, Some(1)), None);
+    }
+
+    #[test]
+    fn streaming_assistant_after_progress_is_continuation() {
+        let messages = vec![
+            DisplayMessage::with_text(MessageRole::Assistant, "pre-tool".to_string()),
+            DisplayMessage::with_text(MessageRole::System, "done".to_string()),
+            DisplayMessage::new(MessageRole::Assistant, true),
+        ];
+        assert_eq!(streaming_assistant_index(&messages, Some(1)), Some(2));
+    }
+
+    #[test]
+    fn streaming_assistant_none_when_only_system_messages() {
+        let messages = vec![DisplayMessage::with_text(
+            MessageRole::System,
+            "done".to_string(),
+        )];
+        assert_eq!(streaming_assistant_index(&messages, None), None);
+    }
 }

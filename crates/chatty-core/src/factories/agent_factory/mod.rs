@@ -728,33 +728,27 @@ impl AgentClient {
             None
         };
 
-        // Sub-agent tool
-        let sub_agent_tool: Option<SubAgentTool> =
-            if allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false) {
-                let sub_model_id = model_config.id.clone();
-                let sub_auto_approve = exec_settings
-                    .as_ref()
-                    .map(|s| {
-                        matches!(
-                        s.approval_mode,
-                        crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
-                    )
-                    })
-                    .unwrap_or(false);
-                tracing::debug!("Sub-agent tool enabled");
-                Some(SubAgentTool::new(
-                    sub_model_id,
-                    sub_auto_approve,
-                    available_model_ids,
-                ))
-            } else {
-                if !allow_sub_agent {
-                    tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
-                } else {
-                    tracing::debug!("Sub-agent tool disabled: execution not enabled");
-                }
-                None
-            };
+        // Sub-agent tool is constructed later, after InvokeAgentTool, so it can
+        // share the progress slot. Availability is decided here for tool_availability.
+        let sub_agent_enabled =
+            allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false);
+        let sub_model_id = model_config.id.clone();
+        let sub_auto_approve = exec_settings
+            .as_ref()
+            .map(|s| {
+                matches!(
+                    s.approval_mode,
+                    crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+                )
+            })
+            .unwrap_or(false);
+        if sub_agent_enabled {
+            tracing::debug!("Sub-agent tool enabled");
+        } else if !allow_sub_agent {
+            tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
+        } else {
+            tracing::debug!("Sub-agent tool disabled: execution not enabled");
+        }
 
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
@@ -879,7 +873,7 @@ impl AgentClient {
             execute_code: execute_code_tool.is_some(),
             memory: remember_tool.is_some(),
             search_web: search_web_tool.is_some(),
-            sub_agent: sub_agent_tool.is_some(),
+            sub_agent: sub_agent_enabled,
             browser_use: browser_use_tool.is_some(),
             daytona: daytona_tool.is_some(),
             publish_module: false, // set below after publish_module_tool is created
@@ -904,6 +898,17 @@ impl AgentClient {
         // Create invoke_agent tool (always available)
         let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
+
+        let sub_agent_tool: Option<SubAgentTool> = if sub_agent_enabled {
+            Some(SubAgentTool::new(
+                sub_model_id,
+                sub_auto_approve,
+                available_model_ids,
+                invoke_agent_progress_slot.clone(),
+            ))
+        } else {
+            None
+        };
 
         // Publish module tool (if an MCP server exposes `publish_module`)
         let publish_module_tool: Option<PublishModuleTool> = mcp_tools.as_ref().and_then(|servers| {
