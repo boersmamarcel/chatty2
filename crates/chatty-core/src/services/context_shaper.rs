@@ -626,8 +626,8 @@ mod tests {
         assert!(freed > 0);
         // Content should be a stub now.
         if let Message::User { content } = &out[0] {
-            if let UserContent::ToolResult(tr) = content.first() {
-                if let ToolResultContent::Text(t) = tr.content.first() {
+            if let Some(UserContent::ToolResult(tr)) = content.first() {
+                if let Some(ToolResultContent::Text(t)) = tr.content.first() {
                     assert!(t.text.contains("truncated"));
                 }
             }
@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(out.len(), 4);
         // The marker should mention "snipped".
         if let Message::User { content } = &out[1] {
-            if let UserContent::Text(t) = content.first() {
+            if let Some(UserContent::Text(t)) = content.first() {
                 assert!(t.text.contains("snipped"));
             }
         }

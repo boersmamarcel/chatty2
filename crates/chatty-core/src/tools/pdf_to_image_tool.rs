@@ -1,7 +1,7 @@
 use pdfium_render::prelude::*;
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -386,12 +386,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "test_convert.pdf".into(),
-                pages: None,
-                dpi: 150,
-                output_dir: Some("out_all".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_convert.pdf".into(),
+                    pages: None,
+                    dpi: 150,
+                    output_dir: Some("out_all".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -411,12 +414,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "test_specific.pdf".into(),
-                pages: Some(vec![0]),
-                dpi: 72,
-                output_dir: Some("out_specific".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_specific.pdf".into(),
+                    pages: Some(vec![0]),
+                    dpi: 72,
+                    output_dir: Some("out_specific".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -435,12 +441,15 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "notes.txt".into(),
-                pages: None,
-                dpi: 150,
-                output_dir: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "notes.txt".into(),
+                    pages: None,
+                    dpi: 150,
+                    output_dir: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&txt_path);
@@ -454,12 +463,15 @@ startxref
         let (tool, pending, _) = create_test_tool().await;
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "nonexistent.pdf".into(),
-                pages: None,
-                dpi: 150,
-                output_dir: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "nonexistent.pdf".into(),
+                    pages: None,
+                    dpi: 150,
+                    output_dir: None,
+                },
+            )
             .await;
 
         assert!(result.is_err());
@@ -474,12 +486,15 @@ startxref
 
         // Page 99 doesn't exist in a 1-page PDF - should be filtered out, page 0 kept
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "test_range.pdf".into(),
-                pages: Some(vec![0, 99]),
-                dpi: 150,
-                output_dir: Some("out_range".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_range.pdf".into(),
+                    pages: Some(vec![0, 99]),
+                    dpi: 150,
+                    output_dir: Some("out_range".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -498,12 +513,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "test_allrange.pdf".into(),
-                pages: Some(vec![99, 100]),
-                dpi: 150,
-                output_dir: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_allrange.pdf".into(),
+                    pages: Some(vec![99, 100]),
+                    dpi: 150,
+                    output_dir: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -520,12 +538,15 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfToImageArgs {
-                path: "test_outdir.pdf".into(),
-                pages: None,
-                dpi: 72,
-                output_dir: Some("pdf_images".into()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfToImageArgs {
+                    path: "test_outdir.pdf".into(),
+                    pages: None,
+                    dpi: 72,
+                    output_dir: Some("pdf_images".into()),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);

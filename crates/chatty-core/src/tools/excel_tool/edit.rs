@@ -732,6 +732,7 @@ impl Tool for EditExcelTool {
 #[cfg(test)]
 mod tests {
     use super::edit_excel_parameters_schema;
+    use rig_core::completion::ToolDefinition;
     use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
     use serde_json::Value;
 

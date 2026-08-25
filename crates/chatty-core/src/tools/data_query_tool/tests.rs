@@ -26,10 +26,13 @@ async fn profile_data_returns_compact_generic_summary() {
     let tool = ProfileDataTool::new(service);
 
     let output = tool
-        .call(&mut ToolContext::new(), ProfileDataArgs {
-            path: "data/sales.csv".to_string(),
-            sample_rows: Some(2),
-        })
+        .call(
+            &mut ToolContext::new(),
+            ProfileDataArgs {
+                path: "data/sales.csv".to_string(),
+                sample_rows: Some(2),
+            },
+        )
         .await
         .unwrap();
 
@@ -125,10 +128,13 @@ async fn query_data_reads_workspace_relative_paths() {
     let tool = QueryDataTool::new(service);
 
     let output = tool
-        .call(&mut ToolContext::new(), QueryDataArgs {
-            query: "SELECT * FROM 'data/sales.csv' ORDER BY amount".to_string(),
-            max_rows: Some(10),
-        })
+        .call(
+            &mut ToolContext::new(),
+            QueryDataArgs {
+                query: "SELECT * FROM 'data/sales.csv' ORDER BY amount".to_string(),
+                max_rows: Some(10),
+            },
+        )
         .await
         .unwrap();
 
@@ -153,10 +159,13 @@ async fn query_data_rejects_files_outside_workspace() {
     let outside_path = escape_sql_string(&outside.path().to_string_lossy());
 
     let result = tool
-        .call(&mut ToolContext::new(), QueryDataArgs {
-            query: format!("SELECT * FROM read_csv('{outside_path}', header=true)"),
-            max_rows: Some(10),
-        })
+        .call(
+            &mut ToolContext::new(),
+            QueryDataArgs {
+                query: format!("SELECT * FROM read_csv('{outside_path}', header=true)"),
+                max_rows: Some(10),
+            },
+        )
         .await;
 
     match result {

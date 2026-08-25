@@ -518,11 +518,14 @@ mod tests {
         );
         let tool = FileStructureTool::new(service);
         let output = tool
-            .call(&mut ToolContext::new(), FileStructureArgs {
-                path: None,
-                max_files: Some(10),
-                sample_rows: Some(2),
-            })
+            .call(
+                &mut ToolContext::new(),
+                FileStructureArgs {
+                    path: None,
+                    max_files: Some(10),
+                    sample_rows: Some(2),
+                },
+            )
             .await
             .unwrap();
 

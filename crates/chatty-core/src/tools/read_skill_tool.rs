@@ -154,9 +154,12 @@ mod tests {
     async fn returns_not_found_for_missing_skill() {
         let tool = ReadSkillTool::new(None);
         let result = tool
-            .call(&mut ToolContext::new(), ReadSkillArgs {
-                name: "nonexistent-skill-xyz".to_string(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadSkillArgs {
+                    name: "nonexistent-skill-xyz".to_string(),
+                },
+            )
             .await;
         assert!(matches!(result, Err(ReadSkillError::NotFound(_))));
     }
@@ -174,9 +177,12 @@ mod tests {
 
         let tool = ReadSkillTool::new(Some(tmp.path().to_path_buf()));
         let output = tool
-            .call(&mut ToolContext::new(), ReadSkillArgs {
-                name: "my-skill".to_string(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadSkillArgs {
+                    name: "my-skill".to_string(),
+                },
+            )
             .await
             .unwrap();
 

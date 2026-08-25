@@ -270,7 +270,7 @@ pub fn merge_search_results(
     let mut merged: Vec<MemoryHit> = Vec::with_capacity(lex_results.len() + vec_results.len());
 
     // Add all results, tracking seen texts
-    for hit in lex_results.into_iter().chain(vec_results.into_iter()) {
+    for hit in lex_results.into_iter().chain(vec_results) {
         // Use first 200 chars as dedup key to avoid expensive full-text comparison
         let key = hit.text.chars().take(200).collect::<String>();
         if seen_texts.contains(&key) {

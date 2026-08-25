@@ -1,7 +1,7 @@
 use pdfium_render::prelude::*;
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -279,9 +279,12 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfInfoArgs {
-                path: "test_info.pdf".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfInfoArgs {
+                    path: "test_info.pdf".into(),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -301,9 +304,12 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfInfoArgs {
-                path: "notes.txt".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfInfoArgs {
+                    path: "notes.txt".into(),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&txt_path);
@@ -314,9 +320,12 @@ startxref
     async fn test_rejects_nonexistent() {
         let (tool, _) = create_test_tool().await;
         let result = tool
-            .call(&mut ToolContext::new(), PdfInfoArgs {
-                path: "nonexistent.pdf".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfInfoArgs {
+                    path: "nonexistent.pdf".into(),
+                },
+            )
             .await;
         assert!(result.is_err());
     }

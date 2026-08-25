@@ -1,6 +1,6 @@
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolError;
@@ -385,25 +385,28 @@ mod tests {
     async fn test_bar_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "bar".to_string(),
-                title: Some("Test".to_string()),
-                data: vec![
-                    ChartDataPoint {
-                        label: "A".to_string(),
-                        value: 10.0,
-                    },
-                    ChartDataPoint {
-                        label: "B".to_string(),
-                        value: 20.0,
-                    },
-                ],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "bar".to_string(),
+                    title: Some("Test".to_string()),
+                    data: vec![
+                        ChartDataPoint {
+                            label: "A".to_string(),
+                            value: 10.0,
+                        },
+                        ChartDataPoint {
+                            label: "B".to_string(),
+                            value: 20.0,
+                        },
+                    ],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
         let spec = result.unwrap();
@@ -415,19 +418,22 @@ mod tests {
     async fn test_line_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "line".to_string(),
-                title: None,
-                data: vec![ChartDataPoint {
-                    label: "Jan".to_string(),
-                    value: 100.0,
-                }],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "line".to_string(),
+                    title: None,
+                    data: vec![ChartDataPoint {
+                        label: "Jan".to_string(),
+                        value: 100.0,
+                    }],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
     }
@@ -436,43 +442,46 @@ mod tests {
     async fn test_multi_series_line_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "line".to_string(),
-                title: Some("Revenue vs Expenses".to_string()),
-                data: vec![],
-                series: Some(vec![
-                    SeriesData {
-                        name: "Revenue".to_string(),
-                        data: vec![
-                            ChartDataPoint {
-                                label: "Jan".to_string(),
-                                value: 1000.0,
-                            },
-                            ChartDataPoint {
-                                label: "Feb".to_string(),
-                                value: 1200.0,
-                            },
-                        ],
-                    },
-                    SeriesData {
-                        name: "Expenses".to_string(),
-                        data: vec![
-                            ChartDataPoint {
-                                label: "Jan".to_string(),
-                                value: 800.0,
-                            },
-                            ChartDataPoint {
-                                label: "Feb".to_string(),
-                                value: 950.0,
-                            },
-                        ],
-                    },
-                ]),
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "line".to_string(),
+                    title: Some("Revenue vs Expenses".to_string()),
+                    data: vec![],
+                    series: Some(vec![
+                        SeriesData {
+                            name: "Revenue".to_string(),
+                            data: vec![
+                                ChartDataPoint {
+                                    label: "Jan".to_string(),
+                                    value: 1000.0,
+                                },
+                                ChartDataPoint {
+                                    label: "Feb".to_string(),
+                                    value: 1200.0,
+                                },
+                            ],
+                        },
+                        SeriesData {
+                            name: "Expenses".to_string(),
+                            data: vec![
+                                ChartDataPoint {
+                                    label: "Jan".to_string(),
+                                    value: 800.0,
+                                },
+                                ChartDataPoint {
+                                    label: "Feb".to_string(),
+                                    value: 950.0,
+                                },
+                            ],
+                        },
+                    ]),
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
         let spec = result.unwrap();
@@ -484,16 +493,19 @@ mod tests {
     async fn test_line_chart_requires_data_or_series() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "line".to_string(),
-                title: None,
-                data: vec![],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "line".to_string(),
+                    title: None,
+                    data: vec![],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }
@@ -502,25 +514,28 @@ mod tests {
     async fn test_pie_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "pie".to_string(),
-                title: Some("Share".to_string()),
-                data: vec![
-                    ChartDataPoint {
-                        label: "X".to_string(),
-                        value: 60.0,
-                    },
-                    ChartDataPoint {
-                        label: "Y".to_string(),
-                        value: 40.0,
-                    },
-                ],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "pie".to_string(),
+                    title: Some("Share".to_string()),
+                    data: vec![
+                        ChartDataPoint {
+                            label: "X".to_string(),
+                            value: 60.0,
+                        },
+                        ChartDataPoint {
+                            label: "Y".to_string(),
+                            value: 40.0,
+                        },
+                    ],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
     }
@@ -529,25 +544,28 @@ mod tests {
     async fn test_donut_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "donut".to_string(),
-                title: Some("Budget".to_string()),
-                data: vec![
-                    ChartDataPoint {
-                        label: "Dev".to_string(),
-                        value: 50.0,
-                    },
-                    ChartDataPoint {
-                        label: "Marketing".to_string(),
-                        value: 30.0,
-                    },
-                ],
-                series: None,
-                candlestick_data: None,
-                inner_radius: Some(60.0),
-                pad_angle: Some(0.05),
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "donut".to_string(),
+                    title: Some("Budget".to_string()),
+                    data: vec![
+                        ChartDataPoint {
+                            label: "Dev".to_string(),
+                            value: 50.0,
+                        },
+                        ChartDataPoint {
+                            label: "Marketing".to_string(),
+                            value: 30.0,
+                        },
+                    ],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: Some(60.0),
+                    pad_angle: Some(0.05),
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
         let spec = result.unwrap();
@@ -559,19 +577,22 @@ mod tests {
     async fn test_area_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "area".to_string(),
-                title: None,
-                data: vec![ChartDataPoint {
-                    label: "Mon".to_string(),
-                    value: 400.0,
-                }],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "area".to_string(),
+                    title: None,
+                    data: vec![ChartDataPoint {
+                        label: "Mon".to_string(),
+                        value: 400.0,
+                    }],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
     }
@@ -580,22 +601,25 @@ mod tests {
     async fn test_candlestick_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "candlestick".to_string(),
-                title: Some("AAPL".to_string()),
-                data: vec![],
-                series: None,
-                candlestick_data: Some(vec![CandlestickDataPoint {
-                    date: "2024-01".to_string(),
-                    open: 150.0,
-                    high: 160.0,
-                    low: 145.0,
-                    close: 158.0,
-                }]),
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "candlestick".to_string(),
+                    title: Some("AAPL".to_string()),
+                    data: vec![],
+                    series: None,
+                    candlestick_data: Some(vec![CandlestickDataPoint {
+                        date: "2024-01".to_string(),
+                        open: 150.0,
+                        high: 160.0,
+                        low: 145.0,
+                        close: 158.0,
+                    }]),
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_ok());
     }
@@ -604,16 +628,19 @@ mod tests {
     async fn test_candlestick_requires_data() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "candlestick".to_string(),
-                title: None,
-                data: vec![],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "candlestick".to_string(),
+                    title: None,
+                    data: vec![],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }
@@ -622,19 +649,22 @@ mod tests {
     async fn test_invalid_chart_type() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "scatter".to_string(),
-                title: None,
-                data: vec![ChartDataPoint {
-                    label: "A".to_string(),
-                    value: 1.0,
-                }],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "scatter".to_string(),
+                    title: None,
+                    data: vec![ChartDataPoint {
+                        label: "A".to_string(),
+                        value: 1.0,
+                    }],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }
@@ -643,16 +673,19 @@ mod tests {
     async fn test_empty_data() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(&mut ToolContext::new(), CreateChartArgs {
-                chart_type: "bar".to_string(),
-                title: None,
-                data: vec![],
-                series: None,
-                candlestick_data: None,
-                inner_radius: None,
-                pad_angle: None,
-                save_path: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CreateChartArgs {
+                    chart_type: "bar".to_string(),
+                    title: None,
+                    data: vec![],
+                    series: None,
+                    candlestick_data: None,
+                    inner_radius: None,
+                    pad_angle: None,
+                    save_path: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

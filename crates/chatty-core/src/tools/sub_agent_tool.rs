@@ -254,10 +254,13 @@ mod tests {
     async fn test_empty_task_rejected() {
         let tool = SubAgentTool::new("model-1".into(), false, Vec::new());
         let result = tool
-            .call(&mut ToolContext::new(), SubAgentArgs {
-                task: "   ".to_string(),
-                model: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                SubAgentArgs {
+                    task: "   ".to_string(),
+                    model: None,
+                },
+            )
             .await;
         let err = result.unwrap_err();
         assert!(
@@ -274,10 +277,13 @@ mod tests {
             vec!["model-a".into(), "model-b".into()],
         );
         let result = tool
-            .call(&mut ToolContext::new(), SubAgentArgs {
-                task: "do something".to_string(),
-                model: Some("nonexistent".to_string()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                SubAgentArgs {
+                    task: "do something".to_string(),
+                    model: Some("nonexistent".to_string()),
+                },
+            )
             .await;
         let err = result.unwrap_err();
         assert!(
@@ -299,10 +305,13 @@ mod tests {
         // trying to spawn the chatty-tui binary (which doesn't exist in tests).
         // We verify it does NOT fail with "Unknown model".
         let result = tool
-            .call(&mut ToolContext::new(), SubAgentArgs {
-                task: "do something".to_string(),
-                model: Some("model-a".to_string()),
-            })
+            .call(
+                &mut ToolContext::new(),
+                SubAgentArgs {
+                    task: "do something".to_string(),
+                    model: Some("model-a".to_string()),
+                },
+            )
             .await;
         match result {
             Err(e) => assert!(

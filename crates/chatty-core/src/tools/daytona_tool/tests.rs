@@ -1,8 +1,8 @@
 //! Tests for `daytona_tool` (extracted from the production file).
 
 use super::*;
-use rig_agent::tool::{Tool, ToolContext};
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 
 #[tokio::test]
 async fn test_daytona_tool_definition() {

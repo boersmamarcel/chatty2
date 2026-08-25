@@ -37,40 +37,43 @@ mod tests {
 
         let write_tool = WritePptxTool::new(service.clone());
         let write_output = write_tool
-            .call(&mut ToolContext::new(), WritePptxArgs {
-                path: path.clone(),
-                slides: vec![PptxSlideSpec {
-                    title: Some("Quarterly Review".to_string()),
-                    shapes: vec![
-                        PptxShapeSpec::BulletList {
-                            x: 0.8,
-                            y: 1.7,
-                            width: 8.0,
-                            height: 2.2,
-                            items: vec![
-                                "Revenue grew 18%".into(),
-                                "Enterprise led expansion".into(),
-                            ],
-                            style: Some(TextStyleSpec {
-                                font_size: Some(20.0),
-                                bold: None,
-                                italic: None,
-                                color: None,
-                            }),
-                        },
-                        PptxShapeSpec::Table {
-                            x: 0.8,
-                            y: 4.3,
-                            width: 8.0,
-                            height: 1.2,
-                            rows: vec![
-                                vec!["Metric".into(), "Value".into()],
-                                vec!["ARR".into(), "$2.1M".into()],
-                            ],
-                        },
-                    ],
-                }],
-            })
+            .call(
+                &mut ToolContext::new(),
+                WritePptxArgs {
+                    path: path.clone(),
+                    slides: vec![PptxSlideSpec {
+                        title: Some("Quarterly Review".to_string()),
+                        shapes: vec![
+                            PptxShapeSpec::BulletList {
+                                x: 0.8,
+                                y: 1.7,
+                                width: 8.0,
+                                height: 2.2,
+                                items: vec![
+                                    "Revenue grew 18%".into(),
+                                    "Enterprise led expansion".into(),
+                                ],
+                                style: Some(TextStyleSpec {
+                                    font_size: Some(20.0),
+                                    bold: None,
+                                    italic: None,
+                                    color: None,
+                                }),
+                            },
+                            PptxShapeSpec::Table {
+                                x: 0.8,
+                                y: 4.3,
+                                width: 8.0,
+                                height: 1.2,
+                                rows: vec![
+                                    vec!["Metric".into(), "Value".into()],
+                                    vec!["ARR".into(), "$2.1M".into()],
+                                ],
+                            },
+                        ],
+                    }],
+                },
+            )
             .await
             .unwrap();
 
@@ -81,11 +84,14 @@ mod tests {
 
         let read_tool = ReadPptxTool::new(service);
         let read_output = read_tool
-            .call(&mut ToolContext::new(), ReadPptxArgs {
-                path,
-                include_notes: None,
-                max_chars: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadPptxArgs {
+                    path,
+                    include_notes: None,
+                    max_chars: None,
+                },
+            )
             .await
             .unwrap();
 
@@ -107,11 +113,14 @@ mod tests {
         );
         let tool = ReadPptxTool::new(service);
         let result = tool
-            .call(&mut ToolContext::new(), ReadPptxArgs {
-                path: tmp.path().join("nope.pptx").to_str().unwrap().to_string(),
-                include_notes: None,
-                max_chars: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadPptxArgs {
+                    path: tmp.path().join("nope.pptx").to_str().unwrap().to_string(),
+                    include_notes: None,
+                    max_chars: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

@@ -1,6 +1,6 @@
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -265,10 +265,13 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfExtractTextArgs {
-                path: "test_extract.pdf".into(),
-                pages: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "test_extract.pdf".into(),
+                    pages: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -287,10 +290,13 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfExtractTextArgs {
-                path: "test_specific_text.pdf".into(),
-                pages: Some(vec![0]),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "test_specific_text.pdf".into(),
+                    pages: Some(vec![0]),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -307,10 +313,13 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(&mut ToolContext::new(), PdfExtractTextArgs {
-                path: "notes.txt".into(),
-                pages: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "notes.txt".into(),
+                    pages: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&txt_path);
@@ -321,10 +330,13 @@ startxref
     async fn test_rejects_nonexistent() {
         let (tool, _) = create_test_tool().await;
         let result = tool
-            .call(&mut ToolContext::new(), PdfExtractTextArgs {
-                path: "nonexistent.pdf".into(),
-                pages: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "nonexistent.pdf".into(),
+                    pages: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

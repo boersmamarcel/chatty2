@@ -1,6 +1,6 @@
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 

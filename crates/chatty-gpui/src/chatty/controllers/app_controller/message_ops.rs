@@ -683,11 +683,9 @@ impl ChattyApp {
                             });
                         }
                     }
-                    StreamStatus::Cancelled => {
+                    StreamStatus::Cancelled if conversation_id != "__pending__" => {
                         // Pending streams have no conversation yet — only UI reset (done above)
-                        if conversation_id != "__pending__" {
-                            self.finalize_stopped_stream(conversation_id, trace_json.clone(), cx);
-                        }
+                        self.finalize_stopped_stream(conversation_id, trace_json.clone(), cx);
                     }
                     _ => {}
                 }
@@ -1218,7 +1216,7 @@ impl ChattyApp {
             let history_context = history[..len - 1].to_vec();
             let user_contents = match &history[len - 1] {
                 rig_core::completion::Message::User { content, .. } => {
-                    content.iter().cloned().collect::<Vec<_>>()
+                    content.to_vec()
                 }
                 _ => {
                     return Err(anyhow::anyhow!(

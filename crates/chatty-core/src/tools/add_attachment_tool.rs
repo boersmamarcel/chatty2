@@ -1,6 +1,6 @@
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -156,9 +156,12 @@ mod tests {
         create_test_file(&workspace, "photo.png", 1024);
 
         let result = tool
-            .call(&mut ToolContext::new(), AddAttachmentArgs {
-                path: "photo.png".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "photo.png".into(),
+                },
+            )
             .await;
 
         assert!(result.is_ok());
@@ -175,9 +178,12 @@ mod tests {
         create_test_file(&workspace, "report.pdf", 2048);
 
         let result = tool
-            .call(&mut ToolContext::new(), AddAttachmentArgs {
-                path: "report.pdf".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "report.pdf".into(),
+                },
+            )
             .await;
 
         assert!(result.is_ok());
@@ -195,19 +201,28 @@ mod tests {
         create_test_file(&workspace, "b.jpg", 512);
         create_test_file(&workspace, "c.pdf", 512);
 
-        tool.call(&mut ToolContext::new(), AddAttachmentArgs {
-            path: "a.png".into(),
-        })
+        tool.call(
+            &mut ToolContext::new(),
+            AddAttachmentArgs {
+                path: "a.png".into(),
+            },
+        )
         .await
         .unwrap();
-        tool.call(&mut ToolContext::new(), AddAttachmentArgs {
-            path: "b.jpg".into(),
-        })
+        tool.call(
+            &mut ToolContext::new(),
+            AddAttachmentArgs {
+                path: "b.jpg".into(),
+            },
+        )
         .await
         .unwrap();
-        tool.call(&mut ToolContext::new(), AddAttachmentArgs {
-            path: "c.pdf".into(),
-        })
+        tool.call(
+            &mut ToolContext::new(),
+            AddAttachmentArgs {
+                path: "c.pdf".into(),
+            },
+        )
         .await
         .unwrap();
 
@@ -225,9 +240,12 @@ mod tests {
         let (tool, pending, _workspace) = create_test_tool().await;
 
         let result = tool
-            .call(&mut ToolContext::new(), AddAttachmentArgs {
-                path: "does_not_exist.png".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "does_not_exist.png".into(),
+                },
+            )
             .await;
 
         assert!(result.is_err());
@@ -240,9 +258,12 @@ mod tests {
         create_test_file(&workspace, "notes.txt", 512);
 
         let result = tool
-            .call(&mut ToolContext::new(), AddAttachmentArgs {
-                path: "notes.txt".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "notes.txt".into(),
+                },
+            )
             .await;
 
         assert!(result.is_err());

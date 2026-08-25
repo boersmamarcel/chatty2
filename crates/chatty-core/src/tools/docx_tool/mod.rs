@@ -51,11 +51,14 @@ mod tests {
         // Read it back
         let read_tool = ReadDocxTool::new(service.clone());
         let read_output = read_tool
-            .call(&mut ToolContext::new(), ReadDocxArgs {
-                path: path.clone(),
-                include_tables: None,
-                max_chars: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadDocxArgs {
+                    path: path.clone(),
+                    include_tables: None,
+                    max_chars: None,
+                },
+            )
             .await
             .unwrap();
 
@@ -75,11 +78,14 @@ mod tests {
         );
         let tool = ReadDocxTool::new(service);
         let result = tool
-            .call(&mut ToolContext::new(), ReadDocxArgs {
-                path: tmp.path().join("nope.docx").to_str().unwrap().to_string(),
-                include_tables: None,
-                max_chars: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadDocxArgs {
+                    path: tmp.path().join("nope.docx").to_str().unwrap().to_string(),
+                    include_tables: None,
+                    max_chars: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

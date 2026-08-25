@@ -492,13 +492,16 @@ mod tests {
         );
         let tool = DocRetrieverTool::new(service);
         let output = tool
-            .call(&mut ToolContext::new(), DocRetrieverArgs {
-                query: "monthly fraud fee buckets".to_string(),
-                path: None,
-                top_k: Some(2),
-                max_files: None,
-                max_chunk_chars: Some(500),
-            })
+            .call(
+                &mut ToolContext::new(),
+                DocRetrieverArgs {
+                    query: "monthly fraud fee buckets".to_string(),
+                    path: None,
+                    top_k: Some(2),
+                    max_files: None,
+                    max_chunk_chars: Some(500),
+                },
+            )
             .await
             .unwrap();
 

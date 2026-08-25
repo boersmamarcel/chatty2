@@ -1,9 +1,9 @@
 use super::path_utils::resolve_output_path;
 use crate::services::typst_compiler_service::TypstCompilerService;
 use crate::tools::ToolError;
-use rig_agent::tool::{Tool, ToolContext};
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -159,10 +159,13 @@ mod tests {
 
         let tool = CompileTypstTool::new(None);
         let result = tool
-            .call(&mut ToolContext::new(), CompileTypstArgs {
-                content: "= Test\n\nHello, world! $ E = m c^2 $".to_string(),
-                output_path,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CompileTypstArgs {
+                    content: "= Test\n\nHello, world! $ E = m c^2 $".to_string(),
+                    output_path,
+                },
+            )
             .await;
 
         assert!(result.is_ok(), "compile failed: {:?}", result.err());
@@ -182,10 +185,13 @@ mod tests {
 
         let tool = CompileTypstTool::new(None);
         let result = tool
-            .call(&mut ToolContext::new(), CompileTypstArgs {
-                content: "= Nested\n\nContent here.".to_string(),
-                output_path,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CompileTypstArgs {
+                    content: "= Nested\n\nContent here.".to_string(),
+                    output_path,
+                },
+            )
             .await;
 
         assert!(result.is_ok());
@@ -199,10 +205,13 @@ mod tests {
 
         let tool = CompileTypstTool::new(None);
         let result = tool
-            .call(&mut ToolContext::new(), CompileTypstArgs {
-                content: "#nonexistent-function-xyz()".to_string(),
-                output_path,
-            })
+            .call(
+                &mut ToolContext::new(),
+                CompileTypstArgs {
+                    content: "#nonexistent-function-xyz()".to_string(),
+                    output_path,
+                },
+            )
             .await;
 
         assert!(result.is_err());
