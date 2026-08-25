@@ -27,8 +27,7 @@ use profile::*;
 use sql::*;
 
 use duckdb::Connection;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -142,11 +141,8 @@ impl Tool for QueryDataTool {
     type Args = QueryDataArgs;
     type Output = QueryDataOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "query_data".to_string(),
-            description:
-                "Run a SQL query against local Parquet, CSV, or JSON files using DuckDB.\n\
+    fn description(&self) -> String {
+        "Run a SQL query against local Parquet, CSV, or JSON files using DuckDB.\n\
                           \n\
                           DuckDB can query files directly by path in SQL:\n\
                           - SELECT * FROM 'data/payments.csv' WHERE year = 2023 LIMIT 5\n\
@@ -158,25 +154,31 @@ impl Tool for QueryDataTool {
                           Prefer aggregate queries and small LIMITs for previews. \
                           For benchmark tasks with `/app/data`, use `/app/data/<file>` or `data/<file>`, not bare file names like `payments.csv`. \
                           Supports aggregations, joins, window functions, and all standard SQL."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "SQL query to execute. Reference files by `data/<file>` or explicit workspace paths such as `/app/data/payments.csv`; avoid bare file names."
-                    },
-                    "max_rows": {
-                        "type": "integer",
-                        "description": "Maximum number of preview rows to return. Default: 20. Max: 10000."
-                    }
-                },
-                "required": ["query"]
-            }),
-        }
+                    .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "SQL query to execute. Reference files by `data/<file>` or explicit workspace paths such as `/app/data/payments.csv`; avoid bare file names."
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "Maximum number of preview rows to return. Default: 20. Max: 10000."
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let max_rows = args
             .max_rows
             .unwrap_or(DEFAULT_QUERY_MAX_ROWS)
@@ -328,30 +330,34 @@ impl Tool for DescribeDataTool {
     type Args = DescribeDataArgs;
     type Output = DescribeDataOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "describe_data".to_string(),
-            description: "Inspect the schema and statistics of a local data file.\n\
+    fn description(&self) -> String {
+        "Inspect the schema and statistics of a local data file.\n\
                          Returns column names, data types, row count, and file size.\n\
                          \n\
                          Supported formats: Parquet (.parquet), CSV (.csv), JSON (.json)\n\
                          \n\
                          Use this to understand the structure of a data file before writing queries."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .json"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .json"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Validate path is within workspace
         let canonical = self
             .service
@@ -475,29 +481,33 @@ impl Tool for ProfileDataTool {
     type Args = ProfileDataArgs;
     type Output = ProfileDataOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "profile_data".to_string(),
-            description: "Profile a local CSV, JSON, JSONL, or Parquet file with compact, structured statistics. Returns schema, row count, a tiny sample, numeric min/max/avg/sum, categorical top values, null counts, and notes. Use this early for generic data-analysis tasks before writing custom code or many SQL queries."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .tsv, .json, .jsonl, .ndjson."
-                    },
-                    "sample_rows": {
-                        "type": "integer",
-                        "description": "Number of sample rows to return. Default: 2. Max: 5."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Profile a local CSV, JSON, JSONL, or Parquet file with compact, structured statistics. Returns schema, row count, a tiny sample, numeric min/max/avg/sum, categorical top values, null counts, and notes. Use this early for generic data-analysis tasks before writing custom code or many SQL queries."
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .tsv, .json, .jsonl, .ndjson."
+                },
+                "sample_rows": {
+                    "type": "integer",
+                    "description": "Number of sample rows to return. Default: 2. Max: 5."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self
             .service
             .resolve_path(&args.path)

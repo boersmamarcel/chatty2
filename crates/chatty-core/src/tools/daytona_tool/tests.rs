@@ -17,7 +17,7 @@ async fn test_daytona_tool_empty_code() {
         code: "   ".to_string(),
         language: None,
     };
-    let result = tool.call(args).await;
+    let result = tool.call(&mut ToolContext::new(), args).await;
     assert!(result.is_err());
 }
 

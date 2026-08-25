@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 # Core agent dependencies
 rig-core.workspace = true
+rig-agent.workspace = true
 rmcp.workspace = true
 
 # Persistence layer
@@ -108,7 +109,10 @@ tar = "0.4"
 
 [features]
 default = ["mcp", "all-tools"]
-mcp = ["rig-core/rmcp"]
+# AgentBuilder::rmcp_tools moved from rig-core/rmcp to rig-agent/rmcp (rmcp ^2).
+# Workspace still lists rig-mcp (=0.2.5) for the compose bridge; it is not wired here
+# because it pins rmcp ^1.6 and does not provide AgentBuilder MCP helpers.
+mcp = ["rig-agent/rmcp"]
 # Enable this feature to get `impl gpui::Global` on core types.
 # A future TUI crate would NOT enable this feature.
 gpui-globals = ["dep:gpui"]

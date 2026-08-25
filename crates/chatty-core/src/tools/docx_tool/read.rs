@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::services::filesystem_service::FileSystemService;
@@ -45,10 +44,8 @@ impl Tool for ReadDocxTool {
     type Args = ReadDocxArgs;
     type Output = ReadDocxOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_docx".to_string(),
-            description: "Read a Word document (.docx) and return its text content as markdown.\n\
+    fn description(&self) -> String {
+        "Read a Word document (.docx) and return its text content as markdown.\n\
                          Returns paragraphs, headings, and optionally tables formatted as markdown.\n\
                          \n\
                          Use this for .docx files — do NOT use read_file (binary garbage).\n\
@@ -57,29 +54,35 @@ impl Tool for ReadDocxTool {
                          - Read full document: {\"path\": \"report.docx\"}\n\
                          - Read without tables: {\"path\": \"report.docx\", \"include_tables\": false}\n\
                          - Limit output: {\"path\": \"report.docx\", \"max_chars\": 10000}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the .docx file, relative to workspace root or absolute within workspace"
-                    },
-                    "include_tables": {
-                        "type": "boolean",
-                        "description": "Include table content as markdown tables. Defaults to true."
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "Maximum characters to return. Defaults to 50000."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .docx file, relative to workspace root or absolute within workspace"
+                },
+                "include_tables": {
+                    "type": "boolean",
+                    "description": "Include table content as markdown tables. Defaults to true."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return. Defaults to 50000."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let (canonical, bytes) = self.service.read_binary_bytes(&args.path).await?;
         let max_chars = args.max_chars.unwrap_or(50_000);
         let include_tables = args.include_tables.unwrap_or(true);

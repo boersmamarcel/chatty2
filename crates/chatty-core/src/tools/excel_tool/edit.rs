@@ -1,6 +1,5 @@
 use calamine::{Reader, open_workbook_auto};
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -374,10 +373,8 @@ impl Tool for EditExcelTool {
     type Args = EditExcelArgs;
     type Output = EditExcelOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "edit_excel".to_string(),
-            description: "Edit an existing Excel file by applying targeted modifications.\n\
+    fn description(&self) -> String {
+        "Edit an existing Excel file by applying targeted modifications.\n\
                          Reads the file, applies operations, and writes the updated workbook.\n\
                          For .xlsx files (except format_range operations), the tool preserves existing template formatting and workbook structures while editing.\n\
                          \n\
@@ -391,12 +388,18 @@ impl Tool for EditExcelTool {
                          - Set a cell: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"set_cell\", \"sheet\": \"Sheet1\", \"cell\": \"B2\", \"value\": 42}]}\n\
                          - Add a sheet: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"add_sheet\", \"name\": \"NewSheet\", \"data\": [[\"A\",\"B\"],[1,2]]}]}\n\
                          - Delete rows: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"delete_rows\", \"sheet\": \"Sheet1\", \"start_row\": 5, \"count\": 3}]}"
-                .to_string(),
-            parameters: edit_excel_parameters_schema(),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        edit_excel_parameters_schema()
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
         let output_canonical = if let Some(ref out) = args.output_path {
             self.service.resolve_new_path(out).await?
@@ -729,8 +732,7 @@ impl Tool for EditExcelTool {
 #[cfg(test)]
 mod tests {
     use super::edit_excel_parameters_schema;
-    use rig_core::completion::ToolDefinition;
-    use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
+        use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
     use serde_json::Value;
 
     fn assert_no_empty_types(schema: &Schema) {

@@ -1,6 +1,5 @@
 use parking_lot::Mutex;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
@@ -119,34 +118,38 @@ impl Tool for InvokeAgentTool {
     type Args = InvokeAgentArgs;
     type Output = InvokeAgentOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "invoke_agent".to_string(),
-            description: "Invoke a named agent (remote A2A or local WASM module) with a prompt \
+    fn description(&self) -> String {
+        "Invoke a named agent (remote A2A or local WASM module) with a prompt \
                           and return its response. Use `list_agents` first to discover available \
                           agents. Remote A2A agents are called over HTTP. Local module agents are \
                           called via the protocol gateway. The agent runs autonomously and returns \
                           its final response."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "agent": {
-                        "type": "string",
-                        "description": "The name of the agent to invoke. Must match a name from \
-                                       `list_agents` output (e.g. \"benford-agent\")."
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The prompt or task to send to the agent."
-                    }
-                },
-                "required": ["agent", "prompt"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "The name of the agent to invoke. Must match a name from \
+                                   `list_agents` output (e.g. \"benford-agent\")."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "The prompt or task to send to the agent."
+                }
+            },
+            "required": ["agent", "prompt"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let agent_name = args.agent.trim().to_string();
         let prompt = args.prompt.trim().to_string();
 

@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use rust_xlsxwriter::{Format, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -201,10 +200,8 @@ impl Tool for WriteExcelTool {
     type Args = WriteExcelArgs;
     type Output = WriteExcelOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "write_excel".to_string(),
-            description: "Create a new Excel (.xlsx) file with structured data and formatting.\n\
+    fn description(&self) -> String {
+        "Create a new Excel (.xlsx) file with structured data and formatting.\n\
                          Supports multiple sheets, bold/italic/color formatting, column widths,\n\
                          auto-filters, frozen panes, merged cells, number formats, borders, and formulas.\n\
                          \n\
@@ -213,97 +210,103 @@ impl Tool for WriteExcelTool {
                          Examples:\n\
                          - Simple data: {\"path\": \"output.xlsx\", \"sheets\": [{\"name\": \"Sheet1\", \"data\": [[\"Name\",\"Age\"],[\"Alice\",30]]}]}\n\
                          - With formatting: {\"path\": \"report.xlsx\", \"sheets\": [{\"name\": \"Sales\", \"data\": [...], \"formatting\": {\"header_bold\": true, \"auto_filter\": true, \"freeze_top_row\": true}, \"column_widths\": [20, 15, 12]}]}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Output path for the .xlsx file, relative to workspace root"
-                    },
-                    "sheets": {
-                        "type": "array",
-                        "description": "Array of sheet specifications",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Sheet name"
-                                },
-                                "data": {
+                .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Output path for the .xlsx file, relative to workspace root"
+                },
+                "sheets": {
+                    "type": "array",
+                    "description": "Array of sheet specifications",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Sheet name"
+                            },
+                            "data": {
+                                "type": "array",
+                                "description": "Array of rows, each row is an array of cell values (string, number, boolean, or null)",
+                                "items": {
                                     "type": "array",
-                                    "description": "Array of rows, each row is an array of cell values (string, number, boolean, or null)",
                                     "items": {
-                                        "type": "array",
-                                        "items": {
-                                            "anyOf": [
-                                                { "type": "string" },
-                                                { "type": "number" },
-                                                { "type": "boolean" },
-                                                { "type": "null" }
-                                            ]
-                                        }
-                                    }
-                                },
-                                "column_widths": {
-                                    "type": "array",
-                                    "description": "Column widths in character units",
-                                    "items": { "type": "number" }
-                                },
-                                "formatting": {
-                                    "type": "object",
-                                    "properties": {
-                                        "header_bold": { "type": "boolean", "description": "Bold the first row (default: true)" },
-                                        "auto_filter": { "type": "boolean", "description": "Add auto-filter to header row" },
-                                        "freeze_top_row": { "type": "boolean", "description": "Freeze the top row" }
-                                    }
-                                },
-                                "cell_formats": {
-                                    "type": "array",
-                                    "description": "Cell formatting specifications",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "range": { "type": "string", "description": "Cell range, e.g. 'A1:D1'" },
-                                            "bold": { "type": "boolean" },
-                                            "italic": { "type": "boolean" },
-                                            "font_color": { "type": "string", "description": "Hex color, e.g. 'FF0000'" },
-                                            "bg_color": { "type": "string", "description": "Hex color, e.g. 'FFFF00'" },
-                                            "number_format": { "type": "string", "description": "Number format, e.g. '#,##0.00'" },
-                                            "border": { "type": "string", "description": "'thin', 'medium', or 'thick'" }
-                                        },
-                                        "required": ["range"]
-                                    }
-                                },
-                                "merged_cells": {
-                                    "type": "array",
-                                    "description": "Cell ranges to merge, e.g. ['A1:D1']",
-                                    "items": { "type": "string" }
-                                },
-                                "formulas": {
-                                    "type": "array",
-                                    "description": "Cell formulas",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "cell": { "type": "string", "description": "Cell reference, e.g. 'E2'" },
-                                            "formula": { "type": "string", "description": "Excel formula, e.g. '=SUM(A2:D2)'" }
-                                        },
-                                        "required": ["cell", "formula"]
+                                        "anyOf": [
+                                            { "type": "string" },
+                                            { "type": "number" },
+                                            { "type": "boolean" },
+                                            { "type": "null" }
+                                        ]
                                     }
                                 }
                             },
-                            "required": ["name"]
-                        }
+                            "column_widths": {
+                                "type": "array",
+                                "description": "Column widths in character units",
+                                "items": { "type": "number" }
+                            },
+                            "formatting": {
+                                "type": "object",
+                                "properties": {
+                                    "header_bold": { "type": "boolean", "description": "Bold the first row (default: true)" },
+                                    "auto_filter": { "type": "boolean", "description": "Add auto-filter to header row" },
+                                    "freeze_top_row": { "type": "boolean", "description": "Freeze the top row" }
+                                }
+                            },
+                            "cell_formats": {
+                                "type": "array",
+                                "description": "Cell formatting specifications",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "range": { "type": "string", "description": "Cell range, e.g. 'A1:D1'" },
+                                        "bold": { "type": "boolean" },
+                                        "italic": { "type": "boolean" },
+                                        "font_color": { "type": "string", "description": "Hex color, e.g. 'FF0000'" },
+                                        "bg_color": { "type": "string", "description": "Hex color, e.g. 'FFFF00'" },
+                                        "number_format": { "type": "string", "description": "Number format, e.g. '#,##0.00'" },
+                                        "border": { "type": "string", "description": "'thin', 'medium', or 'thick'" }
+                                    },
+                                    "required": ["range"]
+                                }
+                            },
+                            "merged_cells": {
+                                "type": "array",
+                                "description": "Cell ranges to merge, e.g. ['A1:D1']",
+                                "items": { "type": "string" }
+                            },
+                            "formulas": {
+                                "type": "array",
+                                "description": "Cell formulas",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "cell": { "type": "string", "description": "Cell reference, e.g. 'E2'" },
+                                        "formula": { "type": "string", "description": "Excel formula, e.g. '=SUM(A2:D2)'" }
+                                    },
+                                    "required": ["cell", "formula"]
+                                }
+                            }
+                        },
+                        "required": ["name"]
                     }
-                },
-                "required": ["path", "sheets"]
-            }),
-        }
+                }
+            },
+            "required": ["path", "sheets"]
+        })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_new_path(&args.path).await?;
         let is_overwrite = canonical.exists();
 

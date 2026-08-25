@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -36,22 +35,26 @@ impl Tool for GitStatusTool {
     type Args = GitStatusArgs;
     type Output = GitStatusOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_status".to_string(),
-            description: "Check the current status of the git repository. Shows the current \
+    fn description(&self) -> String {
+        "Check the current status of the git repository. Shows the current \
                          branch, staged changes, unstaged modifications, and untracked files. \
                          Use this to understand the state of the working tree before making changes."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         tracing::debug!("Checking git status");
         let status = self.service.status().await?;
         Ok(status)
@@ -93,31 +96,35 @@ impl Tool for GitDiffTool {
     type Args = GitDiffArgs;
     type Output = GitDiffOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_diff".to_string(),
-            description: "View changes in the git repository. By default shows unstaged changes. \
+    fn description(&self) -> String {
+        "View changes in the git repository. By default shows unstaged changes. \
                          Set 'staged' to true to see changes that have been staged for commit. \
                          Optionally specify a 'path' to limit the diff to a specific file."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "staged": {
-                        "type": "boolean",
-                        "description": "If true, show staged changes (git diff --cached). Default: false"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Optional file path to restrict the diff to"
-                    }
-                },
-                "required": ["staged", "path"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "staged": {
+                    "type": "boolean",
+                    "description": "If true, show staged changes (git diff --cached). Default: false"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional file path to restrict the diff to"
+                }
+            },
+            "required": ["staged", "path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         tracing::debug!(staged = args.staged, path = ?args.path, "Getting git diff");
         let diff = self.service.diff(args.staged, args.path.as_deref()).await?;
         Ok(GitDiffOutput { diff })
@@ -161,27 +168,31 @@ impl Tool for GitLogTool {
     type Args = GitLogArgs;
     type Output = GitLogOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_log".to_string(),
-            description: "View recent commit history. Returns commit hash, author, date, and \
+    fn description(&self) -> String {
+        "View recent commit history. Returns commit hash, author, date, and \
                          message for each commit. Use 'max_count' to control how many commits \
                          to show (default: 10, max: 100)."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "max_count": {
-                        "type": "integer",
-                        "description": "Maximum number of commits to return (default: 10, max: 100)"
-                    }
-                },
-                "required": ["max_count"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "max_count": {
+                    "type": "integer",
+                    "description": "Maximum number of commits to return (default: 10, max: 100)"
+                }
+            },
+            "required": ["max_count"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let max_count = args.max_count.min(100); // Cap at 100
         tracing::debug!(max_count, "Getting git log");
         let commits = self.service.log(max_count).await?;
@@ -226,29 +237,33 @@ impl Tool for GitAddTool {
     type Args = GitAddArgs;
     type Output = GitAddOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_add".to_string(),
-            description: "Stage files for the next git commit. Provide a list of file paths \
+    fn description(&self) -> String {
+        "Stage files for the next git commit. Provide a list of file paths \
                          (relative to the workspace root) to add to the staging area. Each path \
                          must point to an existing file or directory within the workspace. Use \
                          git_status first to see which files have changes that can be staged."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "List of file paths to stage (relative to workspace root)"
-                    }
-                },
-                "required": ["paths"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of file paths to stage (relative to workspace root)"
+                }
+            },
+            "required": ["paths"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let file_list = args.paths.join(", ");
         let approved = request_execution_approval(
             &self.pending_approvals,
@@ -312,27 +327,31 @@ impl Tool for GitCreateBranchTool {
     type Args = GitCreateBranchArgs;
     type Output = GitCreateBranchOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_create_branch".to_string(),
-            description: "Create a new git branch from the current HEAD. The branch name must \
+    fn description(&self) -> String {
+        "Create a new git branch from the current HEAD. The branch name must \
                          follow git naming rules (no spaces, no '..', cannot start with '-', etc.). \
                          This does NOT switch to the new branch — use git_switch_branch for that."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The name of the new branch to create"
-                    }
-                },
-                "required": ["name"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the new branch to create"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,
@@ -398,27 +417,31 @@ impl Tool for GitSwitchBranchTool {
     type Args = GitSwitchBranchArgs;
     type Output = GitSwitchBranchOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_switch_branch".to_string(),
-            description: "Switch to an existing git branch. The branch must already exist — \
+    fn description(&self) -> String {
+        "Switch to an existing git branch. The branch must already exist — \
                          use git_create_branch to create a new one first. This will fail if \
                          there are uncommitted changes that conflict with the target branch."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The name of the branch to switch to"
-                    }
-                },
-                "required": ["name"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the branch to switch to"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,
@@ -478,28 +501,32 @@ impl Tool for GitCommitTool {
     type Args = GitCommitArgs;
     type Output = GitCommitOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "git_commit".to_string(),
-            description: "Commit staged changes with a message. Only commits changes that \
+    fn description(&self) -> String {
+        "Commit staged changes with a message. Only commits changes that \
                          have been previously staged with 'git add'. Returns an error if there \
                          are no staged changes. Use git_status first to check what's staged. \
                          The commit message should be clear and descriptive."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The commit message describing the changes"
-                    }
-                },
-                "required": ["message"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The commit message describing the changes"
+                }
+            },
+            "required": ["message"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let approved = request_execution_approval(
             &self.pending_approvals,
             &self.approval_mode,

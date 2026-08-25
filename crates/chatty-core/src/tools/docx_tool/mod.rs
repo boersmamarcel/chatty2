@@ -16,7 +16,7 @@ pub enum DocxToolError {
 mod tests {
     use std::sync::Arc;
 
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     use crate::services::filesystem_service::FileSystemService;
 

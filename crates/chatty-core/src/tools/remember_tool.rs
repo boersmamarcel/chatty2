@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use tracing::warn;
@@ -77,7 +76,15 @@ impl Tool for RememberTool {
     type Args = RememberToolArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    fn description(&self) -> String {
+        "Store important information in persistent memory for future conversations. \
+                         Use this to save key facts, decisions, user preferences, project context, \
+                         or anything the user might want you to recall later. Be selective — only \
+                         store genuinely useful information that would be hard to re-derive."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
         let content_description = if self.embedding_service.is_some() {
             "The information to remember. Write naturally — semantic search \
              handles conceptual matching automatically. No need to add extra \
@@ -90,36 +97,31 @@ impl Tool for RememberTool {
              'fruit' or 'food' will find this memory."
         };
 
-        ToolDefinition {
-            name: "remember".to_string(),
-            description:
-                "Store important information in persistent memory for future conversations. \
-                         Use this to save key facts, decisions, user preferences, project context, \
-                         or anything the user might want you to recall later. Be selective — only \
-                         store genuinely useful information that would be hard to re-derive."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": content_description
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Short title or label for this memory (e.g., 'User prefers dark mode', 'Project uses PostgreSQL')."
-                    },
-                    "tags": {
-                        "type": "string",
-                        "description": "Optional JSON object of key-value tags for categorization, as a string (e.g., \"{\\\"project\\\": \\\"chatty\\\", \\\"topic\\\": \\\"architecture\\\"}\"). Pass an empty string or omit if not needed."
-                    }
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": content_description
                 },
-                "required": ["content", "title", "tags"]
-            }),
-        }
+                "title": {
+                    "type": "string",
+                    "description": "Short title or label for this memory (e.g., 'User prefers dark mode', 'Project uses PostgreSQL')."
+                },
+                "tags": {
+                    "type": "string",
+                    "description": "Optional JSON object of key-value tags for categorization, as a string (e.g., \"{\\\"project\\\": \\\"chatty\\\", \\\"topic\\\": \\\"architecture\\\"}\"). Pass an empty string or omit if not needed."
+                }
+            },
+            "required": ["content", "title", "tags"]
+        })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let tag_pairs: Vec<(String, String)> = args.tags.unwrap_or_default().into_iter().collect();
 
         let tag_refs: Vec<(&str, &str)> = tag_pairs

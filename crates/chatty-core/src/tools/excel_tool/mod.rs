@@ -38,7 +38,7 @@ mod tests {
     use crate::services::filesystem_service::FileSystemService;
     use crate::settings::models::execution_settings::ApprovalMode;
     use crate::tools::filesystem_write_tool::set_global_write_approval_mode;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     #[test]
     fn test_parse_cell_ref() {

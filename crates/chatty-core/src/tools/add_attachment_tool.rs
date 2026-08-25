@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -45,10 +44,8 @@ impl Tool for AddAttachmentTool {
     type Args = AddAttachmentArgs;
     type Output = AddAttachmentOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "add_attachment".to_string(),
-            description: "Display an image or PDF file inline in the chat response. \
+    fn description(&self) -> String {
+        "Display an image or PDF file inline in the chat response. \
                          Use this to show generated plots, charts, screenshots, or documents \
                          to the user. The file will appear visually in your response message.\n\
                          \n\
@@ -62,21 +59,27 @@ impl Tool for AddAttachmentTool {
                          - Show a generated plot: {\"path\": \"output/chart.png\"}\n\
                          - Display a screenshot: {\"path\": \"screenshots/page.png\"}\n\
                          - Show a PDF document: {\"path\": \"reports/analysis.pdf\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the image or PDF file, relative to the workspace root or absolute within workspace"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the image or PDF file, relative to the workspace root or absolute within workspace"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Resolve path within workspace
         let canonical = self.service.resolve_path(&args.path).await?;
 
@@ -119,7 +122,7 @@ impl Tool for AddAttachmentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
     use std::fs;
     use std::path::Path;
 

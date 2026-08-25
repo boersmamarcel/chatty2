@@ -1,6 +1,5 @@
 use pdfium_render::prelude::*;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,10 +62,8 @@ impl Tool for PdfToImageTool {
     type Args = PdfToImageArgs;
     type Output = PdfToImageOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "pdf_to_image".to_string(),
-            description: "Convert PDF pages to PNG images and display them inline in chat. \
+    fn description(&self) -> String {
+        "Convert PDF pages to PNG images and display them inline in chat. \
                          Renders specified pages (or all pages) of a PDF file as images. \
                          Use this when you need to visually inspect PDF content, show PDF pages \
                          to the user, or when the model doesn't support native PDF input.\n\
@@ -77,34 +74,40 @@ impl Tool for PdfToImageTool {
                          - Convert all pages: {\"path\": \"docs/report.pdf\"}\n\
                          - Convert specific pages: {\"path\": \"docs/report.pdf\", \"pages\": [0, 1, 2]}\n\
                          - High resolution: {\"path\": \"docs/chart.pdf\", \"pages\": [0], \"dpi\": 300}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
-                    },
-                    "pages": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Zero-indexed page numbers to convert. If omitted, converts all pages (up to 20)."
-                    },
-                    "dpi": {
-                        "type": "integer",
-                        "description": "Resolution in DPI (72-300). Default: 150. Higher values produce larger, sharper images."
-                    },
-                    "output_dir": {
-                        "type": "string",
-                        "description": "Workspace-relative directory to save the PNG files into (e.g. \"pdf_images/\"). Created automatically if it does not exist. If omitted, images are saved to a session temp directory and are not persisted to the workspace."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
+                },
+                "pages": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Zero-indexed page numbers to convert. If omitted, converts all pages (up to 20)."
+                },
+                "dpi": {
+                    "type": "integer",
+                    "description": "Resolution in DPI (72-300). Default: 150. Higher values produce larger, sharper images."
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Workspace-relative directory to save the PNG files into (e.g. \"pdf_images/\"). Created automatically if it does not exist. If omitted, images are saved to a session temp directory and are not persisted to the workspace."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
 
         // Validate it's a PDF
@@ -287,7 +290,7 @@ fn render_pdf_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
     use std::fs;
     use std::io::Write;
 

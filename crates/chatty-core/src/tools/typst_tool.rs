@@ -1,8 +1,7 @@
 use super::path_utils::resolve_output_path;
 use crate::services::typst_compiler_service::TypstCompilerService;
 use crate::tools::ToolError;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -45,10 +44,8 @@ impl Tool for CompileTypstTool {
     type Args = CompileTypstArgs;
     type Output = CompileTypstOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "compile_typst".to_string(),
-            description: "Compile Typst markup into a PDF file and save it to disk.\n\
+    fn description(&self) -> String {
+        "Compile Typst markup into a PDF file and save it to disk.\n\
                 \n\
                 Typst is a modern document preparation system with markdown-like syntax.\n\
                 Use it to produce formatted documents including:\n\
@@ -76,25 +73,31 @@ impl Tool for CompileTypstTool {
                 content: \"= Sales Report\\n\\n#set text(size: 11pt)\\n\\nTotal revenue: $ 1.2 times 10^6 $\\n\\n\
                 #table(columns: 2, [Month], [Revenue], [Jan], [$100K], [Feb], [$120K])\"\n\
                 output_path: \"reports/sales_q1.pdf\""
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "Typst markup source to compile into a PDF"
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "File path where the PDF will be saved (absolute, relative to workspace, or starting with ~)"
-                    }
-                },
-                "required": ["content", "output_path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Typst markup source to compile into a PDF"
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "File path where the PDF will be saved (absolute, relative to workspace, or starting with ~)"
+                }
+            },
+            "required": ["content", "output_path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Resolve output path using the shared path utility (same rules as chart_tool).
         let resolved = resolve_output_path(&args.output_path, self.workspace_dir.as_deref())
             .map_err(ToolError::OperationFailed)?;
@@ -134,7 +137,7 @@ impl Tool for CompileTypstTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     #[tokio::test]
     async fn test_definition_metadata() {

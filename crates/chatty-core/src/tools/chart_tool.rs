@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolError;
@@ -93,10 +92,8 @@ impl Tool for CreateChartTool {
     type Args = CreateChartArgs;
     type Output = ChartSpec;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "create_chart".to_string(),
-            description: "Create and display a chart inline in the chat response.\n\
+    fn description(&self) -> String {
+        "Create and display a chart inline in the chat response.\n\
                          \n\
                          Chart types:\n\
                          - \"bar\": Vertical bar chart for comparing categories (shows value labels on bars)\n\
@@ -135,98 +132,104 @@ impl Tool for CreateChartTool {
                          - Save to disk: {\"chart_type\": \"bar\", \"title\": \"Sales\", \
                            \"data\": [{\"label\": \"A\", \"value\": 100}], \
                            \"save_path\": \"/home/user/report/sales.png\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "chart_type": {
-                        "type": "string",
-                        "enum": ["bar", "line", "pie", "donut", "area", "candlestick"],
-                        "description": "The type of chart to create"
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Optional title displayed above the chart"
-                    },
-                    "data": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": {
-                                    "type": "string",
-                                    "description": "Category label or x-axis value"
-                                },
-                                "value": {
-                                    "type": "number",
-                                    "description": "Numeric value for this data point"
-                                }
-                            },
-                            "required": ["label", "value"]
-                        },
-                        "description": "Data points for single-series charts (bar, pie, donut, area, line). Use 'series' instead for multi-line/area."
-                    },
-                    "series": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Series name shown in the legend"
-                                },
-                                "data": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "label": { "type": "string", "description": "X-axis label" },
-                                            "value": { "type": "number", "description": "Y value" }
-                                        },
-                                        "required": ["label", "value"]
-                                    }
-                                }
-                            },
-                            "required": ["name", "data"]
-                        },
-                        "description": "Multiple named series for line and area charts. Each series has a name and its own data array. All series should share the same x-axis labels."
-                    },
-                    "candlestick_data": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "date": { "type": "string", "description": "Date or time label" },
-                                "open": { "type": "number", "description": "Opening price" },
-                                "high": { "type": "number", "description": "Highest price" },
-                                "low": { "type": "number", "description": "Lowest price" },
-                                "close": { "type": "number", "description": "Closing price" }
-                            },
-                            "required": ["date", "open", "high", "low", "close"]
-                        },
-                        "description": "OHLC data points for candlestick charts"
-                    },
-                    "inner_radius": {
-                        "type": "number",
-                        "description": "Inner radius for donut charts (default: 50). Larger = bigger hole."
-                    },
-                    "pad_angle": {
-                        "type": "number",
-                        "description": "Gap between pie/donut slices in radians (e.g. 0.03 to 0.1)"
-                    },
-                    "save_path": {
-                        "type": "string",
-                        "description": "Absolute file path to save the chart as a PNG file (e.g. \"/home/user/report/chart.png\"). \
-                                        Parent directories are created automatically. \
-                                        The saved path is returned in 'saved_path' so you can reference it in Markdown or other files."
-                    }
-                },
-                "required": ["chart_type"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "chart_type": {
+                    "type": "string",
+                    "enum": ["bar", "line", "pie", "donut", "area", "candlestick"],
+                    "description": "The type of chart to create"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional title displayed above the chart"
+                },
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "description": "Category label or x-axis value"
+                            },
+                            "value": {
+                                "type": "number",
+                                "description": "Numeric value for this data point"
+                            }
+                        },
+                        "required": ["label", "value"]
+                    },
+                    "description": "Data points for single-series charts (bar, pie, donut, area, line). Use 'series' instead for multi-line/area."
+                },
+                "series": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Series name shown in the legend"
+                            },
+                            "data": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string", "description": "X-axis label" },
+                                        "value": { "type": "number", "description": "Y value" }
+                                    },
+                                    "required": ["label", "value"]
+                                }
+                            }
+                        },
+                        "required": ["name", "data"]
+                    },
+                    "description": "Multiple named series for line and area charts. Each series has a name and its own data array. All series should share the same x-axis labels."
+                },
+                "candlestick_data": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": { "type": "string", "description": "Date or time label" },
+                            "open": { "type": "number", "description": "Opening price" },
+                            "high": { "type": "number", "description": "Highest price" },
+                            "low": { "type": "number", "description": "Lowest price" },
+                            "close": { "type": "number", "description": "Closing price" }
+                        },
+                        "required": ["date", "open", "high", "low", "close"]
+                    },
+                    "description": "OHLC data points for candlestick charts"
+                },
+                "inner_radius": {
+                    "type": "number",
+                    "description": "Inner radius for donut charts (default: 50). Larger = bigger hole."
+                },
+                "pad_angle": {
+                    "type": "number",
+                    "description": "Gap between pie/donut slices in radians (e.g. 0.03 to 0.1)"
+                },
+                "save_path": {
+                    "type": "string",
+                    "description": "Absolute file path to save the chart as a PNG file (e.g. \"/home/user/report/chart.png\"). \
+                                    Parent directories are created automatically. \
+                                    The saved path is returned in 'saved_path' so you can reference it in Markdown or other files."
+                }
+            },
+            "required": ["chart_type"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         match args.chart_type.as_str() {
             "bar" | "pie" | "donut" => {
                 if args.data.is_empty() {
@@ -321,7 +324,6 @@ fn save_chart_png(
     theme_colors: Option<&[String; 5]>,
 ) -> Result<String, String> {
     use crate::services::chart_svg_renderer::{DEFAULT_CHART_COLORS, render_chart_svg};
-    use crate::services::mermaid_renderer_service::MermaidRendererService;
 
     let fallback: [String; 5] = DEFAULT_CHART_COLORS.map(str::to_owned);
     let colors = theme_colors.unwrap_or(&fallback);
@@ -338,31 +340,44 @@ fn save_chart_png(
             .map_err(|e| format!("Could not create directory '{}': {e}", parent.display()))?;
     }
 
-    // Write SVG to a temp file, then convert to PNG via resvg
-    let tmp_svg = std::env::temp_dir().join(format!(
-        "chatty_chart_export_{}.svg",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&tmp_svg, &svg).map_err(|e| format!("Failed to write temp SVG: {e}"))?;
+    // Write SVG to a temp file, then convert to PNG via resvg (mermaid feature)
+    #[cfg(feature = "mermaid")]
+    {
+        use crate::services::mermaid_renderer_service::MermaidRendererService;
 
-    let png_bytes = MermaidRendererService::render_svg_to_png(&tmp_svg)
-        .map_err(|e| format!("SVG→PNG render failed: {e}"))?;
+        let tmp_svg = std::env::temp_dir().join(format!(
+            "chatty_chart_export_{}.svg",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&tmp_svg, &svg).map_err(|e| format!("Failed to write temp SVG: {e}"))?;
 
-    let _ = std::fs::remove_file(&tmp_svg);
+        let png_bytes = MermaidRendererService::render_svg_to_png(&tmp_svg)
+            .map_err(|e| format!("SVG→PNG render failed: {e}"))?;
 
-    std::fs::write(path, &png_bytes)
-        .map_err(|e| format!("Failed to write PNG to '{save_path}': {e}"))?;
+        let _ = std::fs::remove_file(&tmp_svg);
 
-    Ok(path.to_string_lossy().into_owned())
+        std::fs::write(path, &png_bytes)
+            .map_err(|e| format!("Failed to write PNG to '{save_path}': {e}"))?;
+
+        Ok(path.to_string_lossy().into_owned())
+    }
+    #[cfg(not(feature = "mermaid"))]
+    {
+        let _ = (svg, path);
+        Err(
+            "PNG chart export requires the `mermaid` feature (resvg). Rebuild with mermaid enabled."
+                .to_string(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     #[tokio::test]
     async fn test_bar_chart() {

@@ -13,6 +13,7 @@ chatty-module-registry = { path = "../chatty-module-registry" }
 
 # LLM framework (needed for rig types used in chatty-core's API)
 rig-core.workspace = true
+rig-agent.workspace = true
 
 # TUI framework
 ratatui.workspace = true

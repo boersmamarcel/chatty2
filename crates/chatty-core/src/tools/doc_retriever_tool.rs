@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -67,7 +66,15 @@ impl Tool for DocRetrieverTool {
     type Args = DocRetrieverArgs;
     type Output = DocRetrieverOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    fn description(&self) -> String {
+        "Search local Markdown/text documentation with sparse BM25 retrieval. \
+                          Use only when you need exact documentation rules, definitions, formulas, or field semantics after mapping the files. \
+                          Do not use for merchant-specific facts, table values, or repeated exploration; use profile_data/query_data for those. \
+                          Returns compact chunks with file path, section title, line span, score, and text."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
         let top_k_description =
             format!("Number of chunks to return. Default: {DEFAULT_TOP_K}. Max: {MAX_TOP_K}.");
         let max_files_description = format!(
@@ -76,43 +83,39 @@ impl Tool for DocRetrieverTool {
         let max_chunk_chars_description = format!(
             "Maximum text characters per returned chunk. Default: {DEFAULT_MAX_CHUNK_CHARS}. Max: {MAX_CHUNK_CHARS}."
         );
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Search local Markdown/text documentation with sparse BM25 retrieval. \
-                          Use only when you need exact documentation rules, definitions, formulas, or field semantics after mapping the files. \
-                          Do not use for merchant-specific facts, table values, or repeated exploration; use profile_data/query_data for those. \
-                          Returns compact chunks with file path, section title, line span, score, and text."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language or keyword query for the documentation."
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "File or directory to search, relative to workspace root. Defaults to workspace root."
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": top_k_description
-                    },
-                    "max_files": {
-                        "type": "integer",
-                        "description": max_files_description
-                    },
-                    "max_chunk_chars": {
-                        "type": "integer",
-                        "description": max_chunk_chars_description
-                    }
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language or keyword query for the documentation."
                 },
-                "required": ["query"]
-            }),
-        }
+                "path": {
+                    "type": "string",
+                    "description": "File or directory to search, relative to workspace root. Defaults to workspace root."
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": top_k_description
+                },
+                "max_files": {
+                    "type": "integer",
+                    "description": max_files_description
+                },
+                "max_chunk_chars": {
+                    "type": "integer",
+                    "description": max_chunk_chars_description
+                }
+            },
+            "required": ["query"]
+        })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let query = args.query.trim().to_string();
         if query.is_empty() {
             return Err(ToolError::OperationFailed(
@@ -466,7 +469,7 @@ fn relative_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     #[tokio::test]
     async fn retrieves_relevant_markdown_section() {

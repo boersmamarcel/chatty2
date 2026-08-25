@@ -245,9 +245,7 @@ impl ChattyApp {
 
                 // PHASE 3: Prepare user content and start LLM stream
                 let mut contents = vec![rig_core::message::UserContent::Text(
-                    rig_core::completion::message::Text {
-                        text: message.clone(),
-                    },
+                    rig_core::completion::message::Text::new(message.clone()),
                 )];
 
                 // Convert file attachments to UserContent

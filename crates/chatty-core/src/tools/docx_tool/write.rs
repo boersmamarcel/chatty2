@@ -2,8 +2,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use anyhow::Context;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::services::filesystem_service::FileSystemService;
@@ -45,10 +44,8 @@ impl Tool for WriteDocxTool {
     type Args = WriteDocxArgs;
     type Output = WriteDocxOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "write_docx".to_string(),
-            description: "Create a Word document (.docx) from simplified markdown content.\n\
+    fn description(&self) -> String {
+        "Create a Word document (.docx) from simplified markdown content.\n\
                          Supports headings (#/##/###), paragraphs, bullet lists (- item), and tables.\n\
                          \n\
                          Content format:\n\
@@ -59,25 +56,31 @@ impl Tool for WriteDocxTool {
                          \n\
                          Examples:\n\
                          - Simple doc: {\"path\": \"report.docx\", \"content\": \"# Title\\n\\nParagraph text.\"}\n\
-                         - With table: {\"path\": \"data.docx\", \"content\": \"# Summary\\n\\n| Name | Value |\\n|---|---|\\n| Alice | 100 |\"}".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to write the .docx file, relative to workspace root or absolute within workspace"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Document content in simplified markdown (headings, paragraphs, bullets, tables)"
-                    }
-                },
-                "required": ["path", "content"]
-            }),
-        }
+                         - With table: {\"path\": \"data.docx\", \"content\": \"# Summary\\n\\n| Name | Value |\\n|---|---|\\n| Alice | 100 |\"}".to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to write the .docx file, relative to workspace root or absolute within workspace"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Document content in simplified markdown (headings, paragraphs, bullets, tables)"
+                }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_new_path(&args.path).await?;
 
         // Ensure parent directory exists

@@ -474,9 +474,7 @@ mod tests {
     fn extract_user_message_text_gets_text_content() {
         use rig_core::completion::message::Text;
         use rig_core::message::UserContent;
-        let contents = vec![UserContent::Text(Text {
-            text: "Hello, world!".to_string(),
-        })];
+        let contents = vec![UserContent::Text(Text::new("Hello, world!"))];
         let text = extract_user_message_text(&contents);
         assert_eq!(text, "Hello, world!");
     }

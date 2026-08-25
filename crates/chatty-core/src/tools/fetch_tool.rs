@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -72,33 +71,37 @@ impl Tool for FetchTool {
     type Args = FetchToolArgs;
     type Output = FetchToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "fetch".to_string(),
-            description: "Fetch a URL and return its content. \
+    fn description(&self) -> String {
+        "Fetch a URL and return its content. \
                          HTML pages are automatically converted to plain text for readability. \
                          Binary content (images, PDFs, zip files, etc.) is saved to the workspace directory. \
                          Only performs GET requests (read-only). \
                          Use this to look up documentation, read web pages, fetch API responses, or download files."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL to fetch. HTTPS is preferred for security."
-                    },
-                    "max_length": {
-                        "type": "integer",
-                        "description": "Maximum length of returned content in characters. Defaults to 50000."
-                    }
-                },
-                "required": ["url", "max_length"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch. HTTPS is preferred for security."
+                },
+                "max_length": {
+                    "type": "integer",
+                    "description": "Maximum length of returned content in characters. Defaults to 50000."
+                }
+            },
+            "required": ["url", "max_length"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let url = args.url.trim().to_string();
         let max_length = args.max_length.unwrap_or(DEFAULT_MAX_LENGTH);
 
@@ -730,7 +733,7 @@ mod tests {
             url: "not-a-url".to_string(),
             max_length: None,
         };
-        let result = tool.call(args).await;
+        let result = tool.call(&mut ToolContext::new(), args).await;
         assert!(result.is_err());
     }
 
@@ -872,7 +875,7 @@ mod tests {
             url: "http://169.254.169.254/latest/meta-data/".to_string(),
             max_length: None,
         };
-        let result = tool.call(args).await;
+        let result = tool.call(&mut ToolContext::new(), args).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(

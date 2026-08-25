@@ -1,6 +1,5 @@
 use calamine::{Reader, open_workbook_auto};
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -50,10 +49,8 @@ impl Tool for ReadExcelTool {
     type Args = ReadExcelArgs;
     type Output = ReadExcelOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_excel".to_string(),
-            description: "Read an Excel spreadsheet file and return its contents as structured data.\n\
+    fn description(&self) -> String {
+        "Read an Excel spreadsheet file and return its contents as structured data.\n\
                          Returns sheet names, cell data as JSON arrays, and a markdown table preview.\n\
                          \n\
                          Supported formats: .xlsx, .xls, .xlsm, .xlsb, .ods\n\
@@ -63,33 +60,39 @@ impl Tool for ReadExcelTool {
                          - Read specific sheet: {\"path\": \"data/report.xlsx\", \"sheet\": \"Sales\"}\n\
                          - Read a range: {\"path\": \"data/report.xlsx\", \"range\": \"A1:D50\"}\n\
                          - Limit rows: {\"path\": \"data/report.xlsx\", \"max_rows\": 100}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the Excel file, relative to workspace root or absolute within workspace"
-                    },
-                    "sheet": {
-                        "type": "string",
-                        "description": "Sheet name to read. Defaults to the first sheet."
-                    },
-                    "range": {
-                        "type": "string",
-                        "description": "Cell range to read, e.g. 'A1:D50'. Defaults to all used cells."
-                    },
-                    "max_rows": {
-                        "type": "integer",
-                        "description": "Maximum number of rows to return. Defaults to 500."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the Excel file, relative to workspace root or absolute within workspace"
+                },
+                "sheet": {
+                    "type": "string",
+                    "description": "Sheet name to read. Defaults to the first sheet."
+                },
+                "range": {
+                    "type": "string",
+                    "description": "Cell range to read, e.g. 'A1:D50'. Defaults to all used cells."
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "Maximum number of rows to return. Defaults to 500."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
         let max_rows = args.max_rows.unwrap_or(500);
 

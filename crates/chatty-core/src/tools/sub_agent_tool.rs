@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{info, warn};
@@ -65,40 +64,44 @@ impl Tool for SubAgentTool {
     type Args = SubAgentArgs;
     type Output = SubAgentOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "sub_agent".to_string(),
-            description: "Delegate a task to an independent sub-agent that has access to the \
+    fn description(&self) -> String {
+        "Delegate a task to an independent sub-agent that has access to the \
                          same tools as you. The sub-agent runs autonomously in its own process, \
                          executes the task (including any tool calls it needs), and returns the \
                          result. Use this to parallelize work or to isolate complex sub-tasks. \
                          Each sub-agent starts with a fresh conversation context — provide all \
                          necessary context in the task description. \
                          You can optionally specify a different model for the sub-agent."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "A detailed description of the task for the sub-agent. \
-                                       Include all context the sub-agent needs since it does not \
-                                       share conversation history with the parent."
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Optional model ID to use for the sub-agent. If omitted, \
-                                       the sub-agent uses the same model as the parent. Use this \
-                                       to pick a faster/cheaper model for simple tasks or a more \
-                                       capable model for complex ones."
-                    }
-                },
-                "required": ["task"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "A detailed description of the task for the sub-agent. \
+                                   Include all context the sub-agent needs since it does not \
+                                   share conversation history with the parent."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model ID to use for the sub-agent. If omitted, \
+                                   the sub-agent uses the same model as the parent. Use this \
+                                   to pick a faster/cheaper model for simple tasks or a more \
+                                   capable model for complex ones."
+                }
+            },
+            "required": ["task"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let task = args.task.trim().to_string();
         if task.is_empty() {
             return Err(ToolError::OperationFailed(
@@ -245,7 +248,7 @@ fn run_sub_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     #[tokio::test]
     async fn test_empty_task_rejected() {

@@ -21,6 +21,7 @@ impl McpTools {
 /// When multiple MCP servers are configured, they may provide tools with the same name.
 /// LLM providers require unique tool names, so this function
 /// deduplicates by keeping the first occurrence of each tool name and logging skipped duplicates.
+#[cfg(feature = "mcp")]
 pub(super) fn deduplicate_mcp_tools(
     mcp_tools: Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>,
     reserved_tool_names: &HashSet<String>,

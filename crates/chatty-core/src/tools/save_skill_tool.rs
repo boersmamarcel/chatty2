@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -66,10 +65,8 @@ impl Tool for SaveSkillTool {
     type Args = SaveSkillArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "save_skill".to_string(),
-            description: "Save a reusable multi-step procedure (skill) to persistent memory. \
+    fn description(&self) -> String {
+        "Save a reusable multi-step procedure (skill) to persistent memory. \
                          Use this after successfully solving a new type of task to record the \
                          steps for future reuse. Saved skills are automatically surfaced at the \
                          start of future conversations when a similar task is detected. \
@@ -82,34 +79,40 @@ impl Tool for SaveSkillTool {
                          <data_dir>/chatty/skills/<name>/ (global). Both sources are merged \
                          into the same context block; calling save_skill is the agent-managed \
                          alternative for skills that should travel with the memory database."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Short memorable name for this skill \
-                                        (e.g., 'deploy to production', 'run CI checks', \
-                                        'analyze csv data', 'set up postgres')."
-                    },
-                    "steps": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Ordered list of steps to perform this task. \
-                                        Each step should be a clear, actionable instruction."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "One-sentence description of when to use this skill \
-                                        (e.g., 'Use when shipping a production release of chatty')."
-                    }
-                },
-                "required": ["name", "steps", "description"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Short memorable name for this skill \
+                                    (e.g., 'deploy to production', 'run CI checks', \
+                                    'analyze csv data', 'set up postgres')."
+                },
+                "steps": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Ordered list of steps to perform this task. \
+                                    Each step should be a clear, actionable instruction."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One-sentence description of when to use this skill \
+                                    (e.g., 'Use when shipping a production release of chatty')."
+                }
+            },
+            "required": ["name", "steps", "description"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let steps_text = args
             .steps
             .iter()
