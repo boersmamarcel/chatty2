@@ -1,4 +1,6 @@
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolError;
@@ -383,7 +385,7 @@ mod tests {
     async fn test_bar_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "bar".to_string(),
                 title: Some("Test".to_string()),
                 data: vec![
@@ -413,7 +415,7 @@ mod tests {
     async fn test_line_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "line".to_string(),
                 title: None,
                 data: vec![ChartDataPoint {
@@ -434,7 +436,7 @@ mod tests {
     async fn test_multi_series_line_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "line".to_string(),
                 title: Some("Revenue vs Expenses".to_string()),
                 data: vec![],
@@ -482,7 +484,7 @@ mod tests {
     async fn test_line_chart_requires_data_or_series() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "line".to_string(),
                 title: None,
                 data: vec![],
@@ -500,7 +502,7 @@ mod tests {
     async fn test_pie_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "pie".to_string(),
                 title: Some("Share".to_string()),
                 data: vec![
@@ -527,7 +529,7 @@ mod tests {
     async fn test_donut_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "donut".to_string(),
                 title: Some("Budget".to_string()),
                 data: vec![
@@ -557,7 +559,7 @@ mod tests {
     async fn test_area_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "area".to_string(),
                 title: None,
                 data: vec![ChartDataPoint {
@@ -578,7 +580,7 @@ mod tests {
     async fn test_candlestick_chart() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "candlestick".to_string(),
                 title: Some("AAPL".to_string()),
                 data: vec![],
@@ -602,7 +604,7 @@ mod tests {
     async fn test_candlestick_requires_data() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "candlestick".to_string(),
                 title: None,
                 data: vec![],
@@ -620,7 +622,7 @@ mod tests {
     async fn test_invalid_chart_type() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "scatter".to_string(),
                 title: None,
                 data: vec![ChartDataPoint {
@@ -641,7 +643,7 @@ mod tests {
     async fn test_empty_data() {
         let tool = CreateChartTool::new(None, None);
         let result = tool
-            .call(CreateChartArgs {
+            .call(&mut ToolContext::new(), CreateChartArgs {
                 chart_type: "bar".to_string(),
                 title: None,
                 data: vec![],
@@ -658,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn test_definition_metadata() {
         let tool = CreateChartTool::new(None, None);
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "create_chart");
         assert!(def.description.contains("bar"));
         assert!(def.description.contains("line"));

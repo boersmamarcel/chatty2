@@ -235,7 +235,7 @@ mod tests {
         let tool = ReadExcelTool::new(service);
 
         let output = tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: xlsx_path.to_str().unwrap().to_string(),
                 sheet: None,
                 range: None,
@@ -279,7 +279,7 @@ mod tests {
         let tool = ReadExcelTool::new(service);
 
         let output = tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: path.to_str().unwrap().to_string(),
                 sheet: Some("Sheet2".to_string()),
                 range: None,
@@ -306,7 +306,7 @@ mod tests {
         let tool = ReadExcelTool::new(service);
 
         let output = tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: xlsx_path.to_str().unwrap().to_string(),
                 sheet: None,
                 range: Some("A1:B2".to_string()),
@@ -336,7 +336,7 @@ mod tests {
 
         // max_rows=1 means keep header + 1 data row = 2 rows total (from 3)
         let output = tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: xlsx_path.to_str().unwrap().to_string(),
                 sheet: None,
                 range: None,
@@ -361,7 +361,7 @@ mod tests {
         let tool = ReadExcelTool::new(service);
 
         let result = tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: tmp.path().join("nope.xlsx").to_str().unwrap().to_string(),
                 sheet: None,
                 range: None,
@@ -533,7 +533,7 @@ mod tests {
         );
         let tool = ReadExcelTool::new(service);
         let output = tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: output_path.to_str().unwrap().to_string(),
                 sheet: None,
                 range: None,
@@ -565,7 +565,7 @@ mod tests {
         let tool = WriteExcelTool::new(service, write_approvals);
 
         let output = tool
-            .call(WriteExcelArgs {
+            .call(&mut ToolContext::new(), WriteExcelArgs {
                 path: "example.xlsx".to_string(),
                 sheets: vec![SheetSpec {
                     name: "Sheet1".to_string(),
@@ -603,7 +603,7 @@ mod tests {
         set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
         let tool = EditExcelTool::new(service.clone(), write_approvals);
 
-        tool.call(EditExcelArgs {
+        tool.call(&mut ToolContext::new(), EditExcelArgs {
             path: input_path.to_str().unwrap().to_string(),
             output_path: Some("out/edited.xlsx".to_string()),
             operations: vec![EditOperation::SetCell {
@@ -620,7 +620,7 @@ mod tests {
 
         let read_tool = ReadExcelTool::new(service);
         let output = read_tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: output_path.to_str().unwrap().to_string(),
                 sheet: None,
                 range: None,
@@ -650,7 +650,7 @@ mod tests {
         let tool = EditExcelTool::new(service.clone(), write_approvals);
 
         let output = tool
-            .call(EditExcelArgs {
+            .call(&mut ToolContext::new(), EditExcelArgs {
                 path: input_path.to_str().unwrap().to_string(),
                 output_path: None,
                 operations: vec![EditOperation::SetCell {
@@ -668,7 +668,7 @@ mod tests {
 
         let read_tool = ReadExcelTool::new(service.clone());
         let edited = read_tool
-            .call(read::ReadExcelArgs {
+            .call(&mut ToolContext::new(), read::ReadExcelArgs {
                 path: input_path.to_str().unwrap().to_string(),
                 sheet: None,
                 range: None,

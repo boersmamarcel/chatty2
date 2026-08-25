@@ -381,7 +381,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![], vec![], None);
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "nonexistent".to_string(),
                 prompt: "hello".to_string(),
             })
@@ -399,7 +399,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![agent], vec![], None);
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "my-agent".to_string(),
                 prompt: "hello".to_string(),
             })
@@ -415,7 +415,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![], vec![module], None);
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "benford-agent".to_string(),
                 prompt: "analyze data".to_string(),
             })
@@ -433,7 +433,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![], vec![module], Some(8420));
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "basic-module".to_string(),
                 prompt: "hello".to_string(),
             })
@@ -453,7 +453,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![], vec![], None);
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "  ".to_string(),
                 prompt: "hello".to_string(),
             })
@@ -468,7 +468,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![], vec![], None);
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "some-agent".to_string(),
                 prompt: "".to_string(),
             })
@@ -489,7 +489,7 @@ mod tests {
         let tool = InvokeAgentTool::new(vec![remote], vec![module], Some(8420));
 
         let result = tool
-            .call(InvokeAgentArgs {
+            .call(&mut ToolContext::new(), InvokeAgentArgs {
                 agent: "shared-name".to_string(),
                 prompt: "hello".to_string(),
             })

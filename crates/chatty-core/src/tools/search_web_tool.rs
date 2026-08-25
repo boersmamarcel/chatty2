@@ -1,4 +1,6 @@
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -495,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_web_tool_definition() {
         let tool = SearchWebTool::new(SearchProvider::Tavily, "test-key".into(), 5);
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
         assert!(def.description.contains("Search the web"));
     }
@@ -514,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn test_fallback_tool_definition() {
         let tool = SearchWebTool::new_fallback(5);
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
     }
 

@@ -1,5 +1,7 @@
 use pdfium_render::prelude::*;
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -369,7 +371,7 @@ startxref
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _, _) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "pdf_to_image");
         assert!(def.description.contains("PDF pages to PNG"));
@@ -384,7 +386,7 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "test_convert.pdf".into(),
                 pages: None,
                 dpi: 150,
@@ -409,7 +411,7 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "test_specific.pdf".into(),
                 pages: Some(vec![0]),
                 dpi: 72,
@@ -433,7 +435,7 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "notes.txt".into(),
                 pages: None,
                 dpi: 150,
@@ -452,7 +454,7 @@ startxref
         let (tool, pending, _) = create_test_tool().await;
 
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "nonexistent.pdf".into(),
                 pages: None,
                 dpi: 150,
@@ -472,7 +474,7 @@ startxref
 
         // Page 99 doesn't exist in a 1-page PDF - should be filtered out, page 0 kept
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "test_range.pdf".into(),
                 pages: Some(vec![0, 99]),
                 dpi: 150,
@@ -496,7 +498,7 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "test_allrange.pdf".into(),
                 pages: Some(vec![99, 100]),
                 dpi: 150,
@@ -518,7 +520,7 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfToImageArgs {
+            .call(&mut ToolContext::new(), PdfToImageArgs {
                 path: "test_outdir.pdf".into(),
                 pages: None,
                 dpi: 72,

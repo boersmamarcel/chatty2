@@ -1,4 +1,6 @@
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -237,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn test_browser_use_tool_definition() {
         let tool = BrowserUseTool::new("test-key".into());
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "browser_use");
         assert!(def.description.contains("browser"));
     }

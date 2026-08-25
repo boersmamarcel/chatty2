@@ -2,6 +2,8 @@ use super::path_utils::resolve_output_path;
 use crate::services::typst_compiler_service::TypstCompilerService;
 use crate::tools::ToolError;
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -142,7 +144,7 @@ mod tests {
     #[tokio::test]
     async fn test_definition_metadata() {
         let tool = CompileTypstTool::new(None);
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "compile_typst");
         assert!(def.description.contains("PDF"));
         assert!(def.description.contains("Typst"));
@@ -157,7 +159,7 @@ mod tests {
 
         let tool = CompileTypstTool::new(None);
         let result = tool
-            .call(CompileTypstArgs {
+            .call(&mut ToolContext::new(), CompileTypstArgs {
                 content: "= Test\n\nHello, world! $ E = m c^2 $".to_string(),
                 output_path,
             })
@@ -180,7 +182,7 @@ mod tests {
 
         let tool = CompileTypstTool::new(None);
         let result = tool
-            .call(CompileTypstArgs {
+            .call(&mut ToolContext::new(), CompileTypstArgs {
                 content: "= Nested\n\nContent here.".to_string(),
                 output_path,
             })
@@ -197,7 +199,7 @@ mod tests {
 
         let tool = CompileTypstTool::new(None);
         let result = tool
-            .call(CompileTypstArgs {
+            .call(&mut ToolContext::new(), CompileTypstArgs {
                 content: "#nonexistent-function-xyz()".to_string(),
                 output_path,
             })

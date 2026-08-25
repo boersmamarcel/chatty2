@@ -1,5 +1,7 @@
 use pdfium_render::prelude::*;
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -263,7 +265,7 @@ startxref
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "pdf_info");
         assert!(def.description.contains("metadata"));
@@ -277,7 +279,7 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfInfoArgs {
+            .call(&mut ToolContext::new(), PdfInfoArgs {
                 path: "test_info.pdf".into(),
             })
             .await;
@@ -299,7 +301,7 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(PdfInfoArgs {
+            .call(&mut ToolContext::new(), PdfInfoArgs {
                 path: "notes.txt".into(),
             })
             .await;
@@ -312,7 +314,7 @@ startxref
     async fn test_rejects_nonexistent() {
         let (tool, _) = create_test_tool().await;
         let result = tool
-            .call(PdfInfoArgs {
+            .call(&mut ToolContext::new(), PdfInfoArgs {
                 path: "nonexistent.pdf".into(),
             })
             .await;

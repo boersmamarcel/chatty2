@@ -37,7 +37,7 @@ mod tests {
 
         let write_tool = WritePptxTool::new(service.clone());
         let write_output = write_tool
-            .call(WritePptxArgs {
+            .call(&mut ToolContext::new(), WritePptxArgs {
                 path: path.clone(),
                 slides: vec![PptxSlideSpec {
                     title: Some("Quarterly Review".to_string()),
@@ -81,7 +81,7 @@ mod tests {
 
         let read_tool = ReadPptxTool::new(service);
         let read_output = read_tool
-            .call(ReadPptxArgs {
+            .call(&mut ToolContext::new(), ReadPptxArgs {
                 path,
                 include_notes: None,
                 max_chars: None,
@@ -107,7 +107,7 @@ mod tests {
         );
         let tool = ReadPptxTool::new(service);
         let result = tool
-            .call(ReadPptxArgs {
+            .call(&mut ToolContext::new(), ReadPptxArgs {
                 path: tmp.path().join("nope.pptx").to_str().unwrap().to_string(),
                 include_notes: None,
                 max_chars: None,

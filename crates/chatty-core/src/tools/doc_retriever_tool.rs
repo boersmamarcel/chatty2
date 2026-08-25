@@ -492,7 +492,7 @@ mod tests {
         );
         let tool = DocRetrieverTool::new(service);
         let output = tool
-            .call(DocRetrieverArgs {
+            .call(&mut ToolContext::new(), DocRetrieverArgs {
                 query: "monthly fraud fee buckets".to_string(),
                 path: None,
                 top_k: Some(2),

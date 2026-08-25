@@ -1,4 +1,6 @@
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -154,7 +156,7 @@ mod tests {
         create_test_file(&workspace, "photo.png", 1024);
 
         let result = tool
-            .call(AddAttachmentArgs {
+            .call(&mut ToolContext::new(), AddAttachmentArgs {
                 path: "photo.png".into(),
             })
             .await;
@@ -173,7 +175,7 @@ mod tests {
         create_test_file(&workspace, "report.pdf", 2048);
 
         let result = tool
-            .call(AddAttachmentArgs {
+            .call(&mut ToolContext::new(), AddAttachmentArgs {
                 path: "report.pdf".into(),
             })
             .await;
@@ -193,17 +195,17 @@ mod tests {
         create_test_file(&workspace, "b.jpg", 512);
         create_test_file(&workspace, "c.pdf", 512);
 
-        tool.call(AddAttachmentArgs {
+        tool.call(&mut ToolContext::new(), AddAttachmentArgs {
             path: "a.png".into(),
         })
         .await
         .unwrap();
-        tool.call(AddAttachmentArgs {
+        tool.call(&mut ToolContext::new(), AddAttachmentArgs {
             path: "b.jpg".into(),
         })
         .await
         .unwrap();
-        tool.call(AddAttachmentArgs {
+        tool.call(&mut ToolContext::new(), AddAttachmentArgs {
             path: "c.pdf".into(),
         })
         .await
@@ -223,7 +225,7 @@ mod tests {
         let (tool, pending, _workspace) = create_test_tool().await;
 
         let result = tool
-            .call(AddAttachmentArgs {
+            .call(&mut ToolContext::new(), AddAttachmentArgs {
                 path: "does_not_exist.png".into(),
             })
             .await;
@@ -238,7 +240,7 @@ mod tests {
         create_test_file(&workspace, "notes.txt", 512);
 
         let result = tool
-            .call(AddAttachmentArgs {
+            .call(&mut ToolContext::new(), AddAttachmentArgs {
                 path: "notes.txt".into(),
             })
             .await;
@@ -254,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _, _workspace) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "add_attachment");
         assert!(def.description.contains("inline"));

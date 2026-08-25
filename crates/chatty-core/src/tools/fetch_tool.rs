@@ -1,4 +1,6 @@
 use rig_agent::tool::{Tool, ToolContext};
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -721,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_tool_definition() {
         let tool = FetchTool::new(None);
-        let def = tool.definition("test".to_string()).await;
+        let def = tool_definition(&tool);
         assert_eq!(def.name, "fetch");
         assert!(def.description.contains("Fetch a URL"));
     }
