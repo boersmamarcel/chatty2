@@ -1,5 +1,17 @@
 # AGENTS.md
 
+<!-- DO NOT REMOVE: ownership contract pointer. Regenerating this file must preserve it. -->
+> ## Research work: read [`RESERVED.md`](RESERVED.md) first
+>
+> The Linear project **Self-improving chatty2** lands five agentic-self-improvement papers
+> in this workspace as `chatty-trace`, `chatty-playbook`, `chatty-flow`, `chatty-optimize`
+> and `chatty-eval`. **A small set of functions in those crates is reserved for the human
+> and must not be implemented by an agent** — the list and the rules are in
+> [`RESERVED.md`](RESERVED.md), enforced by `scripts/check-reserved.sh` in CI.
+>
+> Take only `owner:ai` issues unless told otherwise. Never answer or close a
+> `gate:reflection` issue. Ordinary chatty2 work is unaffected by any of this.
+
 Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper
 via the links below.
