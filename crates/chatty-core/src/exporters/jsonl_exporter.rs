@@ -90,8 +90,11 @@ pub fn conversation_to_sft_jsonl(
                         .iter()
                         .filter_map(|ac| match ac {
                             AssistantContent::ToolCall(tc) => {
-                                let id =
-                                    tc.call_id.clone().unwrap_or_else(|| tc.id.clone());
+                                let id = tc
+                                    .provider
+                                    .as_ref()
+                                    .map(|p| p.call_id.clone())
+                                    .unwrap_or_else(|| tc.id.to_string());
                                 Some(serde_json::json!({
                                     "id": id,
                                     "type": "function",
@@ -128,8 +131,15 @@ pub fn conversation_to_sft_jsonl(
 
                         for ac in content.iter() {
                             if let AssistantContent::ToolCall(tc) = ac {
-                                let call_id = tc.call_id.clone().unwrap_or_else(|| tc.id.clone());
-                                let output = trace_outputs.get(&tc.id).cloned().unwrap_or_default();
+                                let call_id = tc
+                                    .provider
+                                    .as_ref()
+                                    .map(|p| p.call_id.clone())
+                                    .unwrap_or_else(|| tc.id.to_string());
+                                let output = trace_outputs
+                                    .get(tc.id.as_str())
+                                    .cloned()
+                                    .unwrap_or_default();
                                 messages.push(serde_json::json!({
                                     "role": "tool",
                                     "tool_call_id": call_id,
@@ -433,18 +443,14 @@ mod tests {
 
     fn user_message(text: &str) -> Message {
         Message::User {
-            content: vec![UserContent::Text(Text {
-                text: text.to_string(),
-            })],
+            content: vec![UserContent::Text(Text::new(text.to_string()))],
         }
     }
 
     fn assistant_message(text: &str) -> Message {
         Message::Assistant {
             id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: text.to_string(),
-            })],
+            content: vec![AssistantContent::Text(Text::new(text.to_string()))],
         }
     }
 
@@ -568,9 +574,7 @@ mod tests {
         use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
 
         let user_content = vec![
-            UserContent::Text(Text {
-                text: "Look at this".to_string(),
-            }),
+            UserContent::Text(Text::new("Look at this")),
             UserContent::Image(Image {
                 data: DocumentSourceKind::Base64("fake-base64".to_string()),
                 media_type: Some(ImageMediaType::JPEG),
@@ -640,9 +644,7 @@ mod tests {
                         signature: None,
                         additional_params: None,
                     }),
-                    AssistantContent::Text(Text {
-                        text: "Here is the file".to_string(),
-                    }),
+                    AssistantContent::Text(Text::new("Here is the file")),
                 ],
             },
         ];

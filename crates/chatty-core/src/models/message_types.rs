@@ -601,9 +601,7 @@ impl UserMessage {
 
 impl AssistantMessage {
     /// Convert from rig AssistantContent to AssistantMessage
-    pub fn from_rig_content(
-        content: &[rig_core::completion::message::AssistantContent],
-    ) -> Self {
+    pub fn from_rig_content(content: &[rig_core::completion::message::AssistantContent]) -> Self {
         let text: String = content
             .iter()
             .filter_map(|ac| match ac {

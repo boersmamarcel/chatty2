@@ -317,9 +317,7 @@ impl Conversation {
     ) {
         let assistant_message = Message::Assistant {
             id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: response_text,
-            })],
+            content: vec![AssistantContent::Text(Text::new(response_text))],
         };
 
         let now = SystemTime::now();

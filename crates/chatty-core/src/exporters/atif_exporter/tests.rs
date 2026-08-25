@@ -64,18 +64,14 @@ fn make_model_config(provider_type: ProviderType) -> ModelConfig {
 
 fn user_message(text: &str) -> Message {
     Message::User {
-        content: vec![UserContent::Text(Text {
-            text: text.to_string(),
-        })],
+        content: vec![UserContent::Text(Text::new(text.to_string()))],
     }
 }
 
 fn assistant_message(text: &str) -> Message {
     Message::Assistant {
         id: None,
-        content: vec![AssistantContent::Text(Text {
-            text: text.to_string(),
-        })],
+        content: vec![AssistantContent::Text(Text::new(text.to_string()))],
     }
 }
 
@@ -884,9 +880,7 @@ fn snapshot_full_conversation() {
                     signature: None,
                     additional_params: None,
                 }),
-                AssistantContent::Text(Text {
-                    text: "The file contains: Hello, World!".to_string(),
-                }),
+                AssistantContent::Text(Text::new("The file contains: Hello, World!")),
             ],
         },
     ];

@@ -107,11 +107,9 @@ pub async fn summarize_oldest_half(
     // Wrap the summary as a User message prefixed with a clear marker so the LLM
     // knows it is reading a compressed history, not a live user turn.
     let summary_message = Message::User {
-        content: vec![UserContent::Text(Text {
-            text: format!(
-                "[CONVERSATION SUMMARY — {midpoint} messages compressed]\n\n{summary_text}"
-            ),
-        })],
+        content: vec![UserContent::Text(Text::new(format!(
+            "[CONVERSATION SUMMARY — {midpoint} messages compressed]\n\n{summary_text}"
+        )))],
     };
 
     let mut new_history = Vec::with_capacity(1 + to_keep.len());
@@ -249,18 +247,14 @@ mod tests {
 
     fn user_msg(text: &str) -> Message {
         Message::User {
-            content: vec![UserContent::Text(Text {
-                text: text.to_string(),
-            })],
+            content: vec![UserContent::Text(Text::new(text.to_string()))],
         }
     }
 
     fn assistant_msg(text: &str) -> Message {
         Message::Assistant {
             id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: text.to_string(),
-            })],
+            content: vec![AssistantContent::Text(Text::new(text.to_string()))],
         }
     }
 
@@ -291,9 +285,7 @@ mod tests {
     fn build_transcript_empty_user_content_shows_placeholder() {
         // An empty text part produces no usable text items
         let message = Message::User {
-            content: vec![UserContent::Text(Text {
-                text: String::new(),
-            })],
+            content: vec![UserContent::Text(Text::new(String::new()))],
         };
         let transcript = build_transcript(&[message]);
         // Empty text still shows placeholder because text.is_empty() == true
@@ -303,12 +295,8 @@ mod tests {
     #[test]
     fn extract_user_text_collects_multiple_text_parts() {
         let content: Vec<UserContent> = vec![
-            UserContent::Text(Text {
-                text: "Hello".to_string(),
-            }),
-            UserContent::Text(Text {
-                text: "world".to_string(),
-            }),
+            UserContent::Text(Text::new("Hello")),
+            UserContent::Text(Text::new("world")),
         ];
         assert_eq!(extract_user_text(&content), "Hello world");
     }

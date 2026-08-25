@@ -288,7 +288,7 @@ fn trim_tool_result_content(
                     format!("[tool result truncated — {original_len} chars]\n{preview}…");
                 // freed = chars removed (original minus the stub we wrote).
                 *freed += original_len.saturating_sub(stub_text.len());
-                ToolResultContent::Text(Text { text: stub_text })
+                ToolResultContent::Text(Text::new(stub_text))
             }
             other => other,
         })
@@ -322,12 +322,10 @@ fn stage2_snip(history: Vec<Message>, settings: &ContextShaperSettings) -> (Vec<
         .sum();
 
     let marker = Message::User {
-        content: vec![UserContent::Text(Text {
-            text: format!(
-                "[CONTEXT SHAPER: {} messages snipped to reduce context size]",
-                drop_end - drop_start
-            ),
-        })],
+        content: vec![UserContent::Text(Text::new(format!(
+            "[CONTEXT SHAPER: {} messages snipped to reduce context size]",
+            drop_end - drop_start
+        )))],
     };
 
     let mut new_history = Vec::with_capacity(head + 1 + tail);
@@ -402,9 +400,7 @@ fn micro_compact_tool_result(mut tr: ToolResult) -> (ToolResult, usize) {
                     // One-line summary: first 120 chars of trimmed text.
                     let summary: String = t.text.trim().chars().take(120).collect();
                     freed += original_len.saturating_sub(summary.len() + 30);
-                    ToolResultContent::Text(Text {
-                        text: format!("[compacted] {summary}…"),
-                    })
+                    ToolResultContent::Text(Text::new(format!("[compacted] {summary}…")))
                 }
                 other => other,
             })
@@ -486,6 +482,7 @@ fn message_chars(msg: &Message) -> usize {
                     .map(|c| match c {
                         ToolResultContent::Text(t) => t.text.len(),
                         ToolResultContent::Image(_) => 256, // arbitrary placeholder
+                        ToolResultContent::Json { .. } => 256,
                     })
                     .sum::<usize>(),
                 UserContent::Image(_) => 256,
@@ -511,9 +508,9 @@ fn message_chars(msg: &Message) -> usize {
 /// Helper: ensure user content is non-empty (empty messages get a placeholder).
 fn to_user_content(items: Vec<UserContent>) -> Vec<UserContent> {
     if items.is_empty() {
-        vec![UserContent::Text(Text {
-            text: "[CONTEXT SHAPER: empty user message omitted]".to_string(),
-        })]
+        vec![UserContent::Text(Text::new(
+            "[CONTEXT SHAPER: empty user message omitted]",
+        ))]
     } else {
         items
     }
@@ -522,9 +519,9 @@ fn to_user_content(items: Vec<UserContent>) -> Vec<UserContent> {
 /// Helper: ensure tool-result content is non-empty (empty results get a placeholder).
 fn to_tool_result_content(items: Vec<ToolResultContent>) -> Vec<ToolResultContent> {
     if items.is_empty() {
-        vec![ToolResultContent::Text(Text {
-            text: "[CONTEXT SHAPER: empty tool result omitted]".to_string(),
-        })]
+        vec![ToolResultContent::Text(Text::new(
+            "[CONTEXT SHAPER: empty tool result omitted]",
+        ))]
     } else {
         items
     }
@@ -563,9 +560,7 @@ mod tests {
 
     fn user_text(s: &str) -> Message {
         Message::User {
-            content: vec![UserContent::Text(Text {
-                text: s.to_string(),
-            })],
+            content: vec![UserContent::Text(Text::new(s.to_string()))],
         }
     }
 
@@ -576,9 +571,7 @@ mod tests {
                 call: ToolCallId::new(id).unwrap(),
                 provider: None,
                 name: "test_tool".to_string(),
-                content: vec![ToolResultContent::Text(Text {
-                    text: content.to_string(),
-                })],
+                content: vec![ToolResultContent::Text(Text::new(content.to_string()))],
             })],
         }
     }

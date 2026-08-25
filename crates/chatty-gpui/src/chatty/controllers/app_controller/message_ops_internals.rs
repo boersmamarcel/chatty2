@@ -706,9 +706,7 @@ mod tests {
     fn assistant_msg(text: &str) -> Message {
         Message::Assistant {
             id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: text.to_string(),
-            })],
+            content: vec![AssistantContent::Text(Text::new(text.to_string()))],
         }
     }
 
