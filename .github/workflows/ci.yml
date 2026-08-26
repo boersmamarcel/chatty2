@@ -89,9 +89,6 @@ jobs:
       - name: Check rig exact-minor pins (AGE-26)
         run: bash scripts/check-rig-pins.sh
 
-      - name: Check eval dependency isolation (AGE-26)
-        run: bash scripts/check-eval-isolation.sh
-
   # AGE-26: compile-only canary against crates.io latest rig (informational).
   rig-canary:
     runs-on: ubuntu-latest

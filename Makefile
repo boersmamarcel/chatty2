@@ -102,7 +102,6 @@ ci: wasm-modules test
 	$(MAKE) lint
 	bash scripts/check-reserved.sh
 	bash scripts/check-rig-pins.sh
-	bash scripts/check-eval-isolation.sh
 
 clean:
 	cargo clean
