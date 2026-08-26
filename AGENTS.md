@@ -21,14 +21,20 @@
 > all of the following hold:
 >
 > 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
+>    Project members = Marcel (closed-system allowlist).
 > 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
->    `ship:auto` + `release:patch` (never minor/major).
-> 3. CI + `ship-auto-guard` are green; then auto-merge → `prepare-release` lands the
->    version bump via a `cut-release` PR (main is protected), tags, and builds.
+>    `ship:auto` + `release:patch` (never minor/major). Privileged labels are
+>    owner / `github-actions[bot]` only; outsiders are stripped.
+> 3. CI + `ship-auto-guard` are green; then auto-merge (same-repo head; owner sender
+>    or Actions actor) → `prepare-release` lands the version bump via a `cut-release`
+>    PR (main is protected), tags, and builds.
 >
 > **Project membership is the allowlist.** Do not auto-merge solely because an issue has
 > `owner:ai` on another project. Never auto-ship reserved symbols, research crates,
-> auth/billing, or core UX. Failures notify Linear, Slack `#chatty-auto-ship`, and GitHub.
+> auth/billing, or core UX. Slack `#chatty-auto-ship` is notify-only. Failures notify
+> Linear, Slack, and GitHub. Emergency rebuild (owner only):
+> `gh workflow run release.yml -f tag_name=vX.Y.Z`.
+> Authz regression: `bash scripts/check-release-authz.sh`.
 
 Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper

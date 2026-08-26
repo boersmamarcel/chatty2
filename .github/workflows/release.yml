@@ -26,39 +26,70 @@ env:
   APP_NAME: chatty
 
 jobs:
-  # Validate that the tag version matches Cargo.toml
+  # Validate that the tag is immutable, on main, and matches Cargo.toml.
+  # workflow_dispatch is owner-only (forks / outsiders must not arm releases).
   validate-version:
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.actor == github.repository_owner
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
+      git_ref: ${{ steps.version.outputs.git_ref }}
     steps:
       - name: Resolve tag name
         id: resolve_tag
         run: |
+          set -euo pipefail
           # workflow_call / workflow_dispatch pass tag_name; release event has it on the event object
           TAG="${{ inputs.tag_name || github.event.inputs.tag_name || github.event.release.tag_name }}"
           if [ -z "$TAG" ]; then
             echo "::error::No tag name provided"
             exit 1
           fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Resolved tag: $TAG"
+          # Normalize: accept bare vX.Y.Z or refs/tags/vX.Y.Z; always emit both forms.
+          TAG="${TAG#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "git_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG (git_ref=refs/tags/$TAG)"
 
-      - name: Checkout repository
+      - name: Checkout immutable tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve_tag.outputs.tag }}
+          # Never check out a bare name (could resolve to a branch). Always use refs/tags/.
+          ref: ${{ steps.resolve_tag.outputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Verify tag ref and ancestry on main
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.resolve_tag.outputs.tag }}"
+          GIT_REF="refs/tags/${TAG}"
+
+          if ! git show-ref --verify --quiet "$GIT_REF"; then
+            echo "::error::Immutable tag ref $GIT_REF does not exist"
+            exit 1
+          fi
+
+          git fetch origin main
+          TAG_COMMIT="$(git rev-list -n 1 "$GIT_REF")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::Tag $TAG ($TAG_COMMIT) is not an ancestor of origin/main — refusing to build"
+            exit 1
+          fi
+          echo "Tag $TAG ($TAG_COMMIT) is an ancestor of origin/main"
 
       - name: Extract and validate version
         id: version
         run: |
+          set -euo pipefail
           TAG_NAME="${{ steps.resolve_tag.outputs.tag }}"
+          GIT_REF="${{ steps.resolve_tag.outputs.git_ref }}"
 
           # Extract version from tag (remove 'v' prefix if present)
           TAG_VERSION="${TAG_NAME#v}"
           echo "Tag name: $TAG_NAME"
           echo "Tag version: $TAG_VERSION"
+          echo "Git ref: $GIT_REF"
 
           # Extract version from Cargo.toml
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -71,9 +102,10 @@ jobs:
             exit 1
           fi
 
-          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "✅ Version validated: $TAG_VERSION (tag: $TAG_NAME)"
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "git_ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          echo "✅ Version validated: $TAG_VERSION (tag: $TAG_NAME, ref: $GIT_REF)"
 
   build-linux:
     needs: validate-version
@@ -82,7 +114,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -200,7 +232,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -294,7 +326,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.tag_name }}
+          ref: ${{ needs.validate-version.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

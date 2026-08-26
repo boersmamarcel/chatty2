@@ -1,8 +1,11 @@
 name: Ship-auto merge
 
-# When a PR carries ship:auto + release:patch, enable GitHub auto-merge (squash)
-# once the PR is open. Required status checks (CI, reserved, ship-auto guard)
-# still gate the actual merge.
+# When a PR carries ship:auto + release:patch on an auto/* branch, enable GitHub
+# auto-merge (squash) once the PR is open. Required status checks (CI, reserved,
+# ship-auto guard) still gate the actual merge.
+#
+# Closed-system: same-repo head only; only repository_owner (sender) or
+# github-actions[bot] (actor) may arm auto-merge. Fail closed otherwise.
 
 on:
   pull_request:
@@ -23,6 +26,26 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'auto/')
     runs-on: ubuntu-latest
     steps:
+      - name: Require same-repo head and owner/Actions actor
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          SENDER: ${{ github.event.sender.login }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "::error::ship:auto auto-merge refused: head repo ($HEAD_REPO) is not $REPO"
+            exit 1
+          fi
+          if [ "$SENDER" = "$OWNER" ] || [ "$ACTOR" = "github-actions[bot]" ]; then
+            echo "Authorized: sender=$SENDER actor=$ACTOR owner=$OWNER"
+          else
+            echo "::error::ship:auto auto-merge refused: sender ($SENDER) / actor ($ACTOR) is not repository_owner ($OWNER) or github-actions[bot]"
+            exit 1
+          fi
+
       - name: Enable auto-merge (squash)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,12 +2,38 @@
 
 This document explains how to create a release for Chatty.
 
+## Closed-system security contract
+
+Only **`github.repository_owner`** and **`github-actions[bot]`** may arm releases.
+Forks and outside collaborators cannot:
+
+- Dispatch `release.yml` / `prepare-release.yml` manually
+- Apply privileged labels (`ship:auto`, `release:patch|minor|major`, `cut-release`)
+- Enable ship-auto auto-merge
+- Trigger prepare-release from a fork PR head
+
+Linear project **Chatty auto-ship** membership is Marcel (and agents he runs). Slack
+`#chatty-auto-ship` is **notify-only** — not an arming channel.
+
+**Emergency rebuild** (owner only), when a published release event did not fire:
+
+```bash
+gh workflow run release.yml -f tag_name=vX.Y.Z
+```
+
+`release.yml` verifies `refs/tags/vX.Y.Z` exists, checks that commit out, asserts the
+tag is an ancestor of `origin/main`, and matches `Cargo.toml` before building.
+
+Authz gate regression check: `bash scripts/check-release-authz.sh` (also run in CI).
+
 ## Preferred paths (use these)
 
 ### A. PR merge with a release label (human path)
 
-1. Open a PR to `main` with exactly one of `release:patch`, `release:minor`, `release:major`.
-2. Merge when CI is green.
+1. Open a PR to `main` with exactly one of `release:patch`, `release:minor`, `release:major`
+   (owner-applied; unauthorized labelers are stripped by `privileged-labels.yml`).
+2. Merge when CI is green. `ship-auto-guard` enforces the path deny-list on any
+   release-labeled PR.
 3. `prepare-release.yml` bumps `Cargo.toml` on a `release/vX.Y.Z` PR (`cut-release`,
    not `release:patch`), merges that PR (main is protected — a direct push gets GH006),
    tags `vX.Y.Z`, creates the GitHub Release, and calls `release.yml` to build artifacts.
@@ -19,8 +45,11 @@ not create a tag by hand.
 
 For low-risk work filed in Linear project **Chatty auto-ship** only:
 
-1. Agent opens PR: branch `auto/*`, title `auto: …`, labels `ship:auto` + `release:patch`.
-2. `ship-auto-guard.yml` enforces patch-only + path deny-list.
+1. Agent opens PR: branch `auto/*`, title `auto: …`, labels `ship:auto` + `release:patch`
+   (owner/Actions only).
+2. `ship-auto-guard.yml` enforces patch-only + path deny-list; `ship-auto-merge.yml`
+   enables squash auto-merge only for same-repo heads when the sender is the owner or
+   the actor is `github-actions[bot]`.
 3. When required checks are green, auto-merge squash-merges to `main`.
 4. Same `prepare-release` → bump PR → tag → `release.yml` pipeline as (A).
 
