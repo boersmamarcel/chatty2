@@ -25,6 +25,11 @@ env:
   CARGO_TERM_COLOR: always
   APP_NAME: chatty
 
+# Caching policy: restore-only. Release jobs check out a tag ref that may originate
+# from workflow_dispatch inputs; writing caches from that context would allow
+# CodeQL "cache poisoning via execution of untrusted code". Warm caches come from
+# CI on main; release builds never save.
+
 jobs:
   # Validate that the tag is immutable, on main, and matches Cargo.toml.
   # workflow_dispatch is owner-only (forks / outsiders must not arm releases).
@@ -119,8 +124,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+      - name: Restore cargo registry and build artifacts
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -130,8 +135,8 @@ jobs:
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
-      - name: Cache pdfium library
-        uses: actions/cache@v4
+      - name: Restore pdfium library
+        uses: actions/cache/restore@v4
         with:
           path: |
             crates/chatty-core/libs
@@ -237,8 +242,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+      - name: Restore cargo registry and build artifacts
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -248,8 +253,8 @@ jobs:
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
-      - name: Cache pdfium library
-        uses: actions/cache@v4
+      - name: Restore pdfium library
+        uses: actions/cache/restore@v4
         with:
           path: |
             crates/chatty-core/libs
@@ -331,8 +336,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+      - name: Restore cargo registry and build artifacts
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -342,8 +347,8 @@ jobs:
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
-      - name: Cache pdfium library
-        uses: actions/cache@v4
+      - name: Restore pdfium library
+        uses: actions/cache/restore@v4
         with:
           path: |
             crates/chatty-core/libs
