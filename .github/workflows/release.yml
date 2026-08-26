@@ -1,9 +1,17 @@
 name: Release
 
-# Two entry points:
-#   1. Called directly by Prepare Release via workflow_call (primary path)
-#   2. Triggered by a manually-published GitHub Release (fallback)
+# Entry points:
+#   1. Called by Prepare Release via workflow_call (primary path)
+#   2. Triggered by a published GitHub Release (fallback)
+#   3. Manual workflow_dispatch when the published event did not fire
+#      (AGE-35 recovery path: rebuild artifacts for an existing tag)
 on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Git tag to build from (e.g. v1.2.3)"
+        required: true
+        type: string
   workflow_call:
     inputs:
       tag_name:
@@ -28,8 +36,8 @@ jobs:
       - name: Resolve tag name
         id: resolve_tag
         run: |
-          # workflow_call passes tag_name as input; release event has it on the event object
-          TAG="${{ inputs.tag_name || github.event.release.tag_name }}"
+          # workflow_call / workflow_dispatch pass tag_name; release event has it on the event object
+          TAG="${{ inputs.tag_name || github.event.inputs.tag_name || github.event.release.tag_name }}"
           if [ -z "$TAG" ]; then
             echo "::error::No tag name provided"
             exit 1
