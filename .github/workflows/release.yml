@@ -4,6 +4,7 @@ name: Release
 #   1. Called by Prepare Release via workflow_call (primary path)
 #   2. Triggered by a published GitHub Release (fallback)
 #   3. Manual workflow_dispatch when the published event did not fire
+#      (AGE-35 recovery path: rebuild artifacts for an existing tag)
 on:
   workflow_dispatch:
     inputs:
