@@ -23,7 +23,8 @@
 > 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
 > 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
 >    `ship:auto` + `release:patch` (never minor/major).
-> 3. CI + `ship-auto-guard` are green; then auto-merge → `prepare-release` tags and builds.
+> 3. CI + `ship-auto-guard` are green; then auto-merge → `prepare-release` lands the
+>    version bump via a `cut-release` PR (main is protected), tags, and builds.
 >
 > **Project membership is the allowlist.** Do not auto-merge solely because an issue has
 > `owner:ai` on another project. Never auto-ship reserved symbols, research crates,

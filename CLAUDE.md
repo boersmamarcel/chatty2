@@ -178,7 +178,7 @@ sudo apt-get install -y \
 | Workflow | Trigger | Purpose |
 |:---------|:--------|:--------|
 | **CI** (`ci.yml`) | PR to `main` | Tests, formatting check, clippy lints. Cargo dependencies and build artifacts are cached. |
-| **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version in `Cargo.toml`, generates categorized changelog, commits, creates tag + GitHub Release, then calls Release workflow directly via `workflow_call`. |
+| **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version via a `cut-release` PR (main is protected), generates changelog, tags, creates the GitHub Release, then calls Release via `workflow_call`. |
 | **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
 | **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated | Automated AI code review via Claude. |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
@@ -199,11 +199,11 @@ Then merge the PR. The full pipeline runs as a single workflow:
 
 ```
 PR merge → Prepare Release ──────────────────────────────────────────►
-           (bump, changelog,    calls release.yml    (build 3 platforms,
+           (bump PR on main,    calls release.yml    (build 3 platforms,
             tag, GH release) ── via workflow_call ──► checksums, upload)
 ```
 
-Key design: Prepare Release calls Release directly via `workflow_call` — no event-based handoff, no PAT needed, build status appears inline.
+Key design: Prepare Release calls Release directly via `workflow_call` — no event-based handoff, no PAT needed, build status appears inline. Version bumps go through a `cut-release` PR because `main` requires status checks (direct `git push origin main` fails with GH006).
 
 Alternative triggers:
 - **Manual**: Actions UI → Prepare Release → Run workflow (with bump type selector and dry run option)

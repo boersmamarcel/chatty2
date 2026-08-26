@@ -8,8 +8,9 @@ This document explains how to create a release for Chatty.
 
 1. Open a PR to `main` with exactly one of `release:patch`, `release:minor`, `release:major`.
 2. Merge when CI is green.
-3. `prepare-release.yml` bumps `Cargo.toml`, commits, tags `vX.Y.Z`, creates the GitHub
-   Release, and calls `release.yml` to build artifacts.
+3. `prepare-release.yml` bumps `Cargo.toml` on a `release/vX.Y.Z` PR (`cut-release`,
+   not `release:patch`), merges that PR (main is protected — a direct push gets GH006),
+   tags `vX.Y.Z`, creates the GitHub Release, and calls `release.yml` to build artifacts.
 
 On a PR branch, `/create-release patch` (or minor/major) only **adds the label** — it does
 not create a tag by hand.
@@ -21,7 +22,7 @@ For low-risk work filed in Linear project **Chatty auto-ship** only:
 1. Agent opens PR: branch `auto/*`, title `auto: …`, labels `ship:auto` + `release:patch`.
 2. `ship-auto-guard.yml` enforces patch-only + path deny-list.
 3. When required checks are green, auto-merge squash-merges to `main`.
-4. Same `prepare-release` → `release.yml` pipeline as (A).
+4. Same `prepare-release` → bump PR → tag → `release.yml` pipeline as (A).
 
 Never hand-tag for auto-ship. Failures notify Linear, Slack `#chatty-auto-ship`, and GitHub.
 
