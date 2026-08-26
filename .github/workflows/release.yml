@@ -40,9 +40,6 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
       git_ref: ${{ steps.version.outputs.git_ref }}
-      # Trusted checkout target for build jobs. On workflow_dispatch this is
-      # github.sha (workflow was run from the tag); never an input-derived ref.
-      checkout_ref: ${{ steps.version.outputs.checkout_ref }}
     steps:
       - name: Resolve tag name
         id: resolve_tag
@@ -166,7 +163,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.checkout_ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.validate-version.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -284,7 +281,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.checkout_ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.validate-version.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -378,7 +375,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.checkout_ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.validate-version.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
