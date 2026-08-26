@@ -1,6 +1,7 @@
 # chatty-trace — what this crate promises (AGE-26)
 
 **Status:** stub. Contracts land after AGE-22 → AGE-5.
+See also [`semver-policy.md`](semver-policy.md).
 
 ## Promises
 
@@ -8,8 +9,8 @@
 - No panics on input-driven paths.
 - `Trajectory` retention behind a `Recorder` that no-ops by default in release builds.
 - Cancellation/timeouts when LLM-touching paths are added (via `rig-agent` hooks).
-- `#![forbid(unsafe_code)]`, declared MSRV (`rust-version` in Cargo.toml).
-- Zero dependency on dataset / statistics crates in the request path (`chatty-optimize` is on-demand / CI only).
+- `#![forbid(unsafe_code)]`, declared MSRV (`rust-version` in Cargo.toml) — CI-enforced.
+- Zero dependency on dataset / statistics crates in the request path (`chatty-optimize` is on-demand / CI only) — CI-enforced.
 - Semver: public types (`Trajectory`, `Action`, …) are API surface — bump major on breaking changes once stabilized.
 
 ## Non-promises
