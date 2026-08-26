@@ -86,8 +86,10 @@ zip = "7"
 roxmltree = "0.21"
 pptx_writer = { package = "pptx", version = "0.1.0" }
 
-# DuckDB
-duckdb = { version = "1.10500.0", features = ["parquet", "json", "bundled"] }
+# DuckDB — 1.10504+ bundles DuckDB 1.5.4, which builds on MSVC 14.51
+# (VS 2026 / GitHub windows-latest). Older bundled fmt still references
+# the removed stdext::checked_array_iterator.
+duckdb = { version = "~1.10504.0", features = ["parquet", "json", "bundled"] }
 
 # Math rendering
 typst = "0.14.2"
