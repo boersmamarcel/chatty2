@@ -14,6 +14,20 @@
 >
 > Take only `owner:ai` issues unless told otherwise. Never answer or close a
 > `gate:reflection` issue. Ordinary chatty2 work is unaffected by any of this.
+>
+> ### Auto-ship (zero-human patch releases)
+>
+> Low-risk work may merge and **patch-release** without Marcel when — and only when —
+> all of the following hold:
+>
+> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
+> 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
+>    `ship:auto` + `release:patch` (never minor/major).
+> 3. CI + `ship-auto-guard` are green; then auto-merge → `prepare-release` tags and builds.
+>
+> **Project membership is the allowlist.** Do not auto-merge solely because an issue has
+> `owner:ai` on another project. Never auto-ship reserved symbols, research crates,
+> auth/billing, or core UX. Failures notify Linear, Slack `#chatty-auto-ship`, and GitHub.
 
 Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper

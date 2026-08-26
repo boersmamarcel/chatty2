@@ -1,0 +1,84 @@
+name: Ship-auto guard
+
+# Enforces the auto-ship contract on PRs labeled `ship:auto`:
+# - patch release only (no release:minor / release:major)
+# - deny-list for research crates, RESERVED.md, auth, and billing
+# Pure Cargo.toml / Cargo.lock dependency bumps outside the deny-list are allowed.
+#
+# Job always runs so it can be a required status check without blocking
+# non-ship:auto PRs (those take the no-op path).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip when not ship:auto
+        id: gate
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          if echo "$LABELS" | tr ',' '\n' | grep -qx 'ship:auto'; then
+            echo "enforce=true" >> "$GITHUB_OUTPUT"
+            echo "Enforcing ship:auto contract"
+          else
+            echo "enforce=false" >> "$GITHUB_OUTPUT"
+            echo "No ship:auto label — no-op pass"
+          fi
+
+      - name: Checkout repository
+        if: steps.gate.outputs.enforce == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce patch-only release label
+        if: steps.gate.outputs.enforce == 'true'
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          echo "PR labels: ${LABELS}"
+          if echo "$LABELS" | tr ',' '\n' | grep -qx 'release:minor'; then
+            echo "::error::ship:auto PRs must not carry release:minor (patch only)"
+            exit 1
+          fi
+          if echo "$LABELS" | tr ',' '\n' | grep -qx 'release:major'; then
+            echo "::error::ship:auto PRs must not carry release:major (patch only)"
+            exit 1
+          fi
+          if ! echo "$LABELS" | tr ',' '\n' | grep -qx 'release:patch'; then
+            echo "::error::ship:auto PRs must also carry release:patch"
+            exit 1
+          fi
+
+      - name: Enforce path deny-list
+        if: steps.gate.outputs.enforce == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          CHANGED="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Patterns that must never ride the auto-ship path.
+          DENY_REGEX='^(RESERVED\.md|\.cursor/rules/ownership\.mdc|crates/chatty-trace/|crates/chatty-playbook/|crates/chatty-flow/|crates/chatty-optimize/|crates/hive-billing-sdk/|crates/chatty-core/src/auth/|crates/chatty-core/src/settings/models/providers_store\.rs|crates/chatty-gpui/src/settings/.*auth|crates/chatty-tui/src/.*auth)'
+
+          VIOLATIONS="$(echo "$CHANGED" | grep -E "$DENY_REGEX" || true)"
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::ship:auto PR touches deny-listed paths (research / reserved / auth / billing):"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+
+          echo "Path deny-list check passed."
