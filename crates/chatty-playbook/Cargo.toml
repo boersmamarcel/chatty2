@@ -1,0 +1,17 @@
+[package]
+name = "chatty-playbook"
+version.workspace = true
+edition.workspace = true
+description = "ACE playbook: delta ops, merge, grow-and-refine (AGE-17) — ships in the app"
+publish = false
+rust-version = "1.85"
+
+[lib]
+name = "chatty_playbook"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

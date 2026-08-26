@@ -4,7 +4,7 @@ alwaysApply: true
 ---
 
 Read `RESERVED.md` at the repo root before writing code in any `chatty-trace`,
-`chatty-playbook`, `chatty-flow`, `chatty-optimize` or `chatty-eval` crate. Summary of the
+`chatty-playbook`, `chatty-flow`, or `chatty-optimize` crate. Summary of the
 binding parts:
 
 - Some functions are reserved for the human and listed in `RESERVED.md`. **Never implement

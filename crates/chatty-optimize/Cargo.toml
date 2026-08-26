@@ -1,0 +1,23 @@
+[package]
+name = "chatty-optimize"
+version.workspace = true
+edition.workspace = true
+description = "GEPA + AFlow search, paired stats, optimizer QA loaders (build-time / on-demand)"
+publish = false
+rust-version = "1.85"
+
+[lib]
+name = "chatty_optimize"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
+statrs = "0.18"
+
+[dev-dependencies]
+tempfile = { workspace = true }

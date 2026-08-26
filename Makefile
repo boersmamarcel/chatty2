@@ -100,6 +100,8 @@ ci: wasm-modules test
 	./target/debug/chatty-tui --help
 	$(MAKE) fmt-check
 	$(MAKE) lint
+	bash scripts/check-reserved.sh
+	bash scripts/check-rig-pins.sh
 
 clean:
 	cargo clean

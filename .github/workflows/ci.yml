@@ -5,6 +5,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -79,3 +82,41 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
+
+      - name: Check reserved symbols (AGE research)
+        run: bash scripts/check-reserved.sh
+
+      - name: Check rig exact-minor pins (AGE-26)
+        run: bash scripts/check-rig-pins.sh
+
+  # AGE-26: compile-only canary against crates.io latest rig (informational).
+  rig-canary:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libfontconfig1-dev
+
+      - name: Soft canary — cargo update rig + check chatty-core
+        run: |
+          cp Cargo.lock Cargo.lock.canary-bak
+          set +e
+          cargo update -p rig-core
+          cargo update -p rig-agent
+          cargo check -p chatty-core --lib
+          status=$?
+          set -e
+          mv Cargo.lock.canary-bak Cargo.lock
+          if [ "$status" -ne 0 ]; then
+            echo "rig canary: compile failed against updated rig (schedule a bump window)"
+            exit 1
+          fi
+          echo "rig canary: OK"

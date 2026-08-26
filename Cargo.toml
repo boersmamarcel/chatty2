@@ -7,18 +7,27 @@ members = [
     "crates/chatty-module-registry",
     "crates/chatty-protocol-gateway",
     "crates/hive-client",
+    # Research / self-improving agent crates (AGE-5 / AGE-26); Stage B → harbor-chatty
+    "crates/chatty-trace",
+    "crates/chatty-playbook",
+    "crates/chatty-flow",
+    "crates/chatty-optimize",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.26"
+version = "0.3.27"
 edition = "2024"
+# AGE-26: declared MSRV for shipping research crates (also per-crate rust-version).
+rust-version = "1.85"
 
 [workspace.dependencies]
-# Core agent dependencies (rig 0.42 crate family — AGE-32)
+# Core agent dependencies (rig 0.42 crate family — AGE-32 / AGE-26 exact-minor pins)
 rig-core = "=0.42.0"
 rig-agent = { version = "=0.42.0", features = ["derive"] }
 rig-mcp = "=0.2.5"
+# Trace capture for AGE-5 / walking skeleton — pinned now, wired later.
+rig-tap = "=0.3.0"
 # rig-agent's `rmcp` feature requires rmcp ^2 (was 1.4 under rig-core 0.37).
 # Pin 2.1.0: 2.2.0 calls SseStream::from_bytes_stream which does not exist on
 # sse-stream 0.2.x (the method is from_byte_stream).
