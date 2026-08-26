@@ -1,4 +1,7 @@
-//! HumanEval coding problems loader (pass@1 evaluated via chatty-core sandbox later).
+//! HumanEval coding problems loader.
+//!
+//! **Stage B pass@1 runs via Harbor (`harbor-chatty`), not this crate.** The loader
+//! remains for optimizer experiments that need the prompts in-process.
 
 use super::{DatasetError, DatasetItem, load_json_or_jsonl};
 use serde::{Deserialize, Serialize};

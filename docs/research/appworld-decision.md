@@ -1,19 +1,12 @@
-# AppWorld decision (AGE-24)
+# AppWorld / Stage B environments (AGE-24 pivot)
 
-**Decision:** M4 Stage B does **not** use AppWorld for the first reproduction.
+**Decision (updated 2026-08-26):** Stage B sandboxes — including any future AppWorld
+slice — run via **Harbor** in the sibling repo `harbor-chatty`
+(`~/Documents/chattyapp/harbor-chatty`), not via in-repo Python bridges in `chatty-eval`.
 
-**Use instead:** FiNER (entity exact-match) plus a small synthetic tool-use environment that
-exercises ACE's Generator / Reflector / Curator loop without AppWorld's full simulated
-app stack.
+**M4 Stage B for now:** FiNER (entity exact-match) plus synthetic tool-use that exercises
+ACE’s Generator / Reflector / Curator loop. AppWorld remains **cited, not reproduced**,
+until FiNER + calibration are green; then add an AppWorld Harbor task adapter (AGE-34),
+not a `chatty-core` subprocess bridge.
 
-**Why:** AppWorld is the single largest engineering cost in the eval stack (Python
-subprocess protocol on top of `chatty-core`'s sandbox, TGC/SGC scoring, task loader). The
-Master Research Plan already flags the ACE ablation ladder at n=40 as unmeasurable; cutting
-AppWorld avoids budgeting weeks of bridge work before the mechanism is calibrated.
-
-**Claim impact:** Downgrade M4 Stage B from "AppWorld +17 headline" to "FiNER directional
-gain + synthetic tool-use playbook growth". The AppWorld number stays cited-not-reproduced
-(same class as DGM SWE-bench and GEPA-vs-GRPO).
-
-**Revisit when:** Stage 0 ACE calibration passes and FiNER Stage B is green — then
-re-estimate an AppWorld bridge as a follow-up issue, not as a silent substitute.
+See Linear AGE-24 (Harbor pivot) and AGE-34.

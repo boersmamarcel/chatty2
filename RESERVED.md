@@ -66,7 +66,10 @@ in the commit message.
 
 Build all of this without asking:
 
-- Dataset loaders and scorers, the AppWorld / ALFWorld bridges, the paired-statistics harness
+- Dataset loaders and scorers that feed *in-process* optimizers, the paired-statistics
+  harness, and thin calibration stubs in `chatty-eval`
+- Stage B sandboxes (HumanEval, Polyglot, AppWorld, ALFWorld) belong in the sibling
+  `harbor-chatty` Harbor repo (AGE-34) — do not rebuild them inside chatty2
 - The `IrRepr` interpreter and all seven AFlow operators
 - Reflector and Curator wrappers, the Generator adapter, the `MonolithicRewrite` control
 - Error taxonomies, `Recorder` impls, budget accounting, caching, telemetry, serde, CI

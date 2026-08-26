@@ -1,4 +1,8 @@
-//! Dev-only evaluation harness for the Self-improving chatty2 research project (AGE-24).
+//! Dev-only helpers for the Self-improving chatty2 research project (AGE-24).
+//!
+//! **Stage B sandboxes live in `harbor-chatty` (Harbor), not here.** This crate keeps
+//! what Harbor cannot replace: paired statistics, ablation flags, QA loaders for
+//! *in-process* optimizers, and Stage 0 calibration stubs.
 //!
 //! **Must never be a dependency of shipping crates** (`chatty-core`, `chatty-trace`,
 //! `chatty-playbook`, `chatty-flow`). CI enforces isolation via `cargo tree`.
@@ -6,8 +10,7 @@
 //! # Deferred: FeedbackFn scorers
 //!
 //! Natural-language `FeedbackFn` scorers wait on `chatty-trace` contracts from AGE-5 /
-//! the AGE-22 walking skeleton. This crate ships scalar metrics and loaders now;
-//! scorer traits that would require reserved types are intentionally omitted.
+//! the AGE-22 walking skeleton.
 
 #![forbid(unsafe_code)]
 
