@@ -1,0 +1,17 @@
+[package]
+name = "chatty-optimize"
+version.workspace = true
+edition.workspace = true
+description = "GEPA + AFlow search (AGE-15 / AGE-13) — build-time / on-demand, not request path"
+publish = false
+rust-version = "1.85"
+
+[lib]
+name = "chatty_optimize"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

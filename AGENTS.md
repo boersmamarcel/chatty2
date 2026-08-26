@@ -42,6 +42,11 @@ crates/
 ├── chatty-module-registry/   # Module discovery, manifest, lifecycle
 ├── chatty-protocol-gateway/  # HTTP gateway: OpenAI / MCP / A2A protocols
 ├── chatty-module-sdk/        # SDK for `wasm32-wasip2` modules (standalone)
+├── chatty-trace/             # Research: traces / ATIF / FeedbackFn (AGE-5, ships)
+├── chatty-playbook/          # Research: ACE playbook (AGE-17, ships)
+├── chatty-flow/              # Research: AFlow WorkflowRepr + IR (AGE-13, ships)
+├── chatty-optimize/          # Research: GEPA + AFlow search (build-time)
+├── chatty-eval/              # Research: datasets + paired stats (dev-only)
 ├── hive-client/              # Hive registry client
 └── hive-billing-sdk/         # Billing SDK (separate Cargo.lock)
 

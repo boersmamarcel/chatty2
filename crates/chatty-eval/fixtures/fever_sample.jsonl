@@ -1,0 +1,3 @@
+{"id":"fv-1","claim":"The Eiffel Tower is in Paris.","label":"SUPPORTS"}
+{"id":"fv-2","claim":"The Eiffel Tower is in Berlin.","label":"REFUTES"}
+{"id":"fv-3","claim":"The Eiffel Tower was designed by a committee of twelve anonymous engineers.","label":"NOT ENOUGH INFO"}
