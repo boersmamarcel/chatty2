@@ -4,12 +4,14 @@ name: Release
 #   1. Called by Prepare Release via workflow_call (primary path)
 #   2. Triggered by a published GitHub Release (fallback)
 #   3. Manual workflow_dispatch when the published event did not fire
-#      (AGE-35 recovery path: rebuild artifacts for an existing tag)
+#      (AGE-35 recovery path: rebuild artifacts for an existing tag).
+#      MUST be dispatched against the tag ref itself so checkout uses github.sha:
+#        gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z
 on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Git tag to build from (e.g. v1.2.3)"
+        description: "Git tag to build from (e.g. v1.2.3); must match the workflow ref"
         required: true
         type: string
   workflow_call:
@@ -25,10 +27,8 @@ env:
   CARGO_TERM_COLOR: always
   APP_NAME: chatty
 
-# Caching policy: restore-only. Release jobs check out a tag ref that may originate
-# from workflow_dispatch inputs; writing caches from that context would allow
-# CodeQL "cache poisoning via execution of untrusted code". Warm caches come from
-# CI on main; release builds never save.
+# Caching policy: restore-only. Release workflows must not write default-branch
+# caches (CodeQL cache-poisoning). Warm caches come from CI on main.
 
 jobs:
   # Validate that the tag is immutable, on main, and matches Cargo.toml.
@@ -40,28 +40,63 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
       git_ref: ${{ steps.version.outputs.git_ref }}
+      # Trusted checkout target for build jobs. On workflow_dispatch this is
+      # github.sha (workflow was run from the tag); never an input-derived ref.
+      checkout_ref: ${{ steps.version.outputs.checkout_ref }}
     steps:
       - name: Resolve tag name
         id: resolve_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag_name || github.event.inputs.tag_name || '' }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
         run: |
           set -euo pipefail
-          # workflow_call / workflow_dispatch pass tag_name; release event has it on the event object
-          TAG="${{ inputs.tag_name || github.event.inputs.tag_name || github.event.release.tag_name }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Never check out from the dispatch input (CodeQL cache-poisoning).
+            # Operator must run the workflow FROM the tag ref.
+            if [ "$REF_TYPE" != "tag" ]; then
+              echo "::error::workflow_dispatch must target the tag ref (gh workflow run --ref vX.Y.Z -f tag_name=vX.Y.Z). Got ref_type=$REF_TYPE ref_name=$REF_NAME"
+              exit 1
+            fi
+            TAG="$REF_NAME"
+            INPUT="${INPUT_TAG#refs/tags/}"
+            if [ -n "$INPUT" ] && [ "$INPUT" != "$TAG" ]; then
+              echo "::error::tag_name input ($INPUT) must match dispatch tag ref ($TAG)"
+              exit 1
+            fi
+            MODE="workflow_sha"
+          elif [ "$EVENT_NAME" = "release" ]; then
+            TAG="${RELEASE_TAG#refs/tags/}"
+            MODE="git_ref"
+          else
+            # workflow_call from prepare-release
+            TAG="${INPUT_TAG#refs/tags/}"
+            MODE="git_ref"
+          fi
+
           if [ -z "$TAG" ]; then
             echo "::error::No tag name provided"
             exit 1
           fi
-          # Normalize: accept bare vX.Y.Z or refs/tags/vX.Y.Z; always emit both forms.
-          TAG="${TAG#refs/tags/}"
+          if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Invalid tag format: $TAG"
+            exit 1
+          fi
+
+          echo "checkout_mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "git_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: $TAG (git_ref=refs/tags/$TAG)"
+          echo "Resolved tag: $TAG (mode=$MODE)"
 
-      - name: Checkout immutable tag
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Never check out a bare name (could resolve to a branch). Always use refs/tags/.
-          ref: ${{ steps.resolve_tag.outputs.git_ref }}
+          # workflow_dispatch: github.sha is the tag the workflow was run against.
+          # workflow_call / release: immutable refs/tags/… only (never a bare name).
+          ref: ${{ steps.resolve_tag.outputs.checkout_mode == 'git_ref' && steps.resolve_tag.outputs.git_ref || github.sha }}
           fetch-depth: 0
 
       - name: Verify tag ref and ancestry on main
@@ -70,6 +105,8 @@ jobs:
           TAG="${{ steps.resolve_tag.outputs.tag }}"
           GIT_REF="refs/tags/${TAG}"
 
+          # Ensure the tag ref exists (fetch tags if checkout was by SHA).
+          git fetch origin --tags --force
           if ! git show-ref --verify --quiet "$GIT_REF"; then
             echo "::error::Immutable tag ref $GIT_REF does not exist"
             exit 1
@@ -77,6 +114,11 @@ jobs:
 
           git fetch origin main
           TAG_COMMIT="$(git rev-list -n 1 "$GIT_REF")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "$HEAD_COMMIT" != "$TAG_COMMIT" ]; then
+            echo "::error::Checked-out commit ($HEAD_COMMIT) is not tag $TAG ($TAG_COMMIT)"
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
             echo "::error::Tag $TAG ($TAG_COMMIT) is not an ancestor of origin/main — refusing to build"
             exit 1
@@ -89,18 +131,17 @@ jobs:
           set -euo pipefail
           TAG_NAME="${{ steps.resolve_tag.outputs.tag }}"
           GIT_REF="${{ steps.resolve_tag.outputs.git_ref }}"
+          MODE="${{ steps.resolve_tag.outputs.checkout_mode }}"
 
-          # Extract version from tag (remove 'v' prefix if present)
           TAG_VERSION="${TAG_NAME#v}"
           echo "Tag name: $TAG_NAME"
           echo "Tag version: $TAG_VERSION"
           echo "Git ref: $GIT_REF"
+          echo "Checkout mode: $MODE"
 
-          # Extract version from Cargo.toml
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "Cargo.toml version: $CARGO_VERSION"
 
-          # Validate they match
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Version mismatch! Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             echo "::error::Please update Cargo.toml to version $TAG_VERSION before tagging."
@@ -110,6 +151,12 @@ jobs:
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "git_ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          if [ "$MODE" = "workflow_sha" ]; then
+            # Break CodeQL taint from dispatch input → checkout ref in build jobs.
+            echo "checkout_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          fi
           echo "✅ Version validated: $TAG_VERSION (tag: $TAG_NAME, ref: $GIT_REF)"
 
   build-linux:
@@ -119,7 +166,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.git_ref }}
+          ref: ${{ needs.validate-version.outputs.checkout_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -237,7 +284,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.git_ref }}
+          ref: ${{ needs.validate-version.outputs.checkout_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -331,7 +378,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate-version.outputs.git_ref }}
+          ref: ${{ needs.validate-version.outputs.checkout_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -15,14 +15,15 @@ Forks and outside collaborators cannot:
 Linear project **Chatty auto-ship** membership is Marcel (and agents he runs). Slack
 `#chatty-auto-ship` is **notify-only** — not an arming channel.
 
-**Emergency rebuild** (owner only), when a published release event did not fire:
+**Emergency rebuild** (owner only), when a published release event did not fire.
+Dispatch **against the tag ref** (never from `main` with only an input):
 
 ```bash
-gh workflow run release.yml -f tag_name=vX.Y.Z
+gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z
 ```
 
-`release.yml` verifies `refs/tags/vX.Y.Z` exists, checks that commit out, asserts the
-tag is an ancestor of `origin/main`, and matches `Cargo.toml` before building.
+`release.yml` verifies the checked-out commit matches `refs/tags/vX.Y.Z`, asserts that
+commit is an ancestor of `origin/main`, and matches `Cargo.toml` before building.
 
 Authz gate regression check: `bash scripts/check-release-authz.sh` (also run in CI).
 

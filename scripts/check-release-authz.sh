@@ -42,7 +42,11 @@ need "$WF/release.yml" \
 
 need "$WF/release.yml" \
   'git_ref' \
-  "release.yml exports git_ref for checkout steps"
+  "release.yml exports git_ref for tag uploads / immutable refs"
+
+need "$WF/release.yml" \
+  'workflow_dispatch must target the tag ref|checkout_mode=workflow_sha' \
+  "release.yml does not check out workflow_dispatch inputs as refs"
 
 need "$WF/prepare-release.yml" \
   'github\.actor == github\.repository_owner' \

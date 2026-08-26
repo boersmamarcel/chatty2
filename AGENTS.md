@@ -32,8 +32,8 @@
 > **Project membership is the allowlist.** Do not auto-merge solely because an issue has
 > `owner:ai` on another project. Never auto-ship reserved symbols, research crates,
 > auth/billing, or core UX. Slack `#chatty-auto-ship` is notify-only. Failures notify
-> Linear, Slack, and GitHub. Emergency rebuild (owner only):
-> `gh workflow run release.yml -f tag_name=vX.Y.Z`.
+> Linear, Slack, and GitHub. Emergency rebuild (owner only; run against the tag):
+> `gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z`.
 > Authz regression: `bash scripts/check-release-authz.sh`.
 
 Quick-start guide for AI coding agents working in this repository.
