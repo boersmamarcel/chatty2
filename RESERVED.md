@@ -60,14 +60,14 @@ in the commit message.
 | `crates/chatty-optimize/src/gepa/prompts.rs` | `REFLECTION_META_PROMPT` | AGE-15 | Appendix B's wording is why GEPA produces declarative instructions rather than quasi-exemplars. Copying it without reasoning about it teaches nothing. Do not quote the passage. |
 | `crates/chatty-playbook/src/merge.rs` | `apply` | AGE-17 | **ACE's whole argument, as a type signature.** Pure, total, no LLM. ~40 lines. |
 | `crates/chatty-playbook/src/refine.rs` | `grow_and_refine` | AGE-17 | Growth bounds and de-duplication. In a long-running desktop app this is an eviction policy, not a paper knob. |
-| `crates/chatty-eval/src/strategy.rs` | `Strategy` | AGE-11 | The ReAct/CoT-SC backoff rule and the loop's termination semantics. The loop itself already ships — this is the one part of it that is a judgement call. |
+| `crates/chatty-optimize/src/strategy.rs` | `Strategy` | AGE-11 | The ReAct/CoT-SC backoff rule and the loop's termination semantics. The loop itself already ships — this is the one part of it that is a judgement call. |
 
 ## Explicitly NOT reserved
 
 Build all of this without asking:
 
 - Dataset loaders and scorers that feed *in-process* optimizers, the paired-statistics
-  harness, and thin calibration stubs in `chatty-eval`
+  harness, and thin calibration stubs in `chatty-optimize`
 - Stage B sandboxes (HumanEval, Polyglot, AppWorld, ALFWorld) belong in the sibling
   `harbor-chatty` Harbor repo (AGE-34) — do not rebuild them inside chatty2
 - The `IrRepr` interpreter and all seven AFlow operators

@@ -7,12 +7,11 @@ members = [
     "crates/chatty-module-registry",
     "crates/chatty-protocol-gateway",
     "crates/hive-client",
-    # Research / self-improving agent crates (AGE-5 / AGE-24 / AGE-26)
+    # Research / self-improving agent crates (AGE-5 / AGE-26); Stage B → harbor-chatty
     "crates/chatty-trace",
     "crates/chatty-playbook",
     "crates/chatty-flow",
     "crates/chatty-optimize",
-    "crates/chatty-eval",
 ]
 resolver = "2"
 

@@ -8,7 +8,7 @@
 - Interpreter cancellable when wired to LLM / tool calls.
 - `WorkflowRepr` trait keeps representation swappable (`IrRepr` first; Monty later).
 - `#![forbid(unsafe_code)]`, MSRV declared.
-- Zero dependency on `chatty-eval`.
+- Does not pull Harbor / Stage B sandboxes into the app binary.
 
 ## Non-promises
 

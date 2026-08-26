@@ -52,7 +52,7 @@ pub struct CostRowInput {
 }
 
 /// Build a cost row from ModelConfig-style prices (pass the fields explicitly so
-/// chatty-eval does not depend on chatty-core).
+/// chatty-optimize does not depend on chatty-core).
 pub fn row_from_model_prices(input: CostRowInput) -> CostRow {
     CostRow {
         module: input.module,

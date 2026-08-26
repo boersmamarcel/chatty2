@@ -51,7 +51,7 @@ impl WikiEnv {
             }
         } else {
             WikiObservation {
-                text: format!("[live search not wired in chatty-eval] {query}"),
+                text: format!("[live search not wired yet] {query}"),
                 done: false,
             }
         }

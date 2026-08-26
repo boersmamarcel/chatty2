@@ -4,7 +4,7 @@
 //!
 //! - Bounded playbook growth (eviction policy — not an unbounded experiment knob).
 //! - Concrete error enum; no panics on input-driven paths.
-//! - Zero dependency on `chatty-eval`.
+//! - Does not pull Harbor / Stage B sandboxes into the app binary.
 //! - `#![forbid(unsafe_code)]`.
 //!
 //! # Reserved

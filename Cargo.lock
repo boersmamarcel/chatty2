@@ -1772,19 +1772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chatty-eval"
-version = "0.3.26"
-dependencies = [
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "serde",
- "serde_json",
- "statrs",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "chatty-flow"
 version = "0.3.26"
 dependencies = [
@@ -1850,8 +1837,12 @@ dependencies = [
 name = "chatty-optimize"
 version = "0.3.26"
 dependencies = [
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "serde",
  "serde_json",
+ "statrs",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
 ]

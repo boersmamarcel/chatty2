@@ -2,7 +2,7 @@
 name = "chatty-optimize"
 version.workspace = true
 edition.workspace = true
-description = "GEPA + AFlow search (AGE-15 / AGE-13) — build-time / on-demand, not request path"
+description = "GEPA + AFlow search, paired stats, optimizer QA loaders (build-time / on-demand)"
 publish = false
 rust-version = "1.85"
 
@@ -15,3 +15,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
+statrs = "0.18"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -9,7 +9,7 @@
 - `Trajectory` retention behind a `Recorder` that no-ops by default in release builds.
 - Cancellation/timeouts when LLM-touching paths are added (via `rig-agent` hooks).
 - `#![forbid(unsafe_code)]`, declared MSRV (`rust-version` in Cargo.toml).
-- Zero dependency on `chatty-eval`, datasets, or statistics crates.
+- Zero dependency on dataset / statistics crates in the request path (`chatty-optimize` is on-demand / CI only).
 - Semver: public types (`Trajectory`, `Action`, …) are API surface — bump major on breaking changes once stabilized.
 
 ## Non-promises

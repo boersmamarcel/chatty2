@@ -9,7 +9,7 @@
 - Deterministic merge (`apply`) once human-written; no LLM in the merge path.
 - Stable bullet ordering for prompt-cache friendliness.
 - `#![forbid(unsafe_code)]`, MSRV declared.
-- Zero dependency on `chatty-eval`.
+- Does not pull Harbor / Stage B sandboxes into the app binary.
 
 ## Non-promises
 

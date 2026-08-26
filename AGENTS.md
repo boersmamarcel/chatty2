@@ -4,12 +4,13 @@
 > ## Research work: read [`RESERVED.md`](RESERVED.md) first
 >
 > The Linear project **Self-improving chatty2** lands five agentic-self-improvement papers
-> in this workspace as `chatty-trace`, `chatty-playbook`, `chatty-flow`, `chatty-optimize`
-> and a thin `chatty-eval` (paired stats / optimizer QA loaders). **Stage B sandboxes**
+> in this workspace as `chatty-trace`, `chatty-playbook`, `chatty-flow`, and
+> `chatty-optimize` (search + paired stats + optimizer QA loaders). **Stage B sandboxes**
 > (HumanEval, Polyglot, AppWorld, …) live in the sibling repo `harbor-chatty` (Harbor;
-> Linear AGE-34), not in this workspace. **A small set of functions in those crates is
-> reserved for the human and must not be implemented by an agent** — the list and the
-> rules are in [`RESERVED.md`](RESERVED.md), enforced by `scripts/check-reserved.sh` in CI.
+> Linear AGE-34), not in this workspace. There is **no `chatty-eval` crate**. **A small
+> set of functions in those crates is reserved for the human and must not be implemented
+> by an agent** — the list and the rules are in [`RESERVED.md`](RESERVED.md), enforced by
+> `scripts/check-reserved.sh` in CI.
 >
 > Take only `owner:ai` issues unless told otherwise. Never answer or close a
 > `gate:reflection` issue. Ordinary chatty2 work is unaffected by any of this.
@@ -47,8 +48,7 @@ crates/
 ├── chatty-trace/             # Research: traces / ATIF / FeedbackFn (AGE-5, ships)
 ├── chatty-playbook/          # Research: ACE playbook (AGE-17, ships)
 ├── chatty-flow/              # Research: AFlow WorkflowRepr + IR (AGE-13, ships)
-├── chatty-optimize/          # Research: GEPA + AFlow search (build-time)
-├── chatty-eval/              # Research: thin stats + QA loaders (Stage B → harbor-chatty)
+├── chatty-optimize/          # Research: GEPA/AFlow + paired stats + QA loaders
 ├── hive-client/              # Hive registry client
 └── hive-billing-sdk/         # Billing SDK (separate Cargo.lock)
 

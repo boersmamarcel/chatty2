@@ -5,7 +5,7 @@
 //! - Concrete error enum in public APIs (no `Box<dyn Error>`).
 //! - No panics on input-driven paths.
 //! - `Trajectory` retention behind a `Recorder` that no-ops by default in release.
-//! - Zero dependency on `chatty-eval` / dataset / statistics crates.
+//! - Does not pull Harbor / Stage B sandboxes into the app binary.
 //! - `#![forbid(unsafe_code)]`.
 //!
 //! # Status
