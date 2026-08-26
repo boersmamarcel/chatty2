@@ -83,6 +83,10 @@ git push origin v0.1.21
    - Preserves your custom release notes
    - Publishes the release (overrides draft status if needed)
 
+## Auto-ship dry-run marker
+
+Last exercised by an automated `ship:auto` patch release test.
+
 ## What Gets Built
 
 Each release includes:
