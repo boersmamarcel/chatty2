@@ -5,8 +5,8 @@ mod tool_collector;
 mod tool_registry;
 
 use anyhow::Result;
-use rig_core::agent::Agent;
-use rig_core::completion::Prompt;
+use rig_agent::Agent;
+use rig_agent::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::filesystem_service::FileSystemService;
@@ -78,21 +78,15 @@ pub struct AgentBuildContext {
     pub available_model_ids: Vec<String>,
 }
 
-/// Enum-based agent wrapper for multi-provider support
+/// Provider-agnostic agent wrapper.
+///
+/// In rig 0.42, [`Agent`] is no longer generic over the completion model, so all
+/// providers share one concrete agent type.
 #[derive(Clone)]
-pub enum AgentClient {
-    OpenRouter {
-        agent: Agent<rig_core::providers::openrouter::CompletionModel>,
-        task_controller: crate::services::AgentTaskController,
-    },
-    Ollama {
-        agent: Agent<rig_core::providers::ollama::CompletionModel>,
-        task_controller: crate::services::AgentTaskController,
-    },
-    AzureOpenAI {
-        agent: Agent<rig_core::providers::azure::CompletionModel>,
-        task_controller: crate::services::AgentTaskController,
-    },
+pub struct AgentClient {
+    pub agent: Agent,
+    pub task_controller: crate::services::AgentTaskController,
+    provider: crate::settings::models::providers_store::ProviderType,
 }
 
 impl AgentClient {
@@ -102,25 +96,11 @@ impl AgentClient {
     /// (tracing, policy, retries, Rig hooks) that should apply consistently
     /// across title generation, summarization, and other non-streaming calls.
     pub async fn prompt(&self, prompt: &str) -> Result<String> {
-        match self {
-            AgentClient::OpenRouter { agent, .. } => Ok(agent.prompt(prompt).await?),
-            AgentClient::Ollama { agent, .. } => Ok(agent.prompt(prompt).await?),
-            AgentClient::AzureOpenAI { agent, .. } => Ok(agent.prompt(prompt).await?),
-        }
+        Ok(self.agent.prompt(prompt).await?)
     }
 
     pub fn task_controller(&self) -> crate::services::AgentTaskController {
-        match self {
-            AgentClient::OpenRouter {
-                task_controller, ..
-            }
-            | AgentClient::Ollama {
-                task_controller, ..
-            }
-            | AgentClient::AzureOpenAI {
-                task_controller, ..
-            } => task_controller.clone(),
-        }
+        self.task_controller.clone()
     }
 
     /// Create AgentClient from ModelConfig, ProviderConfig and build context
@@ -945,7 +925,7 @@ impl AgentClient {
         );
 
         // Build native tools once (all providers use the same set)
-        let tool_vec = native_tools!(
+        let native_tools = native_tools!(
             list_tools: list_tools,
             write_todos_tool: write_todos_tool,
             update_todo_tool: update_todo_tool,
@@ -983,14 +963,13 @@ impl AgentClient {
             list_agents_tool: list_agents_tool,
             invoke_agent_tool: invoke_agent_tool,
             publish_module_tool: publish_module_tool,
-        )
-        .into_tool_vec();
+        );
 
         let agent = provider_builder::build_provider_agent(
             model_config,
             provider_config,
             &preamble,
-            tool_vec,
+            native_tools,
             mcp_tools,
             &native_tool_names,
             agent_task_controller,
@@ -1002,12 +981,8 @@ impl AgentClient {
 
     /// Returns the provider name for logging/debugging.
     #[allow(dead_code)]
-    pub fn provider_name(&self) -> &'static str {
-        match self {
-            AgentClient::OpenRouter { .. } => "OpenRouter",
-            AgentClient::Ollama { .. } => "Ollama",
-            AgentClient::AzureOpenAI { .. } => "Azure OpenAI",
-        }
+    pub fn provider_name(&self) -> &str {
+        self.provider.display_name()
     }
 }
 

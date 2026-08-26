@@ -201,3 +201,50 @@ examples.
 | WIT reference | [`docs/wit-reference.md`](docs/wit-reference.md) |
 | Release process | [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md) |
 | Coding patterns & behavior | [`CLAUDE.md`](CLAUDE.md) |
+
+## Cursor Cloud specific instructions
+
+Build/test/lint/run commands are unchanged — use the ones documented above
+(the `make` targets / `.github/workflows/ci.yml`). The notes below are only
+the non-obvious environment caveats specific to the Cloud Agent VM. System
+packages, the Rust toolchain, and the `cc`/`c++` alternatives below are baked
+into the VM; the startup/update script only re-runs
+`rustup target add wasm32-wasip2` + `make wasm-modules`.
+
+- **Toolchain must be ≥ 1.85 (edition 2024).** The base VM image historically
+  pinned `rustup default` to an older toolchain (1.83), which cannot compile
+  this workspace (`feature edition2024 is required`). The default is set to
+  `stable`. If a build suddenly fails with an edition-2024 error, run
+  `rustup default stable`.
+
+- **Use GNU `cc`/`c++`, not clang.** `/usr/bin/cc` and `/usr/bin/c++` are
+  pointed at `gcc`/`g++` via `update-alternatives`. The system clang cannot
+  find libstdc++ headers/lib, which breaks the bundled DuckDB C++ build
+  (`fatal error: 'memory' file not found`) and linking the desktop binary
+  (`rust-lld: error: unable to find library -lstdc++`). If you see either
+  error, run `sudo update-alternatives --set cc /usr/bin/gcc` and
+  `sudo update-alternatives --set c++ /usr/bin/g++`.
+
+- **`modules/echo-agent/echo_agent.wasm` is git-ignored** and required by some
+  integration tests, so it must be regenerated after a fresh checkout. The
+  update script runs `make wasm-modules`; run it yourself if `make test` fails
+  with a missing-`.wasm` error.
+
+- **Running the GPUI desktop app (`chatty`) headlessly.** The VM has no GPU,
+  but software Vulkan (Mesa `llvmpipe`/lavapipe) is installed, so the app runs
+  with CPU rendering on the existing X11 display (`DISPLAY=:1`). You MUST export
+  `XDG_RUNTIME_DIR` first, e.g.
+  `export XDG_RUNTIME_DIR=/tmp/xdg-runtime-$(id -u) && mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"`,
+  otherwise X11 window creation fails with `BadMatch`. `chatty-tui` needs none
+  of this.
+
+- **No LLM API key is configured.** To actually chat (either frontend), use a
+  local Ollama: start it with `ollama serve` (systemd is not running, so launch
+  it yourself in a background/tmux session), `ollama pull qwen2.5:0.5b`, then
+  `./target/debug/chatty-tui --ollama http://localhost:11434 --model qwen2.5:0.5b --headless -m "..."`.
+  The desktop app auto-detects a running local Ollama and lists its models.
+
+- **Clippy has pre-existing findings under current stable.** `cargo clippy -- -D warnings`
+  currently fails on 3 lints that predate this environment work
+  (`models/conversations_store.rs`, `services/skill_service.rs`,
+  `tools/search_memory_tool.rs`) — newer-toolchain lints, not env breakage.

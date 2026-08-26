@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -60,34 +59,37 @@ impl Tool for ExecuteCodeTool {
     type Args = ExecuteCodeArgs;
     type Output = ExecuteCodeOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        serde_json::from_value(serde_json::json!({
-            "name": "execute_code",
-            "description": "Execute code in an isolated sandbox. Supported languages: python, javascript, typescript, rust, bash. Python may use the built-in Monty interpreter for simple snippets and automatically fall back to Docker when a fuller environment is needed; other languages use Docker. The sandbox preserves state (variables, installed packages) throughout the conversation. The output includes execution_engine so you can tell the user whether Monty or Docker ran the code. To keep tool-calling stable, stdout/stderr may be truncated, so print compact summaries or small JSON objects instead of large debug dumps. To start a web server the user can access, set expose_port to the port your server listens on (e.g. 8080). The actual host port is returned in port_mappings — tell the user to open http://localhost:<host_port>.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "language": {
-                        "type": "string",
-                        "description": "The programming language: python, javascript, typescript, rust, bash",
-                        "enum": ["python", "javascript", "typescript", "rust", "bash"]
-                    },
-                    "code": {
-                        "type": "string",
-                        "description": "The code to execute"
-                    },
-                    "expose_port": {
-                        "type": "integer",
-                        "description": "Optional container port to publish to the host. Use when starting a web server so the user can access it. The mapped host port is returned in port_mappings."
-                    }
-                },
-                "required": ["language", "code"]
-            }
-        }))
-        .expect("valid tool definition")
+    fn description(&self) -> String {
+        "Execute code in an isolated sandbox. Supported languages: python, javascript, typescript, rust, bash. Python may use the built-in Monty interpreter for simple snippets and automatically fall back to Docker when a fuller environment is needed; other languages use Docker. The sandbox preserves state (variables, installed packages) throughout the conversation. The output includes execution_engine so you can tell the user whether Monty or Docker ran the code. To keep tool-calling stable, stdout/stderr may be truncated, so print compact summaries or small JSON objects instead of large debug dumps. To start a web server the user can access, set expose_port to the port your server listens on (e.g. 8080). The actual host port is returned in port_mappings — tell the user to open http://localhost:<host_port>.".to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "description": "The programming language: python, javascript, typescript, rust, bash",
+                    "enum": ["python", "javascript", "typescript", "rust", "bash"]
+                },
+                "code": {
+                    "type": "string",
+                    "description": "The code to execute"
+                },
+                "expose_port": {
+                    "type": "integer",
+                    "description": "Optional container port to publish to the host. Use when starting a web server so the user can access it. The mapped host port is returned in port_mappings."
+                }
+            },
+            "required": ["language", "code"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let language = Language::parse(&args.language);
         let result = self
             .manager

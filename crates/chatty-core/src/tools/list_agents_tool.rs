@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::models::a2a_store::A2aAgentConfig;
@@ -87,10 +86,8 @@ impl Tool for ListAgentsTool {
     type Args = ListAgentsToolArgs;
     type Output = ListAgentsToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_agents".to_string(),
-            description: "List all available agents: remote A2A agents configured via \
+    fn description(&self) -> String {
+        "List all available agents: remote A2A agents configured via \
                          Settings → A2A Agents, and locally installed WASM module agents. \
                          Returns each agent's name, type, enabled state, and the skills/tools \
                          it provides. \
@@ -99,16 +96,22 @@ impl Tool for ListAgentsTool {
                          to delegate a task. Agents can be invoked with \
                          `/agent <name> <prompt>` — each agent runs its own full agentic \
                          loop and returns a result."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         tracing::info!(
             remote_agent_count = self.remote_agents.len(),
             local_agent_count = self.module_agents.len(),
@@ -179,7 +182,9 @@ mod tests {
     async fn test_list_empty_repo() {
         let tool = ListAgentsTool::new(vec![]);
 
-        let result = tool.call(ListAgentsToolArgs {}).await;
+        let result = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -194,7 +199,10 @@ mod tests {
         let agent = make_agent("voucher-agent", "https://hive.dev/a2a/voucher", true);
         let tool = ListAgentsTool::new(vec![agent]);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         assert_eq!(output.total, 1);
         let a = &output.remote_agents[0];
         assert_eq!(a.name, "voucher-agent");
@@ -214,7 +222,10 @@ mod tests {
         };
         let tool = ListAgentsTool::new(vec![agent]);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         let a = &output.remote_agents[0];
         // API key value is never exposed — only whether one is configured
         assert!(a.has_api_key);
@@ -225,7 +236,10 @@ mod tests {
         let agent = make_agent("disabled-agent", "https://example.com/a2a", false);
         let tool = ListAgentsTool::new(vec![agent]);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         assert!(!output.remote_agents[0].enabled);
     }
 
@@ -240,7 +254,10 @@ mod tests {
         };
         let tool = ListAgentsTool::new(vec![agent]);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         let a = &output.remote_agents[0];
         assert_eq!(a.skills.len(), 2);
         assert_eq!(a.skills[0], "data-analysis");
@@ -254,7 +271,10 @@ mod tests {
         ];
         let tool = ListAgentsTool::new(agents);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         assert_eq!(output.total, 2);
         assert_eq!(output.remote_agents[0].name, "agent-a");
         assert_eq!(output.remote_agents[1].name, "agent-b");
@@ -265,7 +285,10 @@ mod tests {
         let module = make_module_agent("benford-agent");
         let tool = ListAgentsTool::new_with_modules(vec![], vec![module]);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         assert_eq!(output.total, 1);
         assert!(output.remote_agents.is_empty());
         assert_eq!(output.local_agents.len(), 1);
@@ -279,7 +302,10 @@ mod tests {
         let module = make_module_agent("local-agent");
         let tool = ListAgentsTool::new_with_modules(vec![remote], vec![module]);
 
-        let output = tool.call(ListAgentsToolArgs {}).await.unwrap();
+        let output = tool
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .unwrap();
         assert_eq!(output.total, 2);
         assert_eq!(output.remote_agents.len(), 1);
         assert_eq!(output.local_agents.len(), 1);

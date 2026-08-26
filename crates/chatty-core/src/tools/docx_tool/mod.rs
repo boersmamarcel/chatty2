@@ -16,7 +16,7 @@ pub enum DocxToolError {
 mod tests {
     use std::sync::Arc;
 
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
 
     use crate::services::filesystem_service::FileSystemService;
 
@@ -38,7 +38,7 @@ mod tests {
         // Write a document with heading + paragraph + table
         let write_tool = WriteDocxTool::new(service.clone());
         let write_output = write_tool
-            .call(WriteDocxArgs {
+            .call(&mut ToolContext::new(), WriteDocxArgs {
                 path: path.clone(),
                 content: "# Introduction\n\nHello, world!\n\n## Section 2\n\nSome text here.\n\n| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |".to_string(),
             })
@@ -51,11 +51,14 @@ mod tests {
         // Read it back
         let read_tool = ReadDocxTool::new(service.clone());
         let read_output = read_tool
-            .call(ReadDocxArgs {
-                path: path.clone(),
-                include_tables: None,
-                max_chars: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadDocxArgs {
+                    path: path.clone(),
+                    include_tables: None,
+                    max_chars: None,
+                },
+            )
             .await
             .unwrap();
 
@@ -75,11 +78,14 @@ mod tests {
         );
         let tool = ReadDocxTool::new(service);
         let result = tool
-            .call(ReadDocxArgs {
-                path: tmp.path().join("nope.docx").to_str().unwrap().to_string(),
-                include_tables: None,
-                max_chars: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadDocxArgs {
+                    path: tmp.path().join("nope.docx").to_str().unwrap().to_string(),
+                    include_tables: None,
+                    max_chars: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

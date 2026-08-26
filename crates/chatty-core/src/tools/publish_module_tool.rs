@@ -1,6 +1,5 @@
 use base64::Engine;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use rmcp::model::CallToolRequestParams;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -78,10 +77,8 @@ impl Tool for PublishModuleTool {
     type Args = PublishModuleArgs;
     type Output = PublishModuleOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "publish_wasm_module".to_string(),
-            description: "Publish a WASM module to the hive registry. \
+    fn description(&self) -> String {
+        "Publish a WASM module to the hive registry. \
                          Reads the binary file from disk, base64-encodes it, \
                          and uploads it together with a TOML manifest via MCP. \
                          The manifest should be a flat TOML string with fields: \
@@ -100,25 +97,31 @@ impl Tool for PublishModuleTool {
                              category = \\\"utility\\\"\\n\
                              pricing_model = \\\"free\\\"\"\n\
                          }"
-            .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "wasm_path": {
-                        "type": "string",
-                        "description": "Path to the .wasm file (absolute or relative to workspace)"
-                    },
-                    "manifest_toml": {
-                        "type": "string",
-                        "description": "Flat TOML string with module metadata (name, display_name, description, version required)"
-                    }
-                },
-                "required": ["wasm_path", "manifest_toml"]
-            }),
-        }
+        .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "wasm_path": {
+                    "type": "string",
+                    "description": "Path to the .wasm file (absolute or relative to workspace)"
+                },
+                "manifest_toml": {
+                    "type": "string",
+                    "description": "Flat TOML string with module metadata (name, display_name, description, version required)"
+                }
+            },
+            "required": ["wasm_path", "manifest_toml"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let path = self
             .resolve_path(&args.wasm_path)
             .map_err(|e| anyhow::anyhow!("Path resolution failed: {e}"))?;
@@ -169,8 +172,8 @@ impl Tool for PublishModuleTool {
         let text = result
             .content
             .iter()
-            .filter_map(|c| match c.raw {
-                rmcp::model::RawContent::Text(ref t) => Some(t.text.as_str()),
+            .filter_map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

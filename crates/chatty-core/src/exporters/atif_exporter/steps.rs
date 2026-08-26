@@ -78,7 +78,7 @@ pub(super) fn image_media_type(path: &Path) -> Option<&'static str> {
 
 pub(super) fn build_user_step(
     step_id: u32,
-    content: &rig_core::OneOrMany<UserContent>,
+    content: &[UserContent],
     timestamp: Option<i64>,
     attachment_paths: &[String],
 ) -> AtifStep {
@@ -127,7 +127,7 @@ pub(super) fn build_user_step(
 
 pub(super) fn build_agent_step(
     step_id: u32,
-    content: &rig_core::OneOrMany<AssistantContent>,
+    content: &[AssistantContent],
     timestamp: Option<i64>,
     trace_json: Option<serde_json::Value>,
     metrics: Option<AtifStepMetrics>,
@@ -150,7 +150,11 @@ pub(super) fn build_agent_step(
 
     for ac in content.iter() {
         if let AssistantContent::ToolCall(tc) = ac {
-            let atif_id = tc.call_id.clone().unwrap_or_else(|| tc.id.clone());
+            let atif_id = tc
+                .provider
+                .as_ref()
+                .map(|p| p.call_id.clone())
+                .unwrap_or_else(|| tc.id.to_string());
 
             tool_calls_vec.push(AtifToolCall {
                 tool_call_id: atif_id.clone(),
@@ -159,7 +163,7 @@ pub(super) fn build_agent_step(
             });
 
             // If we have output from the trace, add it to observation results
-            if let Some(output) = trace_outputs.get(&tc.id) {
+            if let Some(output) = trace_outputs.get(tc.id.as_str()) {
                 observation_results.push(AtifObservationResult {
                     source_call_id: Some(atif_id),
                     content: Some(output.clone()),

@@ -1,5 +1,6 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -45,10 +46,8 @@ impl Tool for AddAttachmentTool {
     type Args = AddAttachmentArgs;
     type Output = AddAttachmentOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "add_attachment".to_string(),
-            description: "Display an image or PDF file inline in the chat response. \
+    fn description(&self) -> String {
+        "Display an image or PDF file inline in the chat response. \
                          Use this to show generated plots, charts, screenshots, or documents \
                          to the user. The file will appear visually in your response message.\n\
                          \n\
@@ -62,21 +61,27 @@ impl Tool for AddAttachmentTool {
                          - Show a generated plot: {\"path\": \"output/chart.png\"}\n\
                          - Display a screenshot: {\"path\": \"screenshots/page.png\"}\n\
                          - Show a PDF document: {\"path\": \"reports/analysis.pdf\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the image or PDF file, relative to the workspace root or absolute within workspace"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the image or PDF file, relative to the workspace root or absolute within workspace"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Resolve path within workspace
         let canonical = self.service.resolve_path(&args.path).await?;
 
@@ -119,7 +124,7 @@ impl Tool for AddAttachmentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
     use std::fs;
     use std::path::Path;
 
@@ -151,9 +156,12 @@ mod tests {
         create_test_file(&workspace, "photo.png", 1024);
 
         let result = tool
-            .call(AddAttachmentArgs {
-                path: "photo.png".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "photo.png".into(),
+                },
+            )
             .await;
 
         assert!(result.is_ok());
@@ -170,9 +178,12 @@ mod tests {
         create_test_file(&workspace, "report.pdf", 2048);
 
         let result = tool
-            .call(AddAttachmentArgs {
-                path: "report.pdf".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "report.pdf".into(),
+                },
+            )
             .await;
 
         assert!(result.is_ok());
@@ -190,19 +201,28 @@ mod tests {
         create_test_file(&workspace, "b.jpg", 512);
         create_test_file(&workspace, "c.pdf", 512);
 
-        tool.call(AddAttachmentArgs {
-            path: "a.png".into(),
-        })
+        tool.call(
+            &mut ToolContext::new(),
+            AddAttachmentArgs {
+                path: "a.png".into(),
+            },
+        )
         .await
         .unwrap();
-        tool.call(AddAttachmentArgs {
-            path: "b.jpg".into(),
-        })
+        tool.call(
+            &mut ToolContext::new(),
+            AddAttachmentArgs {
+                path: "b.jpg".into(),
+            },
+        )
         .await
         .unwrap();
-        tool.call(AddAttachmentArgs {
-            path: "c.pdf".into(),
-        })
+        tool.call(
+            &mut ToolContext::new(),
+            AddAttachmentArgs {
+                path: "c.pdf".into(),
+            },
+        )
         .await
         .unwrap();
 
@@ -220,9 +240,12 @@ mod tests {
         let (tool, pending, _workspace) = create_test_tool().await;
 
         let result = tool
-            .call(AddAttachmentArgs {
-                path: "does_not_exist.png".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "does_not_exist.png".into(),
+                },
+            )
             .await;
 
         assert!(result.is_err());
@@ -235,9 +258,12 @@ mod tests {
         create_test_file(&workspace, "notes.txt", 512);
 
         let result = tool
-            .call(AddAttachmentArgs {
-                path: "notes.txt".into(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                AddAttachmentArgs {
+                    path: "notes.txt".into(),
+                },
+            )
             .await;
 
         assert!(result.is_err());
@@ -251,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _, _workspace) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "add_attachment");
         assert!(def.description.contains("inline"));

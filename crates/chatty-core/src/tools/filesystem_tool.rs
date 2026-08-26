@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -46,10 +45,8 @@ impl Tool for ReadFileTool {
     type Args = ReadFileArgs;
     type Output = ReadFileOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_file".to_string(),
-            description: "Read the contents of a text file within the workspace. \
+    fn description(&self) -> String {
+        "Read the contents of a text file within the workspace. \
                           Returns the file contents as a string. \
                           Files must be within the workspace directory and under 10MB. \
                           Optionally provide start_line and end_line (1-based, inclusive) to read \
@@ -66,31 +63,37 @@ impl Tool for ReadFileTool {
                           - Read config: {\"path\": \"config.json\"}\n\
                          - Read nested file: {\"path\": \"src/utils/helpers.rs\"}\n\
                          - Read a range: {\"path\": \"src/main.rs\", \"start_line\": 40, \"end_line\": 80}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read, relative to the workspace root or absolute within workspace"
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional 1-based starting line number"
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional 1-based ending line number, inclusive"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to read, relative to the workspace root or absolute within workspace"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional 1-based starting line number"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional 1-based ending line number, inclusive"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = self
             .service
             .read_file_range(&args.path, args.start_line, args.end_line)
@@ -148,30 +151,34 @@ impl Tool for ReadBinaryTool {
     type Args = ReadBinaryArgs;
     type Output = ReadBinaryOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_binary".to_string(),
-            description: "Read a binary file (images, PDFs, etc.) and return its contents as base64-encoded data. \
+    fn description(&self) -> String {
+        "Read a binary file (images, PDFs, etc.) and return its contents as base64-encoded data. \
                          Files must be within the workspace directory and under 10MB.\n\
                          \n\
                          Examples:\n\
                          - Read image: {\"path\": \"assets/logo.png\"}\n\
                          - Read PDF: {\"path\": \"docs/report.pdf\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the binary file to read, relative to the workspace root or absolute within workspace"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the binary file to read, relative to the workspace root or absolute within workspace"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let data = self.service.read_binary(&args.path).await?;
         Ok(ReadBinaryOutput {
             data,
@@ -219,10 +226,8 @@ impl Tool for ListDirectoryTool {
     type Args = ListDirectoryArgs;
     type Output = ListDirectoryOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_directory".to_string(),
-            description: "List the contents of a directory within the workspace. \
+    fn description(&self) -> String {
+        "List the contents of a directory within the workspace. \
                          Returns file and directory names with type and size metadata. \
                          Results are sorted with directories first, then files alphabetically.\n\
                          \n\
@@ -230,21 +235,27 @@ impl Tool for ListDirectoryTool {
                          - List workspace root: {\"path\": \".\"}\n\
                          - List subdirectory: {\"path\": \"src\"}\n\
                          - List nested directory: {\"path\": \"src/components\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the directory to list, relative to the workspace root or absolute within workspace"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the directory to list, relative to the workspace root or absolute within workspace"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let entries = self.service.list_directory(&args.path).await?;
         let count = entries.len();
         let entry_outputs = entries
@@ -295,10 +306,8 @@ impl Tool for GlobSearchTool {
     type Args = GlobSearchArgs;
     type Output = GlobSearchOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "glob_search".to_string(),
-            description: "Search for files matching a glob pattern within the workspace. \
+    fn description(&self) -> String {
+        "Search for files matching a glob pattern within the workspace. \
                          Returns matching file paths relative to the workspace root. \
                          Results are limited to 1000 matches.\n\
                          \n\
@@ -312,21 +321,27 @@ impl Tool for GlobSearchTool {
                          - Find all Rust files: {\"pattern\": \"**/*.rs\"}\n\
                          - Find all test files: {\"pattern\": \"**/test_*.py\"}\n\
                          - Find configs: {\"pattern\": \"*.{json,toml,yaml}\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Glob pattern to match files against, relative to the workspace root"
-                    }
-                },
-                "required": ["pattern"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match files against, relative to the workspace root"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = self.service.glob_search(&args.pattern).await?;
         Ok(GlobSearchOutput {
             matches: result.matches,

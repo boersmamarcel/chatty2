@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -63,53 +62,57 @@ impl Tool for SearchMemoryTool {
     type Args = SearchMemoryToolArgs;
     type Output = SearchMemoryToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let (description, query_description) = if self.embedding_service.is_some() {
-            (
-                "Search persistent memory and available skills for previously stored information. \
+    fn description(&self) -> String {
+        if self.embedding_service.is_some() {
+            "Search persistent memory and available skills for previously stored information. \
                  Uses hybrid search: keyword matching (BM25) + semantic similarity. \
                  Also scans filesystem SKILL.md files so you can discover workspace/global skills. \
                  You can use natural language queries — searching 'fruits' will find \
-                 memories about bananas, apples, etc.",
-                "Natural language query describing what you want to recall or discover. \
-                 Both specific keywords and conceptual descriptions work. \
-                 Example: 'food preferences' will find memories about specific foods. \
-                     Example: 'deployment' may surface a saved skill.",
-            )
+                 memories about bananas, apples, etc."
+                .to_string()
         } else {
-            (
-                "Search persistent memory and available skills for previously stored information. \
+            "Search persistent memory and available skills for previously stored information. \
                  Use this when you need to recall facts, decisions, user preferences, \
                  or context from past conversations, or when you want to discover if a \
                  reusable procedure (skill) exists for a task. Uses keyword matching (BM25), \
-                 so include specific words that are likely in the stored memory.",
-                "Keyword query describing what you want to recall or discover. \
-                 Use concrete nouns and terms likely present in stored memories. \
-                 Example: 'bananas fruit preference' rather than 'what foods does the user like'.",
-            )
-        };
-
-        ToolDefinition {
-            name: "search_memory".to_string(),
-            description: description.to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": query_description
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (1-20). Defaults to 5."
-                    }
-                },
-                "required": ["query", "top_k"]
-            }),
+                 so include specific words that are likely in the stored memory."
+                .to_string()
         }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        let query_description = if self.embedding_service.is_some() {
+            "Natural language query describing what you want to recall or discover. \
+                 Both specific keywords and conceptual descriptions work. \
+                 Example: 'food preferences' will find memories about specific foods. \
+                     Example: 'deployment' may surface a saved skill."
+        } else {
+            "Keyword query describing what you want to recall or discover. \
+                 Use concrete nouns and terms likely present in stored memories. \
+                 Example: 'bananas fruit preference' rather than 'what foods does the user like'."
+        };
+
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": query_description
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (1-20). Defaults to 5."
+                }
+            },
+            "required": ["query", "top_k"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let top_k = args.top_k.unwrap_or(5);
 
         // BM25 lexical search (always runs)
@@ -267,7 +270,7 @@ pub fn merge_search_results(
     let mut merged: Vec<MemoryHit> = Vec::with_capacity(lex_results.len() + vec_results.len());
 
     // Add all results, tracking seen texts
-    for hit in lex_results.into_iter().chain(vec_results.into_iter()) {
+    for hit in lex_results.into_iter().chain(vec_results) {
         // Use first 200 chars as dedup key to avoid expensive full-text comparison
         let key = hit.text.chars().take(200).collect::<String>();
         if seen_texts.contains(&key) {

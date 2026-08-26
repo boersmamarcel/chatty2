@@ -83,8 +83,10 @@ async fn load_cached_embedding(skill_dir: &Path, content: &str) -> Option<Vec<f3
     }
     Some(
         bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect(),
     )
 }

@@ -153,32 +153,28 @@ mod gemini_compat_tests {
     #[tokio::test]
     async fn fetch_tool_gemini_compat() {
         use crate::tools::fetch_tool::FetchTool;
-        use rig_core::tool::Tool as RigTool;
         let tool = FetchTool::new(None);
-        check_gemini_compat(tool.definition("".to_string()).await);
+        check_gemini_compat(rig_agent::tool::tool_definition(&tool));
     }
 
     #[tokio::test]
     async fn chart_tool_gemini_compat() {
         use crate::tools::chart_tool::CreateChartTool;
-        use rig_core::tool::Tool as RigTool;
         let tool = CreateChartTool::new(None, None);
-        check_gemini_compat(tool.definition("".to_string()).await);
+        check_gemini_compat(rig_agent::tool::tool_definition(&tool));
     }
 
     #[tokio::test]
     async fn daytona_tool_gemini_compat() {
         use crate::tools::daytona_tool::DaytonaTool;
-        use rig_core::tool::Tool as RigTool;
         let tool = DaytonaTool::new("dummy".to_string(), None);
-        check_gemini_compat(tool.definition("".to_string()).await);
+        check_gemini_compat(rig_agent::tool::tool_definition(&tool));
     }
 
     #[tokio::test]
     async fn search_web_tool_gemini_compat() {
         use crate::tools::search_web_tool::SearchWebTool;
-        use rig_core::tool::Tool as RigTool;
         let tool = SearchWebTool::new_fallback(10);
-        check_gemini_compat(tool.definition("".to_string()).await);
+        check_gemini_compat(rig_agent::tool::tool_definition(&tool));
     }
 }

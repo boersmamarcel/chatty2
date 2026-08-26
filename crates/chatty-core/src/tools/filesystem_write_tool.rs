@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -154,44 +153,48 @@ impl Tool for FinalAnswerTool {
     type Args = FinalAnswerArgs;
     type Output = FinalAnswerOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "final_answer".to_string(),
-            description: "Normalize and write a final answer to a workspace file. \
+    fn description(&self) -> String {
+        "Normalize and write a final answer to a workspace file. \
                           Use this instead of write_file for benchmark/factoid tasks \
                           once you have the answer candidate. Defaults to answer.txt \
                           in the workspace and keeps output compact."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "answer": {
-                        "type": "string",
-                        "description": "The final answer candidate, not the full reasoning."
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "Optional output path. Defaults to answer.txt. Use /app/answer.txt when the task explicitly requires it."
-                    },
-                    "guidance": {
-                        "type": "string",
-                        "description": "Optional task formatting guidance, such as rounding, yes/no, or comma-separated output."
-                    },
-                    "format_hint": {
-                        "type": "string",
-                        "description": "Optional explicit format hint: scalar, numeric, yes_no, comma_separated, or multiline."
-                    },
-                    "trailing_newline": {
-                        "type": "boolean",
-                        "description": "Whether to end the written file with a newline. Defaults to true."
-                    }
-                },
-                "required": ["answer"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string",
+                    "description": "The final answer candidate, not the full reasoning."
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "Optional output path. Defaults to answer.txt. Use /app/answer.txt when the task explicitly requires it."
+                },
+                "guidance": {
+                    "type": "string",
+                    "description": "Optional task formatting guidance, such as rounding, yes/no, or comma-separated output."
+                },
+                "format_hint": {
+                    "type": "string",
+                    "description": "Optional explicit format hint: scalar, numeric, yes_no, comma_separated, or multiline."
+                },
+                "trailing_newline": {
+                    "type": "boolean",
+                    "description": "Whether to end the written file with a newline. Defaults to true."
+                }
+            },
+            "required": ["answer"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let path = args.output_path.unwrap_or_else(|| "answer.txt".to_string());
         let (answer, notes) = normalize_final_answer(
             &args.answer,
@@ -393,35 +396,39 @@ impl Tool for WriteFileTool {
     type Args = WriteFileArgs;
     type Output = WriteFileOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "write_file".to_string(),
-            description: "Create or overwrite a file within the workspace. \
+    fn description(&self) -> String {
+        "Create or overwrite a file within the workspace. \
                          Requires user confirmation before writing. \
                          The file path must be within the workspace directory.\n\
                          \n\
                          Examples:\n\
                          - Create new file: {\"path\": \"src/utils.rs\", \"content\": \"pub fn hello() {}\"}\n\
                          - Write config: {\"path\": \"config.json\", \"content\": \"{\\\"key\\\": \\\"value\\\"}\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write, relative to the workspace root"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["path", "content"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to write, relative to the workspace root"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write to the file"
+                }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Check if file exists to determine if this is an overwrite
         let is_overwrite = self.service.read_file(&args.path).await.is_ok();
 
@@ -479,31 +486,34 @@ impl Tool for CreateDirectoryTool {
     type Args = CreateDirectoryArgs;
     type Output = CreateDirectoryOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "create_directory".to_string(),
-            description:
-                "Create a directory (and any necessary parent directories) within the workspace. \
+    fn description(&self) -> String {
+        "Create a directory (and any necessary parent directories) within the workspace. \
                          Does not require confirmation as it is non-destructive.\n\
                          \n\
                          Examples:\n\
                          - Create directory: {\"path\": \"src/components\"}\n\
                          - Create nested: {\"path\": \"tests/integration/fixtures\"}"
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the directory to create, relative to the workspace root"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the directory to create, relative to the workspace root"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let already_existed = self.service.create_directory(&args.path).await?;
         Ok(CreateDirectoryOutput {
             path: args.path,
@@ -546,31 +556,35 @@ impl Tool for DeleteFileTool {
     type Args = DeleteFileArgs;
     type Output = DeleteFileOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "delete_file".to_string(),
-            description: "Delete a file within the workspace. \
+    fn description(&self) -> String {
+        "Delete a file within the workspace. \
                          Requires user confirmation before deleting. \
                          This operation is irreversible.\n\
                          \n\
                          Examples:\n\
                          - Delete file: {\"path\": \"temp/output.log\"}\n\
                          - Remove old config: {\"path\": \"config.old.json\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to delete, relative to the workspace root"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to delete, relative to the workspace root"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let operation = WriteOperation::DeleteFile {
             path: args.path.clone(),
         };
@@ -626,35 +640,39 @@ impl Tool for MoveFileTool {
     type Args = MoveFileArgs;
     type Output = MoveFileOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "move_file".to_string(),
-            description: "Move or rename a file within the workspace. \
+    fn description(&self) -> String {
+        "Move or rename a file within the workspace. \
                          Requires user confirmation. \
                          The destination must not already exist.\n\
                          \n\
                          Examples:\n\
                          - Rename: {\"source\": \"old_name.rs\", \"destination\": \"new_name.rs\"}\n\
                          - Move: {\"source\": \"file.txt\", \"destination\": \"archive/file.txt\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "source": {
-                        "type": "string",
-                        "description": "Current path of the file, relative to workspace root"
-                    },
-                    "destination": {
-                        "type": "string",
-                        "description": "New path for the file, relative to workspace root"
-                    }
-                },
-                "required": ["source", "destination"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "Current path of the file, relative to workspace root"
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "New path for the file, relative to workspace root"
+                }
+            },
+            "required": ["source", "destination"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let operation = WriteOperation::MoveFile {
             source: args.source.clone(),
             destination: args.destination.clone(),
@@ -763,10 +781,8 @@ impl Tool for ApplyDiffTool {
     type Args = ApplyDiffArgs;
     type Output = ApplyDiffOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "apply_diff".to_string(),
-            description: "Apply a targeted edit to a file by replacing specific content. \
+    fn description(&self) -> String {
+        "Apply a targeted edit to a file by replacing specific content. \
                          Requires user confirmation. \
                          Provide the exact old content to find and the new content to replace it with. \
                          Only the first occurrence is replaced.\n\
@@ -774,29 +790,35 @@ impl Tool for ApplyDiffTool {
                          Examples:\n\
                          - Fix typo: {\"path\": \"README.md\", \"old_content\": \"teh\", \"new_content\": \"the\"}\n\
                          - Update function: {\"path\": \"src/main.rs\", \"old_content\": \"fn old()\", \"new_content\": \"fn new()\"}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to edit, relative to workspace root"
-                    },
-                    "old_content": {
-                        "type": "string",
-                        "description": "Exact content to find in the file (will be replaced)"
-                    },
-                    "new_content": {
-                        "type": "string",
-                        "description": "New content to replace the old content with"
-                    }
-                },
-                "required": ["path", "old_content", "new_content"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit, relative to workspace root"
+                },
+                "old_content": {
+                    "type": "string",
+                    "description": "Exact content to find in the file (will be replaced)"
+                },
+                "new_content": {
+                    "type": "string",
+                    "description": "New content to replace the old content with"
+                }
+            },
+            "required": ["path", "old_content", "new_content"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let operation = WriteOperation::ApplyDiff {
             path: args.path.clone(),
             old_preview: preview(&args.old_content, PREVIEW_MAX_CHARS),

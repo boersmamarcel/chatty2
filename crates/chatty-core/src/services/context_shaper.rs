@@ -27,7 +27,6 @@
 //! eprintln!("context shaper applied: {:?}", shaped.stage_applied);
 //! ```
 
-use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::completion::message::{AssistantContent, Text, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
@@ -273,10 +272,10 @@ fn stage1_budget_reduction(
 }
 
 fn trim_tool_result_content(
-    content: OneOrMany<ToolResultContent>,
+    content: Vec<ToolResultContent>,
     limit: usize,
     freed: &mut usize,
-) -> OneOrMany<ToolResultContent> {
+) -> Vec<ToolResultContent> {
     let items: Vec<ToolResultContent> = content
         .into_iter()
         .map(|item| match item {
@@ -289,7 +288,7 @@ fn trim_tool_result_content(
                     format!("[tool result truncated — {original_len} chars]\n{preview}…");
                 // freed = chars removed (original minus the stub we wrote).
                 *freed += original_len.saturating_sub(stub_text.len());
-                ToolResultContent::Text(Text { text: stub_text })
+                ToolResultContent::Text(Text::new(stub_text))
             }
             other => other,
         })
@@ -323,12 +322,10 @@ fn stage2_snip(history: Vec<Message>, settings: &ContextShaperSettings) -> (Vec<
         .sum();
 
     let marker = Message::User {
-        content: OneOrMany::one(UserContent::Text(Text {
-            text: format!(
-                "[CONTEXT SHAPER: {} messages snipped to reduce context size]",
-                drop_end - drop_start
-            ),
-        })),
+        content: vec![UserContent::Text(Text::new(format!(
+            "[CONTEXT SHAPER: {} messages snipped to reduce context size]",
+            drop_end - drop_start
+        )))],
     };
 
     let mut new_history = Vec::with_capacity(head + 1 + tail);
@@ -403,9 +400,7 @@ fn micro_compact_tool_result(mut tr: ToolResult) -> (ToolResult, usize) {
                     // One-line summary: first 120 chars of trimmed text.
                     let summary: String = t.text.trim().chars().take(120).collect();
                     freed += original_len.saturating_sub(summary.len() + 30);
-                    ToolResultContent::Text(Text {
-                        text: format!("[compacted] {summary}…"),
-                    })
+                    ToolResultContent::Text(Text::new(format!("[compacted] {summary}…")))
                 }
                 other => other,
             })
@@ -487,6 +482,7 @@ fn message_chars(msg: &Message) -> usize {
                     .map(|c| match c {
                         ToolResultContent::Text(t) => t.text.len(),
                         ToolResultContent::Image(_) => 256, // arbitrary placeholder
+                        ToolResultContent::Json { .. } => 256,
                     })
                     .sum::<usize>(),
                 UserContent::Image(_) => 256,
@@ -509,25 +505,25 @@ fn message_chars(msg: &Message) -> usize {
     }
 }
 
-/// Helper: convert user content into a non-empty `OneOrMany`.
-fn to_user_content(items: Vec<UserContent>) -> OneOrMany<UserContent> {
-    match items.len() {
-        0 => OneOrMany::one(UserContent::Text(Text {
-            text: "[CONTEXT SHAPER: empty user message omitted]".to_string(),
-        })),
-        1 => OneOrMany::one(items.into_iter().next().unwrap()),
-        _ => OneOrMany::many(items).expect("non-empty vec always produces OneOrMany"),
+/// Helper: ensure user content is non-empty (empty messages get a placeholder).
+fn to_user_content(items: Vec<UserContent>) -> Vec<UserContent> {
+    if items.is_empty() {
+        vec![UserContent::Text(Text::new(
+            "[CONTEXT SHAPER: empty user message omitted]",
+        ))]
+    } else {
+        items
     }
 }
 
-/// Helper: convert tool-result content into a non-empty `OneOrMany`.
-fn to_tool_result_content(items: Vec<ToolResultContent>) -> OneOrMany<ToolResultContent> {
-    match items.len() {
-        0 => OneOrMany::one(ToolResultContent::Text(Text {
-            text: "[CONTEXT SHAPER: empty tool result omitted]".to_string(),
-        })),
-        1 => OneOrMany::one(items.into_iter().next().unwrap()),
-        _ => OneOrMany::many(items).expect("non-empty vec always produces OneOrMany"),
+/// Helper: ensure tool-result content is non-empty (empty results get a placeholder).
+fn to_tool_result_content(items: Vec<ToolResultContent>) -> Vec<ToolResultContent> {
+    if items.is_empty() {
+        vec![ToolResultContent::Text(Text::new(
+            "[CONTEXT SHAPER: empty tool result omitted]",
+        ))]
+    } else {
+        items
     }
 }
 
@@ -564,21 +560,19 @@ mod tests {
 
     fn user_text(s: &str) -> Message {
         Message::User {
-            content: OneOrMany::one(UserContent::Text(Text {
-                text: s.to_string(),
-            })),
+            content: vec![UserContent::Text(Text::new(s.to_string()))],
         }
     }
 
     fn tool_result_msg(id: &str, content: &str) -> Message {
+        use rig_core::completion::message::ToolCallId;
         Message::User {
-            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                id: id.to_string(),
-                call_id: None,
-                content: OneOrMany::one(ToolResultContent::Text(Text {
-                    text: content.to_string(),
-                })),
-            })),
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new(id).unwrap(),
+                provider: None,
+                name: "test_tool".to_string(),
+                content: vec![ToolResultContent::Text(Text::new(content.to_string()))],
+            })],
         }
     }
 
@@ -632,8 +626,8 @@ mod tests {
         assert!(freed > 0);
         // Content should be a stub now.
         if let Message::User { content } = &out[0] {
-            if let UserContent::ToolResult(tr) = content.first() {
-                if let ToolResultContent::Text(t) = tr.content.first() {
+            if let Some(UserContent::ToolResult(tr)) = content.first() {
+                if let Some(ToolResultContent::Text(t)) = tr.content.first() {
                     assert!(t.text.contains("truncated"));
                 }
             }
@@ -662,7 +656,7 @@ mod tests {
         assert_eq!(out.len(), 4);
         // The marker should mention "snipped".
         if let Message::User { content } = &out[1] {
-            if let UserContent::Text(t) = content.first() {
+            if let Some(UserContent::Text(t)) = content.first() {
                 assert!(t.text.contains("snipped"));
             }
         }

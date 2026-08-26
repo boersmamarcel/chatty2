@@ -19,8 +19,7 @@
 //!
 //! See `docs/monty-sandbox.md` for the broader sandbox architecture.
 
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -798,10 +797,8 @@ impl Tool for DaytonaTool {
     type Args = DaytonaToolArgs;
     type Output = DaytonaToolOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "daytona_run".to_string(),
-            description: "Execute code in an isolated Daytona cloud sandbox. \
+    fn description(&self) -> String {
+        "Execute code in an isolated Daytona cloud sandbox. \
                          Creates a secure, ephemeral sandbox environment, runs your code, \
                          returns the output, and cleans up automatically. \
                          Generated files (images, HTML, PDFs, CSVs) are automatically \
@@ -809,25 +806,31 @@ impl Tool for DaytonaTool {
                          add_attachment or any file tool afterwards; the files are already local. \
                          Use this for running code snippets, scripts, or commands in a \
                          fully isolated cloud environment with internet access."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "The code or script to execute in the sandbox"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Programming language hint (e.g. 'python', 'javascript', 'bash'). Optional."
-                    }
-                },
-                "required": ["code"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The code or script to execute in the sandbox"
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Programming language hint (e.g. 'python', 'javascript', 'bash'). Optional."
+                }
+            },
+            "required": ["code"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let code = args.code.trim().to_string();
         if code.is_empty() {
             return Err(DaytonaToolError::ApiError(

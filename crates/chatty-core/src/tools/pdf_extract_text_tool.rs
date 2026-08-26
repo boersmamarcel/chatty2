@@ -1,5 +1,6 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+#[cfg(test)]
+use rig_agent::tool::tool_definition;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,10 +49,8 @@ impl Tool for PdfExtractTextTool {
     type Args = PdfExtractTextArgs;
     type Output = PdfExtractTextOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "pdf_extract_text".to_string(),
-            description: "Extract text content from PDF pages. Returns the raw text from \
+    fn description(&self) -> String {
+        "Extract text content from PDF pages. Returns the raw text from \
                          specified pages (or all pages) of a PDF. Use this to read PDF \
                          documents, search for content, or process text from scanned documents \
                          that have OCR layers.\n\
@@ -62,26 +61,32 @@ impl Tool for PdfExtractTextTool {
                          Examples:\n\
                          - Extract all text: {\"path\": \"docs/report.pdf\"}\n\
                          - Extract specific pages: {\"path\": \"docs/report.pdf\", \"pages\": [0, 1, 2]}"
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
-                    },
-                    "pages": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Zero-indexed page numbers to extract text from. If omitted, extracts from all pages (up to 50)."
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the PDF file, relative to the workspace root or absolute within workspace"
+                },
+                "pages": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Zero-indexed page numbers to extract text from. If omitted, extracts from all pages (up to 50)."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
 
         let ext = canonical
@@ -168,7 +173,7 @@ fn extract_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::Tool;
+    use rig_agent::tool::{Tool, ToolContext};
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -246,7 +251,7 @@ startxref
     #[tokio::test]
     async fn test_definition_metadata() {
         let (tool, _) = create_test_tool().await;
-        let def = tool.definition("test".into()).await;
+        let def = tool_definition(&tool);
 
         assert_eq!(def.name, "pdf_extract_text");
         assert!(def.description.contains("Extract text"));
@@ -260,10 +265,13 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfExtractTextArgs {
-                path: "test_extract.pdf".into(),
-                pages: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "test_extract.pdf".into(),
+                    pages: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -282,10 +290,13 @@ startxref
         create_test_pdf(&pdf_path);
 
         let result = tool
-            .call(PdfExtractTextArgs {
-                path: "test_specific_text.pdf".into(),
-                pages: Some(vec![0]),
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "test_specific_text.pdf".into(),
+                    pages: Some(vec![0]),
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&pdf_path);
@@ -302,10 +313,13 @@ startxref
         fs::write(&txt_path, "hello").unwrap();
 
         let result = tool
-            .call(PdfExtractTextArgs {
-                path: "notes.txt".into(),
-                pages: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "notes.txt".into(),
+                    pages: None,
+                },
+            )
             .await;
 
         let _ = fs::remove_file(&txt_path);
@@ -316,10 +330,13 @@ startxref
     async fn test_rejects_nonexistent() {
         let (tool, _) = create_test_tool().await;
         let result = tool
-            .call(PdfExtractTextArgs {
-                path: "nonexistent.pdf".into(),
-                pages: None,
-            })
+            .call(
+                &mut ToolContext::new(),
+                PdfExtractTextArgs {
+                    path: "nonexistent.pdf".into(),
+                    pages: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

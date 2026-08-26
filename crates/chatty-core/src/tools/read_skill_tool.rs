@@ -1,5 +1,4 @@
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -76,31 +75,35 @@ impl Tool for ReadSkillTool {
     type Args = ReadSkillArgs;
     type Output = ReadSkillOutput;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_skill".to_string(),
-            description: "Load the full instructions for a named skill. \
+    fn description(&self) -> String {
+        "Load the full instructions for a named skill. \
                           Skills are listed with a one-line description in the automatic context \
                           block — use this tool to get the complete step-by-step procedure. \
                           Searches the workspace .claude/skills/ directory first, then the \
                           global skills directory. For skills created with save_skill (not \
                           filesystem files), use search_memory instead."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Exact name of the skill to load \
-                                        (matches the subdirectory name, e.g. \"build-and-check\")."
-                    }
-                },
-                "required": ["name"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact name of the skill to load \
+                                    (matches the subdirectory name, e.g. \"build-and-check\")."
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let file_names = ["SKILL.md", "skill.md"];
 
         // Check workspace directory first
@@ -151,9 +154,12 @@ mod tests {
     async fn returns_not_found_for_missing_skill() {
         let tool = ReadSkillTool::new(None);
         let result = tool
-            .call(ReadSkillArgs {
-                name: "nonexistent-skill-xyz".to_string(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadSkillArgs {
+                    name: "nonexistent-skill-xyz".to_string(),
+                },
+            )
             .await;
         assert!(matches!(result, Err(ReadSkillError::NotFound(_))));
     }
@@ -171,9 +177,12 @@ mod tests {
 
         let tool = ReadSkillTool::new(Some(tmp.path().to_path_buf()));
         let output = tool
-            .call(ReadSkillArgs {
-                name: "my-skill".to_string(),
-            })
+            .call(
+                &mut ToolContext::new(),
+                ReadSkillArgs {
+                    name: "my-skill".to_string(),
+                },
+            )
             .await
             .unwrap();
 
