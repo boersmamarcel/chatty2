@@ -25,15 +25,31 @@ jobs:
         uses: anthropics/claude-code-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--allowed-tools "Read,WebFetch,WebSearch,Bash(cargo *),Bash(jq *),Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh issue close:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh issue view:*)"'
+          claude_args: '--allowed-tools "Read,WebFetch,WebSearch,Bash(cargo *),Bash(jq *),Bash(curl *),Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh issue close:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh issue view:*)"'
           prompt: |
             # Dependency Update Check for Chatty Release
 
-            TASK: Check dependencies for updates and propose grouped tech debt cleanup releases.
-            Do NOT create individual issues per crate. Instead, group updates into coherent
-            tech debt release proposals.
+            TASK: Check dependencies for updates and file work into the correct track.
+            Do NOT create individual issues per crate. Group updates into coherent batches.
+
+            ## Two tracks (binding)
+
+            **Auto-ship track** → Linear project **Chatty auto-ship**
+            (https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e,
+            project id `1f9c7583-8e02-44bd-a208-0c976f8006f7`, team Agents-research / AGE):
+            - CRITICAL security / CVE bumps (standalone issue per CVE or per crate)
+            - Safe **infrastructure** patch/minor bumps only (tokio, serde, serde_json,
+              reqwest, azure_* patch/minor — NOT major)
+            - Agents will implement these with GitHub labels `ship:auto` + `release:patch`
+
+            **Human track** → GitHub issues labeled `tech-debt` (NOT Linear auto-ship):
+            - AI/LLM updates (rig-core, rmcp) including majors
+            - UI/Rendering updates (gpui, gpui-component, typst, typst-svg, pdfium-render)
+            - Any **major** bump, large migration, or high blast-radius change
+            - Auth/billing-related deps
 
             ## Dependencies to Check
             Only check dependencies core to the application:
@@ -57,77 +73,90 @@ jobs:
             ## Step 2: Categorize Updates
             Sort each outdated dependency into one of these buckets:
 
-            **CRITICAL (standalone issue)**:
+            **CRITICAL / security (auto-ship, standalone)**:
             - Security vulnerabilities — always file immediately as its own issue
             - Title: "Security: Update {crate} {current} → {latest}"
 
-            **AI/LLM updates (group together)**:
-            - rig-core, rmcp — we want to stay current with AI capabilities
-            - These are high-priority and should be grouped together
+            **Infrastructure safe (auto-ship, group)**:
+            - tokio, serde, serde_json, reqwest, azure_* — patch or minor only
+            - Skip if the bump is major → put in human track instead
 
-            **UI/Rendering updates (group together)**:
+            **AI/LLM updates (human track, group)**:
+            - rig-core, rmcp
+
+            **UI/Rendering updates (human track, group)**:
             - gpui, gpui-component, typst, typst-svg, pdfium-render
 
-            **Infrastructure updates (group together)**:
-            - tokio, serde, reqwest, azure_*, and other supporting crates
-
             **SKIP**:
-            - Patch-only bumps (0.0.x) unless they fix bugs we've hit
+            - Patch-only bumps with no security/bugfix signal (except CRITICAL)
             - Crates already at latest version
             - Updates with no meaningful changelog entries
 
-            ## Step 3: Check for Existing Tech Debt Issues
+            ## Step 3: Deduplicate before creating
             CRITICAL — do this BEFORE creating anything:
+
+            Auto-ship / Linear (if LINEAR_API_KEY is set):
+            - Query open issues in project Chatty auto-ship via Linear GraphQL
+              (filter titles containing "Security:" or "Auto-ship: Infrastructure")
+            - Do not duplicate; comment on existing issues when versions advance
+
+            Human / GitHub:
             - Run: gh issue list --state open --search "Tech Debt" --limit 50
-            - Look for open issues with "Tech Debt" in the title
-            - Note what they already cover (read the issue body if needed with gh issue view)
+            - Note what open tech-debt issues already cover
 
-            ## Step 4: Create or Amend Tech Debt Issues
-            For each non-empty bucket from Step 2:
+            ## Step 4: File work
 
-            **If an open tech debt issue already covers this bucket:**
-            - Read the existing issue body with: gh issue view {number}
-            - Check if the updates you found are already listed
-            - If there are NEW updates not yet in the issue, append them with:
-              gh issue comment {number} --body "..."
-              Include: what's new since last check, updated version targets
-            - Do NOT create a duplicate issue
+            ### Auto-ship → Linear (preferred when LINEAR_API_KEY is set)
 
-            **If no matching open tech debt issue exists:**
-            - Create ONE issue per bucket (not per crate!)
-            - Title format: "Tech Debt: {bucket name} updates"
-              Examples:
+            Use Linear GraphQL `https://api.linear.app/graphql` with header
+            `Authorization: <LINEAR_API_KEY>` (raw key, no Bearer prefix if the secret
+            is already an API key).
+
+            Create issue mutation must:
+            - Set `teamId` for Agents-research (`5903cbf0-a4ad-4d7a-ba33-2f13bf95e18c`)
+            - Set `projectId` to Chatty auto-ship (`1f9c7583-8e02-44bd-a208-0c976f8006f7`)
+            - Title examples:
+              - "Security: Update {crate} {current} → {latest}"
+              - "Auto-ship: Infrastructure updates (tokio, serde, …)"
+            - Body: checklist `- [ ] crate: current → latest`, effort, changelogs,
+              note "ship:auto + release:patch when implementing"
+            - Prefer labels `owner:ai` and `ship:auto` if the API allows attaching them
+
+            If LINEAR_API_KEY is unset or Linear calls fail:
+            - Fall back to GitHub issues with title prefix `[auto-ship]` and labels
+              `ship:auto`, `dependencies` so a Cursor automation can mirror them into Linear.
+
+            ### Human track → GitHub only
+
+            Title format: "Tech Debt: {bucket name} updates"
+            Examples:
               - "Tech Debt: AI/LLM dependency updates (rig-core, rmcp)"
               - "Tech Debt: UI/Rendering updates (gpui, typst)"
-              - "Tech Debt: Infrastructure updates (tokio, serde, azure)"
-            - Body must include:
-              - A checklist of each crate to update: `- [ ] crate: current → latest`
-              - For each crate: one-line summary of why (new feature, bug fix, etc.)
-              - Estimated effort: Low / Medium / High
-              - Any breaking changes or migration notes
-              - Link to relevant changelogs
+            Labels: `tech-debt`, `dependencies`
+            Body: checklist, effort, breaking-change notes, changelogs
+            NEVER put these in Chatty auto-ship.
 
             ## Sizing Guidelines
-            - Each tech debt issue should be completable in roughly 1-3 hours of work
+            - Each issue should be completable in roughly 1-3 hours of work
             - If a bucket has too many updates (>6 crates) or includes a complex migration,
               split it into smaller issues with clear scope
-            - If a bucket has only 1 trivial update, skip it — not worth the issue overhead
+            - If a bucket has only 1 trivial non-security update, skip it
             - Aim for 0-3 issues total per run. Creating 0 issues is perfectly fine.
 
             ## Quality Bar
             Before creating each issue, ask: "Is this actionable and worth a developer's time?"
-            - A good tech debt issue: clear scope, grouped logically, achievable in one session
-            - A bad tech debt issue: single patch bump, no real value, just noise
+            - Auto-ship issues must be low blast-radius (security or safe infra)
+            - Human tech-debt issues cover high-risk majors and UI/LLM bumps
 
             ## Project Context
             Chatty is a desktop chat app using GPUI for UI, rig-core for LLM integration,
             rmcp for MCP support, and typst for math rendering. Stay current with AI/LLM
-            libraries for latest capabilities. For UI and infrastructure, only flag meaningful
-            improvements or security fixes.
+            libraries for latest capabilities — but those stay on the human track.
+            Auto-ship is for CVE fixes and boring infra patches only.
 
             ## Output
             End with a summary:
             1. Table of ALL checked dependencies (including skipped ones)
-               | Crate | Current | Latest | Bump | Action | Reason |
-            2. List of issues created or amended (with issue numbers)
-            3. Total: X issues created, Y issues amended, Z crates skipped
+               | Crate | Current | Latest | Bump | Track | Action | Reason |
+            2. List of Linear / GitHub issues created or amended
+            3. Total: X auto-ship filed, Y human tech-debt filed, Z crates skipped

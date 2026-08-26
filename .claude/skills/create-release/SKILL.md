@@ -9,6 +9,10 @@ allowed-tools: Bash, Read, Grep, Glob, Edit
 
 Prepares and executes a new Chatty release. The bump type is `$ARGUMENTS` (defaults to `patch` if not specified).
 
+**Human path only.** Do not use this skill for Linear **Chatty auto-ship** / `ship:auto`
+work — that path labels the PR `ship:auto` + `release:patch` and relies on auto-merge +
+`prepare-release`. This skill is for Marcel-driven releases (PR label or `workflow_dispatch`).
+
 ## Determine Release Method
 
 First, figure out the current context:

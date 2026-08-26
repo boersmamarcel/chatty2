@@ -2,18 +2,36 @@
 
 This document explains how to create a release for Chatty.
 
-## Prerequisites
+## Preferred paths (use these)
 
-1. Version in `Cargo.toml` matches the release version you want to create
-2. All changes are committed and pushed to `main`
+### A. PR merge with a release label (human path)
 
-## Release Workflow Options
+1. Open a PR to `main` with exactly one of `release:patch`, `release:minor`, `release:major`.
+2. Merge when CI is green.
+3. `prepare-release.yml` bumps `Cargo.toml`, commits, tags `vX.Y.Z`, creates the GitHub
+   Release, and calls `release.yml` to build artifacts.
 
-The release pipeline supports **two workflows**:
+On a PR branch, `/create-release patch` (or minor/major) only **adds the label** — it does
+not create a tag by hand.
 
-### Option 1: Tag Push (Automatic)
+### B. Auto-ship (zero-human patch releases)
 
-**Best for:** Quick releases without custom release notes
+For low-risk work filed in Linear project **Chatty auto-ship** only:
+
+1. Agent opens PR: branch `auto/*`, title `auto: …`, labels `ship:auto` + `release:patch`.
+2. `ship-auto-guard.yml` enforces patch-only + path deny-list.
+3. When required checks are green, auto-merge squash-merges to `main`.
+4. Same `prepare-release` → `release.yml` pipeline as (A).
+
+Never hand-tag for auto-ship. Failures notify Linear, Slack `#chatty-auto-ship`, and GitHub.
+
+## Deprecated for routine releases: manual tag / UI draft
+
+Hand-updating `Cargo.toml` and pushing `vX.Y.Z` (or drafting a GitHub Release) is easy to
+desync from `Cargo.toml`. Prefer (A) or (B). The workflows below remain for emergency or
+one-off use only.
+
+### Legacy Option 1: Tag Push
 
 ```bash
 # 1. Update version in Cargo.toml
@@ -37,7 +55,7 @@ git push origin v0.1.21
 - Generates release notes from commits
 - Uploads all build artifacts
 
-### Option 2: GitHub UI Release (Manual)
+### Legacy Option 2: GitHub UI Release
 
 **Best for:** Releases with custom release notes or announcements
 
