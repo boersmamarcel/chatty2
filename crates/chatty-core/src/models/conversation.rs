@@ -706,32 +706,15 @@ impl Conversation {
     }
 
     pub fn start_sub_agent_progress(&mut self, prompt: &str, source: ToolSource) {
-        start_sub_agent_progress_state(
-            &mut self.streaming_message,
-            &mut self.streaming_trace,
-            &mut self.streaming_sub_agent_trace,
-            prompt,
-            source,
-        );
+        start_sub_agent_progress_state(&mut self.streaming_sub_agent_trace, prompt, source);
     }
 
     pub fn append_sub_agent_progress(&mut self, line: &str) {
-        append_sub_agent_progress_state(
-            &mut self.streaming_message,
-            &mut self.streaming_trace,
-            &mut self.streaming_sub_agent_trace,
-            line,
-        );
+        append_sub_agent_progress_state(&mut self.streaming_sub_agent_trace, line);
     }
 
     pub fn finalize_sub_agent_progress(&mut self, success: bool, result: Option<String>) {
-        finalize_sub_agent_progress_state(
-            &mut self.streaming_message,
-            &mut self.streaming_trace,
-            &mut self.streaming_sub_agent_trace,
-            success,
-            result,
-        );
+        finalize_sub_agent_progress_state(&mut self.streaming_sub_agent_trace, success, result);
     }
 
     /// Get or create the streaming trace, returning a mutable reference
@@ -857,32 +840,29 @@ mod tests {
 
     #[test]
     fn sub_agent_progress_does_not_touch_parent_body() {
-        let mut streaming_message = Some("assistant body".to_string());
-        let mut streaming_trace = None;
+        let streaming_message = Some("assistant body".to_string());
+        let streaming_trace = Some(SystemTrace::new());
         let mut streaming_sub_agent_trace = None;
 
         start_sub_agent_progress_state(
-            &mut streaming_message,
-            &mut streaming_trace,
             &mut streaming_sub_agent_trace,
             "investigate",
             ToolSource::Local,
         );
-        append_sub_agent_progress_state(
-            &mut streaming_message,
-            &mut streaming_trace,
-            &mut streaming_sub_agent_trace,
-            "working...",
-        );
+        append_sub_agent_progress_state(&mut streaming_sub_agent_trace, "working...");
         finalize_sub_agent_progress_state(
-            &mut streaming_message,
-            &mut streaming_trace,
             &mut streaming_sub_agent_trace,
             true,
             Some("done".to_string()),
         );
 
         assert_eq!(streaming_message.as_deref(), Some("assistant body"));
+        assert!(
+            streaming_trace
+                .as_ref()
+                .is_some_and(|trace| trace.items.is_empty()),
+            "parent streaming_trace must not be replaced by the sub-agent progress card"
+        );
 
         let trace = streaming_sub_agent_trace
             .as_ref()
@@ -897,41 +877,27 @@ mod tests {
 }
 
 fn start_sub_agent_progress_state(
-    _streaming_message: &mut Option<String>,
-    streaming_trace: &mut Option<SystemTrace>,
     streaming_sub_agent_trace: &mut Option<SystemTrace>,
     prompt: &str,
     source: ToolSource,
 ) {
-    let trace = SystemTrace::new_sub_agent(prompt, source);
-    *streaming_trace = Some(trace.clone());
-    *streaming_sub_agent_trace = Some(trace);
+    *streaming_sub_agent_trace = Some(SystemTrace::new_sub_agent(prompt, source));
 }
 
 fn append_sub_agent_progress_state(
-    _streaming_message: &mut Option<String>,
-    streaming_trace: &mut Option<SystemTrace>,
     streaming_sub_agent_trace: &mut Option<SystemTrace>,
     line: &str,
 ) {
-    if let Some(trace) = streaming_trace.as_mut() {
-        trace.append_sub_agent_progress(line);
-    }
     if let Some(trace) = streaming_sub_agent_trace.as_mut() {
         trace.append_sub_agent_progress(line);
     }
 }
 
 fn finalize_sub_agent_progress_state(
-    _streaming_message: &mut Option<String>,
-    streaming_trace: &mut Option<SystemTrace>,
     streaming_sub_agent_trace: &mut Option<SystemTrace>,
     success: bool,
     result: Option<String>,
 ) {
-    if let Some(trace) = streaming_trace.as_mut() {
-        trace.finalize_sub_agent_progress(success, result.clone());
-    }
     if let Some(trace) = streaming_sub_agent_trace.as_mut() {
         trace.finalize_sub_agent_progress(success, result);
     }

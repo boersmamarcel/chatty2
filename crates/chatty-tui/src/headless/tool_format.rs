@@ -6,6 +6,18 @@
 
 use crate::engine::{ToolCallInfo, ToolCallState};
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use chatty_core::tools::CHATTY_PROGRESS_PREFIX;
+
+/// Structured progress line for parent processes (`SubAgentTool`).
+///
+/// `status` is `None` for `tool_started`, `Some("ok")` / `Some("err")` for
+/// `tool_finished`.
+pub(super) fn format_progress_line(kind: &str, name: &str, status: Option<&str>) -> String {
+    match status {
+        Some(status) => format!("{CHATTY_PROGRESS_PREFIX}{kind}\t{name}\t{status}"),
+        None => format!("{CHATTY_PROGRESS_PREFIX}{kind}\t{name}"),
+    }
+}
 
 pub(super) fn format_tool_call_lines(tc: &ToolCallInfo) -> Vec<String> {
     let mut lines = vec![format_tool_call_header(tc)];

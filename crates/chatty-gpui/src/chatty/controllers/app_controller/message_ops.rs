@@ -408,7 +408,7 @@ impl ChattyApp {
                     }
                 });
 
-                if name == "invoke_agent" {
+                if name == "invoke_agent" || name == "sub_agent" {
                     // Suppress ToolCallBlock in the UI — the sub-agent progress
                     // system will handle visualisation via the progress channel.
                     self.active_invoke_agent_ids.insert(id);
@@ -492,8 +492,8 @@ impl ChattyApp {
                 });
 
                 if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent result — sub-agent progress already finalized via
-                    // the progress channel; skip creating a ToolCallBlock result.
+                    // invoke_agent / sub_agent result — sub-agent progress already
+                    // finalized via the progress channel; skip creating a ToolCallBlock result.
                 } else {
                     chat_view.update(cx, |view, cx| {
                         if view.conversation_id() == Some(conversation_id) {
@@ -526,7 +526,7 @@ impl ChattyApp {
                 });
 
                 if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent error — sub-agent progress handles error
+                    // invoke_agent / sub_agent error — sub-agent progress handles error
                     // finalization via the progress channel.
                 } else {
                     chat_view.update(cx, |view, cx| {

@@ -386,9 +386,8 @@ pub struct ChattyApp {
     /// Keeps the AgentConfigNotifier entity alive for the app's lifetime so that
     /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
     _mcp_notifier: Entity<AgentConfigNotifier>,
-    /// Tool-call IDs for active invoke_agent calls. These are suppressed from the
-    /// chat UI (no ToolCallBlock) and instead visualised via the sub-agent progress
-    /// system, identical to the `/agent` slash command.
+    /// Tool-call IDs whose ToolCallBlocks are visualised via the sub-agent
+    /// progress channel (`invoke_agent` and `sub_agent`) instead of the main trace.
     active_invoke_agent_ids: std::collections::HashSet<String>,
 }
 

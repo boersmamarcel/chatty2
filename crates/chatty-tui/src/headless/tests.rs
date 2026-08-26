@@ -12,6 +12,22 @@ use std::collections::BTreeSet;
 use crate::engine::{ToolCallInfo, ToolCallState};
 
 #[test]
+fn formats_structured_progress_lines() {
+    assert_eq!(
+        format_progress_line("tool_started", "read_file", None),
+        "CHATTY_PROGRESS\ttool_started\tread_file"
+    );
+    assert_eq!(
+        format_progress_line("tool_finished", "read_file", Some("ok")),
+        "CHATTY_PROGRESS\ttool_finished\tread_file\tok"
+    );
+    assert_eq!(
+        format_progress_line("tool_finished", "shell_execute", Some("err")),
+        "CHATTY_PROGRESS\ttool_finished\tshell_execute\terr"
+    );
+}
+
+#[test]
 fn formats_tool_call_with_pretty_json_and_error_output() {
     let tc = ToolCallInfo {
         id: "call-1".to_string(),

@@ -516,6 +516,9 @@ impl ChattyApp {
                     if let Some(stderr) = stderr {
                         let reader = std::io::BufReader::new(stderr);
                         for line in reader.lines().map_while(Result::ok) {
+                            if chatty_core::tools::is_chatty_progress_line(&line) {
+                                continue;
+                            }
                             let _ = progress_tx.send(line);
                         }
                     }

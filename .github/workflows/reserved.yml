@@ -1,0 +1,18 @@
+name: Reserved symbols
+
+# Fails if a function reserved in RESERVED.md has been implemented without either its
+# todo!("human: ...") marker or a `// HUMAN-WRITTEN: <symbol>` attestation.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check-reserved:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check reserved symbols
+        run: bash scripts/check-reserved.sh
