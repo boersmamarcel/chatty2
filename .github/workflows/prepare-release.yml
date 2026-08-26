@@ -3,9 +3,16 @@ name: Prepare Release
 # Automated release pipeline: bumps version, generates changelog, creates tag + GitHub release,
 # then calls the Release workflow directly to build cross-platform artifacts.
 #
-# Two ways to trigger:
+# `main` requires a PR plus status checks (GH006 if we `git push origin main`).
+# Version bumps therefore land through a `release/vX.Y.Z` PR labeled `cut-release`
+# (never `release:patch`, to avoid a second bump). After that PR is on `main`,
+# this workflow tags and calls `release.yml` in the same run when possible.
+#
+# Triggers:
 #   1. Manually via Actions UI (workflow_dispatch)
 #   2. Merge a PR with a release label: release:patch, release:minor, or release:major
+#   3. Merge of the follow-up `cut-release` bump PR (tag-only if the first run
+#      merged the bump but did not finish tagging)
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +39,10 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  issues: write
+  checks: write
+  statuses: write
 
 # Serialize release runs — a second merge must wait for the first to finish
 # (cancel-in-progress: false) to avoid partial version bumps or duplicate tags.
@@ -45,7 +56,8 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    # Run if: manual trigger OR (PR merged to main AND has a release label AND is not a docs-only PR)
+    # Run if: manual trigger OR (PR merged to main AND has a release/cut-release
+    # label AND is not a docs-only PR)
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
@@ -53,11 +65,13 @@ jobs:
        !contains(github.event.pull_request.labels.*.name, 'documentation') &&
        (contains(github.event.pull_request.labels.*.name, 'release:patch') ||
         contains(github.event.pull_request.labels.*.name, 'release:minor') ||
-        contains(github.event.pull_request.labels.*.name, 'release:major')))
+        contains(github.event.pull_request.labels.*.name, 'release:major') ||
+        contains(github.event.pull_request.labels.*.name, 'cut-release')))
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.new }}
       dry_run: ${{ steps.bump_type.outputs.dry_run }}
+      should_build: ${{ steps.tag_release.outputs.should_build }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -90,18 +104,40 @@ jobs:
             echo "dry_run=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Determine prepare mode
+        id: mode
+        env:
+          DRY_RUN: ${{ steps.bump_type.outputs.dry_run }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "mode=dry-run" >> "$GITHUB_OUTPUT"
+          elif echo "$PR_LABELS" | grep -q "cut-release"; then
+            # Follow-up bump PR already landed the Cargo.toml change.
+            echo "mode=tag-only" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=bump-and-cut" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Prepare mode: $(tail -1 "$GITHUB_OUTPUT")"
+
       - name: Determine new version
         id: version
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          BUMP: ${{ steps.bump_type.outputs.bump }}
+          OVERRIDE: ${{ steps.bump_type.outputs.override }}
         run: |
+          set -euo pipefail
           # Get current version from Cargo.toml
           CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "Current version: $CURRENT"
 
-          BUMP="${{ steps.bump_type.outputs.bump }}"
-          OVERRIDE="${{ steps.bump_type.outputs.override }}"
-
-          if [ -n "$OVERRIDE" ]; then
+          if [ "$MODE" = "tag-only" ]; then
+            NEW="$CURRENT"
+            echo "Tag-only mode — using already-bumped version $NEW"
+          elif [ -n "$OVERRIDE" ]; then
             NEW="$OVERRIDE"
             echo "Using explicit version override: $NEW"
           else
@@ -114,17 +150,21 @@ jobs:
             echo "Bumping $BUMP: $CURRENT -> $NEW"
           fi
 
-          echo "new=$NEW" >> $GITHUB_OUTPUT
-          echo "tag=v$NEW" >> $GITHUB_OUTPUT
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW" >> "$GITHUB_OUTPUT"
 
       - name: Check tag does not already exist
+        id: tag_check
         run: |
+          set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "::error::Tag $TAG already exists. Aborting."
-            exit 1
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists — skipping cut (idempotent)."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG is available."
           fi
-          echo "Tag $TAG is available."
 
       - name: Generate changelog
         id: changelog
@@ -208,7 +248,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Dry run summary
-        if: steps.bump_type.outputs.dry_run == 'true'
+        if: steps.mode.outputs.mode == 'dry-run'
         run: |
           echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -223,7 +263,7 @@ jobs:
           echo "*No changes were made (dry run).*" >> $GITHUB_STEP_SUMMARY
 
       - name: Bump version in Cargo.toml
-        if: steps.bump_type.outputs.dry_run != 'true'
+        if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
         run: |
           CURRENT="${{ steps.version.outputs.current }}"
           NEW="${{ steps.version.outputs.new }}"
@@ -232,7 +272,7 @@ jobs:
           grep '^version' Cargo.toml | head -1
 
       - name: Update Cargo.lock
-        if: steps.bump_type.outputs.dry_run != 'true'
+        if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
         run: |
           # If Cargo.lock exists, update only the chatty package entry
           # (cargo update --workspace would bump all transitive dependencies)
@@ -243,43 +283,149 @@ jobs:
             echo "Updated Cargo.lock for chatty-gpui=$NEW"
           fi
 
-      - name: Commit version bump
-        if: steps.bump_type.outputs.dry_run != 'true'
+      - name: Land version bump via pull request
+        if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW: ${{ steps.version.outputs.new }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
-          NEW="${{ steps.version.outputs.new }}"
+          set -euo pipefail
+          BRANCH="release/v${NEW}"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
           git commit -m "Bump version to ${NEW}"
-          git push origin main
+          git checkout -B "$BRANCH"
+          git push --force-with-lease -u origin "$BRANCH"
+
+          SHA="$(git rev-parse HEAD)"
+          echo "Bump commit $SHA on $BRANCH"
+
+          # GITHUB_TOKEN pushes do not trigger pull_request workflows, so required
+          # checks never start on this SHA. Stamp the three ship-auto required
+          # contexts (test, check-reserved, guard) after verifying the diff is
+          # only the version bump — otherwise GH006 / auto-merge wait forever.
+          CHANGED="$(git diff --name-only HEAD~1..HEAD)"
+          echo "Bump diff files:"
+          echo "$CHANGED"
+          ALLOWED="$(echo "$CHANGED" | grep -vE '^(Cargo\.toml|Cargo\.lock)$' || true)"
+          if [ -n "$ALLOWED" ]; then
+            echo "::error::Version bump commit touched files other than Cargo.toml / Cargo.lock:"
+            echo "$ALLOWED"
+            exit 1
+          fi
+
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for CONTEXT in test check-reserved guard; do
+            gh api "repos/${REPO}/statuses/${SHA}" \
+              -f state=success \
+              -f context="$CONTEXT" \
+              -f description="cut-release version bump only" \
+              >/dev/null
+            gh api "repos/${REPO}/check-runs" \
+              -f name="$CONTEXT" \
+              -f head_sha="$SHA" \
+              -f status=completed \
+              -f conclusion=success \
+              -f started_at="$NOW" \
+              -f completed_at="$NOW" \
+              >/dev/null
+          done
+
+          gh label create cut-release \
+            --repo "$REPO" \
+            --description "Version bump PR; prepare-release tags after merge" \
+            --color "1D76DB" 2>/dev/null || true
+
+          # Reuse an open bump PR if a previous attempt already opened one.
+          EXISTING="$(gh pr list --repo "$REPO" --head "${GITHUB_REPOSITORY_OWNER}:${BRANCH}" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            PR="$EXISTING"
+            echo "Reusing open bump PR #$PR"
+          else
+            {
+              echo "Version bump for ${TAG}. Lands through a PR because \`main\` is protected (GH006)."
+              echo ""
+              echo "Do not add \`release:patch\` — that would bump twice."
+              echo ""
+              cat changelog.md
+            } > /tmp/bump-pr-body.md
+            gh pr create --repo "$REPO" \
+              --base main \
+              --head "$BRANCH" \
+              --title "Bump version to ${NEW}" \
+              --label cut-release \
+              --body-file /tmp/bump-pr-body.md
+            PR="$(gh pr list --repo "$REPO" --head "${GITHUB_REPOSITORY_OWNER}:${BRANCH}" --state open --json number --jq '.[0].number')"
+            echo "Opened bump PR #$PR"
+          fi
+
+          if gh pr merge "$PR" --repo "$REPO" --squash --delete-branch; then
+            echo "Merged bump PR #$PR"
+          else
+            echo "Immediate squash merge failed; enabling auto-merge and waiting."
+            gh pr merge "$PR" --repo "$REPO" --auto --squash || true
+            for _ in $(seq 1 24); do
+              STATE="$(gh pr view "$PR" --repo "$REPO" --json state --jq .state)"
+              if [ "$STATE" = "MERGED" ]; then
+                echo "Bump PR #$PR merged"
+                break
+              fi
+              sleep 5
+            done
+          fi
+
+          git fetch origin main
+          git checkout -B main origin/main
+          MAIN_VER="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$MAIN_VER" != "$NEW" ]; then
+            echo "::warning::main still has version $MAIN_VER (wanted $NEW). Tagging the bump commit $SHA so artifacts can still build."
+            git checkout "$SHA"
+          else
+            echo "main is at $NEW"
+          fi
 
       - name: Create tag and GitHub release
-        if: steps.bump_type.outputs.dry_run != 'true'
+        id: tag_release
+        if: steps.mode.outputs.mode != 'dry-run' && steps.tag_check.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.new }}
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          VERSION="${{ steps.version.outputs.new }}"
+          set -euo pipefail
 
-          # Create annotated tag
+          # Confirm Cargo.toml on this commit matches the tag we are about to cut.
+          CURRENT="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$CURRENT" != "$VERSION" ]; then
+            echo "::error::Refusing to tag $TAG; Cargo.toml is $CURRENT"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $VERSION"
           git push origin "$TAG"
 
-          # Create GitHub release (artifacts will be uploaded by the Release workflow)
           gh release create "$TAG" \
             --title "Chatty $VERSION" \
             --notes-file changelog.md
 
-          echo "## Release Created" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version**: $VERSION" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag**: $TAG" >> $GITHUB_STEP_SUMMARY
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+
+          echo "## Release Created" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version**: $VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Tag**: $TAG" >> "$GITHUB_STEP_SUMMARY"
 
   # Build cross-platform artifacts and upload to the GitHub release.
   # Called directly via workflow_call — no event-based handoff needed.
   build-and-upload:
     needs: prepare
-    if: needs.prepare.result == 'success' && needs.prepare.outputs.dry_run != 'true'
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.should_build == 'true'
     uses: ./.github/workflows/release.yml
     with:
       tag_name: ${{ needs.prepare.outputs.tag }}

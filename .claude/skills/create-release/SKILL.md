@@ -84,8 +84,9 @@ Fall back to triggering the workflow directly.
 The `prepare-release` workflow handles everything in a single run:
 1. Bumps version in `Cargo.toml` + `Cargo.lock`
 2. Generates a categorized changelog from commits since last tag
-3. Commits, creates an annotated tag, and creates a GitHub Release
-4. Calls `release.yml` directly via `workflow_call` to build artifacts (no event-based handoff)
+3. Opens (and squash-merges) a `cut-release` PR — `main` is protected, so it does not `git push origin main`
+4. Creates an annotated tag and a GitHub Release
+5. Calls `release.yml` directly via `workflow_call` to build artifacts (no event-based handoff)
 
 The build pipeline produces:
 - **Linux x86_64**: `chatty-linux-x86_64.AppImage`
@@ -108,5 +109,6 @@ gh release list --limit=1
 ## Troubleshooting
 
 - **Label not triggering**: Ensure the PR targets `main` and has exactly one of `release:patch`, `release:minor`, `release:major`
+- **GH006 / protected main**: Expected if a workflow still `git push origin main`. Current `prepare-release` lands the bump via a `cut-release` PR instead. Do not hand-create tags.
 - **Version mismatch error**: The prepare-release workflow handles this automatically — no manual version matching needed
 - **Build failures**: Check platform-specific logs in GitHub Actions
