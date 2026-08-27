@@ -20,11 +20,13 @@ pub mod ablation;
 pub mod aflow;
 pub mod archive;
 pub mod calibration;
+pub mod compound;
 pub mod cost;
 pub mod datasets;
 pub mod gepa;
 pub mod stats;
 pub mod strategy;
+pub mod walking_skeleton;
 pub mod wiki_env;
 
 pub use ablation::AblationConfig;
@@ -32,6 +34,7 @@ pub use calibration::{
     AceCalibration, AflowCalibration, CalibrationModule, CalibrationResult, CalibrationTask,
     DgmCalibration, GepaCalibration, ReactCalibration, run_all_calibrations,
 };
+pub use compound::{CompoundSystem, UnwiredCompoundSystem};
 pub use cost::{CostRow, CostRowInput, format_cost_sheet, row_from_model_prices};
 pub use datasets::{
     DatasetError, DatasetItem, FeverItem, Gsm8kItem, HotpotQaItem, HumanEvalItem, Split,
@@ -43,6 +46,11 @@ pub use stats::{
     paired_bootstrap_mean_diff,
 };
 pub use strategy::{Regime, Strategy, StrategyError};
+pub use walking_skeleton::{
+    CacheKey, DEFAULT_GEPA_ITERATIONS, DEFAULT_ITEM_COUNT, ResponseCache, WalkingSkeletonConfig,
+    WalkingSkeletonResult, missing_supporting_titles, normalized_exact_match,
+    run_from_dataset_path, run_walking_skeleton, select_items,
+};
 
 use thiserror::Error;
 
