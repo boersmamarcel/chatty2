@@ -35,8 +35,15 @@ pub fn paper_dominance_matrix() -> Vec<Vec<f64>> {
 
 /// Instance-wise best → candidates winning ≥1 instance → strict-dominance prune → sample ∝ wins.
 pub fn select_candidate(score_matrix: &[Vec<f64>]) -> Result<usize, OptimizeError> {
+    // score_matrix[candidate][instance]
     let _ = score_matrix;
-    todo!("human: select_candidate — instance-wise Pareto + frequency sampling (AGE-15)")
+    // todo!("human: select_candidate — instance-wise Pareto + frequency sampling (AGE-15)");
+
+    for (i, row) in score_matrix.iter().enumerate() {
+        println!("candate:{i}, {row:?}");
+    }
+
+    Ok(0)
 }
 
 #[cfg(test)]
