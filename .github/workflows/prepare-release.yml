@@ -38,6 +38,11 @@ on:
     branches: [main]
 
 permissions:
+  # contents: tags + release notes; pull-requests: cut-release bump PR;
+  # checks/statuses: intentional Cargo-only bump status stamping (GITHUB_TOKEN
+  # pushes do not trigger pull_request workflows, so required checks are stamped
+  # after verifying the diff is only Cargo.toml / Cargo.lock — see
+  # "Land version bump via pull request"). issues: label create for cut-release.
   contents: write
   pull-requests: write
   issues: write
@@ -56,11 +61,14 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    # Run if: manual trigger OR (PR merged to main AND has a release/cut-release
-    # label AND is not a docs-only PR)
+    # Closed-system: workflow_dispatch is repository_owner only; PR-closed path
+    # requires same-repo head (no fork PRs) plus a release/cut-release label.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
+      (github.event_name == 'workflow_dispatch' &&
+       github.actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.merged == true &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
        !startsWith(github.event.pull_request.head.ref, 'docs/') &&
        !contains(github.event.pull_request.labels.*.name, 'documentation') &&
        (contains(github.event.pull_request.labels.*.name, 'release:patch') ||
