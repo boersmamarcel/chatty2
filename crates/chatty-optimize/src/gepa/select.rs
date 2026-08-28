@@ -1,6 +1,23 @@
 //! GEPA Pareto candidate selection (AGE-15).
 //!
 //! `select_candidate` is **reserved** — GEPA's actual contribution (~30 lines).
+//!
+//! # Debugging your implementation
+//!
+//! **Prefer the example binary** (always runs, shows `println!` inside `select_candidate`):
+//!
+//! ```bash
+//! cargo run -p chatty-optimize --example select_candidate_debug
+//! ```
+//!
+//! Or the ignored unit test (only exists after the debug harness is merged):
+//!
+//! ```bash
+//! cargo test -p chatty-optimize gepa::select::tests::manual_select_candidate -- --ignored --nocapture
+//! ```
+//!
+//! If you see `running 0 tests`, that test is not in your branch yet — use the example,
+//! or cherry-pick commit `0d45dcb` from `cursor/age-22-walking-skeleton-e949`.
 
 use crate::OptimizeError;
 
@@ -37,16 +54,22 @@ mod tests {
 
     /// Manual debug while implementing (human-reserved).
     ///
-    /// ```bash
-    /// cargo test -p chatty-optimize manual_select_candidate -- --ignored --nocapture
-    /// ```
-    ///
-    /// With lldb: set breakpoint on `select_candidate`, then run the same test under the debugger.
+    /// Full name filter avoids accidentally matching zero tests:
+    /// `cargo test -p chatty-optimize gepa::select::tests::manual_select_candidate -- --ignored --nocapture`
     #[test]
     #[ignore = "manual debug harness — run with --ignored while implementing select_candidate"]
     fn manual_select_candidate() {
         let matrix = paper_dominance_matrix();
         let idx = select_candidate(&matrix).expect("select_candidate");
         println!("selected candidate index: {idx}");
+    }
+
+    /// Prints the paper matrix only — always runnable, no `select_candidate` call.
+    #[test]
+    fn paper_matrix_debug_print() {
+        let matrix = paper_dominance_matrix();
+        for (i, row) in matrix.iter().enumerate() {
+            println!("candidate {i}: {row:?}");
+        }
     }
 }
