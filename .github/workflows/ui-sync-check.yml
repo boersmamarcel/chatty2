@@ -4,6 +4,15 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "docs-site/**"
+      - "**/*.md"
+      - ".github/workflows/**"
+      - ".lychee.toml"
+      - "scripts/docs-sync.sh"
+      - "scripts/gen-docs-reference.sh"
+      - "scripts/check-docs-*.sh"
 
 jobs:
   sync-check:
