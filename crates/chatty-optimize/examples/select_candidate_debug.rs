@@ -1,5 +1,7 @@
 //! Manual debug entry for human-reserved [`select_candidate`](chatty_optimize::gepa::select::select_candidate).
 //!
+//! Paper: Agrawal et al., ICLR 2026, arXiv:2507.19457, Algorithm 2 / §3.3.
+//!
 //! ```bash
 //! cargo run -p chatty-optimize --example select_candidate_debug
 //! cargo run -p chatty-optimize --example select_candidate_debug -- --trials 1000 --seed 42

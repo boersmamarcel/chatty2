@@ -2,6 +2,12 @@
 //!
 //! `select_candidate` is **reserved** — GEPA's actual contribution (~30 lines).
 //!
+//! # Reference
+//!
+//! Agrawal et al., *GEPA: Reflective Prompt Evolution Can Outperform Reinforcement
+//! Learning*, ICLR 2026 Oral, arXiv:2507.19457. Algorithm 2 / §3.3 and Figure 4 (right).
+//! <https://arxiv.org/abs/2507.19457>
+//!
 //! # Debugging your implementation
 //!
 //! **Prefer the example binary** (always runs, shows `println!` inside `select_candidate`):
@@ -23,7 +29,7 @@ use crate::OptimizeError;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::thread_rng;
 
-/// Score matrix from the GEPA paper dominance example (rows = candidates, cols = instances).
+/// Score matrix from Agrawal et al. §3.3 (the dominance worked example).
 ///
 /// Candidate 2 wins only instance 1; candidate 3 wins instances 1 and 2 → 2 is strictly dominated.
 pub fn paper_dominance_matrix() -> Vec<Vec<f64>> {
@@ -37,7 +43,7 @@ pub fn paper_dominance_matrix() -> Vec<Vec<f64>> {
 
 /// Instance-wise best → candidates winning ≥1 instance → strict-dominance prune → sample ∝ wins.
 ///
-/// Paper Algorithm 2 (`SELECTCANDIDATE`): `s*` → `P*` → `C` → `D` → `Ĉ` → `f` → sample.
+/// Agrawal et al., Algorithm 2 (`SELECTCANDIDATE`): `s*` → `P*` → `C` → `D` → `Ĉ` → `f` → sample.
 // HUMAN-WRITTEN: select_candidate
 pub fn select_candidate(score_matrix: &[Vec<f64>]) -> Result<usize, OptimizeError> {
     let (_, weights) = pareto_candidates_and_win_counts(score_matrix)?;
