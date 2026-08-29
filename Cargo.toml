@@ -62,7 +62,7 @@ flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.11"
 hex = "0.4"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 percent-encoding = "2"
 
 # Date/time formatting
@@ -81,16 +81,16 @@ azure_identity = "0.20"
 azure_core = "0.20"
 
 # Asset embedding
-rust-embed = "8.0"
+rust-embed = "8.12.0"
 
 # PDF and image
 pdfium-render = "0.9.0"
 image = "0.25"
 
 # Excel
-calamine = "0.34.0"
-rust_xlsxwriter = "0.94.0"
-umya-spreadsheet = "2.3.3"
+calamine = "0.36.1"
+rust_xlsxwriter = "0.99.0"
+umya-spreadsheet = "3.1.0"
 
 # DOCX (Word documents)
 docx-rs = "0.4.20"
@@ -136,7 +136,7 @@ gpui-component-assets = "0.5.1"
 # TUI framework
 ratatui = "0.30.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
-tui-textarea = { package = "tui-textarea-2", version = "0.10.2" }
+tui-textarea = { package = "tui-textarea-2", version = "0.13.2" }
 clap = { version = "4.6.0", features = ["derive"] }
 
 # Unix-specific
