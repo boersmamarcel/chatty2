@@ -8,6 +8,9 @@
 //! paired statistics, ablation flags, QA loaders for in-process GEPA/ACE, calibration
 //! stubs, and the reserved ReAct `Strategy`.
 //!
+//! GEPA code in [`gepa`] follows Agrawal et al., *GEPA: Reflective Prompt Evolution
+//! Can Outperform Reinforcement Learning*, ICLR 2026 Oral, arXiv:2507.19457.
+//!
 //! # Reserved
 //!
 //! `SelectionStrategy`, `soft_mixed_select`, `select_candidate`, `merge`,
