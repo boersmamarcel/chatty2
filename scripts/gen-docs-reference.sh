@@ -171,6 +171,108 @@ make docs-gen
 EOF
 fi
 
+# ── Event catalog (GPUI entity events) ───────────────────────────────────────
+cat > "$OUT/event-catalog.md" << 'EOF'
+# GPUI event catalog
+
+**When to read this:** Wire a new entity subscriber, debug event flow, or find which component emits a variant.
+
+All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [entity-communication](../architecture/entity-communication.md)). This table lists the typed events in `chatty-gpui` and `chatty-core`.
+
+| Event enum | Variant | Key fields | Emitter | Typical subscriber |
+|------------|---------|------------|---------|-------------------|
+| `StreamManagerEvent` | `StreamStarted` | `conversation_id` | `StreamManager` | `ChattyApp` |
+| | `TextChunk` | `conversation_id`, `text` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `ToolCallStarted` | `conversation_id`, `id`, `name` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `ToolCallInput` | `conversation_id`, `id`, `arguments` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `ToolCallResult` | `conversation_id`, `id`, `result` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `ToolCallError` | `conversation_id`, `id`, `error` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `ApprovalRequested` | `conversation_id`, `id`, `command`, `is_sandboxed` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `ApprovalResolved` | `conversation_id`, `id`, `approved` | `StreamManager` | `ChattyApp` → `ChatView` |
+| | `TokenUsage` | `conversation_id`, `input_tokens`, `output_tokens` | `StreamManager` | `ChattyApp` |
+| | `StreamEnded` | `conversation_id`, `status`, `token_usage`, `trace_json`, … | `StreamManager` | `ChattyApp` (finalization) |
+| `SidebarEvent` | `NewChat` | — | `SidebarView` | `ChattyApp` |
+| | `OpenSettings` | — | `SidebarView` | `ChattyApp` |
+| | `SelectConversation` | `String` (id) | `SidebarView` | `ChattyApp` |
+| | `DeleteConversation` | `String` (id) | `SidebarView` | `ChattyApp` |
+| | `ExportConversation` | `String` (id) | `SidebarView` | `ChattyApp` |
+| | `ToggleCollapsed` | `bool` | `SidebarView` | `ChattyApp` |
+| | `LoadMore` | — | `SidebarView` | `ChattyApp` |
+| `ChatInputEvent` | `Send` | `message`, `attachments` | `ChatInputState` | `ChattyApp` |
+| | `ModelChanged` | `String` (model id) | `ChatInputState` | `ChattyApp` |
+| | `Stop` | — | `ChatInputState` | `ChattyApp` |
+| | `SlashCommandSelected` | `String` (command) | `ChatInputState` | `ChattyApp` |
+| | `WorkingDirChanged` | `Option<PathBuf>` | `ChatInputState` | `ChattyApp` |
+| `ChatViewEvent` | `FeedbackChanged` | `history_index`, `feedback` | `ChatView` | `ChattyApp` |
+| | `RegenerateMessage` | `history_index` | `ChatView` | `ChattyApp` |
+| `TraceEvent` | `ToolCallStateChanged` | `tool_id`, `old_state`, `new_state` | `SystemTraceView` | `ChatView` |
+| | `ToolCallInputReceived` | `tool_id` | `SystemTraceView` | `ChatView` |
+| | `ToolCallOutputReceived` | `tool_id`, `has_output` | `SystemTraceView` | `ChatView` |
+| | `ThinkingStateChanged` | `old_state`, `new_state` | `SystemTraceView` | `ChatView` |
+| `ModelsNotifierEvent` | `ModelsReady` | — | `ModelsNotifier` | `ChattyApp` (startup) |
+| `AgentConfigEvent` | `RebuildRequired` | — | `AgentConfigNotifier` | Settings controllers, `ChattyApp` |
+| `ErrorNotifierEvent` | `NewError` | — | `ErrorNotifier` | `ChattyApp` (toast/banner) |
+
+**Source files:** `stream_manager.rs`, `sidebar_view.rs`, `chat_input/mod.rs`, `chat_view/mod.rs`, `message_types.rs` (TraceEvent), `models_notifier.rs`, `agent_config_notifier.rs`, `error_notifier.rs`.
+
+**Adding a new event:** define an enum on the emitter entity, `impl EventEmitter<YourEvent>`, subscribe in the parent (usually `ChattyApp` or `ChatView`). Never use `Arc<dyn Fn>` callbacks between entities.
+EOF
+
+# ── Singleton inventory ──────────────────────────────────────────────────────
+cat > "$OUT/singleton-inventory.md" << 'EOF'
+# Process-global singleton inventory
+
+**When to read this:** Find where shared state lives before adding a new global, repository, or `OnceLock`.
+
+Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This page expands it with accessors and rationale.
+
+## Service singletons (`chatty-core/src/lib.rs`)
+
+| Name | Type | Init | Rationale |
+|------|------|------|-----------|
+| `MCP_UPDATE_SENDER` | `OnceLock<mpsc::Sender<Vec<McpServerConfig>>>` | Startup | Cross-cutting MCP config change notifications |
+| `MCP_SERVICE` | `OnceLock<McpService>` | Startup | Tool context has no UI handle; needs shared MCP client |
+
+## Repository registry (`chatty-core/src/lib.rs`)
+
+| Accessor | JSON / storage | Purpose |
+|----------|----------------|---------|
+| `provider_repository()` | providers | LLM provider configs + API keys |
+| `general_settings_repository()` | general settings | Theme, font, UI prefs |
+| `models_repository()` | models | Per-model capabilities |
+| `mcp_repository()` | MCP servers | MCP service definitions |
+| `a2a_repository()` | A2A agents | WASM / remote agent registry |
+| `execution_settings_repository()` | execution | Workspace, approval mode, sandbox |
+| `search_settings_repository()` | search | Web search provider keys |
+| `training_settings_repository()` | training | Fine-tuning prefs |
+| `user_secrets_repository()` | secrets | User-provided secret values |
+| `module_settings_repository()` | modules | WASM module settings |
+| `hive_settings_repository()` | hive | Hive registry / billing |
+| `extensions_repository()` | extensions | Browser extension config |
+
+All repositories initialize via `init_repositories()` once at startup. Use accessor functions — never read `REPOSITORY_REGISTRY` directly.
+
+## Domain-local singletons (near usage)
+
+| Name | Location | Type | Purpose |
+|------|----------|------|---------|
+| `GLOBAL_WRITE_APPROVAL_MODE` | `tools/filesystem_write_tool.rs` | `OnceLock<Mutex<ApprovalMode>>` | Write-tool approval without coupling to UI |
+| `GLOBAL_APPROVAL_NOTIFIER` | `models/execution_approval_store.rs` | `OnceLock<Mutex<Option<UnboundedSender>>>` | Shell tools notify GPUI of pending approvals |
+| `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
+| `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
+| `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
+
+**Design rule:** service and repository singletons stay centralized in `lib.rs`; domain-local `OnceLock`s stay in the module that owns the behavior to avoid coupling unrelated code.
+
+## GPUI globals (`chatty-core` + `gpui-globals` feature)
+
+UI frontends store `WeakEntity<T>` handles in types implementing `gpui::Global` (see `chatty-core/src/gpui_globals.rs`). Examples: `ConversationsStore`, `ModelsModel`, `GlobalStreamManager`, `GlobalChattyApp`. Prefer weak refs in globals to prevent circular ownership.
+
+## Not singletons (avoid confusing with globals)
+
+Module-level `LazyLock<Regex>` and tokenizer caches (`token_budget/counter.rs`, renderer services) are **immutable process caches**, not application state. They do not require `init_*()` and are safe to lazy-init on first use.
+EOF
+
 # ── llms.txt ─────────────────────────────────────────────────────────────────
 cat > "$OUT/llms.txt" << EOF
 # Chatty developer documentation
@@ -192,6 +294,7 @@ cat > "$OUT/llms.txt" << EOF
 ## Reference
 
 - tools-catalog.md, slash-commands.md, env-vars.md, cli-flags.md
+- event-catalog.md, singleton-inventory.md
 
 ## Marketing (end users)
 
