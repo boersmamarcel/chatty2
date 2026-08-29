@@ -3,25 +3,18 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
     runs-on: ubuntu-latest
+
+    # Skip PRs from forks: secrets are not available there, so the action
+    # would fail on a missing CLAUDE_CODE_OAUTH_TOKEN.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write   # was: read — needed for `gh pr comment` / posting review
       issues: read
       id-token: write
 
@@ -36,24 +29,33 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Allow Cursor cloud-agent PRs to trigger review (action rejects bots by default)
-          allowed_bots: cursor
+
+          # Cursor cloud-agent PRs are authored by the `cursoragent` account.
+          # `allowed_bots` matches exact GitHub logins (e.g. "dependabot[bot]").
+          # Check the actual author login on one of the Cursor PRs and match it here.
+          allowed_bots: cursoragent
+
+          # Let the action own the PR comment instead of shelling out to `gh`.
+          track_progress: true
+          use_sticky_comment: true
+
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Please review this pull request and provide feedback on:
+            Review this pull request and give feedback on:
             - Code quality and best practices
             - Potential bugs or issues
             - Performance considerations
             - Security concerns
             - Test coverage
 
-            Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
+            Use the repository's CLAUDE.md for style and conventions.
+            Be constructive and specific. Prefer inline comments on the
+            relevant lines; end with a short summary.
 
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
-
+          # --allowedTools is the documented flag spelling.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
-
+          claude_args: >-
+            --allowedTools
+            "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"
