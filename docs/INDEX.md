@@ -62,6 +62,30 @@ for coding patterns and behavioural rules read
 | [`research/crate-promises-chatty-flow.md`](research/crate-promises-chatty-flow.md) | chatty-flow work | Flow crate scope |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
+| [`research/README.md`](research/README.md) | Research folder entry | How the research docs are organized |
+| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | User-guide split leftover | Temporary note from the Epic 2 migration |
+
+## Workspace crates
+
+One-line map of all 13 workspace crates. Full index with dependency diagram:
+[crates.md](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/crates.md)
+(mdBook: **Crates → Workspace crate index**).
+
+| Crate | Purpose |
+|---|---|
+| `chatty-core` | UI-agnostic agent core: models, services, tools, settings, sandbox |
+| `chatty-gpui` | GPUI desktop app (`chatty` binary) |
+| `chatty-tui` | Ratatui terminal app (interactive, headless, pipe) |
+| `chatty-wasm-runtime` | Wasmtime embedding and host WIT interfaces |
+| `chatty-module-registry` | WASM module discovery, manifest, lifecycle |
+| `chatty-protocol-gateway` | HTTP gateway: OpenAI / MCP / A2A |
+| `chatty-module-sdk` | SDK for `wasm32-wasip2` agent modules |
+| `chatty-trace` | Research: trace capture, ATIF export, feedback (M0) |
+| `chatty-playbook` | Research: ACE playbook memory (M4) |
+| `chatty-flow` | Research: AFlow workflow IR (M2) |
+| `chatty-optimize` | Research: GEPA/AFlow optimizers, paired stats (M3) |
+| `hive-client` | Hive module registry client |
+| `hive-billing-sdk` | Hive billing SDK for WASM publishers |
 
 ## Crate READMEs
 
@@ -86,12 +110,14 @@ Regenerate with `make docs-gen`. Synced into the mdBook site on build.
 | File | When to read |
 |---|---|
 | `tools-catalog.md` | Look up LLM tool names |
+| `provider-matrix.md` | Provider auth, capabilities, TUI flags |
 | `slash-commands.md` | `/` commands in GPUI |
 | `cli-flags.md` | `chatty-tui --help` when the binary is already built; otherwise a static fallback |
 | `env-vars.md` | `CHATTY_*` and related env vars |
 | `event-catalog.md` | GPUI entity events and subscribers |
 | `singleton-inventory.md` | Process-global state and repositories |
-| `llms.txt` | Agent discovery index |
+| `llms.txt` | Agent discovery index (curated links) |
+| `llms-full.txt` | Concatenated key pages for large-context agents |
 
 ---
 

@@ -27,6 +27,7 @@ flowchart TD
 |------------|------|
 | Understand the big picture | [system-overview.md](./architecture/system-overview.md) |
 | See component diagrams | [component-map.md](./architecture/component-map.md) |
+| Find a workspace crate | [crates.md](./crates.md) |
 | Add an LLM tool | [add-tool.md](./guides/add-tool.md) |
 | Add a provider | [add-provider.md](./guides/add-provider.md) |
 | Fix stream/cancel bugs | [stream-manager.md](./architecture/stream-manager.md) |
