@@ -903,3 +903,20 @@ fn inject_discovered(
         models_list.push(mc);
     }
 }
+
+#[cfg(test)]
+mod cli_smoke_tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    /// Replaces the old CI `cargo build -p chatty-tui && ./target/debug/chatty-tui --help`
+    /// step. `cargo test` already compiles this crate; a second non-test bin
+    /// build was rebuilding for ~15 minutes on GitHub-hosted runners.
+    #[test]
+    fn help_renders_and_names_core_modes() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("chatty-tui"), "{help}");
+        assert!(help.contains("--headless"), "{help}");
+        assert!(help.contains("--pipe"), "{help}");
+    }
+}

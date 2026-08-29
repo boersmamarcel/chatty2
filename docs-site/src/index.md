@@ -4,9 +4,9 @@ Welcome to the **developer documentation** for [Chatty](https://github.com/boers
 a Rust desktop and terminal AI agent framework.
 
 <div class="hero-links">
-  <a href="dev/architecture/system-overview.html">System overview</a>
-  <a href="dev/architecture/component-map.html" class="secondary">Component map</a>
-  <a href="dev/agents.html" class="secondary">Agent guide</a>
+  <a href="dev/architecture/system-overview.md">System overview</a>
+  <a href="dev/architecture/component-map.md" class="secondary">Component map</a>
+  <a href="dev/agents.md" class="secondary">Agent guide</a>
   <a href="https://github.com/boersmamarcel/chatty" class="secondary">Marketing site</a>
 </div>
 
@@ -17,7 +17,7 @@ a Rust desktop and terminal AI agent framework.
 | **Coding agents** | [Agent quick-start](./dev/agents.md) · [Doc index](./dev/doc-index.md) · [Component map](./dev/architecture/component-map.md) |
 | **Contributors** | [System overview](./dev/architecture/system-overview.md) · [Contributing patterns](./dev/contributing-patterns.md) |
 | **Research → product** | [App ↔ research bridge](./dev/adrs/app-research-bridge.md) · [Paper pipeline](./dev/adrs/paper-to-product-pipeline.md) · [Modules](./dev/research/modules/index.md) |
-| **End users** | [Marketing site](https://github.com/boersmamarcel/chatty) · [User guides](./user/getting-started.md) |
+| **End users** | [Getting started](./user/getting-started.md) · [Features](./user/features.md) · [Marketing site](https://github.com/boersmamarcel/chatty) |
 
 ## Documentation map
 

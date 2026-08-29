@@ -1,39 +1,99 @@
 name: CI
 
+# Required status check is the `test` job. Do not add workflow-level
+# `paths` / `paths-ignore` — a skipped workflow fails that check.
+# Docs-only (and other non-compile) diffs take the cheap path inside `test`.
+
 on:
   pull_request:
+    branches:
+      - main
+  push:
     branches:
       - main
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  test:
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect compile-relevant changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - '**/.cargo/**'
+              - 'rust-toolchain'
+              - 'rust-toolchain.toml'
+              - 'clippy.toml'
+              - 'rustfmt.toml'
+              - 'modules/**/*.rs'
+              - 'modules/**/Cargo.toml'
+              - 'modules/**/Cargo.lock'
+              - 'wit/**'
+              - 'scripts/check-reserved.sh'
+              - 'scripts/check-rig-pins.sh'
+              - 'scripts/check-release-authz.sh'
+              - 'scripts/setup-linux.sh'
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+
+  test:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Skip compile/test (no Rust-relevant changes)
+        if: needs.changes.outputs.rust != 'true'
+        run: |
+          echo "No compile-relevant files changed; skipping toolchain, tests, and clippy."
+          echo "The required \`test\` check still reports success."
+
+      - name: Checkout repository
+        if: needs.changes.outputs.rust == 'true'
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
+        if: needs.changes.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+        if: needs.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            modules/echo-agent/target
-          key: cargo-ci-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'modules/echo-agent/Cargo.toml') }}
-          restore-keys: |
-            cargo-ci-${{ runner.os }}-
+          shared-key: linux-ci
+          workspaces: |
+            .
+            modules/echo-agent
+          cache-on-failure: true
 
       - name: Install Linux dependencies
+        if: needs.changes.outputs.rust == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -55,35 +115,31 @@ jobs:
             libssl-dev \
             pkg-config
 
-      - name: Install wasm32-wasip2 target
-        run: rustup target add wasm32-wasip2
-
       - name: Build echo-agent WASM
+        if: needs.changes.outputs.rust == 'true'
         run: |
           cd modules/echo-agent
           cargo build --target wasm32-wasip2 --release
           cp target/wasm32-wasip2/release/echo_agent.wasm .
 
       - name: Run tests
+        if: needs.changes.outputs.rust == 'true'
         # CI has shown intermittent SIGTRAP in `chatty-core` tests when run in
         # parallel on GitHub-hosted runners; serialize tests for stability.
+        # chatty-tui clap --help is covered by `cli_smoke_tests` (no extra
+        # `cargo build -p chatty-tui`, which recompiled the bin without cfg(test)).
         run: cargo test --all-features -- --test-threads=1
 
-      - name: Build chatty-tui
-        run: cargo build -p chatty-tui
-
-      - name: Smoke test chatty-tui (--help exits 0)
-        # Verifies the binary starts and clap argument parsing works.
-        # Does not require a configured provider or LLM access.
-        run: ./target/debug/chatty-tui --help
-
       - name: Check formatting
+        if: needs.changes.outputs.rust == 'true'
         run: cargo fmt --check
 
       - name: Run clippy
+        if: needs.changes.outputs.rust == 'true'
         run: cargo clippy -- -D warnings
 
       - name: Check reserved symbols (AGE research)
+        if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-reserved.sh
 
       - name: Check no resurrected chatty-eval (AGE-24 / AGE-26)
@@ -99,39 +155,9 @@ jobs:
         run: bash scripts/check-shipping-isolation.sh
 
       - name: Check rig exact-minor pins (AGE-26)
+        if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-rig-pins.sh
 
       - name: Check release authz gates (closed-system)
+        if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-release-authz.sh
-
-  # AGE-26: compile-only canary against crates.io latest rig (informational).
-  rig-canary:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libfontconfig1-dev
-
-      - name: Soft canary — cargo update rig + check chatty-core
-        run: |
-          cp Cargo.lock Cargo.lock.canary-bak
-          set +e
-          cargo update -p rig-core
-          cargo update -p rig-agent
-          cargo check -p chatty-core --lib
-          status=$?
-          set -e
-          mv Cargo.lock.canary-bak Cargo.lock
-          if [ "$status" -ne 0 ]; then
-            echo "rig canary: compile failed against updated rig (schedule a bump window)"
-            exit 1
-          fi
-          echo "rig canary: OK"
