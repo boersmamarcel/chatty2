@@ -89,23 +89,104 @@ PY
 cat > "$OUT/slash-commands.md" << 'EOF'
 # Slash commands
 
-**When to read this:** Look up chat input `/` commands in the GPUI desktop app.
+**When to read this:** Look up chat input `/` commands. GPUI and TUI do not share a command table — see [Add a slash command](../guides/add-slash-command.md).
 
-Source: `crates/chatty-gpui/src/chatty/controllers/app_controller/slash_commands.rs`
+Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
+`crates/chatty-gpui/src/chatty/controllers/app_controller/slash_commands.rs`,
+`crates/chatty-tui/src/engine/commands.rs`.
 
 | Command | Action | GPUI | TUI |
 |---------|--------|------|-----|
-| `/clear` | Start new conversation | Yes | — |
-| `/new` | Start new conversation | Yes | — |
-| `/compact` | Summarize oldest half of history | Yes | — |
-| `/context` | Show token/context usage | Yes | — |
-| `/copy` | Copy last assistant response | Yes | — |
-| `/cwd` | Show working directory | Yes | — |
-| `/cd` | Change per-chat working directory | Yes | — |
-| `/add-dir` | Add workspace directory | Yes | — |
-| `/agent` | Switch agent configuration | Yes | — |
+| `/clear` | Start new conversation | Yes | Yes |
+| `/new` | Start new conversation | Yes | Yes |
+| `/compact` | Summarize oldest half of history | Yes | Yes |
+| `/context` | Show token/context usage | Yes | Yes |
+| `/copy` | Copy last assistant response | Yes | Yes |
+| `/cwd` | Show working directory | Yes | Yes |
+| `/cd [dir]` | Change per-chat working directory | Yes | Yes |
+| `/add-dir <dir>` | Add workspace directory | Yes | Yes |
+| `/agent [name] <prompt>` | Launch local sub-agent or named A2A agent | Yes | Yes |
+| `/model [query]` | Switch / list models | — | Yes |
+| `/tools [name]` | Open tool picker or toggle by name | — | Yes |
+| `/modules …` | Module runtime settings | — | Yes |
+| `/update` | CLI auto-update | — | Yes |
+| `/quit` `/exit` | Quit the application | — | Yes |
 
-Skills from `.claude/skills/` appear in the picker with a `[skill]` badge.
+Skills from `.claude/skills/` appear in both pickers with a skill badge.
+EOF
+
+# ── Settings schema (AGE-101, pair review) ──────────────────────────────────
+cat > "$OUT/settings-schema.md" << 'EOF'
+---
+audience: [contributor, agent]
+source_files:
+  - crates/chatty-core/src/settings/repositories/mod.rs
+  - crates/chatty-core/src/settings/models/
+related:
+  - ./dev/reference/env-vars.md
+  - ./dev/adrs/settings-integration-map.md
+---
+
+# Settings schema reference
+
+**When to read this:** Find the JSON file, model, and defaults for a persisted
+setting.
+
+> **Pair review pending (DOC-23 / AGE-101):** Tables below are generated from
+> `settings/repositories/` + `settings/models/` as of this commit. Marcel
+> confirms file names, defaults, and which secrets must never appear in docs
+> examples before this page is treated as complete.
+
+## Config directory
+
+`dirs::config_dir()/chatty` — via `generic_json_repository::chatty_config_dir()`.
+
+| Platform | Typical path |
+|----------|----------------|
+| Linux | `~/.config/chatty/` (`$XDG_CONFIG_HOME/chatty`) |
+| macOS | `~/Library/Application Support/chatty/` (`dirs::config_dir`) |
+| Windows | `%APPDATA%\chatty\` |
+
+Missing files load `Default`. Saves are atomic (temp file + rename).
+
+Module **binaries** (WASM) live under `dirs::data_dir()/chatty/modules/`, not
+the config dir — see `ModuleSettingsModel`.
+
+## Single-object files (`load` / `save`)
+
+| File | Model | Key fields / defaults |
+|------|-------|------------------------|
+| `general_settings.json` | `GeneralSettingsModel` | `font_size` `14.0`; `theme_name` / `dark_mode` `None` |
+| `execution_settings.json` | `ExecutionSettingsModel` | `enabled` `false`; `approval_mode` `AlwaysAsk`; `workspace_dir` `None`; filesystem + fetch default **on**; git / execute_code / docker default **off**; `timeout_seconds` `30`; `max_output_bytes` `51200`; `max_agent_turns` `10`; `memory_enabled` `true` |
+| `search_settings.json` | `SearchSettingsModel` | `enabled` `false`; `active_provider` `Tavily`; API keys `None`; `max_results` `5` |
+| `training_settings.json` | `TrainingSettingsModel` | `atif_auto_export` / `jsonl_auto_export` `false` |
+| `user_secrets.json` | `UserSecretsModel` | secret key/value list — **do not log or paste real values** |
+| `hive_settings.json` | `HiveSettingsModel` | `registry_url` `http://localhost:8080`; `runner_url` `http://localhost:8081`; `token` `None` |
+| `extensions.json` | `ExtensionsModel` | enabled A2A / extension entries |
+| `module_settings.json` | `ModuleSettingsModel` | `enabled` `false`; `gateway_port` `8420`; `module_dir` = platform data dir (`~/Library/Application Support/chatty/modules` on macOS, `~/.local/share/chatty/modules` on Linux) |
+
+OAuth tokens: `mcp_oauth_<sanitized_name>.json` in the same config dir
+(`oauth_credential_json_repository`).
+
+## List files (`load_all` / `save_all`)
+
+| File | Item type | Notes |
+|------|-----------|--------|
+| `providers.json` | `ProviderConfig` | API keys live here; never expose to the LLM |
+| `models.json` | `ModelConfig` | per-model capabilities, preamble, temperature |
+| `mcp_servers.json` | `McpServerConfig` | use `masked_env()` on any LLM-facing copy |
+| `a2a_agents.json` | `A2aAgentConfig` | registered A2A agents |
+
+## Not persisted as JSON (yet)
+
+| Model | Notes |
+|-------|-------|
+| `TokenTrackingSettings` | In-memory global; defaults `enabled` `true`, reserve `4096`, high `0.70`, critical `0.90`, `auto_summarize` `false`. Comment in source says JSON persistence is a follow-up. |
+
+## Related
+
+- [Settings integration map](../adrs/settings-integration-map.md) — research ↔ settings
+- [Environment variables](./env-vars.md) — `CHATTY_*` / `XDG_*`
 EOF
 
 # ── Provider matrix ─────────────────────────────────────────────────────────
@@ -371,6 +452,7 @@ cat > "$OUT/llms.txt" << EOF
 - [Slash commands](${SITE_BASE}/dev/reference/slash-commands.html)
 - [CLI flags](${SITE_BASE}/dev/reference/cli-flags.html)
 - [Environment variables](${SITE_BASE}/dev/reference/env-vars.html)
+- [Settings schema](${SITE_BASE}/dev/reference/settings-schema.html)
 - [GPUI event catalog](${SITE_BASE}/dev/reference/event-catalog.html)
 - [Singleton inventory](${SITE_BASE}/dev/reference/singleton-inventory.html)
 
@@ -378,6 +460,7 @@ cat > "$OUT/llms.txt" << EOF
 
 - [Add a provider](${SITE_BASE}/dev/guides/add-provider.html)
 - [Add a tool](${SITE_BASE}/dev/guides/add-tool.html)
+- [Add a slash command](${SITE_BASE}/dev/guides/add-slash-command.html)
 - [Debug streams](${SITE_BASE}/dev/guides/debug-streams.html)
 - [Build & package](${SITE_BASE}/dev/guides/build-package.html)
 
@@ -423,6 +506,7 @@ append_section "Tools catalog" "$OUT/tools-catalog.md"
 append_section "GPUI event catalog" "$OUT/event-catalog.md"
 append_section "Singleton inventory" "$OUT/singleton-inventory.md"
 append_section "Environment variables" "$OUT/env-vars.md"
+append_section "Settings schema" "$OUT/settings-schema.md"
 append_section "Where do I…?" "$ROOT/docs-site/src/dev/where-to-look.md"
 
 echo "gen-docs-reference: wrote reference pages to $OUT"

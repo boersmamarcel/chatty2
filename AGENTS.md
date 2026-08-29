@@ -123,6 +123,7 @@ make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
 make docs-check-links # lychee link check (AGE-117)
 make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
+make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
 make ci               # everything the Rust CI path runs, locally, in order
 ```
 
