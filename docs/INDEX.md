@@ -46,6 +46,10 @@ for coding patterns and behavioural rules read
 | File | When to read | What it covers |
 |---|---|---|
 | [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | **Start here for research** | SOTA → experiment → product flow, promotion outcomes, crate map |
+| [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
+| [`research/promotion-log.md`](research/promotion-log.md) | After experiments | Marcel-only promotion verdicts |
+| [`research/settings-integration-map.md`](research/settings-integration-map.md) | Product integration | Settings ↔ research mechanisms |
+| [`research/experiment-protocol.md`](research/experiment-protocol.md) | Running evals | Stage A/B checklist, cost accounting |
 | [`research/harbor-pivot.md`](research/harbor-pivot.md) | Stage B sandboxes | Harbor pivot decision |
 | [`research/crate-promises-chatty-trace.md`](research/crate-promises-chatty-trace.md) | chatty-trace work | Trace crate scope |
 | [`research/crate-promises-chatty-playbook.md`](research/crate-promises-chatty-playbook.md) | chatty-playbook work | Playbook crate scope |

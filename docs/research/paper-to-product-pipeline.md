@@ -132,22 +132,25 @@ Rigorous docs mirror the pipeline — each layer answers a different question:
 |-------|----------|----------|--------|
 | **Pipeline** | Why does research exist and how does it become product? | This page | Active |
 | **Architecture** | What runs where at runtime? | [`system-overview.md`](../system-overview.md), [`component-map.md`](../component-map.md) | Built |
-| **Paper fidelity** | What did the paper actually claim? | Linear module issues (AGE-6–9) | In issues — extract to `/dev/research/modules/` as each lands |
+| **Paper fidelity** | What did the paper actually claim? | [`research/modules/`](./modules/index.md) | Built (M0–M4) |
 | **Crate promises** | What does each shipping crate guarantee? | [`crate-promises-*.md`](./crate-promises-chatty-trace.md) | Stubs until Stage A |
 | **ADRs** | Why this fork (Harbor, AppWorld, cost model)? | [`docs/research/*.md`](./harbor-pivot.md) | Partial |
-| **Promotion record** | What shipped, as what, with what evidence? | *To add:* `/dev/research/promotion-log.md` — one row per mechanism when Marcel decides | Not started |
+| **Promotion record** | What shipped, as what, with what evidence? | [`promotion-log.md`](./promotion-log.md) — Marcel updates | Template ready |
+| **Settings map** | Which settings map to which mechanisms? | [`settings-integration-map.md`](./settings-integration-map.md) | Built (gates open) |
+| **Experiment protocol** | How to run Stage A/B rigorously? | [`experiment-protocol.md`](./experiment-protocol.md) | Built |
 | **Reference** | What can I configure today? | Generated tools/CLI/env pages | Partial |
 
-### Recommended next docs (Linear: Chatty developer documentation)
+### Completed doc layers
 
-1. **Per-paper module pages** — one mdBook page per module (M1–M4): mechanism, Chatty
-   mapping, eval protocol, promotion status. Source: Linear issue bodies.
-2. **Promotion log** — append-only table Marcel updates after each gate decision; agents
-   link ADRs here but do not fill verdicts.
-3. **Settings integration map** — which `*SettingsModel` fields correspond to which paper
-   knobs (AGE-80).
-4. **Experiment protocol** — paired stats, MDE, cost sheet usage (`cost-model.md` + Harbor
-   README).
+1. ~~**Per-paper module pages**~~ — [`modules/`](./modules/index.md)
+2. ~~**Promotion log**~~ — [`promotion-log.md`](./promotion-log.md)
+3. ~~**Settings integration map**~~ — [`settings-integration-map.md`](./settings-integration-map.md)
+4. ~~**Experiment protocol**~~ — [`experiment-protocol.md`](./experiment-protocol.md)
+
+### Still open
+
+1. **Link checker CI** (DOC-50)
+2. **README → `/user/` migration** (DOC-15, human review)
 
 ## Related reading
 

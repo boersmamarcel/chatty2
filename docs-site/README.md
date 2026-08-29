@@ -9,6 +9,7 @@ edit the source files and rebuild.
 |------------|--------------|
 | `src/dev/architecture/*.md` | `docs/*.md` |
 | `src/dev/adrs/*.md` | `docs/research/*.md` |
+| `src/dev/research/modules/*.md` | `docs/research/modules/*.md` |
 | `src/dev/agents.md` | `AGENTS.md` |
 | `src/dev/contributing-patterns.md` | `CLAUDE.md` |
 | `src/dev/reference/*.md` | Regenerate via `make docs-gen` |
