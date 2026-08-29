@@ -18,8 +18,11 @@ Thank you for contributing to [chatty2](https://github.com/boersmamarcel/chatty2
 ```bash
 make setup        # once on Linux
 make wasm-modules # before full test suite
-make ci           # same as GitHub Actions
+make ci           # same compile/test/lint path GitHub runs for Rust PRs
 ```
+
+Docs-only pull requests do not compile the workspace on GitHub. Run `make docs`
+and `make docs-check-links` for documentation changes.
 
 ## Pull requests
 

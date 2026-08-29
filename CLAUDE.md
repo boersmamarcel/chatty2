@@ -177,10 +177,11 @@ sudo apt-get install -y \
 
 | Workflow | Trigger | Purpose |
 |:---------|:--------|:--------|
-| **CI** (`ci.yml`) | PR to `main` | Tests, formatting check, clippy lints. Cargo dependencies and build artifacts are cached. |
+| **CI** (`ci.yml`) | PR / push to `main` | Tests, formatting, clippy. Docs-only diffs skip compile (required `test` job still passes). Stale PR runs are cancelled. `Swatinem/rust-cache` is warmed on `main`. |
 | **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version via a `cut-release` PR (main is protected), generates changelog, tags, creates the GitHub Release, then calls Release via `workflow_call`. |
 | **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
-| **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated | Automated AI code review via Claude. |
+| **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated (Rust/CI paths only) | Automated AI code review via Claude. Skipped for docs-only PRs. |
+| **Rig canary** (`rig-canary.yml`) | Weekly, or PR that touches Cargo manifests | Informational `cargo update` + `cargo check` against latest rig (AGE-26). |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
 | **Update README** (`update-readme.yml`) | PR merged to `main` | Claude analyzes the diff; if user-facing features changed, opens a follow-up PR with README updates. Add `skip-readme` label to opt out. |
 | **Update Agent Docs** (`update-agent-docs.yml`) | PR merged to `main` | Claude analyzes the merged PR for guidance drift and opens a follow-up PR to sync `CLAUDE.md` / `AGENTS.md` when needed. Add `skip-agent-docs` label to opt out. |

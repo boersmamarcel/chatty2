@@ -88,7 +88,7 @@ Regenerate with `make docs-gen`. Synced into the mdBook site on build.
 | `tools-catalog.md` | Look up LLM tool names |
 | `provider-matrix.md` | Provider auth, capabilities, TUI flags |
 | `slash-commands.md` | `/` commands in GPUI |
-| `cli-flags.md` | `chatty-tui --help` |
+| `cli-flags.md` | `chatty-tui --help` when the binary is already built; otherwise a static fallback |
 | `env-vars.md` | `CHATTY_*` and related env vars |
 | `llms.txt` | Agent discovery index (curated links) |
 | `llms-full.txt` | Concatenated key pages for large-context agents |
