@@ -59,6 +59,15 @@ jobs:
           mdbook build docs-site
           install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
 
+      - name: Install lychee
+        run: cargo install lychee --locked
+
+      - name: Check documentation links
+        run: bash scripts/check-docs-links.sh
+
+      - name: Check docs nav drift (INDEX + SUMMARY)
+        run: bash scripts/check-docs-nav-drift.sh
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

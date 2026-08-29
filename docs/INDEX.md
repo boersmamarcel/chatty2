@@ -48,6 +48,11 @@ for coding patterns and behavioural rules read
 | [`research/app-research-bridge.md`](research/app-research-bridge.md) | **App ↔ research map** | Memory, context window, loop, traces → M0–M4 |
 | [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | Research pipeline | SOTA → experiment → product flow |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
+| [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace / M0 work | Trace contract module notes |
+| [`research/modules/m1-react.md`](research/modules/m1-react.md) | ReAct substrate work | M1 strategy variants |
+| [`research/modules/m2-aflow.md`](research/modules/m2-aflow.md) | chatty-flow / M2 work | AFlow workflow search |
+| [`research/modules/m3-gepa.md`](research/modules/m3-gepa.md) | chatty-optimize / M3 work | GEPA prompt evolution |
+| [`research/modules/m4-ace.md`](research/modules/m4-ace.md) | chatty-playbook / M4 work | ACE playbook deltas |
 | [`research/promotion-log.md`](research/promotion-log.md) | After experiments | Marcel-only promotion verdicts |
 | [`research/settings-integration-map.md`](research/settings-integration-map.md) | Product integration | Settings ↔ research mechanisms |
 | [`research/experiment-protocol.md`](research/experiment-protocol.md) | Running evals | Stage A/B checklist, cost accounting |
@@ -57,6 +62,22 @@ for coding patterns and behavioural rules read
 | [`research/crate-promises-chatty-flow.md`](research/crate-promises-chatty-flow.md) | chatty-flow work | Flow crate scope |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
+
+## Crate READMEs
+
+| File | When to read | What it covers |
+|---|---|---|
+| [`../crates/chatty-core/README.md`](../crates/chatty-core/README.md) | Core crate work | UI-agnostic models, tools, services |
+| [`../crates/chatty-gpui/README.md`](../crates/chatty-gpui/README.md) | Desktop UI work | GPUI binary |
+| [`../crates/chatty-tui/README.md`](../crates/chatty-tui/README.md) | Terminal UI work | Ratatui binary, headless mode |
+| [`../crates/chatty-trace/README.md`](../crates/chatty-trace/README.md) | chatty-trace work | Trace capture crate |
+| [`../crates/chatty-playbook/README.md`](../crates/chatty-playbook/README.md) | chatty-playbook work | ACE playbook crate |
+| [`../crates/chatty-flow/README.md`](../crates/chatty-flow/README.md) | chatty-flow work | Workflow IR crate |
+| [`../crates/chatty-optimize/README.md`](../crates/chatty-optimize/README.md) | Optimizer tooling | Offline GEPA/AFlow (not in app binary) |
+| [`../crates/chatty-wasm-runtime/README.md`](../crates/chatty-wasm-runtime/README.md) | WASM runtime | Wasmtime agent modules |
+| [`../crates/chatty-module-registry/README.md`](../crates/chatty-module-registry/README.md) | Module registry | Discovery and lifecycle |
+| [`../crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md) | HTTP gateway | OpenAI / MCP / A2A protocols |
+| [`../crates/chatty-module-sdk/README.md`](../crates/chatty-module-sdk/README.md) | WASM module SDK | Authoring agent modules |
 
 ## Generated reference (`docs/generated/`)
 

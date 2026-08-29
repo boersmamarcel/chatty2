@@ -117,6 +117,8 @@ make wasm-modules     # build the echo-agent WASM module (needed by tests)
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
+make docs-check-links # lychee link check (AGE-117)
+make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
 make ci               # everything CI runs, locally, in order
 ```
 
