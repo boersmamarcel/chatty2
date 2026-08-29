@@ -114,6 +114,9 @@ make lint             # cargo clippy -- -D warnings
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
 make wasm-modules     # build the echo-agent WASM module (needed by tests)
+make docs-gen         # regenerate docs/generated reference pages
+make docs             # sync + build mdBook site (docs-site/book/)
+make docs-serve       # local preview at http://localhost:3000
 make ci               # everything CI runs, locally, in order
 ```
 
@@ -219,6 +222,8 @@ examples.
 | Topic | File |
 |---|---|
 | Full architecture | [`docs/architecture-overview.md`](docs/architecture-overview.md) |
+| **System overview (diagrams)** | [`docs/system-overview.md`](docs/system-overview.md) |
+| **Component map (diagrams)** | [`docs/component-map.md`](docs/component-map.md) |
 | Crate split rationale | [`docs/workspace-crate-split.md`](docs/workspace-crate-split.md) |
 | Stream lifecycle | [`docs/stream-manager.md`](docs/stream-manager.md) |
 | Entity communication | [`docs/entity-communication.md`](docs/entity-communication.md) |
