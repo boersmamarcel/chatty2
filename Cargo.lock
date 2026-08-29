@@ -5128,7 +5128,7 @@ dependencies = [
  "futures-util",
  "hex",
  "percent-encoding",
- "rand 0.8.5",
+ "rand 0.10.2",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

@@ -106,10 +106,8 @@ mod tests {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
-
     fn make_keypair() -> (String, String) {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
         (
             hex::encode(signing_key.to_bytes()),
