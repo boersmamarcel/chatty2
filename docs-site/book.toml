@@ -1,0 +1,26 @@
+[book]
+title = "Chatty Developer Documentation"
+authors = ["Marcel Boersma"]
+description = "Architecture, reference, and contributor guides for the Chatty agent framework"
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/boersmamarcel/chatty2"
+edit-url-template = "https://github.com/boersmamarcel/chatty2/edit/main/{path}"
+site-url = "/chatty2/"
+additional-css = ["theme/chatty.css"]
+additional-js = ["theme/mermaid.min.js", "theme/mermaid-init.js"]
+no-section-label = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+
+[output.html.playground]
+editable = false

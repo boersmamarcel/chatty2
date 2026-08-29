@@ -1,12 +1,11 @@
 name: Ship-auto guard
 
-# Enforces the auto-ship contract on PRs labeled `ship:auto`:
-# - patch release only (no release:minor / release:major)
-# - deny-list for research crates, RESERVED.md, auth, and billing
-# Pure Cargo.toml / Cargo.lock dependency bumps outside the deny-list are allowed.
+# Enforces release safety on privileged PRs:
+# - Path deny-list for ANY PR labeled release:patch|minor|major
+# - For ship:auto subset: patch-only, require release:patch, prefer auto/* branch
 #
-# Job always runs so it can be a required status check without blocking
-# non-ship:auto PRs (those take the no-op path).
+# Job always runs so it can be a required status check without blocking ordinary
+# PRs (those take the no-op path when no privileged release labels are present).
 
 on:
   pull_request:
@@ -20,18 +19,37 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - name: Skip when not ship:auto
+      - name: Classify privileged labels
         id: gate
         env:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          HAS_RELEASE=false
+          HAS_SHIP_AUTO=false
+          if echo "$LABELS" | tr ',' '\n' | grep -Eqx 'release:(patch|minor|major)'; then
+            HAS_RELEASE=true
+          fi
           if echo "$LABELS" | tr ',' '\n' | grep -qx 'ship:auto'; then
+            HAS_SHIP_AUTO=true
+          fi
+
+          echo "has_release=$HAS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "has_ship_auto=$HAS_SHIP_AUTO" >> "$GITHUB_OUTPUT"
+
+          if [ "$HAS_RELEASE" = "true" ] || [ "$HAS_SHIP_AUTO" = "true" ]; then
             echo "enforce=true" >> "$GITHUB_OUTPUT"
-            echo "Enforcing ship:auto contract"
+            echo "Privileged release labels present — enforcing guards"
           else
             echo "enforce=false" >> "$GITHUB_OUTPUT"
-            echo "No ship:auto label — no-op pass"
+            echo "No privileged release labels — no-op pass"
+          fi
+
+          # Prefer auto/* for ship:auto (same contract as ship-auto-merge).
+          if [ "$HAS_SHIP_AUTO" = "true" ] && [[ "$HEAD_REF" != auto/* ]]; then
+            echo "::error::ship:auto PRs must use an auto/* branch (got: $HEAD_REF)"
+            exit 1
           fi
 
       - name: Checkout repository
@@ -40,8 +58,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Enforce patch-only release label
-        if: steps.gate.outputs.enforce == 'true'
+      - name: Enforce ship:auto patch-only contract
+        if: steps.gate.outputs.has_ship_auto == 'true'
         env:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
@@ -61,7 +79,7 @@ jobs:
           fi
 
       - name: Enforce path deny-list
-        if: steps.gate.outputs.enforce == 'true'
+        if: steps.gate.outputs.has_release == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -71,12 +89,12 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          # Patterns that must never ride the auto-ship path.
+          # Patterns that must never ride a privileged release path.
           DENY_REGEX='^(RESERVED\.md|\.cursor/rules/ownership\.mdc|crates/chatty-trace/|crates/chatty-playbook/|crates/chatty-flow/|crates/chatty-optimize/|crates/hive-billing-sdk/|crates/chatty-core/src/auth/|crates/chatty-core/src/settings/models/providers_store\.rs|crates/chatty-gpui/src/settings/.*auth|crates/chatty-tui/src/.*auth)'
 
           VIOLATIONS="$(echo "$CHANGED" | grep -E "$DENY_REGEX" || true)"
           if [ -n "$VIOLATIONS" ]; then
-            echo "::error::ship:auto PR touches deny-listed paths (research / reserved / auth / billing):"
+            echo "::error::Release-labeled PR touches deny-listed paths (research / reserved / auth / billing):"
             echo "$VIOLATIONS"
             exit 1
           fi

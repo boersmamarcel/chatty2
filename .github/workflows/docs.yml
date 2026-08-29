@@ -1,0 +1,95 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'docs-site/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'crates/**/README.md'
+      - 'scripts/docs-sync.sh'
+      - 'scripts/gen-docs-reference.sh'
+      - 'scripts/check-docs-links.sh'
+      - 'scripts/check-docs-nav-drift.sh'
+      - 'Makefile'
+      - '.lychee.toml'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'docs-site/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'crates/**/README.md'
+      - 'scripts/docs-sync.sh'
+      - 'scripts/gen-docs-reference.sh'
+      - 'scripts/check-docs-links.sh'
+      - 'scripts/check-docs-nav-drift.sh'
+      - 'Makefile'
+      - '.lychee.toml'
+      - '.github/workflows/docs.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Do not share one "pages" group across every PR — that serialized 20-minute
+# jobs. Cancel stale PR builds; never cancel the main deploy mid-upload.
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdbook
+        run: |
+          curl -fsSL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C /usr/local/bin
+
+      - name: Install lychee
+        uses: taiki-e/install-action@v2
+        with:
+          tool: lychee
+
+      - name: Generate reference pages
+        run: bash scripts/gen-docs-reference.sh
+
+      - name: Sync markdown into docs-site
+        run: bash scripts/docs-sync.sh
+
+      - name: Build mdBook
+        run: |
+          mdbook build docs-site
+          install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
+          install -m 644 docs/generated/llms-full.txt docs-site/book/llms-full.txt
+
+      - name: Check documentation links
+        run: bash scripts/check-docs-links.sh
+
+      - name: Check docs nav drift (INDEX + SUMMARY)
+        run: bash scripts/check-docs-nav-drift.sh
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/book
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

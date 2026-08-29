@@ -21,14 +21,20 @@
 > all of the following hold:
 >
 > 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
+>    Project members = Marcel (closed-system allowlist).
 > 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
->    `ship:auto` + `release:patch` (never minor/major).
-> 3. CI + `ship-auto-guard` are green; then auto-merge → `prepare-release` lands the
->    version bump via a `cut-release` PR (main is protected), tags, and builds.
+>    `ship:auto` + `release:patch` (never minor/major). Privileged labels are
+>    owner / `github-actions[bot]` only; outsiders are stripped.
+> 3. CI + `ship-auto-guard` are green; then auto-merge (same-repo head; owner sender
+>    or Actions actor) → `prepare-release` lands the version bump via a `cut-release`
+>    PR (main is protected), tags, and builds.
 >
 > **Project membership is the allowlist.** Do not auto-merge solely because an issue has
 > `owner:ai` on another project. Never auto-ship reserved symbols, research crates,
-> auth/billing, or core UX. Failures notify Linear, Slack `#chatty-auto-ship`, and GitHub.
+> auth/billing, or core UX. Slack `#chatty-auto-ship` is notify-only. Failures notify
+> Linear, Slack, and GitHub. Emergency rebuild (owner only; run against the tag):
+> `gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z`.
+> Authz regression: `bash scripts/check-release-authz.sh`.
 
 Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper
@@ -96,6 +102,10 @@ trait impls live behind the `gpui-globals` feature.
 **The CI workflow** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 **is the ground truth.** If a command is not here, it is not what CI runs.
 
+Docs-only PRs (and other diffs that do not match the Rust path filter in
+`ci.yml`) skip compile, test, and clippy. The required `test` check still
+goes green. Stale CI runs on the same PR are cancelled on the next push.
+
 ```bash
 make setup            # one-time: install Linux deps + wasm32-wasip2 target
 make build            # cargo build (debug)
@@ -108,7 +118,12 @@ make lint             # cargo clippy -- -D warnings
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
 make wasm-modules     # build the echo-agent WASM module (needed by tests)
-make ci               # everything CI runs, locally, in order
+make docs-gen         # regenerate docs/generated reference pages
+make docs             # sync + build mdBook site (docs-site/book/)
+make docs-serve       # local preview at http://localhost:3000
+make docs-check-links # lychee link check (AGE-117)
+make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
+make ci               # everything the Rust CI path runs, locally, in order
 ```
 
 Or use cargo directly:
@@ -118,8 +133,6 @@ cargo build
 cargo test --all-features -- --test-threads=1
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo build -p chatty-tui
-./target/debug/chatty-tui --help
 ```
 
 ### Test-thread footgun
@@ -213,6 +226,8 @@ examples.
 | Topic | File |
 |---|---|
 | Full architecture | [`docs/architecture-overview.md`](docs/architecture-overview.md) |
+| **System overview (diagrams)** | [`docs/system-overview.md`](docs/system-overview.md) |
+| **Component map (diagrams)** | [`docs/component-map.md`](docs/component-map.md) |
 | Crate split rationale | [`docs/workspace-crate-split.md`](docs/workspace-crate-split.md) |
 | Stream lifecycle | [`docs/stream-manager.md`](docs/stream-manager.md) |
 | Entity communication | [`docs/entity-communication.md`](docs/entity-communication.md) |

@@ -332,3 +332,9 @@ The `pending_resolved_ids` map tracks the `Arc<Mutex<Option<String>>>` so that `
 **Init** (`main.rs`): StreamManager is created as a GPUI entity and stored as a **strong** `Entity<StreamManager>` reference in `GlobalStreamManager`. Using a strong reference (not `WeakEntity`) prevents garbage collection after the initialization closure returns.
 
 **Shutdown** (Quit action): Calls `StreamManager.stop_all()` which iterates all active streams, sets their cancel flags, emits `StreamEnded` for each, and clears the HashMap.
+
+## Research connection (M0 Trace)
+
+`StreamState.trace_json` and ATIF export (`exporters/types.rs`) are the production trace
+surface. M0 adds per-module attribution, round-trip `Deserialize`, and an opt-in
+`Recorder` — see [app ↔ research bridge](research/app-research-bridge.md#traces-atif--training-export-m0).

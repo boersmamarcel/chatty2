@@ -13,7 +13,8 @@
 
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
-        run-tui ci clean
+        run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
+        docs-check-nav
 
 help:
 	@echo "Common targets:"
@@ -32,6 +33,12 @@ help:
 	@echo "  make wasm-modules  Build modules/echo-agent for wasm32-wasip2 (needed by tests)"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
 	@echo "  make run-tui       cargo run -p chatty-tui"
+	@echo "  make docs-gen      Generate docs/generated reference pages"
+	@echo "  make docs-sync     Copy repo markdown into docs-site/src"
+	@echo "  make docs          docs-gen + docs-sync + mdbook build"
+	@echo "  make docs-serve    Local mdBook preview (port 3000)"
+	@echo "  make docs-check-links  Verify markdown links (lychee; AGE-117)"
+	@echo "  make docs-check-nav    Verify INDEX.md + SUMMARY.md completeness (AGE-116)"
 	@echo "  make ci            Everything CI runs, in order"
 
 setup:
@@ -94,10 +101,9 @@ run-gpui:
 run-tui:
 	cargo run -p chatty-tui
 
-# Mirrors the order in .github/workflows/ci.yml.
+# Mirrors the Rust path in .github/workflows/ci.yml.
+# GitHub skips this compile/test path when a PR only touches docs.
 ci: wasm-modules test
-	cargo build -p chatty-tui
-	./target/debug/chatty-tui --help
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	bash scripts/check-reserved.sh
@@ -105,3 +111,22 @@ ci: wasm-modules test
 
 clean:
 	cargo clean
+
+docs-gen:
+	bash scripts/gen-docs-reference.sh
+
+docs-sync:
+	bash scripts/docs-sync.sh
+
+docs: docs-gen docs-sync
+	mdbook build docs-site
+	install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
+
+docs-serve: docs-gen docs-sync
+	mdbook serve docs-site --open
+
+docs-check-links:
+	bash scripts/check-docs-links.sh
+
+docs-check-nav:
+	bash scripts/check-docs-nav-drift.sh
