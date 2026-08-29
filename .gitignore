@@ -29,6 +29,17 @@ chatty-*.dmg
 REFACTORING_SUMMARY.md
 TEST_SUMMARY.md
 
+# mdBook build output and synced copies (source: docs/, AGENTS.md, crates/*/README.md)
+/docs-site/book/
+/docs-site/src/dev/architecture/
+/docs-site/src/dev/adrs/
+/docs-site/src/dev/reference/
+/docs-site/src/dev/crates/
+/docs-site/src/dev/agents.md
+/docs-site/src/dev/contributing-patterns.md
+/docs-site/src/dev/doc-index.md
+/docs/generated/
+
 # Inspiration/reference code (should be external)
 /inspiration/
 

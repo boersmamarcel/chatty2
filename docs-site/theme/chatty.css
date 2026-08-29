@@ -1,0 +1,75 @@
+/* Modern Chatty docs theme — extends mdBook defaults */
+
+:root {
+    --chatty-accent: #6366f1;
+    --chatty-accent-soft: #eef2ff;
+    --content-max-width: 920px;
+}
+
+.content main {
+    max-width: var(--content-max-width);
+}
+
+.chapter li.part-title {
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    color: var(--chatty-accent);
+    margin-top: 1.5rem;
+}
+
+/* Role tables in architecture pages */
+table {
+    font-size: 0.92rem;
+}
+
+table th {
+    background: var(--chatty-accent-soft);
+}
+
+.navy .table thead th,
+.ayu .table thead th,
+.coal .table thead th,
+.rust .table thead th {
+    background: rgba(99, 102, 241, 0.12);
+}
+
+/* Callout-style blockquotes used in synced docs */
+blockquote {
+    border-left: 4px solid var(--chatty-accent);
+    background: rgba(99, 102, 241, 0.06);
+    padding: 0.5rem 1rem;
+    margin: 1rem 0;
+}
+
+/* Mermaid diagrams */
+.mermaid {
+    text-align: center;
+    margin: 1.5rem 0;
+    overflow-x: auto;
+}
+
+/* Home hero links */
+.hero-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 1.5rem 0;
+}
+
+.hero-links a {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    background: var(--chatty-accent);
+    color: #fff !important;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.hero-links a.secondary {
+    background: transparent;
+    color: var(--chatty-accent) !important;
+    border: 2px solid var(--chatty-accent);
+}

@@ -1,0 +1,77 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'docs-site/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'crates/**/README.md'
+      - 'scripts/docs-sync.sh'
+      - 'scripts/gen-docs-reference.sh'
+      - 'Makefile'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'docs-site/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'crates/**/README.md'
+      - 'scripts/docs-sync.sh'
+      - 'scripts/gen-docs-reference.sh'
+      - 'Makefile'
+      - '.github/workflows/docs.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdbook
+        run: |
+          curl -fsSL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C /usr/local/bin
+
+      - name: Build chatty-tui for CLI reference
+        run: cargo build -p chatty-tui
+
+      - name: Generate reference pages
+        run: bash scripts/gen-docs-reference.sh
+
+      - name: Sync markdown into docs-site
+        run: bash scripts/docs-sync.sh
+
+      - name: Build mdBook
+        run: |
+          mdbook build docs-site
+          install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/book
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
