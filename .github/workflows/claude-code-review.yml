@@ -1,20 +1,40 @@
 name: Claude Code Review
 
+# Automated PR review for Cursor cloud-agent (and human) PRs.
+#
+# Loop prevention (by design):
+# - This job is comment-only (no git push) → comments never fire `synchronize`.
+# - Concurrency cancels stale runs when Cursor pushes several fix commits quickly.
+# - Prompt asks for a merge verdict and forbids @claude / automated fix requests.
+# - Draft PRs and `documentation`-labeled PRs are skipped.
+#
+# Ping-pong only happens if Cursor keeps pushing after every review — that is
+# a workflow choice, not an infinite Actions loop. Merge when CI is green.
+
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, ready_for_review]
+    paths-ignore:
+      - 'docs/generated/**'
+      - 'docs-site/book/**'
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   claude-review:
     runs-on: ubuntu-latest
 
-    # Skip PRs from forks: secrets are not available there, so the action
-    # would fail on a missing CLAUDE_CODE_OAUTH_TOKEN.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Skip forks (no OAuth secret), drafts, and auto-doc sync PRs.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false &&
+      !contains(github.event.pull_request.labels.*.name, 'documentation')
 
     permissions:
       contents: read
-      pull-requests: write   # was: read — needed for `gh pr comment` / posting review
+      pull-requests: write
       issues: read
       id-token: write
 
@@ -30,32 +50,40 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
-          # Cursor cloud-agent PRs are authored by the `cursoragent` account.
-          # `allowed_bots` matches exact GitHub logins (e.g. "dependabot[bot]").
-          # Check the actual author login on one of the Cursor PRs and match it here.
+          # Cursor cloud-agent PRs use the `cursoragent` account.
           allowed_bots: cursoragent
 
-          # Let the action own the PR comment instead of shelling out to `gh`.
           track_progress: true
           use_sticky_comment: true
+
+          # Do not feed prior bot review threads back into the model (saves tokens,
+          # avoids the model reacting to its own earlier sticky comment).
+          exclude_comments_by_actor: claude[bot],github-actions[bot],cursoragent
 
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request and give feedback on:
-            - Code quality and best practices
+            Review this pull request once. Be proportionate: focus on bugs,
+            security, correctness, and meaningful style issues — not nits that
+            should not block merge.
+
+            Check:
+            - Code quality and best practices (see CLAUDE.md)
             - Potential bugs or issues
             - Performance considerations
             - Security concerns
-            - Test coverage
+            - Test coverage for non-trivial logic
 
-            Use the repository's CLAUDE.md for style and conventions.
-            Be constructive and specific. Prefer inline comments on the
-            relevant lines; end with a short summary.
+            Rules:
+            - Prefer inline comments on relevant lines; keep the summary short.
+            - Do NOT mention @claude and do NOT ask any bot to push fixes.
+            - Do NOT request an automated follow-up PR or commit.
+            - If there are no blocking issues, say so clearly.
 
-          # --allowedTools is the documented flag spelling.
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+            End the sticky summary with exactly one verdict line:
+            **Verdict: Ready to merge** | **Verdict: Minor nits (non-blocking)** | **Verdict: Blocking issues**
+
           claude_args: >-
             --allowedTools
             "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"
