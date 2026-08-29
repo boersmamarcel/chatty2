@@ -101,10 +101,9 @@ run-gpui:
 run-tui:
 	cargo run -p chatty-tui
 
-# Mirrors the order in .github/workflows/ci.yml.
+# Mirrors the Rust path in .github/workflows/ci.yml.
+# GitHub skips this compile/test path when a PR only touches docs.
 ci: wasm-modules test
-	cargo build -p chatty-tui
-	./target/debug/chatty-tui --help
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	bash scripts/check-reserved.sh
