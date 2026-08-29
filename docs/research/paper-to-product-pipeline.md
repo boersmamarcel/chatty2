@@ -131,6 +131,7 @@ Rigorous docs mirror the pipeline — each layer answers a different question:
 | Layer | Question | Location | Status |
 |-------|----------|----------|--------|
 | **Pipeline** | Why does research exist and how does it become product? | This page | Active |
+| **App bridge** | Which app components map to which research modules? | [`app-research-bridge.md`](./app-research-bridge.md) | Built |
 | **Architecture** | What runs where at runtime? | [`system-overview.md`](../system-overview.md), [`component-map.md`](../component-map.md) | Built |
 | **Paper fidelity** | What did the paper actually claim? | [`research/modules/`](./modules/index.md) | Built (M0–M4) |
 | **Crate promises** | What does each shipping crate guarantee? | [`crate-promises-*.md`](./crate-promises-chatty-trace.md) | Stubs until Stage A |

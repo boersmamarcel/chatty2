@@ -16,7 +16,7 @@ a Rust desktop and terminal AI agent framework.
 |----------|------------|
 | **Coding agents** | [Agent quick-start](./dev/agents.md) · [Doc index](./dev/doc-index.md) · [Component map](./dev/architecture/component-map.md) |
 | **Contributors** | [System overview](./dev/architecture/system-overview.md) · [Contributing patterns](./dev/contributing-patterns.md) |
-| **Research → product** | [Paper pipeline](./dev/adrs/paper-to-product-pipeline.md) · [Self-improving chatty2 (Linear)](https://linear.app/agents-research/project/self-improving-chatty2-landing-the-agentic-papers-in-a-real-agent-63694d44-a4d5-4b99-9a71-de31a2701c25) |
+| **Research → product** | [App ↔ research bridge](./dev/adrs/app-research-bridge.md) · [Paper pipeline](./dev/adrs/paper-to-product-pipeline.md) · [Modules](./dev/research/modules/index.md) |
 | **End users** | [Marketing site](https://github.com/boersmamarcel/chatty) · [User guides](./user/getting-started.md) |
 
 ## Documentation map

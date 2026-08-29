@@ -250,3 +250,9 @@ flowchart TD
   Q4 --> CI[.github/workflows/]
   Q4 --> Docs[docs/ + docs-site/]
 ```
+
+## Research touchpoints
+
+Production components above are where promoted research mechanisms land. For a
+bidirectional map (memory → M4 ACE, token budget → M3/M4, sub-agents → M2 AFlow, …)
+see [research/app-research-bridge.md](research/app-research-bridge.md).

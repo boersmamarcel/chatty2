@@ -66,5 +66,6 @@ See `crates/chatty-optimize/src/ablation.rs`.
 ## Related
 
 - [Promotion log](./promotion-log.md) — verdict when a mechanism ships as setting vs default
+- [App ↔ research bridge](./app-research-bridge.md) — component-level mapping
 - [Module pages](./modules/index.md)
 - [Chatty agentic product integration (Linear)](https://linear.app/agents-research/project/chatty-agentic-product-integration-d9e57d61-eae2-46c1-a6ee-d8e963741449)

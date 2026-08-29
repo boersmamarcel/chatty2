@@ -5,6 +5,9 @@ Chatty, and how far along the pipeline each module is.
 
 Parent frame: [Paper → experiment → product](../paper-to-product-pipeline.md).
 
+**App bridge:** [App ↔ research bridge](../app-research-bridge.md) — maps production
+components (memory, context window, agent loop, …) to these modules.
+
 ```mermaid
 flowchart TB
   M0[M0 Trace contract] --> M1[M1 ReAct]

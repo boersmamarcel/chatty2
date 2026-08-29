@@ -65,6 +65,7 @@
 
 # Research pipeline
 
+- [App ↔ research bridge](./dev/adrs/app-research-bridge.md)
 - [Paper → experiment → product](./dev/adrs/paper-to-product-pipeline.md)
 - [Experiment protocol](./dev/adrs/experiment-protocol.md)
 - [Promotion log](./dev/adrs/promotion-log.md)
