@@ -10,7 +10,8 @@ ADRS="$SITE_SRC/dev/adrs"
 REF="$SITE_SRC/dev/reference"
 USER="$SITE_SRC/user"
 
-mkdir -p "$ARCH" "$ADRS" "$REF" "$USER"
+MODULES="$SITE_SRC/dev/research/modules"
+mkdir -p "$ARCH" "$ADRS" "$REF" "$USER" "$MODULES"
 
 copy() {
   local src="$1" dest="$2"
@@ -33,6 +34,13 @@ done
 if compgen -G "$ROOT/docs/research/*.md" > /dev/null; then
   for f in "$ROOT"/docs/research/*.md; do
     copy "$f" "$ADRS/$(basename "$f")"
+  done
+fi
+
+# Research module pages (M0–M4)
+if compgen -G "$ROOT/docs/research/modules/*.md" > /dev/null; then
+  for f in "$ROOT"/docs/research/modules/*.md; do
+    copy "$f" "$MODULES/$(basename "$f")"
   done
 fi
 

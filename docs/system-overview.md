@@ -99,6 +99,9 @@ sequenceDiagram
 |----------|----------|
 | Crate/module layout | [architecture-overview.md](architecture-overview.md) |
 | Component relationships & diagrams | [component-map.md](component-map.md) |
+| **App components ↔ research modules** | [research/app-research-bridge.md](research/app-research-bridge.md) |
 | Entity events between GPUI components | [entity-communication.md](entity-communication.md) |
 | LLM stream lifecycle | [stream-manager.md](stream-manager.md) |
+| Agent memory & skills | [agent-memory.md](agent-memory.md) |
+| Context window / token budget | [token-tracking.md](token-tracking.md) |
 | Agent quick-start | [AGENTS.md](../AGENTS.md) |

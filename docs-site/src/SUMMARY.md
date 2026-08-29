@@ -63,6 +63,23 @@
 - [hive-client](./dev/crates/hive-client.md)
 - [hive-billing-sdk](./dev/crates/hive-billing-sdk.md)
 
+# Research pipeline
+
+- [App ↔ research bridge](./dev/adrs/app-research-bridge.md)
+- [Paper → experiment → product](./dev/adrs/paper-to-product-pipeline.md)
+- [Experiment protocol](./dev/adrs/experiment-protocol.md)
+- [Promotion log](./dev/adrs/promotion-log.md)
+- [Settings integration map](./dev/adrs/settings-integration-map.md)
+
+## Modules (M0–M4)
+
+- [Overview](./dev/research/modules/index.md)
+- [M0 Trace contract](./dev/research/modules/m0-trace.md)
+- [M1 ReAct](./dev/research/modules/m1-react.md)
+- [M2 AFlow](./dev/research/modules/m2-aflow.md)
+- [M3 GEPA](./dev/research/modules/m3-gepa.md)
+- [M4 ACE](./dev/research/modules/m4-ace.md)
+
 # ADRs & research
 
 - [Harbor pivot](./dev/adrs/harbor-pivot.md)

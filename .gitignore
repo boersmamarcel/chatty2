@@ -33,6 +33,7 @@ TEST_SUMMARY.md
 /docs-site/book/
 /docs-site/src/dev/architecture/
 /docs-site/src/dev/adrs/
+/docs-site/src/dev/research/
 /docs-site/src/dev/reference/
 /docs-site/src/dev/crates/
 /docs-site/src/dev/agents.md
