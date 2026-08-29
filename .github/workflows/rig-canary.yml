@@ -1,0 +1,65 @@
+name: Rig canary
+
+# AGE-26: compile-only canary against crates.io latest rig (informational).
+# Not part of the required `test` check. Weekly + when lockfile/manifests change
+# so every docs PR does not pay for a cold `cargo check`.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".github/workflows/rig-canary.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rig-canary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rig-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-rig-canary
+          cache-targets: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libfontconfig1-dev
+
+      - name: Soft canary — cargo update rig + check chatty-core
+        run: |
+          cp Cargo.lock Cargo.lock.canary-bak
+          set +e
+          cargo update -p rig-core
+          cargo update -p rig-agent
+          cargo check -p chatty-core --lib
+          status=$?
+          set -e
+          mv Cargo.lock.canary-bak Cargo.lock
+          if [ "$status" -ne 0 ]; then
+            echo "rig canary: compile failed against updated rig (schedule a bump window)"
+            exit 1
+          fi
+          echo "rig canary: OK"

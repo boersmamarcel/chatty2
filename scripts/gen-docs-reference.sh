@@ -134,6 +134,9 @@ cat > "$OUT/env-vars.md" << 'EOF'
 EOF
 
 # ── CLI flags (chatty-tui) ───────────────────────────────────────────────────
+# Prefer a live `--help` dump when the binary is already built. Docs CI does
+# not compile chatty-tui (18+ minutes); keep an existing generated page or
+# write a static fallback so `make docs` still works without a Rust toolchain.
 TUI_BIN="$ROOT/target/debug/chatty-tui"
 if [[ -x "$TUI_BIN" ]]; then
   {
@@ -145,6 +148,8 @@ if [[ -x "$TUI_BIN" ]]; then
     "$TUI_BIN" --help 2>/dev/null || true
     echo '```'
   } > "$OUT/cli-flags.md"
+elif [[ -f "$OUT/cli-flags.md" ]]; then
+  echo "gen-docs-reference: chatty-tui not built; keeping existing cli-flags.md"
 else
   cat > "$OUT/cli-flags.md" << 'EOF'
 # CLI reference (chatty-tui)
