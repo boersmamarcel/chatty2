@@ -94,6 +94,7 @@
 # Reference
 
 - [Tools catalog](./dev/reference/tools-catalog.md)
+- [Provider matrix](./dev/reference/provider-matrix.md)
 - [Slash commands](./dev/reference/slash-commands.md)
 - [CLI flags (chatty-tui)](./dev/reference/cli-flags.md)
 - [Environment variables](./dev/reference/env-vars.md)
