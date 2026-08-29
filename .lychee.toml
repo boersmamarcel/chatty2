@@ -1,0 +1,17 @@
+# Link checker config for docs CI (AGE-117).
+# Run via: bash scripts/check-docs-links.sh
+
+exclude_path = [
+  "docs-site/book/**",
+  "target/**",
+  "docs/generated/**",
+]
+
+# Sibling repo (harbor-chatty) is not in this workspace; links are intentional.
+exclude = [
+  '^file:///harbor-chatty',
+  '.*/harbor-chatty$',
+  'https://linear.app/',
+]
+
+offline = true

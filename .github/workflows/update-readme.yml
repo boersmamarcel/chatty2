@@ -6,6 +6,12 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "docs-site/**"
+      - "**/*.md"
+      - ".github/workflows/docs.yml"
+      - ".lychee.toml"
 
 jobs:
   update-readme:

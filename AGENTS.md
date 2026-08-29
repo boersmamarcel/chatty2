@@ -102,6 +102,10 @@ trait impls live behind the `gpui-globals` feature.
 **The CI workflow** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 **is the ground truth.** If a command is not here, it is not what CI runs.
 
+Docs-only PRs (and other diffs that do not match the Rust path filter in
+`ci.yml`) skip compile, test, and clippy. The required `test` check still
+goes green. Stale CI runs on the same PR are cancelled on the next push.
+
 ```bash
 make setup            # one-time: install Linux deps + wasm32-wasip2 target
 make build            # cargo build (debug)
@@ -117,7 +121,9 @@ make wasm-modules     # build the echo-agent WASM module (needed by tests)
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
-make ci               # everything CI runs, locally, in order
+make docs-check-links # lychee link check (AGE-117)
+make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
+make ci               # everything the Rust CI path runs, locally, in order
 ```
 
 Or use cargo directly:
@@ -127,8 +133,6 @@ cargo build
 cargo test --all-features -- --test-threads=1
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo build -p chatty-tui
-./target/debug/chatty-tui --help
 ```
 
 ### Test-thread footgun

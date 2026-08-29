@@ -7,8 +7,11 @@
 ```bash
 make setup        # Linux deps + wasm32-wasip2 (once)
 make wasm-modules # echo-agent WASM for tests
-make ci           # matches GitHub Actions
+make ci           # matches the Rust path of GitHub Actions
 ```
+
+GitHub skips that compile path when a PR only changes docs. Use `make docs`
+and `make docs-check-links` for documentation-only work.
 
 ## Platform packages
 
