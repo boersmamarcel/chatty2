@@ -106,12 +106,13 @@ pptx_writer = { package = "pptx", version = "0.1.0" }
 duckdb = { version = "~1.10504.0", features = ["parquet", "json", "bundled"] }
 
 # Math rendering
-typst = "0.14.2"
-typst-svg = "0.14.2"
-typst-pdf = "0.14.2"
+typst = "0.15.1"
+typst-svg = "0.15.1"
+typst-pdf = "0.15.1"
+typst-layout = "0.15.1"
 mitex = "0.2.4"
-typst-assets = { version = "0.14.2", features = ["fonts"] }
-comemo = "0.4"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+comemo = "0.5.1"
 
 # Mermaid / SVG
 mermaid-rs-renderer = { version = "0.2", default-features = false }

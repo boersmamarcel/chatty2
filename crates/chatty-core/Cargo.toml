@@ -74,6 +74,7 @@ duckdb = { workspace = true, optional = true }
 typst = { workspace = true, optional = true }
 typst-svg = { workspace = true, optional = true }
 typst-pdf = { workspace = true, optional = true }
+typst-layout = { workspace = true, optional = true }
 mitex = { workspace = true, optional = true }
 typst-assets = { workspace = true, optional = true }
 comemo = { workspace = true, optional = true }
@@ -121,7 +122,7 @@ excel = ["dep:calamine", "dep:rust_xlsxwriter", "dep:umya-spreadsheet"]
 docx = ["dep:docx-rs"]
 pdf = ["dep:pdfium-render", "dep:image"]
 pptx = ["dep:zip", "dep:roxmltree", "dep:pptx_writer"]
-math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:mitex", "dep:typst-assets", "dep:comemo"]
+math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:typst-layout", "dep:mitex", "dep:typst-assets", "dep:comemo"]
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]
 # Convenience: enable all optional tool dependencies
