@@ -37,7 +37,7 @@ rmcp = { version = "=2.1.0", features = ["client", "macros", "transport-streamab
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.50.0", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 dirs = "5.0"
 uuid = { version = "1.23.0", features = ["v4"] }
 
@@ -96,7 +96,7 @@ umya-spreadsheet = "2.3.3"
 docx-rs = "0.4.20"
 
 # PPTX (PowerPoint) — ZIP+XML read support plus `pptx` crate write support
-zip = "7"
+zip = "8"
 roxmltree = "0.21"
 pptx_writer = { package = "pptx", version = "0.1.0" }
 
