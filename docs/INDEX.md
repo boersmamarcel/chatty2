@@ -58,6 +58,30 @@ for coding patterns and behavioural rules read
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
 
+## Workspace crates
+
+One-line map of all 13 workspace crates. Full index with dependency diagram:
+[crates.md](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/crates.md)
+(mdBook: **Crates → Workspace crate index**).
+
+| Crate | Purpose |
+|---|---|
+| `chatty-core` | UI-agnostic agent core: models, services, tools, settings, sandbox |
+| `chatty-gpui` | GPUI desktop app (`chatty` binary) |
+| `chatty-tui` | Ratatui terminal app (interactive, headless, pipe) |
+| `chatty-wasm-runtime` | Wasmtime embedding and host WIT interfaces |
+| `chatty-module-registry` | WASM module discovery, manifest, lifecycle |
+| `chatty-protocol-gateway` | HTTP gateway: OpenAI / MCP / A2A |
+| `chatty-module-sdk` | SDK for `wasm32-wasip2` agent modules |
+| `chatty-trace` | Research: trace capture, ATIF export, feedback (M0) |
+| `chatty-playbook` | Research: ACE playbook memory (M4) |
+| `chatty-flow` | Research: AFlow workflow IR (M2) |
+| `chatty-optimize` | Research: GEPA/AFlow optimizers, paired stats (M3) |
+| `hive-client` | Hive module registry client |
+| `hive-billing-sdk` | Hive billing SDK for WASM publishers |
+
+Per-crate READMEs: `crates/<name>/README.md` (synced to mdBook on build).
+
 ## Generated reference (`docs/generated/`)
 
 Regenerate with `make docs-gen`. Synced into the mdBook site on build.
