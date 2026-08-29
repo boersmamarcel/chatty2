@@ -121,7 +121,6 @@ docs-sync:
 docs: docs-gen docs-sync
 	mdbook build docs-site
 	install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
-	install -m 644 docs/generated/llms-full.txt docs-site/book/llms-full.txt
 
 docs-serve: docs-gen docs-sync
 	mdbook serve docs-site --open
