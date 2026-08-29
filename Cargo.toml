@@ -74,7 +74,7 @@ parking_lot = "0.12"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Azure authentication
 azure_identity = "0.20"
