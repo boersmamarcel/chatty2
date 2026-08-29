@@ -25,5 +25,5 @@ Chatty stores per-model capabilities in `ModelConfig`:
 Defaults come from `ProviderType::default_capabilities()`; Ollama models are
 detected per-model via `/api/show`.
 
-Developer reference: [Provider matrix](../dev/reference/env-vars.md) ·
+Developer reference: [Provider matrix](../dev/reference/provider-matrix.md) ·
 [agent_factory](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-core/src/factories/agent_factory).

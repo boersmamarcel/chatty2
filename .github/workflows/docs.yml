@@ -58,6 +58,7 @@ jobs:
         run: |
           mdbook build docs-site
           install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
+          install -m 644 docs/generated/llms-full.txt docs-site/book/llms-full.txt
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

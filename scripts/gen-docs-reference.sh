@@ -108,6 +108,67 @@ Source: `crates/chatty-gpui/src/chatty/controllers/app_controller/slash_commands
 Skills from `.claude/skills/` appear in the picker with a `[skill]` badge.
 EOF
 
+# ── Provider matrix ─────────────────────────────────────────────────────────
+cat > "$OUT/provider-matrix.md" << 'EOF'
+# Provider matrix
+
+**When to read this:** Configure LLM backends, auth, or default model capabilities.
+
+Source: `crates/chatty-core/src/settings/models/providers_store.rs`,
+`crates/chatty-core/src/factories/agent_factory/provider_builder.rs`.
+
+## Provider types
+
+| Provider | Display name | Auth | Required config | Default images | Default PDF | Temperature default |
+|----------|--------------|------|-----------------|----------------|-------------|---------------------|
+| `openrouter` | OpenRouter | API key | `api_key`; optional `base_url` | yes | yes | per `ModelConfig` |
+| `ollama` | Ollama | none | optional `base_url` (default `http://localhost:11434`) | no | no | always applied |
+| `azure_openai` | Azure OpenAI | API key **or** Entra ID | `base_url` (resource endpoint) + credentials | yes | no | per `ModelConfig` |
+
+### OpenRouter
+
+- Gateway to 200+ upstream models (Anthropic, OpenAI, Google, Mistral, Meta, …).
+- Legacy JSON values `open_ai`, `anthropic`, `gemini`, `mistral` deserialize as `openrouter` for backward compatibility.
+- `configured_providers()` requires a non-empty `api_key`.
+- Rig client: `rig_core::providers::openrouter::Client`.
+- MCP tools are sanitized for OpenAI-compatible schemas before attachment.
+
+### Ollama
+
+- Local or remote Ollama instance; no API key required.
+- Included in `configured_providers()` even without `api_key`.
+- Default capabilities are `(false, false)`; vision/PDF support is detected per model via `/api/show` (`sync_service.rs`) and stored in `ModelConfig`.
+- Rig client: `rig_core::providers::ollama::Client`.
+
+### Azure OpenAI
+
+- Auth via `extra_config.auth_method`: `api_key` (default) or `entra_id`.
+- `configured_providers()` requires non-empty `base_url` **and** (`api_key` **or** Entra ID).
+- Endpoint URLs are normalized (trailing slashes stripped, `/openai/deployments/...` paths truncated).
+- Per-model `api_version` in `ModelConfig.extra_params`; default from `AZURE_DEFAULT_API_VERSION`.
+- Entra ID tokens are cached in `AzureTokenCache` when available.
+- Rig client: `rig_core::providers::azure::Client`.
+
+## Model capabilities (`ModelConfig`)
+
+| Field | Purpose |
+|-------|---------|
+| `supports_images` | Allow image attachments in chat |
+| `supports_pdf` | Allow PDF attachments |
+| `supports_temperature` | Show temperature slider; skipped for reasoning models |
+
+New models inherit `ProviderType::default_capabilities()`. Ollama overrides per model after sync.
+
+## TUI direct-connect flags (bypass Settings UI)
+
+| Flag | Maps to | Notes |
+|------|---------|-------|
+| `--ollama [URL]` | Ollama provider | Auto-discovers models from `/api/tags` |
+| `--openai-compat-url URL` | OpenRouter provider type | vLLM, llama.cpp, LM Studio, etc.; optional `--api-key` |
+
+See [CLI flags](./cli-flags.md) for full `chatty-tui` options.
+EOF
+
 # ── Environment variables ────────────────────────────────────────────────────
 cat > "$OUT/env-vars.md" << 'EOF'
 # Environment variables
@@ -171,35 +232,86 @@ make docs-gen
 EOF
 fi
 
-# ── llms.txt ─────────────────────────────────────────────────────────────────
+# ── llms.txt (llmstxt.org curated index) ─────────────────────────────────────
+SITE_BASE="https://boersmamarcel.github.io/chatty2"
 cat > "$OUT/llms.txt" << EOF
 # Chatty developer documentation
 
-> Chatty is a Rust desktop and terminal AI agent. This file helps coding agents find the right docs.
+> Chatty is a Rust desktop and terminal AI agent (GPUI + Ratatui). Curated links for coding agents.
 
-## Essential (read first)
+## Essential
 
-- [AGENTS.md quick-start](https://github.com/boersmamarcel/chatty2/blob/main/AGENTS.md): build, test, workspace map
-- [System overview](dev/architecture/system-overview.md): one-page mental model
-- [Component map](dev/architecture/component-map.md): diagrams of how pieces connect
-- [Doc index](dev/doc-index.md): all docs/ files by purpose
+- [Agent quick-start (AGENTS.md)](${SITE_BASE}/dev/agents.html): build, test, workspace map, conventions
+- [Where do I…? decision tree](${SITE_BASE}/dev/where-to-look.html): task → file/doc routing
+- [Documentation index](${SITE_BASE}/dev/doc-index.html): all docs/ files by purpose
+- [System overview](${SITE_BASE}/dev/architecture/system-overview.html): one-page mental model
+- [Component map](${SITE_BASE}/dev/architecture/component-map.html): crate/entity diagrams
 
 ## Architecture
 
-- architecture-overview.md, entity-communication.md, stream-manager.md
-- workspace-crate-split.md, rendering-system.md, token-tracking.md, agent-memory.md
+- [Architecture overview](${SITE_BASE}/dev/architecture/architecture-overview.html)
+- [Entity communication](${SITE_BASE}/dev/architecture/entity-communication.html)
+- [Stream manager](${SITE_BASE}/dev/architecture/stream-manager.html)
+- [Workspace crate split](${SITE_BASE}/dev/architecture/workspace-crate-split.html)
+- [Rendering system](${SITE_BASE}/dev/architecture/rendering-system.html)
+- [Token tracking](${SITE_BASE}/dev/architecture/token-tracking.html)
+- [Agent memory](${SITE_BASE}/dev/architecture/agent-memory.html)
 
 ## Reference
 
-- tools-catalog.md, slash-commands.md, env-vars.md, cli-flags.md
+- [Tools catalog](${SITE_BASE}/dev/reference/tools-catalog.html)
+- [Provider matrix](${SITE_BASE}/dev/reference/provider-matrix.html)
+- [Slash commands](${SITE_BASE}/dev/reference/slash-commands.html)
+- [CLI flags](${SITE_BASE}/dev/reference/cli-flags.html)
+- [Environment variables](${SITE_BASE}/dev/reference/env-vars.html)
 
-## Marketing (end users)
+## How-to guides
 
-- https://github.com/boersmamarcel/chatty
+- [Add a provider](${SITE_BASE}/dev/guides/add-provider.html)
+- [Add a tool](${SITE_BASE}/dev/guides/add-tool.html)
+- [Debug streams](${SITE_BASE}/dev/guides/debug-streams.html)
+- [Build & package](${SITE_BASE}/dev/guides/build-package.html)
 
-## Source repo
+## Research / reserved symbols
 
-- https://github.com/boersmamarcel/chatty2
+- [RESERVED.md](https://github.com/boersmamarcel/chatty2/blob/main/RESERVED.md): human-only functions in research crates
+- [App ↔ research bridge](${SITE_BASE}/dev/adrs/app-research-bridge.html)
+
+## Optional
+
+- [Full context bundle](${SITE_BASE}/llms-full.txt): concatenated key pages for large-context agents
+- [Marketing site](https://github.com/boersmamarcel/chatty): end-user README and screenshots
+- [Source repo](https://github.com/boersmamarcel/chatty2)
 EOF
+
+# ── llms-full.txt (concatenated key pages) ───────────────────────────────────
+LLMS_FULL="$OUT/llms-full.txt"
+: > "$LLMS_FULL"
+
+append_section() {
+  local title="$1"
+  local file="$2"
+  [[ -f "$file" ]] || return 0
+  {
+    echo ""
+    echo "================================================================================"
+    echo "# $title"
+    echo "# Source: ${file#$ROOT/}"
+    echo "================================================================================"
+    echo ""
+    cat "$file"
+    echo ""
+  } >> "$LLMS_FULL"
+}
+
+append_section "AGENTS.md" "$ROOT/AGENTS.md"
+append_section "Documentation index" "$ROOT/docs/INDEX.md"
+append_section "System overview" "$ROOT/docs/system-overview.md"
+append_section "Entity communication" "$ROOT/docs/entity-communication.md"
+append_section "Stream manager" "$ROOT/docs/stream-manager.md"
+append_section "Provider matrix" "$OUT/provider-matrix.md"
+append_section "Tools catalog" "$OUT/tools-catalog.md"
+append_section "Environment variables" "$OUT/env-vars.md"
+append_section "Where do I…?" "$ROOT/docs-site/src/dev/where-to-look.md"
 
 echo "gen-docs-reference: wrote reference pages to $OUT"
