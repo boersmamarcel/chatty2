@@ -4,9 +4,9 @@ Welcome to the **developer documentation** for [Chatty](https://github.com/boers
 a Rust desktop and terminal AI agent framework.
 
 <div class="hero-links">
-  <a href="dev/architecture/system-overview.html">System overview</a>
-  <a href="dev/architecture/component-map.html" class="secondary">Component map</a>
-  <a href="dev/agents.html" class="secondary">Agent guide</a>
+  <a href="dev/architecture/system-overview.md">System overview</a>
+  <a href="dev/architecture/component-map.md" class="secondary">Component map</a>
+  <a href="dev/agents.md" class="secondary">Agent guide</a>
   <a href="https://github.com/boersmamarcel/chatty" class="secondary">Marketing site</a>
 </div>
 
