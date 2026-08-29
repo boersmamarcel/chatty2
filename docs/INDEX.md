@@ -45,6 +45,7 @@ for coding patterns and behavioural rules read
 
 | File | When to read | What it covers |
 |---|---|---|
+| [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | **Start here for research** | SOTA → experiment → product flow, promotion outcomes, crate map |
 | [`research/harbor-pivot.md`](research/harbor-pivot.md) | Stage B sandboxes | Harbor pivot decision |
 | [`research/crate-promises-chatty-trace.md`](research/crate-promises-chatty-trace.md) | chatty-trace work | Trace crate scope |
 | [`research/crate-promises-chatty-playbook.md`](research/crate-promises-chatty-playbook.md) | chatty-playbook work | Playbook crate scope |

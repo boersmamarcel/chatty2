@@ -63,6 +63,10 @@
 - [hive-client](./dev/crates/hive-client.md)
 - [hive-billing-sdk](./dev/crates/hive-billing-sdk.md)
 
+# Research pipeline
+
+- [Paper → experiment → product](./dev/adrs/paper-to-product-pipeline.md)
+
 # ADRs & research
 
 - [Harbor pivot](./dev/adrs/harbor-pivot.md)
