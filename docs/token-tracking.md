@@ -69,6 +69,11 @@ cx.global::<GlobalTokenBudget>().update_with_actuals(input_tokens, output_tokens
 
 `update_with_actuals()` uses `watch::Sender::send_modify` to atomically patch the existing snapshot in-place, setting `actual_input_tokens` and `actual_output_tokens`. The watcher detects this change and triggers another re-render, showing actual counts in the popover alongside the estimates.
 
+## Research connection (GEPA / ACE)
+
+Context headroom and token cost feed optimizer economics ([cost model](../research/cost-model.md))
+and ACE playbook growth bounds. See [app ↔ research bridge](../research/app-research-bridge.md#context-window--token-budget).
+
 ## `TokenBudgetSnapshot`
 
 ```rust

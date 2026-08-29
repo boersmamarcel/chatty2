@@ -13,7 +13,7 @@
 
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
-        run-tui ci clean
+        run-tui ci clean docs-gen docs-sync docs docs-serve
 
 help:
 	@echo "Common targets:"
@@ -32,6 +32,10 @@ help:
 	@echo "  make wasm-modules  Build modules/echo-agent for wasm32-wasip2 (needed by tests)"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
 	@echo "  make run-tui       cargo run -p chatty-tui"
+	@echo "  make docs-gen      Generate docs/generated reference pages"
+	@echo "  make docs-sync     Copy repo markdown into docs-site/src"
+	@echo "  make docs          docs-gen + docs-sync + mdbook build"
+	@echo "  make docs-serve    Local mdBook preview (port 3000)"
 	@echo "  make ci            Everything CI runs, in order"
 
 setup:
@@ -109,3 +113,16 @@ ci: wasm-modules test
 
 clean:
 	cargo clean
+
+docs-gen:
+	bash scripts/gen-docs-reference.sh
+
+docs-sync:
+	bash scripts/docs-sync.sh
+
+docs: docs-gen docs-sync
+	mdbook build docs-site
+	install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
+
+docs-serve: docs-gen docs-sync
+	mdbook serve docs-site --open

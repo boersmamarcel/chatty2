@@ -127,6 +127,12 @@ pub struct ExecutionSettingsModel {
 
 This can be changed in the Settings → Execution panel. When disabled, the memory service is not initialized and the agent has no memory tools.
 
+## Research connection (ACE / M4)
+
+The memory + `[SKILL]` split is the production substrate for [ACE playbooks](../research/modules/m4-ace.md).
+`chatty-playbook` will add Reflector/Curator delta ops and deterministic merge on top of this
+store — see the [app ↔ research bridge](../research/app-research-bridge.md#memory-skills--playbook-m4).
+
 ## Dependencies
 
 ```toml

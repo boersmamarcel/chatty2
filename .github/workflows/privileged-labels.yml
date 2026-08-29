@@ -1,0 +1,38 @@
+name: Privileged labels
+
+# Closed-system: only repository_owner and github-actions[bot] may apply
+# ship:auto, release:patch|minor|major, or cut-release. Anyone else gets the
+# label removed and a PR comment.
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  revoke-unauthorized:
+    if: >-
+      (github.event.label.name == 'ship:auto' ||
+       github.event.label.name == 'release:patch' ||
+       github.event.label.name == 'release:minor' ||
+       github.event.label.name == 'release:major' ||
+       github.event.label.name == 'cut-release') &&
+      github.actor != github.repository_owner &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove privileged label and comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ github.event.label.name }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" --repo "$REPO" --remove-label "$LABEL"
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "Removed privileged label \`$LABEL\` added by @$ACTOR. Privileged labels (\`ship:auto\`, \`release:patch|minor|major\`, \`cut-release\`) are repository-owner / GitHub Actions only."
+          echo "Revoked unauthorized label $LABEL from PR #$PR (actor=$ACTOR)"
