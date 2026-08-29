@@ -17,6 +17,8 @@ edit the source files and rebuild.
 
 Hand-written pages (edit in place): `src/index.md`, `src/user/*`, `src/dev/guides/*`, `src/dev/where-to-look.md`, `src/dev/crates.md`.
 
+Optional YAML frontmatter (`audience`, `source_files`, `related`) is documented in `src/dev/guides/doc-frontmatter.md` and linted by `make docs-check-frontmatter`.
+
 ## Commands
 
 ```bash
