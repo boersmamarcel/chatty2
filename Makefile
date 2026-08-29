@@ -13,7 +13,8 @@
 
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
-        run-tui ci clean docs-gen docs-sync docs docs-serve
+        run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
+        docs-check-nav
 
 help:
 	@echo "Common targets:"
@@ -36,6 +37,8 @@ help:
 	@echo "  make docs-sync     Copy repo markdown into docs-site/src"
 	@echo "  make docs          docs-gen + docs-sync + mdbook build"
 	@echo "  make docs-serve    Local mdBook preview (port 3000)"
+	@echo "  make docs-check-links  Verify markdown links (lychee; AGE-117)"
+	@echo "  make docs-check-nav    Verify INDEX.md + SUMMARY.md completeness (AGE-116)"
 	@echo "  make ci            Everything CI runs, in order"
 
 setup:
@@ -123,3 +126,9 @@ docs: docs-gen docs-sync
 
 docs-serve: docs-gen docs-sync
 	mdbook serve docs-site --open
+
+docs-check-links:
+	bash scripts/check-docs-links.sh
+
+docs-check-nav:
+	bash scripts/check-docs-nav-drift.sh
