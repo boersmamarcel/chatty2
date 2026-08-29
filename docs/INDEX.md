@@ -62,6 +62,8 @@ for coding patterns and behavioural rules read
 | [`research/crate-promises-chatty-flow.md`](research/crate-promises-chatty-flow.md) | chatty-flow work | Flow crate scope |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
+| [`research/README.md`](research/README.md) | Research folder entry | How the research docs are organized |
+| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | User-guide split leftover | Temporary note from the Epic 2 migration |
 
 ## Workspace crates
 
@@ -112,6 +114,8 @@ Regenerate with `make docs-gen`. Synced into the mdBook site on build.
 | `slash-commands.md` | `/` commands in GPUI |
 | `cli-flags.md` | `chatty-tui --help` when the binary is already built; otherwise a static fallback |
 | `env-vars.md` | `CHATTY_*` and related env vars |
+| `event-catalog.md` | GPUI entity events and subscribers |
+| `singleton-inventory.md` | Process-global state and repositories |
 | `llms.txt` | Agent discovery index (curated links) |
 | `llms-full.txt` | Concatenated key pages for large-context agents |
 

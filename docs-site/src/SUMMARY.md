@@ -107,6 +107,8 @@
 - [Slash commands](./dev/reference/slash-commands.md)
 - [CLI flags (chatty-tui)](./dev/reference/cli-flags.md)
 - [Environment variables](./dev/reference/env-vars.md)
+- [GPUI event catalog](./dev/reference/event-catalog.md)
+- [Singleton inventory](./dev/reference/singleton-inventory.md)
 
 # How-to guides
 
