@@ -1,10 +1,8 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Icon, Sizable};
 use std::path::PathBuf;
 use tracing::debug;
 
@@ -18,6 +16,7 @@ use super::parsed_cache::{
     ParsedContentCache, StreamingParseState,
 };
 use super::trace_components::SystemTraceView;
+use super::transcript::MessageActionBar;
 
 /// Message role indicator
 #[derive(Clone, Debug)]
@@ -587,98 +586,23 @@ fn render_assistant_actions<G, R>(
     is_last_message: bool,
     on_feedback: G,
     on_regenerate: R,
-    cx: &App,
-) -> Div
+    _cx: &App,
+) -> impl IntoElement
 where
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
     R: Fn(usize, &mut App) + 'static + Clone,
 {
-    let muted = cx.theme().muted_foreground;
-
-    let thumbs_up_active = matches!(feedback, Some(MessageFeedback::ThumbsUp));
-    let thumbs_down_active = matches!(feedback, Some(MessageFeedback::ThumbsDown));
-
-    div()
-        .flex()
-        .justify_end()
-        .gap_1()
-        .pt_2()
-        .child(
-            Button::new(ElementId::Name(format!("thumbs-up-msg-{}", index).into()))
-                .ghost()
-                .xsmall()
-                .icon(
-                    Icon::new(IconName::ThumbsUp).text_color(if thumbs_up_active {
-                        gpui_component::green_500()
-                    } else {
-                        muted
-                    }),
-                )
-                .tooltip("Good response")
-                .on_click({
-                    let on_feedback = on_feedback.clone();
-                    let new_feedback = if thumbs_up_active {
-                        None
-                    } else {
-                        Some(MessageFeedback::ThumbsUp)
-                    };
-                    move |_event, _window, cx| {
-                        on_feedback(index, new_feedback.clone(), cx);
-                    }
-                }),
-        )
-        .child(
-            Button::new(ElementId::Name(format!("thumbs-down-msg-{}", index).into()))
-                .ghost()
-                .xsmall()
-                .icon(
-                    Icon::new(IconName::ThumbsDown).text_color(if thumbs_down_active {
-                        gpui_component::red_500()
-                    } else {
-                        muted
-                    }),
-                )
-                .tooltip("Bad response")
-                .on_click({
-                    let on_feedback = on_feedback.clone();
-                    let new_feedback = if thumbs_down_active {
-                        None
-                    } else {
-                        Some(MessageFeedback::ThumbsDown)
-                    };
-                    move |_event, _window, cx| {
-                        on_feedback(index, new_feedback.clone(), cx);
-                    }
-                }),
-        )
-        .when(is_last_message, |this| {
-            this.child(
-                Button::new(ElementId::Name(format!("regenerate-msg-{}", index).into()))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(CustomIcon::Refresh).text_color(muted))
-                    .tooltip("Regenerate response")
-                    .on_click({
-                        let on_regenerate = on_regenerate.clone();
-                        move |_event, _window, cx| {
-                            on_regenerate(index, cx);
-                        }
-                    }),
-            )
+    MessageActionBar::new(format!("msg-{index}"), content)
+        .feedback(feedback.clone())
+        .always_visible(is_last_message)
+        .on_feedback({
+            let on_feedback = on_feedback.clone();
+            move |next, cx| on_feedback(index, next, cx)
         })
-        .child(
-            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(CustomIcon::Copy))
-                .tooltip("Copy message")
-                .on_click({
-                    let content = content.to_string();
-                    move |_event, _window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
-                    }
-                }),
-        )
+        .on_regenerate({
+            let on_regenerate = on_regenerate.clone();
+            move |cx| on_regenerate(index, cx)
+        })
 }
 
 #[allow(clippy::too_many_arguments)] // Rendering function with 4 generic callbacks

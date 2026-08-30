@@ -96,9 +96,9 @@ impl RenderOnce for ConversationItem {
         let on_export = self.on_export.clone();
 
         let bg_color = if self.is_active {
-            cx.theme().secondary
-        } else {
             cx.theme().background
+        } else {
+            cx.theme().sidebar
         };
 
         div()

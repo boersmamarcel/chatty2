@@ -446,7 +446,7 @@ impl RenderOnce for ChatInput {
                     .px_3()
                     .py_3()
                     .rounded_2xl()
-                    .border_color(rgb(0xe5e7eb))
+                    .border_color(cx.theme().border)
                     .bg(cx.theme().secondary)
                     .child(
                         div()
@@ -593,12 +593,12 @@ impl RenderOnce for ChatInput {
                                             .px_3()
                                             .py_1()
                                             .rounded_sm()
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(cx.theme().primary_foreground)
                                             .cursor_pointer()
                                             .when(is_streaming, |div| {
                                                 // Stop button when streaming
-                                                div.bg(rgb(0xff4444))
-                                                    .hover(|style| style.bg(rgb(0xff2222)))
+                                                div.bg(cx.theme().danger)
+                                                    .hover(|style| style.bg(cx.theme().danger_hover))
                                                     .child("Stop")
                                                     .on_mouse_down(
                                                         MouseButton::Left,
@@ -614,8 +614,10 @@ impl RenderOnce for ChatInput {
                                             })
                                             .when(!is_streaming, |div| {
                                                 // Send button when not streaming
-                                                div.bg(rgb(0xffa033))
-                                                    .hover(|style| style.bg(rgb(0xff8c1a)))
+                                                div.bg(cx.theme().primary)
+                                                    .hover(|style| {
+                                                        style.bg(cx.theme().primary_hover)
+                                                    })
                                                     .child("Send")
                                                     .on_mouse_down(
                                                         MouseButton::Left,

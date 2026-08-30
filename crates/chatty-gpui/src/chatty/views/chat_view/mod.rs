@@ -52,17 +52,22 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use tracing::{debug, info, trace, warn};
 
-use super::agent_todo_panel::AgentTodoPanel;
 use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::SystemTrace;
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
+use super::transcript::{
+    ApprovalCard, PlanBlock, PlanStrip, RunPin, RunPinKind, TurnRole, adapt_messages,
+    estimate_turn_height, format_worked_for,
+};
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
@@ -81,6 +86,11 @@ pub struct ChatView {
     messages: Vec<DisplayMessage>,
     conversation_id: Option<String>,
     scroll_handle: ScrollHandle,
+    list_scroll: VirtualListScrollHandle,
+    /// Explicit pin: auto-scroll only while this is false.
+    user_scrolled_away: bool,
+    /// Finished assistant turns fold unless the user expands them.
+    collapsed_turns: HashMap<usize, bool>,
     pending_approval: Option<PendingApprovalInfo>,
     /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
@@ -138,6 +148,7 @@ impl ChatView {
 
         let chat_input_state = cx.new(|_cx| ChatInputState::new(input.clone()));
         let scroll_handle = ScrollHandle::new();
+        let list_scroll = VirtualListScrollHandle::new();
 
         // Subscribe to input events to handle Enter key
         let state_for_enter = chat_input_state.clone();
@@ -253,6 +264,9 @@ impl ChatView {
             messages: Vec::new(),
             conversation_id: None,
             scroll_handle,
+            list_scroll,
+            user_scrolled_away: false,
+            collapsed_turns: HashMap::new(),
             pending_approval: None,
             collapsed_tool_calls: HashMap::new(),
             diff_expanded: HashMap::new(),
@@ -313,25 +327,34 @@ impl ChatView {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn toggle_agent_task_panel(&mut self, cx: &mut Context<Self>) {
         self.agent_task_panel_collapsed = !self.agent_task_panel_collapsed;
         cx.notify();
     }
 
-    fn render_agent_task_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_agent_task_panel(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         let snapshot = self.agent_task_snapshot.clone()?;
         if !snapshot.write_todos_called {
             return None;
         }
+        Some(PlanBlock::new(snapshot).into_any_element())
+    }
 
-        let entity = cx.entity();
-        Some(
-            AgentTodoPanel::new(snapshot, self.agent_task_panel_collapsed)
-                .on_toggle(move |cx| {
-                    entity.update(cx, |view, cx| view.toggle_agent_task_panel(cx));
-                })
-                .into_any_element(),
-        )
+    fn should_collapse_turn(&self, index: usize, msg: &DisplayMessage) -> bool {
+        if msg.is_streaming || !matches!(msg.role, MessageRole::Assistant) {
+            return false;
+        }
+        self.collapsed_turns
+            .get(&index)
+            .copied()
+            .unwrap_or_else(|| {
+                msg.system_trace_view.is_some()
+                    || msg
+                        .live_trace
+                        .as_ref()
+                        .is_some_and(|trace| trace.has_items())
+            })
     }
 
     /// Add a user message to the chat
@@ -614,6 +637,8 @@ impl ChatView {
     /// Sticky mode is automatically disabled when the user scrolls up.
     fn activate_sticky_scroll(&mut self) {
         self.stick_to_bottom = true;
+        self.user_scrolled_away = false;
+        self.list_scroll.scroll_to_bottom();
         self.scroll_handle.scroll_to_bottom();
     }
 
@@ -621,7 +646,8 @@ impl ChatView {
     /// Used for incremental streaming updates — respects the user's decision
     /// to scroll up by not re-enabling sticky mode.
     fn scroll_if_sticky(&mut self) {
-        if self.stick_to_bottom {
+        if self.stick_to_bottom && !self.user_scrolled_away {
+            self.list_scroll.scroll_to_bottom();
             self.scroll_handle.scroll_to_bottom();
         }
     }
@@ -678,18 +704,20 @@ impl ChatView {
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
         // async layout changes (image loading, SVG math, code blocks) always
         // converge to the true bottom. Detect user scroll-away to disable.
-        if self.stick_to_bottom {
-            let offset = self.scroll_handle.offset();
-            let max_offset = self.scroll_handle.max_offset();
+        if self.stick_to_bottom && !self.user_scrolled_away {
+            let offset = self.list_scroll.offset();
+            let max_offset = self.list_scroll.max_offset();
             let distance_from_bottom = max_offset.height + offset.y;
 
             if distance_from_bottom > px(10.0) && max_offset.height > px(0.0) {
                 self.stick_to_bottom = false;
+                self.user_scrolled_away = true;
                 trace!(
                     distance = %distance_from_bottom,
                     "Sticky scroll disabled: user scrolled up"
                 );
             } else {
+                self.list_scroll.scroll_to_bottom();
                 self.scroll_handle.scroll_to_bottom();
             }
         }
@@ -738,74 +766,158 @@ impl ChatView {
     /// Render the scrollable message list area including the loading skeleton.
     fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_awaiting = self.is_awaiting_response();
-        let chat_view_entity = cx.entity();
-
-        // Temporarily move state out to avoid split borrows
-        let collapsed_tool_calls = std::mem::take(&mut self.collapsed_tool_calls);
-        let diff_expanded = std::mem::take(&mut self.diff_expanded);
-        let mut parsed_cache = std::mem::take(&mut self.parsed_cache);
-        let mut streaming_cache = self.streaming_parse_cache.take();
-
-        let total_messages = self.messages.len();
-        let visible_messages: Vec<(usize, &DisplayMessage)> = self
+        let collapsed: Vec<bool> = self
             .messages
             .iter()
             .enumerate()
-            .filter(|(_, msg)| {
-                !(msg.is_streaming
-                    && msg.content.is_empty()
-                    && !msg
-                        .live_trace
-                        .as_ref()
-                        .is_some_and(|trace| trace.has_items()))
-            })
+            .map(|(index, msg)| self.should_collapse_turn(index, msg))
             .collect();
+        let turns = adapt_messages(&self.messages, &collapsed);
+        let show_start_screen = turns.is_empty() && !is_awaiting;
+        let thinking_visible = self.is_thinking_indicator_visible();
+        let thinking_indicator = self.thinking_indicator.clone();
+        let sizes = Rc::new(turns.iter().map(estimate_turn_height).collect::<Vec<_>>());
+        let entity = cx.entity();
+        let user_away = self.user_scrolled_away;
+        let has_approval = self.active_approval_for_display().is_some();
+        let plan_strip = self
+            .agent_task_snapshot
+            .clone()
+            .filter(|snap| snap.write_todos_called && user_away);
 
         trace!(
             target: "chatty_gpui::render::list",
-            total = total_messages,
-            visible = visible_messages.len(),
-            filtered = total_messages - visible_messages.len(),
+            total = self.messages.len(),
+            visible = turns.len(),
             is_awaiting = is_awaiting,
-            thinking_visible = is_awaiting,
+            thinking_visible = thinking_visible,
             conversation_id = ?self.conversation_id,
             "render_message_list",
         );
 
-        let last_visible_assistant_idx = visible_messages
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .flex_col()
+            .when_some(plan_strip, |this, snapshot| {
+                this.child(div().px_4().pt_2().child(PlanStrip::new(snapshot)))
+            })
+            .when(show_start_screen, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .items_center()
+                        .justify_center()
+                        .child(self.render_start_screen(cx)),
+                )
+            })
+            .when(!show_start_screen, |this| {
+                this.child(
+                    v_virtual_list(
+                        entity,
+                        "transcript",
+                        sizes,
+                        move |this, range, window, cx| this.render_visible_turns(range, window, cx),
+                    )
+                    .track_scroll(&self.list_scroll)
+                    .p_4()
+                    .flex_1(),
+                )
+                .vertical_scrollbar(&self.list_scroll)
+            })
+            .when(thinking_visible, |this| this.child(thinking_indicator))
+            .child(
+                RunPin::new(if has_approval && user_away {
+                    RunPinKind::PendingApproval
+                } else {
+                    RunPinKind::JumpToLatest
+                })
+                .visible(user_away)
+                .on_click({
+                    let entity = cx.entity();
+                    move |cx| {
+                        entity.update(cx, |view, cx| {
+                            view.activate_sticky_scroll();
+                            cx.notify();
+                        });
+                    }
+                }),
+            )
+    }
+
+    fn render_visible_turns(
+        &mut self,
+        range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let collapsed: Vec<bool> = self
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, msg)| self.should_collapse_turn(index, msg))
+            .collect();
+        let turns = adapt_messages(&self.messages, &collapsed);
+        let last_visible_assistant_idx = turns
             .iter()
             .rev()
-            .find(|(_, msg)| {
-                matches!(msg.role, MessageRole::Assistant)
-                    && !msg.is_streaming
-                    && msg.live_trace.is_none()
-            })
-            .map(|(idx, _)| *idx);
+            .find(|turn| matches!(turn.role, TurnRole::Assistant) && !turn.streaming)
+            .map(|turn| turn.message_index);
 
-        let mut rendered: Vec<AnyElement> = visible_messages
-            .into_iter()
-            .map(|(index, msg)| {
-                let entity_clone = chat_view_entity.clone();
-                let entity_for_diff = chat_view_entity.clone();
-                let entity_for_feedback = chat_view_entity.clone();
-                let entity_for_regenerate = chat_view_entity.clone();
-                let history_index = msg.history_index;
-                let is_last_message = last_visible_assistant_idx == Some(index);
-                let mut no_cache: Option<StreamingParseState> = None;
-                let sc = if msg.is_streaming {
-                    &mut streaming_cache
-                } else {
-                    &mut no_cache
+        let entity = cx.entity();
+        range
+            .filter_map(|ix| turns.get(ix).cloned())
+            .map(|turn| {
+                if turn.collapsed {
+                    let label = format_worked_for(turn.elapsed);
+                    let msg_index = turn.message_index;
+                    let entity = entity.clone();
+                    return div()
+                        .id(ElementId::NamedInteger("turn-collapsed".into(), turn.id))
+                        .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .px_3()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().muted_foreground)
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            entity.update(cx, |view, cx| {
+                                view.collapsed_turns.insert(msg_index, false);
+                                cx.notify();
+                            });
+                        })
+                        .child(label)
+                        .into_any_element();
+                }
+
+                let Some(msg) = self.messages.get(turn.message_index) else {
+                    return div().into_any_element();
                 };
-                render_message(
+                let history_index = msg.history_index;
+                let is_last_message = last_visible_assistant_idx == Some(turn.message_index);
+                let entity_clone = entity.clone();
+                let entity_for_diff = entity.clone();
+                let entity_for_feedback = entity.clone();
+                let entity_for_regenerate = entity.clone();
+                let mut streaming_slot = if msg.is_streaming {
+                    self.streaming_parse_cache.take()
+                } else {
+                    None
+                };
+                let element = render_message(
                     msg,
-                    index,
+                    turn.message_index,
                     is_last_message,
-                    &collapsed_tool_calls,
-                    &diff_expanded,
+                    &self.collapsed_tool_calls,
+                    &self.diff_expanded,
                     &mut MessageRenderCaches {
-                        parsed: &mut parsed_cache,
-                        streaming: sc,
+                        parsed: &mut self.parsed_cache,
+                        streaming: &mut streaming_slot,
                     },
                     move |msg_idx, tool_idx, cx| {
                         entity_clone.update(cx, |chat_view, cx| {
@@ -852,50 +964,13 @@ impl ChatView {
                         });
                     },
                     cx,
-                )
-                .into_any_element()
+                );
+                if streaming_slot.is_some() {
+                    self.streaming_parse_cache = streaming_slot;
+                }
+                element
             })
-            .collect();
-
-        let show_start_screen = rendered.is_empty() && !is_awaiting;
-        if show_start_screen {
-            rendered.push(self.render_start_screen(cx).into_any_element());
-        }
-
-        // Move state back
-        self.parsed_cache = parsed_cache;
-        self.streaming_parse_cache = streaming_cache;
-        self.collapsed_tool_calls = collapsed_tool_calls;
-        self.diff_expanded = diff_expanded;
-
-        let thinking_visible = self.is_thinking_indicator_visible();
-        let thinking_indicator = self.thinking_indicator.clone();
-
-        div()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .child(
-                div()
-                    .id("chat-messages")
-                    .track_scroll(&self.scroll_handle)
-                    .overflow_scroll()
-                    .size_full()
-                    .child(
-                        div()
-                            .p_4()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .when(show_start_screen, |this| {
-                                this.h_full().items_center().justify_center().gap_0()
-                            })
-                            .when(!show_start_screen, |this| this.gap_4())
-                            .children(rendered)
-                            .when(thinking_visible, |this| this.child(thinking_indicator)),
-                    ),
-            )
-            .vertical_scrollbar(&self.scroll_handle)
+            .collect()
     }
 
     /// Return the pending approval if it belongs to the current conversation.
@@ -1071,13 +1146,16 @@ impl Render for ChatView {
             })
             .when_some(self.active_approval_for_display(), |this, pending| {
                 let view_entity = cx.entity();
+                let approval = chatty_core::models::message_types::ApprovalBlock {
+                    id: pending.id,
+                    command: pending.command,
+                    is_sandboxed: pending.is_sandboxed,
+                    state: chatty_core::models::message_types::ApprovalState::Pending,
+                    created_at: std::time::SystemTime::now(),
+                };
                 this.child(
-                    div().child(
-                        super::approval_prompt_bar::ApprovalPromptBar::new(
-                            pending.command,
-                            pending.is_sandboxed,
-                        )
-                        .on_approve_deny({
+                    div().px_4().child(
+                        ApprovalCard::new(approval).on_decide({
                             let entity = view_entity.clone();
                             move |approved, cx| {
                                 entity.update(cx, |view, cx| {

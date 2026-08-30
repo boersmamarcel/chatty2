@@ -1,0 +1,246 @@
+use std::time::Duration;
+
+use chatty_core::models::message_types::{SystemTrace, TraceItem};
+use gpui::{Pixels, Size, px, size};
+
+use super::activity::classify_tool;
+use super::types::{Block, BlockId, Turn, TurnRole};
+use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
+
+/// Fixed height reported by a collapsed finished turn.
+pub const COLLAPSED_TURN_HEIGHT: f32 = 36.0;
+
+/// Map one [`DisplayMessage`] onto one [`Turn`].
+pub fn adapt_message(msg: &DisplayMessage, message_index: usize, collapsed: bool) -> Turn {
+    let namespace = (message_index as u64).saturating_add(1);
+    let mut blocks = Vec::new();
+
+    match msg.role {
+        MessageRole::User => {
+            blocks.push(Block::User {
+                id: BlockId::from_parts(namespace, "user"),
+                content: msg.content.clone(),
+                attachments: msg.attachments.clone(),
+            });
+        }
+        MessageRole::Assistant => {
+            let trace = msg.live_trace.as_ref();
+            if let Some(trace) = trace {
+                push_trace_blocks(&mut blocks, namespace, trace);
+            }
+            if !msg.content.is_empty() {
+                blocks.push(Block::Text {
+                    id: BlockId::from_parts(namespace, "text"),
+                    content: msg.content.clone(),
+                    streaming: msg.is_streaming,
+                });
+            }
+        }
+    }
+
+    let elapsed = msg
+        .live_trace
+        .as_ref()
+        .and_then(|trace| trace.total_duration);
+
+    Turn {
+        id: namespace,
+        message_index,
+        role: match msg.role {
+            MessageRole::User => TurnRole::User,
+            MessageRole::Assistant => TurnRole::Assistant,
+        },
+        blocks,
+        elapsed,
+        collapsed: collapsed && !msg.is_streaming && matches!(msg.role, MessageRole::Assistant),
+        streaming: msg.is_streaming,
+    }
+}
+
+fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrace) {
+    let mut activity_tools = Vec::new();
+    let flush_activity = |blocks: &mut Vec<Block>, tools: &mut Vec<_>| {
+        if tools.is_empty() {
+            return;
+        }
+        let key = tools
+            .first()
+            .map(|t: &chatty_core::models::message_types::ToolCallBlock| t.id.clone())
+            .unwrap_or_else(|| "activity".into());
+        blocks.push(Block::Activity {
+            id: BlockId::from_parts(namespace, &format!("activity-{key}")),
+            tools: std::mem::take(tools),
+        });
+    };
+
+    for (idx, item) in trace.items.iter().enumerate() {
+        match item {
+            TraceItem::Thinking(thinking) => {
+                flush_activity(blocks, &mut activity_tools);
+                blocks.push(Block::Thinking {
+                    id: BlockId::from_parts(namespace, &format!("thinking-{idx}")),
+                    block: thinking.clone(),
+                });
+            }
+            TraceItem::ApprovalPrompt(approval) => {
+                flush_activity(blocks, &mut activity_tools);
+                blocks.push(Block::Approval {
+                    id: BlockId::from_parts(namespace, &approval.id),
+                    approval: approval.clone(),
+                });
+            }
+            TraceItem::ToolCall(tool) => {
+                if is_diff_tool(tool) {
+                    flush_activity(blocks, &mut activity_tools);
+                    blocks.push(Block::Diff {
+                        id: BlockId::from_parts(namespace, &tool.id),
+                        tool: tool.clone(),
+                    });
+                } else if is_new_file_artifact(tool) {
+                    flush_activity(blocks, &mut activity_tools);
+                    if let Some(path) = artifact_path(tool) {
+                        blocks.push(Block::Artifact {
+                            id: BlockId::from_parts(namespace, &tool.id),
+                            path,
+                        });
+                    } else {
+                        activity_tools.push(tool.clone());
+                    }
+                } else if let Some(err) = tool_error(tool) {
+                    flush_activity(blocks, &mut activity_tools);
+                    blocks.push(Block::Error {
+                        id: BlockId::from_parts(namespace, &tool.id),
+                        message: err,
+                        detail: tool.output.clone(),
+                    });
+                } else {
+                    activity_tools.push(tool.clone());
+                }
+            }
+        }
+    }
+    flush_activity(blocks, &mut activity_tools);
+}
+
+fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> bool {
+    matches!(
+        classify_tool(&tool.tool_name),
+        super::activity::ToolKind::Edit
+    ) && !is_new_file_artifact(tool)
+}
+
+fn is_new_file_artifact(tool: &chatty_core::models::message_types::ToolCallBlock) -> bool {
+    let name = tool.tool_name.to_ascii_lowercase();
+    (name.contains("write") || name.contains("create")) && !name.contains("diff")
+}
+
+fn artifact_path(
+    tool: &chatty_core::models::message_types::ToolCallBlock,
+) -> Option<std::path::PathBuf> {
+    let input = tool.input.as_str();
+    for key in ["path", "file_path", "filename"] {
+        if let Some(idx) = input.find(key)
+            && let Some(rest) = input.get(idx + key.len()..)
+        {
+            let trimmed = rest.trim_start_matches([' ', ':', '=', '"', '\'']);
+            let end = trimmed
+                .find(|c: char| c == '"' || c == '\'' || c.is_whitespace() || c == ',')
+                .unwrap_or(trimmed.len());
+            let path = &trimmed[..end];
+            if !path.is_empty() {
+                return Some(std::path::PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Option<String> {
+    match &tool.state {
+        chatty_core::models::message_types::ToolCallState::Error(msg) => Some(msg.clone()),
+        _ => None,
+    }
+}
+
+pub fn adapt_messages(messages: &[DisplayMessage], collapsed_turns: &[bool]) -> Vec<Turn> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, msg)| {
+            !(msg.is_streaming
+                && msg.content.is_empty()
+                && !msg
+                    .live_trace
+                    .as_ref()
+                    .is_some_and(|trace| trace.has_items()))
+        })
+        .map(|(index, msg)| {
+            let collapsed = collapsed_turns.get(index).copied().unwrap_or(false);
+            adapt_message(msg, index, collapsed)
+        })
+        .collect()
+}
+
+pub fn estimate_turn_height(turn: &Turn) -> Size<Pixels> {
+    if turn.collapsed {
+        return size(px(800.), px(COLLAPSED_TURN_HEIGHT));
+    }
+    let mut height = 48.0_f32;
+    for block in &turn.blocks {
+        height += match block {
+            Block::User {
+                content,
+                attachments,
+                ..
+            } => 28.0 + (content.len() as f32 / 48.0).min(240.0) + attachments.len() as f32 * 48.0,
+            Block::Text { content, .. } => 24.0 + (content.len() as f32 / 48.0).min(400.0),
+            Block::Thinking { .. } => 56.0,
+            Block::Activity { tools, .. } => 40.0 + tools.len() as f32 * 28.0,
+            Block::Diff { .. } => 120.0,
+            Block::Approval { .. } => 72.0,
+            Block::Plan { .. } => 80.0,
+            Block::Artifact { .. } => 56.0,
+            Block::Error { .. } => 64.0,
+        };
+    }
+    size(px(800.), px(height.max(36.0)))
+}
+
+pub fn format_worked_for(elapsed: Option<Duration>) -> String {
+    let secs = elapsed.map(|d| d.as_secs()).unwrap_or(0);
+    if secs < 1 {
+        "Worked for a moment".to_string()
+    } else if secs < 60 {
+        format!("Worked for {secs}s")
+    } else {
+        format!("Worked for {}m {}s", secs / 60, secs % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worked_for_formats_seconds_and_minutes() {
+        assert_eq!(format_worked_for(None), "Worked for a moment");
+        assert_eq!(
+            format_worked_for(Some(Duration::from_secs(4))),
+            "Worked for 4s"
+        );
+        assert_eq!(
+            format_worked_for(Some(Duration::from_secs(65))),
+            "Worked for 1m 5s"
+        );
+    }
+
+    #[test]
+    fn block_ids_are_stable_and_not_indexes() {
+        let a = BlockId::from_parts(1, "user");
+        let b = BlockId::from_parts(1, "user");
+        let c = BlockId::from_parts(1, "text");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a.0, 0);
+    }
+}
