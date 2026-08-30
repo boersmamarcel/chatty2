@@ -75,7 +75,7 @@ jobs:
 
             Same project id `3155f3ff-5aab-4caf-96ed-c4ca1590afd9`:
             - azure_identity / azure_core **major** bumps (Entra ID auth — smoke test required)
-            - MSRV-raising bumps (e.g. bollard when workspace rust-version blocks it)
+            - MSRV-raising bumps (crates whose rust-version exceeds workspace rust-version)
             - Updates known **not to compile** upstream (e.g. broken rmcp release)
             - Auth/billing-related deps
             - Label: `owner:human` (`a98f1293-26e1-4e7f-aef6-b4d41882648e`) only — no `ship:auto`

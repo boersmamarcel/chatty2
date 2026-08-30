@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Trace capture, ATIF round-trip, FeedbackFn (AGE-5) — ships in the app"
 publish = false
-rust-version = "1.85"
+rust-version = "1.95"
 
 [lib]
 name = "chatty_trace"
