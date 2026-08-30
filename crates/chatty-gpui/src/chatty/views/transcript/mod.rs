@@ -34,7 +34,7 @@ pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
     COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
     adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    plan_block_top, plan_is_above_viewport, plan_turn_index,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact::{

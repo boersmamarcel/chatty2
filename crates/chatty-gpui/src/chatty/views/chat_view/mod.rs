@@ -68,7 +68,7 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
     PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, Turn, TurnRole,
     adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff, plan_block_bottom,
+    is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff, plan_block_top,
     plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
     tool_file_path,
 };
@@ -124,6 +124,8 @@ pub struct ChatView {
     thinking_indicator: Entity<ThinkingIndicator>,
     agent_task_snapshot: Option<AgentTaskSnapshot>,
     plan_overlay_open: bool,
+    plan_scroll_watch_armed: bool,
+    last_list_scroll_offset: Option<Point<Pixels>>,
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
@@ -285,6 +287,8 @@ impl ChatView {
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
+            plan_scroll_watch_armed: false,
+            last_list_scroll_offset: None,
             artifact_view: new_artifact_view(cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
@@ -332,6 +336,38 @@ impl ChatView {
         self.agent_task_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.write_todos_called && !snapshot.todos.is_empty())
+    }
+
+    fn ensure_plan_scroll_watch(&mut self, cx: &mut Context<Self>) {
+        if self.plan_scroll_watch_armed || !self.plan_snapshot_active() {
+            return;
+        }
+        self.plan_scroll_watch_armed = true;
+        cx.spawn(async move |entity, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(80))
+                    .await;
+                let keep = entity
+                    .update(cx, |view, cx| {
+                        if !view.plan_snapshot_active() {
+                            view.plan_scroll_watch_armed = false;
+                            return false;
+                        }
+                        let offset = view.list_scroll.offset();
+                        if view.last_list_scroll_offset != Some(offset) {
+                            view.last_list_scroll_offset = Some(offset);
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn typed_turns(&self, cx: &App) -> Vec<Turn> {
@@ -926,10 +962,12 @@ impl ChatView {
         let user_away = self.user_scrolled_away;
         let has_approval = self.active_approval_for_display().is_some();
         let has_plan = self.plan_snapshot_active();
+        if has_plan {
+            self.ensure_plan_scroll_watch(cx);
+        }
         let show_strip = has_plan
-            && self.list_scroll.max_offset().height > px(0.0)
-            && plan_block_bottom(&turns, plan_steps, px(16.0))
-                .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
+            && plan_block_top(&turns, plan_steps, px(16.0))
+                .is_some_and(|top| plan_is_above_viewport(top, -self.list_scroll.offset().y));
         if !show_strip {
             self.plan_overlay_open = false;
         }
@@ -1011,6 +1049,12 @@ impl ChatView {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        .on_scroll_wheel({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |_, cx| cx.notify());
+                            }
+                        })
                         .child(
                             v_virtual_list(
                                 entity,

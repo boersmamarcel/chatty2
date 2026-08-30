@@ -196,8 +196,8 @@ pub fn block_estimated_height(block: &Block, plan_steps: usize) -> f32 {
     }
 }
 
-/// Content Y of the bottom of the inline plan block, including list top padding.
-pub fn plan_block_bottom(turns: &[Turn], plan_steps: usize, padding_top: Pixels) -> Option<Pixels> {
+/// Content Y of the top of the inline plan block, including list top padding.
+pub fn plan_block_top(turns: &[Turn], plan_steps: usize, padding_top: Pixels) -> Option<Pixels> {
     let ix = plan_turn_index(turns)?;
     let mut y = padding_top;
     for turn in &turns[..ix] {
@@ -205,21 +205,21 @@ pub fn plan_block_bottom(turns: &[Turn], plan_steps: usize, padding_top: Pixels)
     }
     let turn = &turns[ix];
     if turn.collapsed {
-        return Some(y + px(COLLAPSED_TURN_HEIGHT));
+        return Some(y);
     }
     y += px(48.0);
     for block in &turn.blocks {
-        y += px(block_estimated_height(block, plan_steps));
         if matches!(block, Block::Plan { .. }) {
             return Some(y);
         }
+        y += px(block_estimated_height(block, plan_steps));
     }
     Some(y)
 }
 
-/// True when the plan card has fully scrolled above the viewport.
-pub fn plan_is_above_viewport(plan_bottom: Pixels, viewport_top: Pixels) -> bool {
-    plan_bottom + px(4.0) <= viewport_top
+/// True when the plan card's origin has scrolled above the viewport.
+pub fn plan_is_above_viewport(plan_top: Pixels, viewport_top: Pixels) -> bool {
+    plan_top + px(8.0) <= viewport_top
 }
 
 fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> bool {
@@ -462,17 +462,17 @@ mod tests {
     }
 
     #[test]
-    fn plan_strip_hides_while_block_straddles_and_shows_when_fully_past() {
-        let bottom = px(120.0);
+    fn plan_strip_shows_once_the_card_origin_is_above_the_viewport() {
+        let top = px(120.0);
         assert!(
-            !plan_is_above_viewport(bottom, px(100.0)),
-            "straddling the top edge must not show the strip"
+            !plan_is_above_viewport(top, px(100.0)),
+            "card origin still in view"
         );
         assert!(
-            !plan_is_above_viewport(bottom, px(122.0)),
-            "4px hysteresis keeps the boundary quiet"
+            !plan_is_above_viewport(top, px(126.0)),
+            "8px hysteresis keeps the boundary quiet"
         );
-        assert!(plan_is_above_viewport(bottom, px(130.0)));
+        assert!(plan_is_above_viewport(top, px(130.0)));
     }
 
     fn tally_sentence_matches_linear_1a_order() {
