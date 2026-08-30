@@ -1349,20 +1349,13 @@ impl Render for ChatView {
                     .px_4()
                     .pt_2()
                     .pb_4()
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .rounded_2xl()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .overflow_hidden()
-                            .when_some(self.render_agent_task_panel(cx), |this, panel| {
-                                this.child(panel)
-                            })
-                            .child(ChatInput::new(self.chat_input_state.clone()).bare()),
-                    ),
+                    .child({
+                        let input = ChatInput::new(self.chat_input_state.clone());
+                        match self.render_agent_task_panel(cx) {
+                            Some(panel) => input.header(panel).into_any_element(),
+                            None => input.into_any_element(),
+                        }
+                    }),
             );
 
         div()
