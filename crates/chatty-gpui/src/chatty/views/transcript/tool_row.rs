@@ -7,6 +7,8 @@ use gpui_component::skeleton::Skeleton;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
+use super::verb::tool_row_label;
+
 /// Compact tool-call row. Verb tense encodes state.
 #[derive(IntoElement)]
 pub struct ToolRow {
@@ -16,29 +18,6 @@ pub struct ToolRow {
 impl ToolRow {
     pub fn new(tool: ToolCallBlock) -> Self {
         Self { tool }
-    }
-}
-
-fn verb(name: &str, state: &ToolCallState) -> String {
-    let base = name
-        .rsplit(['.', '_', ':'])
-        .next()
-        .unwrap_or(name)
-        .replace('_', " ");
-    match state {
-        ToolCallState::Running => format!("{base}…"),
-        ToolCallState::Success => past_tense(&base),
-        ToolCallState::Error(_) => format!("Failed {base}"),
-    }
-}
-
-fn past_tense(verb: &str) -> String {
-    if verb.ends_with('e') {
-        format!("{verb}d")
-    } else if verb.ends_with('y') && verb.len() > 1 {
-        format!("{}ied", &verb[..verb.len() - 1])
-    } else {
-        format!("{verb}ed")
     }
 }
 
@@ -59,7 +38,7 @@ impl RenderOnce for ToolRow {
         } else {
             tool.id.clone()
         };
-        let label = verb(&tool.display_name, &tool.state);
+        let label = tool_row_label(&tool.display_name, &tool.tool_name, &tool.state);
         let (tag, tag_success) = match &tool.state {
             ToolCallState::Success => (None, true),
             ToolCallState::Error(err) => (Some(err.clone()), false),

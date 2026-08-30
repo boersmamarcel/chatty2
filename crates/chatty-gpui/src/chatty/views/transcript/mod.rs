@@ -16,6 +16,7 @@ mod run_pin;
 mod ticker;
 mod tool_row;
 mod types;
+mod verb;
 
 pub use action_bar::MessageActionBar;
 pub use activity::{ActivityGroup, RunTally, classify_tool};
