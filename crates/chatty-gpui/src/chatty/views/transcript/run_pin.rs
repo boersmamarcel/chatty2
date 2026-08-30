@@ -8,11 +8,13 @@ pub enum RunPinKind {
     PendingApproval,
 }
 
+type RunPinClick = Box<dyn Fn(&mut App) + 'static>;
+
 #[derive(IntoElement)]
 pub struct RunPin {
     kind: RunPinKind,
     visible: bool,
-    on_click: Option<Box<dyn Fn(&mut App) + 'static>>,
+    on_click: Option<RunPinClick>,
 }
 
 impl RunPin {

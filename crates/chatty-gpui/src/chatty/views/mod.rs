@@ -1,5 +1,4 @@
 pub mod app_view;
-pub mod approval_prompt_bar;
 pub use chatty_core::models::attachment_validation;
 mod chart_renderer;
 pub mod chat_input;

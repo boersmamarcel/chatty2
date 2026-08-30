@@ -166,7 +166,7 @@ impl RenderOnce for ActivityGroup {
                     .gap_1()
                     .px_2()
                     .pb_2()
-                    .children(self.tools.into_iter().map(|tool| ToolRow::new(tool))),
+                    .children(self.tools.into_iter().map(ToolRow::new)),
             )
     }
 }

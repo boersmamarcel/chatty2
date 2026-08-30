@@ -2,7 +2,7 @@ use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::{Icon, Sizable};
+use gpui_component::Icon;
 use std::path::PathBuf;
 use tracing::debug;
 

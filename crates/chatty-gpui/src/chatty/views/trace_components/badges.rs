@@ -46,6 +46,7 @@ pub(super) fn execution_engine_badge(engine: ExecutionEngine) -> (String, Rgba) 
     (label.to_string(), color)
 }
 
+#[allow(dead_code)]
 pub(super) fn render_mode_badge(
     label: &'static str,
     is_remote: bool,
@@ -69,6 +70,7 @@ pub(super) fn render_mode_badge(
         .into_any_element()
 }
 
+#[allow(dead_code)]
 pub(super) fn sub_agent_mode_label(source: &ToolSource) -> &'static str {
     match source {
         ToolSource::HiveCloud
@@ -78,6 +80,7 @@ pub(super) fn sub_agent_mode_label(source: &ToolSource) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn render_sub_agent_mode_badge(source: &ToolSource, badge_text: Hsla) -> AnyElement {
     render_mode_badge(
         sub_agent_mode_label(source),

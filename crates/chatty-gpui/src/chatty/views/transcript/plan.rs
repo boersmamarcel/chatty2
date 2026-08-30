@@ -1,9 +1,10 @@
+use crate::assets::CustomIcon;
 use chatty_core::services::{AgentTaskSnapshot, AgentTodoStatus};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::popover::Popover;
-use gpui_component::{ActiveTheme, Sizable};
+use gpui_component::{ActiveTheme, Icon, Sizable};
 
 #[derive(IntoElement)]
 pub struct PlanBlock {
@@ -51,10 +52,21 @@ impl RenderOnce for PlanBlock {
             )
             .children(self.snapshot.todos.into_iter().map(|todo| {
                 let running = matches!(todo.status, AgentTodoStatus::InProgress);
+                let icon = match todo.status {
+                    AgentTodoStatus::Done => CustomIcon::CircleDot,
+                    AgentTodoStatus::InProgress => CustomIcon::CircleDashed,
+                    AgentTodoStatus::Blocked => CustomIcon::Lock,
+                    AgentTodoStatus::Pending => CustomIcon::CircleDashed,
+                };
                 div()
                     .id(ElementId::Name(format!("plan-step-{}", todo.id).into()))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .text_xs()
                     .when(running, |this| this.text_color(cx.theme().primary))
+                    .child(Icon::new(icon).size_3())
                     .child(todo.title)
             }))
     }

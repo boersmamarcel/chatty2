@@ -10,14 +10,17 @@ use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
 const BAR_HEIGHT: f32 = 28.0;
 
+type FeedbackFn = Arc<dyn Fn(Option<MessageFeedback>, &mut App) + 'static>;
+type RegenerateFn = Arc<dyn Fn(&mut App) + 'static>;
+
 #[derive(IntoElement)]
 pub struct MessageActionBar {
     message_id: String,
     content: String,
     feedback: Option<MessageFeedback>,
     always_visible: bool,
-    on_feedback: Option<Arc<dyn Fn(Option<MessageFeedback>, &mut App) + 'static>>,
-    on_regenerate: Option<Arc<dyn Fn(&mut App) + 'static>>,
+    on_feedback: Option<FeedbackFn>,
+    on_regenerate: Option<RegenerateFn>,
 }
 
 impl MessageActionBar {
