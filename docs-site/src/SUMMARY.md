@@ -107,6 +107,7 @@
 - [Slash commands](./dev/reference/slash-commands.md)
 - [CLI flags (chatty-tui)](./dev/reference/cli-flags.md)
 - [Environment variables](./dev/reference/env-vars.md)
+- [Settings schema](./dev/reference/settings-schema.md)
 - [GPUI event catalog](./dev/reference/event-catalog.md)
 - [Singleton inventory](./dev/reference/singleton-inventory.md)
 
@@ -114,5 +115,8 @@
 
 - [Add a new LLM provider](./dev/guides/add-provider.md)
 - [Add a new LLM tool](./dev/guides/add-tool.md)
+- [Add a slash command](./dev/guides/add-slash-command.md)
+- [Add a desktop GPUI view](./dev/guides/add-gpui-view.md)
+- [Doc frontmatter schema](./dev/guides/doc-frontmatter.md)
 - [Debug streams & rendering](./dev/guides/debug-streams.md)
 - [Build & package](./dev/guides/build-package.md)

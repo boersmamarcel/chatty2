@@ -4,6 +4,15 @@
 
 Each crate has a README synced into this site on `make docs-sync`. Edit the source at `crates/<name>/README.md`, not the built copy under `dev/crates/`.
 
+None of the workspace crates are published to [crates.io](https://crates.io) / [docs.rs](https://docs.rs) today. Research crates set `publish = false`. Until a crate is published, use the README on this site and `cargo doc -p <crate> --open` locally — do not add docs.rs badge URLs (they 404 and fail the link checker).
+
+| Crate | crates.io / docs.rs | Local rustdoc |
+|-------|---------------------|---------------|
+| Application + WASM + Hive crates | Unpublished | `cargo doc -p <crate> --open` |
+| `chatty-trace`, `chatty-playbook`, `chatty-flow`, `chatty-optimize` | `publish = false` | `cargo doc -p <crate> --open` |
+
+When a crate is published, add a docs.rs badge here and on its README, and keep the crate-level `//!` docs complete enough for docs.rs.
+
 ## Application crates
 
 | Crate | Purpose | README |
