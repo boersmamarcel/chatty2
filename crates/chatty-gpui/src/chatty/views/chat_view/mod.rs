@@ -53,7 +53,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{VirtualListScrollHandle, v_virtual_list};
+use gpui_component::{Icon, IconName, VirtualListScrollHandle, v_virtual_list};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -800,8 +800,22 @@ impl ChatView {
     fn show_artifact(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
         self.ensure_artifact_close_wired(cx);
         self.artifact_dismissed = false;
+        let workspace = cx
+            .try_global::<ExecutionSettingsModel>()
+            .and_then(|s| s.workspace_dir.clone())
+            .map(PathBuf::from);
+        let resolved = super::transcript::resolve_artifact_path(&path, workspace.as_deref());
+        // Relative tool paths often yield an empty source; re-read after resolve.
+        let source = {
+            let from_disk = super::transcript::read_artifact_source(&resolved);
+            if from_disk.is_empty() {
+                source
+            } else {
+                from_disk
+            }
+        };
         self.artifact_view
-            .update(cx, |view, cx| view.open(path, source, cx));
+            .update(cx, |view, cx| view.open(resolved, source, cx));
         cx.notify();
     }
 
@@ -1096,30 +1110,6 @@ impl ChatView {
         range
             .filter_map(|ix| turns.get(ix).cloned())
             .map(|turn| {
-                if turn.collapsed {
-                    let label = format_worked_for(turn.elapsed);
-                    let msg_index = turn.message_index;
-                    let entity = entity.clone();
-                    return div()
-                        .id(ElementId::NamedInteger("turn-collapsed".into(), turn.id))
-                        .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .px_3()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().muted_foreground)
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            entity.update(cx, |view, cx| {
-                                view.collapsed_turns.insert(msg_index, false);
-                                cx.notify();
-                            });
-                        })
-                        .child(label)
-                        .into_any_element();
-                }
-
                 let Some(msg) = self.messages.get(turn.message_index) else {
                     return div().into_any_element();
                 };
@@ -1154,10 +1144,28 @@ impl ChatView {
                         });
                     })
                 };
+
+                // Folded turns keep receipts + the assistant message; only the
+                // work trace (thinking / activity / diffs) is hidden.
                 let typed: Vec<AnyElement> = turn
                     .blocks
                     .iter()
-                    .filter(|block| !matches!(block, Block::User { .. } | Block::Text { .. }))
+                    .filter(|block| {
+                        if matches!(block, Block::User { .. } | Block::Text { .. }) {
+                            return false;
+                        }
+                        if turn.collapsed {
+                            matches!(
+                                block,
+                                Block::Artifact { .. }
+                                    | Block::Approval { .. }
+                                    | Block::Plan { .. }
+                                    | Block::Error { .. }
+                            )
+                        } else {
+                            true
+                        }
+                    })
                     .map(|block| {
                         let activity_open = match block {
                             Block::Activity { id, .. } => {
@@ -1176,8 +1184,61 @@ impl ChatView {
                         )
                     })
                     .collect();
+
+                let show_work_fold = matches!(turn.role, TurnRole::Assistant)
+                    && !turn.streaming
+                    && turn.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            Block::Thinking { .. }
+                                | Block::Activity { .. }
+                                | Block::Diff { .. }
+                                | Block::Artifact { .. }
+                                | Block::Approval { .. }
+                                | Block::Plan { .. }
+                                | Block::Error { .. }
+                        )
+                    });
+                let work_header = show_work_fold.then(|| {
+                    let label = format_worked_for(turn.elapsed);
+                    let msg_index = turn.message_index;
+                    let entity = entity.clone();
+                    let collapsed = turn.collapsed;
+                    let chevron = if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    };
+                    div()
+                        .id(ElementId::NamedInteger("turn-fold".into(), turn.id))
+                        .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().muted_foreground)
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            entity.update(cx, |view, cx| {
+                                view.collapsed_turns.insert(msg_index, !collapsed);
+                                cx.notify();
+                            });
+                        })
+                        .child(label)
+                        .child(
+                            Icon::new(chevron)
+                                .size_3()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .into_any_element()
+                });
+
                 let mut msg_for_text = msg.clone();
-                if !typed.is_empty() {
+                if !typed.is_empty() || work_header.is_some() {
                     msg_for_text.system_trace_view = None;
                 }
                 let text = render_message(
@@ -1239,7 +1300,7 @@ impl ChatView {
                 if streaming_slot.is_some() {
                     self.streaming_parse_cache = streaming_slot;
                 }
-                if typed.is_empty() {
+                if typed.is_empty() && work_header.is_none() {
                     text
                 } else {
                     div()
@@ -1247,6 +1308,7 @@ impl ChatView {
                         .flex_col()
                         .gap_2()
                         .w_full()
+                        .children(work_header)
                         .children(typed)
                         .child(text)
                         .into_any_element()

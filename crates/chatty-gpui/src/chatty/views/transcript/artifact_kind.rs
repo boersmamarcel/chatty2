@@ -7,6 +7,27 @@ pub fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
 }
 
+/// Resolve a tool-produced path against the workspace (and cwd). Relative
+/// paths like `poem.md` otherwise fail to read and the Rendered tab is blank.
+pub fn resolve_artifact_path(path: &Path, workspace: Option<&Path>) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Some(ws) = workspace {
+        let joined = ws.join(path);
+        if joined.exists() {
+            return joined;
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let joined = cwd.join(path);
+        if joined.exists() {
+            return joined;
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Source text for the artifact panel. PDFs are binary — return empty and let
 /// the view render pages / extract text via pdfium.
 pub fn read_artifact_source(path: &Path) -> String {
@@ -73,6 +94,19 @@ mod tests {
         drop(file);
         assert_eq!(read_artifact_source(&pdf), "");
         let _ = std::fs::remove_file(&pdf);
+    }
+
+    #[test]
+    fn resolve_relative_path_against_workspace() {
+        let dir = std::env::temp_dir().join("artifact_kind_resolve_ws");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("poem.md");
+        std::fs::write(&file, "# hi").expect("write");
+        let resolved = resolve_artifact_path(Path::new("poem.md"), Some(&dir));
+        assert_eq!(resolved, file);
+        assert_eq!(read_artifact_source(&resolved), "# hi");
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

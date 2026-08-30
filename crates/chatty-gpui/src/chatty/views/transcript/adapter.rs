@@ -295,11 +295,23 @@ pub fn adapt_messages_with_traces(
 }
 
 pub fn estimate_turn_height(turn: &Turn, plan_steps: usize) -> Size<Pixels> {
-    if turn.collapsed {
-        return size(px(800.), px(COLLAPSED_TURN_HEIGHT));
-    }
-    let mut height = 48.0_f32;
+    // Folded turns still show the worked-for header plus receipts (artifacts,
+    // approvals, plan, errors) and the assistant text — only the work trace
+    // (thinking / activity / diffs) is hidden.
+    let mut height = if turn.collapsed {
+        COLLAPSED_TURN_HEIGHT
+    } else {
+        48.0_f32
+    };
     for block in &turn.blocks {
+        if turn.collapsed
+            && matches!(
+                block,
+                Block::Thinking { .. } | Block::Activity { .. } | Block::Diff { .. }
+            )
+        {
+            continue;
+        }
         height += block_estimated_height(block, plan_steps);
     }
     size(px(800.), px(height.max(36.0)))
