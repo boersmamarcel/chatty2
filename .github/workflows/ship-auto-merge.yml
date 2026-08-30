@@ -4,16 +4,30 @@ name: Ship-auto merge
 # auto-merge (squash) once the PR is open. Required status checks (CI, reserved,
 # ship-auto guard) still gate the actual merge.
 #
+# After the PR lands, if github-actions[bot] was the merger (GITHUB_TOKEN does
+# not emit pull_request.closed), dispatch prepare-release.yml with bump=patch.
+#
 # Closed-system: same-repo head only; only repository_owner (sender) or
-# github-actions[bot] (actor) may arm auto-merge. Fail closed otherwise.
+# github-actions[bot] (actor) may newly arm auto-merge. Fail closed otherwise.
+# Later synchronize events from other same-repo actors (e.g. cursor[bot]) must
+# not re-arm — but if auto-merge is already on, succeed so the waiter starts.
+# Failing that job cancelled the waiter (concurrency) and left v0.3.31 uncut.
 
 on:
   pull_request:
     types: [opened, reopened, labeled, synchronize, ready_for_review]
 
+# One waiter per PR. opened+labeled would otherwise start two dispatch jobs
+# and double-bump (0.3.31 then 0.3.32).
+concurrency:
+  group: ship-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
+  # gh workflow run needs this; contents/pull-requests write is not enough.
+  actions: write
 
 jobs:
   enable-automerge:
@@ -27,12 +41,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Require same-repo head and owner/Actions actor
+        id: authz
         env:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPO: ${{ github.repository }}
           SENDER: ${{ github.event.sender.login }}
           ACTOR: ${{ github.actor }}
           OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           if [ "$HEAD_REPO" != "$REPO" ]; then
@@ -41,12 +58,20 @@ jobs:
           fi
           if [ "$SENDER" = "$OWNER" ] || [ "$ACTOR" = "github-actions[bot]" ]; then
             echo "Authorized: sender=$SENDER actor=$ACTOR owner=$OWNER"
-          else
-            echo "::error::ship:auto auto-merge refused: sender ($SENDER) / actor ($ACTOR) is not repository_owner ($OWNER) or github-actions[bot]"
-            exit 1
+            echo "may_arm=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          already="$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.mergeMethod // empty')"
+          if [ -n "$already" ]; then
+            echo "Sender $SENDER / actor $ACTOR cannot newly arm auto-merge; already armed ($already) — not re-arming"
+            echo "may_arm=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::ship:auto auto-merge refused: sender ($SENDER) / actor ($ACTOR) is not repository_owner ($OWNER) or github-actions[bot]"
+          exit 1
 
       - name: Enable auto-merge (squash)
+        if: steps.authz.outputs.may_arm == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -54,3 +79,50 @@ jobs:
           set -euo pipefail
           gh pr merge "$PR" --repo "${{ github.repository }}" --auto --squash
           echo "Auto-merge enabled for PR #$PR"
+
+  # GITHUB_TOKEN squash-merges do not fire pull_request.closed, so prepare-release
+  # never starts on the ship-auto path. After automerge is armed, wait for GitHub
+  # to land the PR and dispatch prepare-release only when Actions was the merger.
+  dispatch-prepare-release:
+    needs: enable-automerge
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Wait for merge, then dispatch prepare-release if Actions merged
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          merged_by=""
+          for _ in $(seq 1 100); do
+            state="$(gh pr view "$PR" --repo "$REPO" --json state --jq '.state')"
+            if [ "$state" = "MERGED" ]; then
+              merged_by="$(gh pr view "$PR" --repo "$REPO" --json mergedBy --jq '.mergedBy.login // empty')"
+              echo "PR #$PR merged by ${merged_by:-unknown}"
+              break
+            fi
+            echo "PR #$PR state=$state; waiting for merge"
+            sleep 60
+          done
+          if [ -z "$merged_by" ]; then
+            echo "::error::Timed out waiting for PR #$PR to merge"
+            exit 1
+          fi
+          case "$merged_by" in
+            github-actions[bot]|app/github-actions)
+              already="$(gh run list --repo "$REPO" --workflow prepare-release.yml \
+                --json status,databaseId --jq '[.[] | select(.status=="queued" or .status=="in_progress") | .databaseId] | first // empty')"
+              if [ -n "$already" ]; then
+                echo "prepare-release already running ($already) — not dispatching again"
+                exit 0
+              fi
+              echo "Actions merger — dispatching prepare-release (patch) on main"
+              gh workflow run prepare-release.yml --repo "$REPO" --ref main -f bump=patch
+              ;;
+            *)
+              echo "Merged by $merged_by — pull_request.closed should cut the release; not dispatching"
+              ;;
+          esac

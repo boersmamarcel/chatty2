@@ -53,6 +53,10 @@ need "$WF/prepare-release.yml" \
   "prepare-release.yml gates workflow_dispatch to repository_owner"
 
 need "$WF/prepare-release.yml" \
+  "github\.actor == 'github-actions\[bot\]'" \
+  "prepare-release.yml allows github-actions[bot] workflow_dispatch after ship-auto merge"
+
+need "$WF/prepare-release.yml" \
   'head\.repo\.full_name == github\.repository' \
   "prepare-release.yml requires same-repo PR head"
 
@@ -67,6 +71,18 @@ need "$WF/ship-auto-merge.yml" \
 need "$WF/ship-auto-merge.yml" \
   'repository_owner|OWNER' \
   "ship-auto-merge.yml requires repository_owner sender"
+
+need "$WF/ship-auto-merge.yml" \
+  'actions:[[:space:]]*write' \
+  "ship-auto-merge.yml has actions: write so GITHUB_TOKEN can dispatch prepare-release"
+
+need "$WF/ship-auto-merge.yml" \
+  'workflow run prepare-release.yml' \
+  "ship-auto-merge.yml dispatches prepare-release after an Actions squash"
+
+need "$WF/ship-auto-merge.yml" \
+  'autoMergeRequest' \
+  "ship-auto-merge.yml continues the waiter when auto-merge is already armed"
 
 need "$WF/ship-auto-guard.yml" \
   'release:\(patch\|minor\|major\)|release:patch' \

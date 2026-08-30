@@ -52,9 +52,14 @@ For low-risk work filed in Linear project **Chatty auto-ship** or **Chatty tech 
    (owner/Actions only).
 2. `ship-auto-guard.yml` enforces patch-only + path deny-list; `ship-auto-merge.yml`
    enables squash auto-merge only for same-repo heads when the sender is the owner or
-   the actor is `github-actions[bot]`.
+   the actor is `github-actions[bot]`. Later `synchronize` events from other same-repo
+   actors do not re-arm; if auto-merge is already on, the prepare-release waiter still
+   starts.
 3. When required checks are green, auto-merge squash-merges to `main`.
-4. Same `prepare-release` → bump PR → tag → `release.yml` pipeline as (A).
+4. If Actions performed the squash (`GITHUB_TOKEN` does not emit
+   `pull_request.closed`), `ship-auto-merge` dispatches `prepare-release`
+   (`bump=patch`). Owner merges still use the `pull_request` closed path.
+5. Same `prepare-release` → bump PR → tag → `release.yml` pipeline as (A).
 
 Never hand-tag for auto-ship. Failures notify Linear, Slack `#chatty-auto-ship`, and GitHub.
 
