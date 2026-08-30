@@ -67,7 +67,8 @@ use super::trace_components::SystemTraceView;
 use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact, PlanBlock,
     PlanStrip, RunPin, RunPinKind, TurnRole, adapt_messages_with_traces, estimate_turn_height,
-    format_worked_for, new_artifact_view, parse_unified_diff, render_typed_block,
+    format_worked_for, is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff,
+    read_artifact_source, render_typed_block, tool_file_path,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -758,12 +759,17 @@ impl ChatView {
                     && !parsed.path.is_empty()
                 {
                     let path = PathBuf::from(parsed.path);
-                    let source = if parsed.new.trim().is_empty() {
-                        std::fs::read_to_string(&path).unwrap_or_default()
+                    let source = if is_pdf_path(&path) || parsed.new.trim().is_empty() {
+                        read_artifact_source(&path)
                     } else {
                         parsed.new
                     };
                     return Some((path, source));
+                }
+                if is_produced_file_tool(&tool.tool_name, &tool.input)
+                    && let Some(path) = tool_file_path(&tool.input)
+                {
+                    return Some((path.clone(), read_artifact_source(&path)));
                 }
             }
         }

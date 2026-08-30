@@ -4,6 +4,7 @@ use chatty_core::models::message_types::{SystemTrace, TraceItem};
 use gpui::{Pixels, Size, px, size};
 
 use super::activity::{RunTally, classify_tool};
+use super::artifact_kind::{is_produced_file_tool, tool_file_path};
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
 
@@ -104,7 +105,7 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                         id: BlockId::from_parts(namespace, &tool.id),
                         tool: tool.clone(),
                     });
-                } else if is_new_file_artifact(tool) {
+                } else if is_produced_file_tool(&tool.tool_name, &tool.input) {
                     flush_activity(blocks, &mut activity_tools);
                     if let Some(path) = artifact_path(tool) {
                         blocks.push(Block::Artifact {
@@ -134,33 +135,13 @@ fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> boo
     matches!(
         classify_tool(&tool.tool_name),
         super::activity::ToolKind::Edit
-    ) && !is_new_file_artifact(tool)
-}
-
-fn is_new_file_artifact(tool: &chatty_core::models::message_types::ToolCallBlock) -> bool {
-    let name = tool.tool_name.to_ascii_lowercase();
-    (name.contains("write") || name.contains("create")) && !name.contains("diff")
+    ) && !is_produced_file_tool(&tool.tool_name, &tool.input)
 }
 
 fn artifact_path(
     tool: &chatty_core::models::message_types::ToolCallBlock,
 ) -> Option<std::path::PathBuf> {
-    let input = tool.input.as_str();
-    for key in ["path", "file_path", "filename"] {
-        if let Some(idx) = input.find(key)
-            && let Some(rest) = input.get(idx + key.len()..)
-        {
-            let trimmed = rest.trim_start_matches([' ', ':', '=', '"', '\'']);
-            let end = trimmed
-                .find(|c: char| c == '"' || c == '\'' || c.is_whitespace() || c == ',')
-                .unwrap_or(trimmed.len());
-            let path = &trimmed[..end];
-            if !path.is_empty() {
-                return Some(std::path::PathBuf::from(path));
-            }
-        }
-    }
-    None
+    tool_file_path(&tool.input)
 }
 
 fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Option<String> {
@@ -266,6 +247,49 @@ mod tests {
     }
 
     #[test]
+    fn pdf_tool_becomes_artifact_block() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "t1".into(),
+            tool_name: "pdf_extract_text".into(),
+            display_name: "pdf_extract_text".into(),
+            input: r#"{"path":"docs/report.pdf"}"#.into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            turn.blocks
+                .iter()
+                .any(|block| matches!(block, Block::Artifact { path, .. } if path.ends_with("report.pdf"))),
+            "pdf_* tools that name a .pdf should open as artifact cards, got {:?}",
+            turn.blocks
+        );
+    }
+
     fn tally_sentence_matches_linear_1a_order() {
         let sentence = RunTally {
             edits: 4,

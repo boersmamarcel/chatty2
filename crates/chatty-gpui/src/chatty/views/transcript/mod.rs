@@ -18,6 +18,7 @@ mod activity;
 mod adapter;
 mod approval;
 mod artifact;
+mod artifact_kind;
 mod block_render;
 mod diff;
 mod diff_parse;
@@ -38,6 +39,7 @@ pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact::{
     ArtifactCard, ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view,
 };
+pub use artifact_kind::{is_pdf_path, is_produced_file_tool, read_artifact_source, tool_file_path};
 pub use block_render::render_typed_block;
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
 pub use diff_parse::parse_unified_diff;
