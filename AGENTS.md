@@ -20,8 +20,11 @@
 > Low-risk work may merge and **patch-release** without Marcel when — and only when —
 > all of the following hold:
 >
-> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
+> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** or **[Chatty tech debt](https://linear.app/agents-research/project/chatty-tech-debt-16da7cdefe96)** (not Self-improving chatty2).
+>    **Chatty auto-ship** — CVEs and safe infra patch/minor only.
+>    **Chatty tech debt** — grouped dependency/crate bumps agents may implement (`ship:auto`).
 >    Project members = Marcel (closed-system allowlist).
+>    Weekly `dependency-check.yml` files work in Linear only (no GitHub tech-debt issues).
 > 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
 >    `ship:auto` + `release:patch` (never minor/major). Privileged labels are
 >    owner / `github-actions[bot]` only; outsiders are stripped.
