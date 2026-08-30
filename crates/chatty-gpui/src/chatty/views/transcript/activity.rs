@@ -62,15 +62,35 @@ impl RunTally {
 
     pub fn sentence(&self) -> String {
         let mut parts = Vec::new();
-        push_count(&mut parts, self.edits, "edit", "edits");
-        push_count(&mut parts, self.explore, "explore", "explores");
-        push_count(&mut parts, self.searches, "search", "searches");
-        push_count(&mut parts, self.external, "external", "external");
-        push_count(&mut parts, self.commands, "command", "commands");
+        match self.edits {
+            0 => {}
+            1 => parts.push("Edited 1 file".into()),
+            n => parts.push(format!("Edited {n} files")),
+        }
+        match self.explore {
+            0 => {}
+            1 => parts.push("explored 1 file".into()),
+            n => parts.push(format!("explored {n} files")),
+        }
+        match self.searches {
+            0 => {}
+            1 => parts.push("1 search".into()),
+            n => parts.push(format!("{n} searches")),
+        }
+        match self.external {
+            0 => {}
+            1 => parts.push("1 tool".into()),
+            n => parts.push(format!("{n} tools")),
+        }
+        match self.commands {
+            0 => {}
+            1 => parts.push("ran 1 command".into()),
+            n => parts.push(format!("ran {n} commands")),
+        }
         if parts.is_empty() {
-            "Working".to_string()
+            "Worked".to_string()
         } else {
-            parts.join(" · ")
+            parts.join(", ")
         }
     }
 
@@ -79,14 +99,6 @@ impl RunTally {
             && tools
                 .iter()
                 .all(|t| matches!(t.state, ToolCallState::Success))
-    }
-}
-
-fn push_count(parts: &mut Vec<String>, n: usize, one: &str, many: &str) {
-    if n == 1 {
-        parts.push(format!("1 {one}"));
-    } else if n > 1 {
-        parts.push(format!("{n} {many}"));
     }
 }
 

@@ -46,7 +46,7 @@ mod parent_stream;
 mod start_screen;
 mod sub_agent;
 
-use chatty_core::services::AgentTaskSnapshot;
+use chatty_core::services::{AgentTaskSnapshot, AgentTodoStatus};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -699,6 +699,44 @@ impl ChatView {
             .any(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
     }
 
+    fn running_step_progress(&self) -> (usize, usize) {
+        if let Some(snapshot) = self
+            .agent_task_snapshot
+            .as_ref()
+            .filter(|snap| snap.write_todos_called && !snap.todos.is_empty())
+        {
+            let done = snapshot
+                .todos
+                .iter()
+                .filter(|todo| matches!(todo.status, AgentTodoStatus::Done))
+                .count();
+            return (done, snapshot.todos.len());
+        }
+        let tools: Vec<_> = self
+            .messages
+            .iter()
+            .filter_map(|msg| msg.live_trace.as_ref())
+            .flat_map(|trace| trace.items.iter())
+            .filter_map(|item| match item {
+                crate::chatty::views::message_types::TraceItem::ToolCall(tool) => Some(tool),
+                _ => None,
+            })
+            .collect();
+        if tools.is_empty() {
+            return (0, 0);
+        }
+        let done = tools
+            .iter()
+            .filter(|tool| {
+                !matches!(
+                    tool.state,
+                    crate::chatty::views::message_types::ToolCallState::Running
+                )
+            })
+            .count();
+        (done, tools.len())
+    }
+
     fn history_traces(&self, cx: &App) -> Vec<Option<SystemTrace>> {
         self.messages
             .iter()
@@ -805,11 +843,13 @@ impl ChatView {
                     })
                 })
             });
-            if let Some(attention) = attention {
-                self.thinking_indicator.update(cx, |indicator, cx| {
+            let (steps_done, steps_total) = self.running_step_progress();
+            self.thinking_indicator.update(cx, |indicator, cx| {
+                if let Some(attention) = attention {
                     indicator.set_attention(attention, cx);
-                });
-            }
+                }
+                indicator.set_progress(steps_done, steps_total, cx);
+            });
         }
         let thinking_indicator = self.thinking_indicator.clone();
         let sizes = Rc::new(turns.iter().map(estimate_turn_height).collect::<Vec<_>>());

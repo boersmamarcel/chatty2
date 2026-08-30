@@ -3,7 +3,7 @@ use std::time::Duration;
 use chatty_core::models::message_types::{SystemTrace, TraceItem};
 use gpui::{Pixels, Size, px, size};
 
-use super::activity::classify_tool;
+use super::activity::{RunTally, classify_tool};
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
 
@@ -263,5 +263,21 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_ne!(a.0, 0);
+    }
+
+    #[test]
+    fn tally_sentence_matches_linear_1a_order() {
+        let sentence = RunTally {
+            edits: 4,
+            explore: 6,
+            searches: 2,
+            external: 1,
+            commands: 1,
+        }
+        .sentence();
+        assert_eq!(
+            sentence,
+            "Edited 4 files, explored 6 files, 2 searches, 1 tool, ran 1 command"
+        );
     }
 }

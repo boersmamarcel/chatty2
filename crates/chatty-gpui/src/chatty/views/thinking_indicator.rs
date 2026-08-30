@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     Animation, AnimationExt, App, AppContext, Context, Entity, IntoElement, ParentElement, Render,
     Styled, Window, div, px, radians,
@@ -47,6 +48,8 @@ pub struct ThinkingIndicator {
     timer_started: bool,
     ticker: Entity<HeadlineTicker>,
     attention: String,
+    steps_done: usize,
+    steps_total: usize,
 }
 
 impl ThinkingIndicator {
@@ -59,6 +62,8 @@ impl ThinkingIndicator {
             timer_started: false,
             ticker,
             attention: String::new(),
+            steps_done: 0,
+            steps_total: 0,
         }
     }
 
@@ -66,6 +71,14 @@ impl ThinkingIndicator {
         let next = attention.into();
         if next != self.attention {
             self.attention = next;
+            cx.notify();
+        }
+    }
+
+    pub fn set_progress(&mut self, done: usize, total: usize, cx: &mut Context<Self>) {
+        if done != self.steps_done || total != self.steps_total {
+            self.steps_done = done;
+            self.steps_total = total;
             cx.notify();
         }
     }
@@ -130,65 +143,62 @@ impl Render for ThinkingIndicator {
             String::new()
         };
         let word = self.current_word();
-        let ticker = self.ticker.clone();
         let phrase = if self.attention.is_empty() {
-            format!("{word} the current step{elapsed_label}")
+            format!("{word}{elapsed_label}")
         } else {
             format!("{word} {}{elapsed_label}", self.attention)
         };
-        let pip_filled = ((elapsed as usize) % 7) + 1;
+        let (pip_filled, step_label) = if self.steps_total > 0 {
+            let filled = ((self.steps_done * 7) / self.steps_total.max(1)).clamp(1, 7);
+            (
+                filled,
+                format!("{} of {} steps", self.steps_done, self.steps_total),
+            )
+        } else {
+            (((self.tick % 7) + 1), String::new())
+        };
 
+        // 1a: terracotta asterisk, attention phrase, seven step pips on one row.
         div()
             .flex()
-            .flex_col()
-            .gap_1()
+            .flex_row()
+            .items_center()
+            .gap_3()
             .px_4()
             .py_3()
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
                     .child(
-                        div()
-                            .child(
-                                Icon::new(IconName::Asterisk)
-                                    .text_color(primary)
-                                    .with_animation(
-                                        "running-glyph-rotate",
-                                        Animation::new(Duration::from_millis(GLYPH_ROTATE_MS))
-                                            .repeat(),
-                                        |this, delta| {
-                                            this.rotate(radians(delta * std::f32::consts::TAU))
-                                        },
-                                    ),
-                            )
+                        Icon::new(IconName::Asterisk)
+                            .text_color(primary)
                             .with_animation(
-                                "running-glyph-opacity",
-                                Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
-                                |this, delta| {
-                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                                    this.opacity(0.45 + 0.55 * wave)
-                                },
+                                "running-glyph-rotate",
+                                Animation::new(Duration::from_millis(GLYPH_ROTATE_MS)).repeat(),
+                                |this, delta| this.rotate(radians(delta * std::f32::consts::TAU)),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().foreground)
-                            .child(phrase)
-                            .with_animation(
-                                gpui::ElementId::NamedInteger(
-                                    "thinking-word".into(),
-                                    self.tick as u64,
-                                ),
-                                Animation::new(Duration::from_millis(400)),
-                                |this, delta| this.opacity(0.4 + 0.6 * delta),
-                            ),
-                    )
-                    .child(ticker),
+                    .with_animation(
+                        "running-glyph-opacity",
+                        Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
+                        |this, delta| {
+                            let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                            this.opacity(0.45 + 0.55 * wave)
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(phrase)
+                    .with_animation(
+                        gpui::ElementId::NamedInteger("thinking-word".into(), self.tick as u64),
+                        Animation::new(Duration::from_millis(400)),
+                        |this, delta| this.opacity(0.4 + 0.6 * delta),
+                    ),
             )
             .child(
                 div()
@@ -196,7 +206,6 @@ impl Render for ThinkingIndicator {
                     .flex_row()
                     .items_center()
                     .gap(px(3.))
-                    .pl(px(28.))
                     .children((0..7).map(move |i| {
                         let on = i < pip_filled;
                         let pip = div().w(px(10.)).h(px(7.)).rounded_sm().bg(if on {
@@ -219,6 +228,9 @@ impl Render for ThinkingIndicator {
                         }
                     })),
             )
+            .when(!step_label.is_empty(), |this| {
+                this.child(div().text_xs().text_color(muted).child(step_label))
+            })
     }
 }
 

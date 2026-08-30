@@ -282,6 +282,7 @@ impl RenderOnce for DiffHunkList {
             .children(
                 rows.into_iter()
                     .enumerate()
+                    .filter(|(_, row)| !(show_fold && row.tag == ChangeTag::Equal))
                     .map(|(i, row)| render_diff_line(&self.id, i, row, cx)),
             )
             .when(show_fold, |this| {
