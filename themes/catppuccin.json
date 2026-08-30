@@ -391,7 +391,11 @@
           "variant": {
             "color": "#d20f39"
           }
-        }
+        },
+        "created.background": "#5aa93b33",
+        "deleted.background": "#d26a53",
+        "created.border": "#85dc78",
+        "deleted.border": "#dc8a78"
       }
     },
     {
@@ -526,7 +530,11 @@
           "variable.special": {
             "color": "#e78284"
           }
-        }
+        },
+        "created.background": "#a6d18933",
+        "deleted.background": "#e78284",
+        "created.border": "#a6d189",
+        "deleted.border": "#3b2e2e"
       }
     },
     {
@@ -670,7 +678,11 @@
           "variable.special": {
             "color": "#f5bde6"
           }
-        }
+        },
+        "created.background": "#a6da9533",
+        "deleted.background": "#ed8796",
+        "created.border": "#a6da95",
+        "deleted.border": "#ed8796"
       }
     },
     {
@@ -818,7 +830,11 @@
           "variable.special": {
             "color": "#f5c2e7"
           }
-        }
+        },
+        "created.background": "#a6e3a133",
+        "deleted.background": "#f38ba8",
+        "created.border": "#a6e3a1",
+        "deleted.border": "#f38ba8"
       }
     }
   ]

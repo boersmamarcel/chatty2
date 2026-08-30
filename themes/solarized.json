@@ -141,7 +141,11 @@
           "variable.special": {
             "color": "#DC322F"
           }
-        }
+        },
+        "created.background": "#71755833",
+        "deleted.background": "#755858",
+        "created.border": "#859900",
+        "deleted.border": "#DC322F"
       }
     },
     {
@@ -282,7 +286,10 @@
           "variable.special": {
             "color": "#E19773"
           }
-        }
+        },
+        "deleted": "#7d2f0d",
+        "created.border": "#3f72e2",
+        "deleted.border": "#7d2f0d"
       }
     }
   ]
