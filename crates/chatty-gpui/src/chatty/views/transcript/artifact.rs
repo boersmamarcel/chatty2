@@ -18,6 +18,12 @@ use super::artifact_kind::{is_pdf_path, read_artifact_source};
 use super::diff::DiffHunkList;
 use super::run_pin::{RunPin, RunPinKind};
 
+/// Inner width of the 380px dock minus body padding. `img` only derives height
+/// from aspect ratio when width is an absolute `px()` — `w_full()` is relative,
+/// so GPUI would keep the PNG's pixel height and `ObjectFit::Contain` would
+/// center the sheet in that tall box (page sitting in the lower half).
+const PDF_PAGE_DISPLAY_WIDTH: f32 = 348.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ArtifactMode {
     #[default]
@@ -286,8 +292,11 @@ fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .justify_start()
                 .gap_2()
-                .size_full()
                 .child(
                     div()
                         .flex()
@@ -333,8 +342,14 @@ fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -
                         .id("artifact-pdf-pages")
                         .flex_1()
                         .min_h_0()
+                        .w_full()
                         .overflow_y_scroll()
-                        .child(img(image.clone()).w_full().rounded_md()),
+                        .child(
+                            img(image.clone())
+                                .w(px(PDF_PAGE_DISPLAY_WIDTH))
+                                .object_fit(ObjectFit::Fill)
+                                .rounded_md(),
+                        ),
                 )
                 .into_any_element()
         }
@@ -358,7 +373,9 @@ impl Render for ArtifactView {
         let body = div()
             .flex()
             .flex_col()
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .child(
                 TabBar::new("artifact-modes")
                     .segmented()
@@ -378,8 +395,11 @@ impl Render for ArtifactView {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .w_full()
                     .p_2()
                     .when(tab == 0 && is_pdf, |this| {
                         this.child(pdf_rendered_body(&pdf, entity.clone(), cx))
