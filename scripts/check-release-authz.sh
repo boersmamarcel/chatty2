@@ -80,6 +80,10 @@ need "$WF/ship-auto-merge.yml" \
   'workflow run prepare-release.yml' \
   "ship-auto-merge.yml dispatches prepare-release after an Actions squash"
 
+need "$WF/ship-auto-merge.yml" \
+  'autoMergeRequest' \
+  "ship-auto-merge.yml continues the waiter when auto-merge is already armed"
+
 need "$WF/ship-auto-guard.yml" \
   'release:\(patch\|minor\|major\)|release:patch' \
   "ship-auto-guard.yml keys off release labels"
