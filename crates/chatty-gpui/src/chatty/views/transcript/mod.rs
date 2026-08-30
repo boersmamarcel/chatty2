@@ -33,7 +33,8 @@ pub use action_bar::MessageActionBar;
 pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
     COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
-    adapt_messages_with_traces, estimate_turn_height, format_worked_for,
+    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
+    plan_block_bottom, plan_is_above_viewport, plan_turn_index,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact::{
@@ -43,7 +44,7 @@ pub use artifact_kind::{is_pdf_path, is_produced_file_tool, read_artifact_source
 pub use block_render::render_typed_block;
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
 pub use diff_parse::parse_unified_diff;
-pub use plan::{PlanBlock, PlanOverlay, PlanStrip};
+pub use plan::{PLAN_LIST_TOP_PADDING, PLAN_STRIP_HEIGHT, PlanBlock, PlanOverlay, PlanStrip};
 pub use run_pin::{RunPin, RunPinKind};
 pub use ticker::HeadlineTicker;
 pub use tool_row::ToolRow;

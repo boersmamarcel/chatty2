@@ -1,3 +1,4 @@
+use chatty_core::services::AgentTaskSnapshot;
 use gpui::*;
 use gpui_component::ActiveTheme;
 
@@ -6,16 +7,24 @@ use super::activity::ActivityGroup;
 use super::approval::{ApprovalCard, ErrorBlock};
 use super::artifact::ArtifactCard;
 use super::diff::DiffHunkList;
+use super::plan::PlanBlock;
 use super::types::Block;
 
 pub fn render_typed_block(
     block: &Block,
     on_open: Option<OpenArtifact>,
+    plan: Option<&AgentTaskSnapshot>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     match block {
-        Block::User { .. } | Block::Text { .. } | Block::Plan { .. } => div().into_any_element(),
+        Block::User { .. } | Block::Text { .. } => div().into_any_element(),
+        Block::Plan { .. } => match plan {
+            Some(snapshot) if snapshot.write_todos_called && !snapshot.todos.is_empty() => {
+                PlanBlock::new(snapshot.clone()).into_any_element()
+            }
+            _ => div().into_any_element(),
+        },
         Block::Thinking { id, block } => div()
             .id(id.element_id())
             .px_3()

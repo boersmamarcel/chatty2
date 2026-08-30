@@ -65,10 +65,12 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact, PlanBlock,
-    PlanStrip, RunPin, RunPinKind, TurnRole, adapt_messages_with_traces, estimate_turn_height,
-    format_worked_for, is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff,
-    read_artifact_source, render_typed_block, tool_file_path,
+    ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
+    PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, Turn, TurnRole,
+    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
+    is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff, plan_block_bottom,
+    plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
+    tool_file_path,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -121,7 +123,7 @@ pub struct ChatView {
     /// makes sense per-turn.
     thinking_indicator: Entity<ThinkingIndicator>,
     agent_task_snapshot: Option<AgentTaskSnapshot>,
-    agent_task_panel_collapsed: bool,
+    plan_overlay_open: bool,
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
@@ -282,7 +284,7 @@ impl ChatView {
             sub_agent_progress_msg_idx: None,
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
-            agent_task_panel_collapsed: false,
+            plan_overlay_open: false,
             artifact_view: new_artifact_view(cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
@@ -312,41 +314,37 @@ impl ChatView {
 
     pub fn set_agent_task_snapshot(&mut self, snapshot: AgentTaskSnapshot, cx: &mut Context<Self>) {
         if snapshot.write_todos_called {
-            let was_showing_plan = self.agent_task_snapshot.is_some();
-            let previous_was_verified = self
-                .agent_task_snapshot
-                .as_ref()
-                .is_some_and(|previous| previous.verified);
-            if snapshot.verified {
-                self.agent_task_panel_collapsed = true;
-            } else if !was_showing_plan || previous_was_verified {
-                self.agent_task_panel_collapsed = false;
-            }
             self.agent_task_snapshot = Some(snapshot);
         } else {
             self.agent_task_snapshot = None;
+            self.plan_overlay_open = false;
         }
         cx.notify();
     }
 
     pub fn clear_agent_task_snapshot(&mut self, cx: &mut Context<Self>) {
         self.agent_task_snapshot = None;
-        self.agent_task_panel_collapsed = false;
+        self.plan_overlay_open = false;
         cx.notify();
     }
 
-    #[allow(dead_code)]
-    fn toggle_agent_task_panel(&mut self, cx: &mut Context<Self>) {
-        self.agent_task_panel_collapsed = !self.agent_task_panel_collapsed;
-        cx.notify();
+    fn plan_snapshot_active(&self) -> bool {
+        self.agent_task_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.write_todos_called && !snapshot.todos.is_empty())
     }
 
-    fn render_agent_task_panel(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
-        let snapshot = self.agent_task_snapshot.clone()?;
-        if !snapshot.write_todos_called {
-            return None;
-        }
-        Some(PlanBlock::new(snapshot).bare().into_any_element())
+    fn typed_turns(&self, cx: &App) -> Vec<Turn> {
+        let collapsed: Vec<bool> = self
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, msg)| self.should_collapse_turn(index, msg))
+            .collect();
+        let traces = self.history_traces(cx);
+        let mut turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
+        attach_plan_block(&mut turns, self.plan_snapshot_active());
+        turns
     }
 
     fn should_collapse_turn(&self, index: usize, msg: &DisplayMessage) -> bool {
@@ -886,14 +884,7 @@ impl ChatView {
     /// Render the scrollable message list area including the loading skeleton.
     fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_awaiting = self.is_awaiting_response();
-        let collapsed: Vec<bool> = self
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(index, msg)| self.should_collapse_turn(index, msg))
-            .collect();
-        let traces = self.history_traces(cx);
-        let turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
+        let turns = self.typed_turns(cx);
         let show_start_screen = turns.is_empty() && !is_awaiting;
         let thinking_visible = self.is_thinking_indicator_visible();
         if thinking_visible {
@@ -920,14 +911,32 @@ impl ChatView {
             });
         }
         let thinking_indicator = self.thinking_indicator.clone();
-        let sizes = Rc::new(turns.iter().map(estimate_turn_height).collect::<Vec<_>>());
+        let plan_steps = self
+            .agent_task_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.todos.len())
+            .unwrap_or(0);
+        let sizes = Rc::new(
+            turns
+                .iter()
+                .map(|turn| estimate_turn_height(turn, plan_steps))
+                .collect::<Vec<_>>(),
+        );
         let entity = cx.entity();
         let user_away = self.user_scrolled_away;
         let has_approval = self.active_approval_for_display().is_some();
-        let plan_strip = self
-            .agent_task_snapshot
-            .clone()
-            .filter(|snap| snap.write_todos_called && user_away);
+        let has_plan = self.plan_snapshot_active();
+        let show_strip = has_plan
+            && self.list_scroll.max_offset().height > px(0.0)
+            && plan_block_bottom(&turns, plan_steps, px(16.0))
+                .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
+        if !show_strip {
+            self.plan_overlay_open = false;
+        }
+        let plan_strip = self.agent_task_snapshot.clone().filter(|_| show_strip);
+        let jump_turn = plan_turn_index(&turns);
+        let jump_message = jump_turn.and_then(|ix| turns.get(ix).map(|turn| turn.message_index));
+        let overlay_open = self.plan_overlay_open;
 
         trace!(
             target: "chatty_gpui::render::list",
@@ -946,7 +955,44 @@ impl ChatView {
             .flex()
             .flex_col()
             .when_some(plan_strip, |this, snapshot| {
-                this.child(div().px_4().pt_2().child(PlanStrip::new(snapshot)))
+                this.child(
+                    div()
+                        .id("plan-strip-slot")
+                        .h(px(PLAN_LIST_TOP_PADDING))
+                        .w_full()
+                        .px_4()
+                        .flex()
+                        .items_center()
+                        .child(
+                            PlanStrip::new(snapshot)
+                                .open(overlay_open)
+                                .on_open_change({
+                                    let entity = entity.clone();
+                                    move |open, cx| {
+                                        entity.update(cx, |view, cx| {
+                                            view.plan_overlay_open = open;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .on_jump({
+                                    let entity = entity.clone();
+                                    move |cx| {
+                                        entity.update(cx, |view, cx| {
+                                            if let Some(msg_index) = jump_message {
+                                                view.collapsed_turns.insert(msg_index, false);
+                                            }
+                                            view.plan_overlay_open = false;
+                                            if let Some(turn_ix) = jump_turn {
+                                                view.list_scroll
+                                                    .scroll_to_item(turn_ix, ScrollStrategy::Top);
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
+                )
             })
             .when(show_start_screen, |this| {
                 this.child(
@@ -960,15 +1006,33 @@ impl ChatView {
             })
             .when(!show_start_screen, |this| {
                 this.child(
-                    v_virtual_list(
-                        entity,
-                        "transcript",
-                        sizes,
-                        move |this, range, window, cx| this.render_visible_turns(range, window, cx),
-                    )
-                    .track_scroll(&self.list_scroll)
-                    .p_4()
-                    .flex_1(),
+                    div()
+                        .id("transcript-scroll")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            v_virtual_list(
+                                entity,
+                                "transcript",
+                                sizes,
+                                move |this, range, window, cx| {
+                                    this.render_visible_turns(range, window, cx)
+                                },
+                            )
+                            .track_scroll(&self.list_scroll)
+                            .p_4()
+                            .flex_1(),
+                        )
+                        .when(overlay_open, |this| {
+                            this.child(
+                                div()
+                                    .id("plan-overlay-scrim")
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(cx.theme().overlay),
+                            )
+                        }),
                 )
                 .vertical_scrollbar(&self.list_scroll)
             })
@@ -998,14 +1062,7 @@ impl ChatView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let collapsed: Vec<bool> = self
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(index, msg)| self.should_collapse_turn(index, msg))
-            .collect();
-        let traces = self.history_traces(cx);
-        let turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
+        let turns = self.typed_turns(cx);
         let last_visible_assistant_idx = turns
             .iter()
             .rev()
@@ -1013,6 +1070,7 @@ impl ChatView {
             .map(|turn| turn.message_index);
 
         let entity = cx.entity();
+        let plan = self.agent_task_snapshot.clone();
         range
             .filter_map(|ix| turns.get(ix).cloned())
             .map(|turn| {
@@ -1065,13 +1123,10 @@ impl ChatView {
                 let typed: Vec<AnyElement> = turn
                     .blocks
                     .iter()
-                    .filter(|block| {
-                        !matches!(
-                            block,
-                            Block::User { .. } | Block::Text { .. } | Block::Plan { .. }
-                        )
+                    .filter(|block| !matches!(block, Block::User { .. } | Block::Text { .. }))
+                    .map(|block| {
+                        render_typed_block(block, Some(on_open.clone()), plan.as_ref(), _window, cx)
                     })
-                    .map(|block| render_typed_block(block, Some(on_open.clone()), _window, cx))
                     .collect();
                 let mut msg_for_text = msg.clone();
                 if !typed.is_empty() {
@@ -1356,11 +1411,7 @@ impl Render for ChatView {
                     .pt_2()
                     .pb_4()
                     .child({
-                        let input = ChatInput::new(self.chat_input_state.clone());
-                        match self.render_agent_task_panel(cx) {
-                            Some(panel) => input.header(panel).into_any_element(),
-                            None => input.into_any_element(),
-                        }
+                        ChatInput::new(self.chat_input_state.clone()).into_any_element()
                     }),
             );
 

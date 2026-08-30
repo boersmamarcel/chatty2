@@ -145,7 +145,6 @@ fn render_file_chip(
 
 impl RenderOnce for ChatInput {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let header = self.header;
         let state_for_send = self.state.clone();
         let state_for_stop = self.state.clone();
         let state_for_model = self.state.clone();
@@ -440,8 +439,7 @@ impl RenderOnce for ChatInput {
                     cx,
                 ))
             })
-            // Main input box. Optional plan header shares this card so the
-            // sage block and the sand composer keep the same left/right edges.
+            // Main input box.
             .child(
                 div()
                     .w_full()
@@ -452,7 +450,6 @@ impl RenderOnce for ChatInput {
                     .rounded_2xl()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .when_some(header, |this, header| this.child(header))
                     .child(
                         div()
                             .w_full()

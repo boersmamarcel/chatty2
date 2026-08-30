@@ -401,20 +401,11 @@ impl ChatInputState {
 #[derive(IntoElement)]
 pub struct ChatInput {
     state: Entity<ChatInputState>,
-    header: Option<AnyElement>,
 }
 
 impl ChatInput {
     pub fn new(state: Entity<ChatInputState>) -> Self {
-        Self {
-            state,
-            header: None,
-        }
-    }
-
-    pub fn header(mut self, header: impl IntoElement) -> Self {
-        self.header = Some(header.into_any_element());
-        self
+        Self { state }
     }
 }
 
