@@ -255,9 +255,10 @@ packages, the Rust toolchain, and the `cc`/`c++` alternatives below are baked
 into the VM; the startup/update script only re-runs
 `rustup target add wasm32-wasip2` + `make wasm-modules`.
 
-- **Toolchain must be ≥ 1.85 (edition 2024).** The base VM image historically
-  pinned `rustup default` to an older toolchain (1.83), which cannot compile
-  this workspace (`feature edition2024 is required`). The default is set to
+- **Toolchain must be ≥ 1.95 (edition 2024).** Workspace `rust-version` is 1.95
+  (AGE-123 / bollard 0.21). The base VM image historically pinned
+  `rustup default` to an older toolchain (1.83), which cannot compile this
+  workspace (`feature edition2024 is required`). The default is set to
   `stable`. If a build suddenly fails with an edition-2024 error, run
   `rustup default stable`.
 
