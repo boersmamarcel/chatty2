@@ -18,6 +18,7 @@ pub const PLAN_STRIP_HEIGHT: f32 = 34.0;
 pub const PLAN_LIST_TOP_PADDING: f32 = 36.0;
 
 type PlanJump = Rc<dyn Fn(&mut App)>;
+type PlanOpenChange = Rc<dyn Fn(bool, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct PlanBlock {
@@ -80,7 +81,7 @@ pub struct PlanStrip {
     snapshot: AgentTaskSnapshot,
     open: bool,
     on_jump: Option<PlanJump>,
-    on_open_change: Option<Rc<dyn Fn(bool, &mut App)>>,
+    on_open_change: Option<PlanOpenChange>,
 }
 
 impl PlanStrip {

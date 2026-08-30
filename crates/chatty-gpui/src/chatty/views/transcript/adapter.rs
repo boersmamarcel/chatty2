@@ -146,7 +146,7 @@ pub(crate) fn is_agent_todo_tool(name: &str) -> bool {
 
 /// Insert a single plan block onto the last assistant turn when a snapshot
 /// exists but `write_todos` never appeared in the trace.
-pub fn attach_plan_block(turns: &mut Vec<Turn>, has_plan: bool) {
+pub fn attach_plan_block(turns: &mut [Turn], has_plan: bool) {
     if !has_plan || plan_turn_index(turns).is_some() {
         return;
     }
