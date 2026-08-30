@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
-use azure_core::auth::TokenCredential;
-use azure_identity::{DefaultAzureCredential, TokenCredentialOptions};
+use azure_core::credentials::{Secret, TokenCredential};
+use azure_identity::{
+    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    WorkloadIdentityCredential,
+};
+use std::sync::Arc;
 use tracing::info;
 
 const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
@@ -268,13 +272,108 @@ pub fn augment_gui_app_path() {
     });
 }
 
+/// Which Entra credential `create_entra_credential` will construct.
+///
+/// azure_identity 1.0 removed `DefaultAzureCredential` (automatic chaining of
+/// developer + deployed credentials was considered unsafe). Chatty picks one
+/// explicit credential from environment signals instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntraCredentialSource {
+    ClientSecret,
+    WorkloadIdentity,
+    ManagedIdentity,
+    DeveloperTools,
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|s| !s.is_empty())
+}
+
+fn present(value: Option<&str>) -> bool {
+    value.is_some_and(|s| !s.is_empty())
+}
+
+/// Pure selection used by `create_entra_credential` and unit tests.
+pub(crate) fn entra_credential_source_from_vars(
+    client_id: Option<&str>,
+    tenant_id: Option<&str>,
+    client_secret: Option<&str>,
+    federated_token_file: Option<&str>,
+    identity_endpoint: Option<&str>,
+    msi_endpoint: Option<&str>,
+) -> EntraCredentialSource {
+    if present(client_id) && present(tenant_id) && present(client_secret) {
+        EntraCredentialSource::ClientSecret
+    } else if present(federated_token_file) {
+        EntraCredentialSource::WorkloadIdentity
+    } else if present(identity_endpoint) || present(msi_endpoint) {
+        EntraCredentialSource::ManagedIdentity
+    } else {
+        EntraCredentialSource::DeveloperTools
+    }
+}
+
+fn detect_entra_credential_source() -> EntraCredentialSource {
+    entra_credential_source_from_vars(
+        env_nonempty("AZURE_CLIENT_ID").as_deref(),
+        env_nonempty("AZURE_TENANT_ID").as_deref(),
+        env_nonempty("AZURE_CLIENT_SECRET").as_deref(),
+        env_nonempty("AZURE_FEDERATED_TOKEN_FILE").as_deref(),
+        env_nonempty("IDENTITY_ENDPOINT").as_deref(),
+        env_nonempty("MSI_ENDPOINT").as_deref(),
+    )
+}
+
+/// Build the Entra credential azure_identity 1.0 expects (no `DefaultAzureCredential`).
+///
+/// Selection order:
+/// 1. Service principal env vars (`AZURE_CLIENT_ID` + `AZURE_TENANT_ID` + `AZURE_CLIENT_SECRET`)
+/// 2. Workload identity (`AZURE_FEDERATED_TOKEN_FILE`)
+/// 3. Managed identity (`IDENTITY_ENDPOINT` / `MSI_ENDPOINT`)
+/// 4. Developer tools (`az login` / `azd auth`) — the desktop default
+pub(crate) fn create_entra_credential() -> Result<Arc<dyn TokenCredential>> {
+    match detect_entra_credential_source() {
+        EntraCredentialSource::ClientSecret => {
+            let tenant_id = env_nonempty("AZURE_TENANT_ID")
+                .context("AZURE_TENANT_ID is required for ClientSecretCredential")?;
+            let client_id = env_nonempty("AZURE_CLIENT_ID")
+                .context("AZURE_CLIENT_ID is required for ClientSecretCredential")?;
+            let secret = env_nonempty("AZURE_CLIENT_SECRET")
+                .context("AZURE_CLIENT_SECRET is required for ClientSecretCredential")?;
+            info!("Using ClientSecretCredential for Entra ID");
+            let credential =
+                ClientSecretCredential::new(&tenant_id, client_id, Secret::new(secret), None)
+                    .context("Failed to create ClientSecretCredential")?;
+            Ok(credential)
+        }
+        EntraCredentialSource::WorkloadIdentity => {
+            info!("Using WorkloadIdentityCredential for Entra ID");
+            let credential = WorkloadIdentityCredential::new(None)
+                .context("Failed to create WorkloadIdentityCredential")?;
+            Ok(credential)
+        }
+        EntraCredentialSource::ManagedIdentity => {
+            info!("Using ManagedIdentityCredential for Entra ID");
+            let credential = ManagedIdentityCredential::new(None)
+                .context("Failed to create ManagedIdentityCredential")?;
+            Ok(credential)
+        }
+        EntraCredentialSource::DeveloperTools => {
+            info!("Using DeveloperToolsCredential for Entra ID (az / azd)");
+            let credential = DeveloperToolsCredential::new(None)
+                .context("Failed to create DeveloperToolsCredential")?;
+            Ok(credential)
+        }
+    }
+}
+
 /// Fetch Azure Entra ID token for Azure OpenAI
 ///
-/// Uses DefaultAzureCredential which tries:
-/// 1. Environment variables (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_CLIENT_SECRET)
-/// 2. Managed Identity (if running on Azure)
-/// 3. Azure CLI (`az login`)
-/// 4. Interactive browser authentication (if configured)
+/// Picks one azure_identity 1.0 credential (see `create_entra_credential`):
+/// 1. Service principal env vars (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`)
+/// 2. Workload identity (`AZURE_FEDERATED_TOKEN_FILE`)
+/// 3. Managed identity (`IDENTITY_ENDPOINT` / `MSI_ENDPOINT`)
+/// 4. Developer tools (`az login` / `azd auth`)
 ///
 /// # Returns
 /// - `Ok(String)`: Valid bearer token (valid for ~1 hour)
@@ -284,14 +383,16 @@ pub async fn fetch_entra_id_token() -> Result<String> {
 
     augment_gui_app_path();
 
-    let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())
-        .context("Failed to create DefaultAzureCredential")?;
+    let credential = create_entra_credential().context("Failed to create Entra ID credential")?;
 
-    let token_response = credential.get_token(&[AZURE_OPENAI_SCOPE]).await.context(
-        "Failed to authenticate with Azure Entra ID. \
+    let token_response = credential
+        .get_token(&[AZURE_OPENAI_SCOPE], None)
+        .await
+        .context(
+            "Failed to authenticate with Azure Entra ID. \
             Please run 'az login', configure managed identity, \
             or set AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET environment variables.",
-    )?;
+        )?;
 
     Ok(token_response.token.secret().to_string())
 }
@@ -328,6 +429,115 @@ mod tests {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(10),
             "resolve_login_shell_path should complete within the timeout"
+        );
+    }
+
+    #[test]
+    fn entra_source_prefers_client_secret_when_all_three_env_vars_set() {
+        assert_eq!(
+            entra_credential_source_from_vars(
+                Some("app-id"),
+                Some("tenant-id"),
+                Some("secret"),
+                Some("/var/run/secrets/azure/tokens/azure-identity-token"),
+                Some("http://169.254.169.254/metadata/identity"),
+                None,
+            ),
+            EntraCredentialSource::ClientSecret
+        );
+    }
+
+    #[test]
+    fn entra_source_uses_workload_identity_when_federated_token_file_set() {
+        assert_eq!(
+            entra_credential_source_from_vars(
+                Some("app-id"),
+                Some("tenant-id"),
+                None,
+                Some("/var/run/secrets/azure/tokens/azure-identity-token"),
+                None,
+                None,
+            ),
+            EntraCredentialSource::WorkloadIdentity
+        );
+    }
+
+    #[test]
+    fn entra_source_uses_managed_identity_when_identity_endpoint_set() {
+        assert_eq!(
+            entra_credential_source_from_vars(
+                None,
+                None,
+                None,
+                None,
+                Some("http://169.254.169.254/metadata/identity"),
+                None,
+            ),
+            EntraCredentialSource::ManagedIdentity
+        );
+    }
+
+    #[test]
+    fn entra_source_uses_managed_identity_when_msi_endpoint_set() {
+        assert_eq!(
+            entra_credential_source_from_vars(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("http://localhost")
+            ),
+            EntraCredentialSource::ManagedIdentity
+        );
+    }
+
+    #[test]
+    fn entra_source_defaults_to_developer_tools() {
+        assert_eq!(
+            entra_credential_source_from_vars(None, None, None, None, None, None),
+            EntraCredentialSource::DeveloperTools
+        );
+        assert_eq!(
+            entra_credential_source_from_vars(Some(""), Some(""), Some(""), None, None, None),
+            EntraCredentialSource::DeveloperTools
+        );
+        // Incomplete service-principal trio is not enough
+        assert_eq!(
+            entra_credential_source_from_vars(
+                Some("app-id"),
+                Some("tenant-id"),
+                None,
+                None,
+                None,
+                None
+            ),
+            EntraCredentialSource::DeveloperTools
+        );
+    }
+
+    /// Live Entra ID token fetch. Requires `az login` or AZURE_CLIENT_* env vars.
+    ///
+    /// ```text
+    /// cargo test -p chatty-core --lib smoke_fetch_entra_id_token -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires Azure credentials (az login or AZURE_CLIENT_* env)"]
+    async fn smoke_fetch_entra_id_token() {
+        let token = fetch_entra_id_token().await.expect(
+            "Entra ID token fetch failed — run `az login` or set \
+             AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET",
+        );
+        let parts: Vec<_> = token.split('.').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "expected a JWT (three dot-separated parts), got {} parts",
+            parts.len()
+        );
+        assert!(
+            parts.iter().all(|p| !p.is_empty()),
+            "JWT parts must be non-empty"
         );
     }
 }

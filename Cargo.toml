@@ -76,9 +76,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 thiserror = "2.0"
 
-# Azure authentication
-azure_identity = "0.20"
-azure_core = "0.20"
+# Azure authentication (AGE-122: 0.20 → 1.x; DefaultAzureCredential removed in 1.0)
+azure_identity = { version = "1.0.0", features = ["tokio"] }
+azure_core = "1.1.0"
 
 # Asset embedding
 rust-embed = "8.12.0"
