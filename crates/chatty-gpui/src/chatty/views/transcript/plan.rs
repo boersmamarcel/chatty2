@@ -9,11 +9,20 @@ use gpui_component::{ActiveTheme, Icon, Sizable};
 #[derive(IntoElement)]
 pub struct PlanBlock {
     snapshot: AgentTaskSnapshot,
+    bare: bool,
 }
 
 impl PlanBlock {
     pub fn new(snapshot: AgentTaskSnapshot) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            bare: false,
+        }
+    }
+
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
 }
 
@@ -35,10 +44,12 @@ impl RenderOnce for PlanBlock {
         div()
             .id("plan-block")
             .w_full()
-            .rounded_2xl()
+            .when(!self.bare, |this| {
+                this.rounded_2xl()
+                    .border_1()
+                    .border_color(cx.theme().border)
+            })
             .bg(cx.theme().green_light)
-            .border_1()
-            .border_color(cx.theme().border)
             .px_3()
             .py_2()
             .flex()

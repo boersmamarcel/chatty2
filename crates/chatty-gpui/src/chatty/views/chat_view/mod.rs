@@ -345,7 +345,7 @@ impl ChatView {
         if !snapshot.write_todos_called {
             return None;
         }
-        Some(PlanBlock::new(snapshot).into_any_element())
+        Some(PlanBlock::new(snapshot).bare().into_any_element())
     }
 
     fn should_collapse_turn(&self, index: usize, msg: &DisplayMessage) -> bool {
@@ -1262,6 +1262,7 @@ impl Render for ChatView {
         let column = div()
             .flex_1()
             .h_full()
+            .w_full()
             .min_w_0()
             .flex()
             .flex_col()
@@ -1344,16 +1345,24 @@ impl Render for ChatView {
             .child(
                 div()
                     .flex_shrink_0()
+                    .w_full()
                     .px_4()
                     .pt_2()
                     .pb_4()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .when_some(self.render_agent_task_panel(cx), |this, panel| {
-                        this.child(panel)
-                    })
-                    .child(ChatInput::new(self.chat_input_state.clone())),
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .rounded_2xl()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .overflow_hidden()
+                            .when_some(self.render_agent_task_panel(cx), |this, panel| {
+                                this.child(panel)
+                            })
+                            .child(ChatInput::new(self.chat_input_state.clone()).bare()),
+                    ),
             );
 
         div()

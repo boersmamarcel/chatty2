@@ -145,6 +145,7 @@ fn render_file_chip(
 
 impl RenderOnce for ChatInput {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let bare = self.bare;
         let state_for_send = self.state.clone();
         let state_for_stop = self.state.clone();
         let state_for_model = self.state.clone();
@@ -444,12 +445,14 @@ impl RenderOnce for ChatInput {
                 div()
                     .w_full()
                     .min_w_0()
-                    .border_1()
                     .px_3()
                     .py_3()
-                    .rounded_2xl()
-                    .border_color(cx.theme().border)
                     .bg(cx.theme().secondary)
+                    .when(!bare, |this| {
+                        this.border_1()
+                            .rounded_2xl()
+                            .border_color(cx.theme().border)
+                    })
                     .child(
                         div()
                             .child(
