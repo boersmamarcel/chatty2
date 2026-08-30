@@ -35,7 +35,7 @@ impl RenderOnce for PlanBlock {
         div()
             .id("plan-block")
             .w_full()
-            .rounded_xl()
+            .rounded_2xl()
             .bg(cx.theme().green_light)
             .border_1()
             .border_color(cx.theme().border)
