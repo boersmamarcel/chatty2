@@ -61,11 +61,14 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    # Closed-system: workflow_dispatch is repository_owner only; PR-closed path
-    # requires same-repo head (no fork PRs) plus a release/cut-release label.
+    # Closed-system: workflow_dispatch is repository_owner or github-actions[bot]
+    # (bot path is only used by ship-auto-merge after a GITHUB_TOKEN squash, which
+    # does not emit pull_request.closed). PR-closed path requires same-repo head
+    # plus a release/cut-release label.
     if: >-
       (github.event_name == 'workflow_dispatch' &&
-       github.actor == github.repository_owner) ||
+       (github.actor == github.repository_owner ||
+        github.actor == 'github-actions[bot]')) ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.merged == true &&
        github.event.pull_request.head.repo.full_name == github.repository &&

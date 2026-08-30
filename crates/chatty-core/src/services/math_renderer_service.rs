@@ -23,8 +23,8 @@ pub struct RgbColor {
 }
 
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime};
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
@@ -59,7 +59,8 @@ impl MathWorld {
         let book = LazyHash::new(FontBook::from_fonts(fonts.iter()));
 
         // Create virtual file ID for the main file
-        let main_id = FileId::new(None, VirtualPath::new("main.typ"));
+        let vpath = VirtualPath::new("main.typ").expect("valid virtual path");
+        let main_id = FileId::new(RootedPath::new(VirtualRoot::Project, vpath));
 
         // Create source
         let source = Source::new(main_id, content.to_string());
@@ -91,19 +92,19 @@ impl World for MathWorld {
         if id == self.main_id {
             Ok(self.source.clone())
         } else {
-            Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+            Err(FileError::NotFound(id.vpath().get_without_slash().into()))
         }
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+        Err(FileError::NotFound(id.vpath().get_without_slash().into()))
     }
 
     fn font(&self, index: usize) -> Option<Font> {
         self.fonts.get(index).cloned()
     }
 
-    fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
+    fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
         Some(Datetime::from_ymd(2024, 1, 1).unwrap())
     }
 }
@@ -385,7 +386,7 @@ $ {typst_code} $")
         let world = MathWorld::new(typst_content);
 
         // Compile the document
-        let warned_result = typst::compile::<typst::layout::PagedDocument>(&world);
+        let warned_result = typst::compile::<typst_layout::PagedDocument>(&world);
 
         // Extract the document, handling any errors
         let document = warned_result.output.map_err(|errors| {
@@ -395,7 +396,11 @@ $ {typst_code} $")
         })?;
 
         // Render the first (and only) page to SVG
-        let svg_data = typst_svg::svg_frame(&document.pages[0].frame);
+        let page = document
+            .pages()
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Typst compilation produced no pages"))?;
+        let svg_data = typst_svg::svg(page, &typst_svg::SvgOptions::default());
 
         Ok(svg_data)
     }

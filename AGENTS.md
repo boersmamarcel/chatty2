@@ -20,8 +20,11 @@
 > Low-risk work may merge and **patch-release** without Marcel when — and only when —
 > all of the following hold:
 >
-> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
+> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** or **[Chatty tech debt](https://linear.app/agents-research/project/chatty-tech-debt-16da7cdefe96)** (not Self-improving chatty2).
+>    **Chatty auto-ship** — CVEs and safe infra patch/minor only.
+>    **Chatty tech debt** — grouped dependency/crate bumps agents may implement (`ship:auto`).
 >    Project members = Marcel (closed-system allowlist).
+>    Weekly `dependency-check.yml` files work in Linear only (no GitHub tech-debt issues).
 > 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
 >    `ship:auto` + `release:patch` (never minor/major). Privileged labels are
 >    owner / `github-actions[bot]` only; outsiders are stripped.
@@ -123,6 +126,7 @@ make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
 make docs-check-links # lychee link check (AGE-117)
 make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
+make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
 make ci               # everything the Rust CI path runs, locally, in order
 ```
 
@@ -186,6 +190,9 @@ examples.
   `masked_env()` not `.env`. See "Security Practices" in CLAUDE.md.
 - **Rust edition** — 2024. Use `LazyLock`/`OnceLock` (std) rather than
   `lazy_static`/`once_cell`.
+- **GPUI / gpui-component skills** — When changing desktop UI, load
+  `.claude/skills/gpui` and `.claude/skills/gpui-component` (vendored from
+  `npx skills add longbridge/gpui-component`; lockfile `skills-lock.json`).
 
 ## Known gotchas
 
@@ -248,9 +255,10 @@ packages, the Rust toolchain, and the `cc`/`c++` alternatives below are baked
 into the VM; the startup/update script only re-runs
 `rustup target add wasm32-wasip2` + `make wasm-modules`.
 
-- **Toolchain must be ≥ 1.85 (edition 2024).** The base VM image historically
-  pinned `rustup default` to an older toolchain (1.83), which cannot compile
-  this workspace (`feature edition2024 is required`). The default is set to
+- **Toolchain must be ≥ 1.95 (edition 2024).** Workspace `rust-version` is 1.95
+  (AGE-123 / bollard 0.21). The base VM image historically pinned
+  `rustup default` to an older toolchain (1.83), which cannot compile this
+  workspace (`feature edition2024 is required`). The default is set to
   `stable`. If a build suddenly fails with an edition-2024 error, run
   `rustup default stable`.
 

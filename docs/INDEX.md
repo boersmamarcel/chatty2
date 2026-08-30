@@ -115,6 +115,7 @@ Regenerate with `make docs-gen`. Synced into the mdBook site on build.
 | `slash-commands.md` | `/` commands in GPUI |
 | `cli-flags.md` | `chatty-tui --help` when the binary is already built; otherwise a static fallback |
 | `env-vars.md` | `CHATTY_*` and related env vars |
+| `settings-schema.md` | Persisted settings JSON files, models, defaults (AGE-101 pair review) |
 | `event-catalog.md` | GPUI entity events and subscribers |
 | `singleton-inventory.md` | Process-global state and repositories |
 | `llms.txt` | Agent discovery index (curated links) |

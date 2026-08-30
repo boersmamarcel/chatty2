@@ -16,10 +16,10 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.30"
+version = "0.3.34"
 edition = "2024"
 # AGE-26: declared MSRV for shipping research crates (also per-crate rust-version).
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # Core agent dependencies (rig 0.42 crate family — AGE-32 / AGE-26 exact-minor pins)
@@ -36,13 +36,13 @@ rmcp = { version = "=2.1.0", features = ["client", "macros", "transport-streamab
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.50.0", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
-dirs = "5.0"
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
+dirs = "6.0"
 uuid = { version = "1.23.0", features = ["v4"] }
 
 # Docker sandbox
-bollard = "0.20.2"
+bollard = "0.21"
 async-trait = "0.1"
 
 # Chat functionality
@@ -53,7 +53,7 @@ base64 = "0.22"
 async-stream = "0.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "query"] }
 glob = "0.3"
-similar = "2.7.0"
+similar = "3.2.0"
 
 # Auto-updater
 semver = "1.0"
@@ -62,7 +62,7 @@ flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.11"
 hex = "0.4"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 percent-encoding = "2"
 
 # Date/time formatting
@@ -74,29 +74,29 @@ parking_lot = "0.12"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-thiserror = "1.0"
+thiserror = "2.0"
 
-# Azure authentication
-azure_identity = "0.20"
-azure_core = "0.20"
+# Azure authentication (AGE-122: 0.20 → 1.x; DefaultAzureCredential removed in 1.0)
+azure_identity = { version = "1.0.0", features = ["tokio"] }
+azure_core = "1.1.0"
 
 # Asset embedding
-rust-embed = "8.0"
+rust-embed = "8.12.0"
 
 # PDF and image
 pdfium-render = "0.9.0"
 image = "0.25"
 
 # Excel
-calamine = "0.34.0"
-rust_xlsxwriter = "0.94.0"
-umya-spreadsheet = "2.3.3"
+calamine = "0.36.1"
+rust_xlsxwriter = "0.99.0"
+umya-spreadsheet = "3.1.0"
 
 # DOCX (Word documents)
 docx-rs = "0.4.20"
 
 # PPTX (PowerPoint) — ZIP+XML read support plus `pptx` crate write support
-zip = "7"
+zip = "8"
 roxmltree = "0.21"
 pptx_writer = { package = "pptx", version = "0.1.0" }
 
@@ -106,12 +106,13 @@ pptx_writer = { package = "pptx", version = "0.1.0" }
 duckdb = { version = "~1.10504.0", features = ["parquet", "json", "bundled"] }
 
 # Math rendering
-typst = "0.14.2"
-typst-svg = "0.14.2"
-typst-pdf = "0.14.2"
+typst = "0.15.1"
+typst-svg = "0.15.1"
+typst-pdf = "0.15.1"
+typst-layout = "0.15.1"
 mitex = "0.2.4"
-typst-assets = { version = "0.14.2", features = ["fonts"] }
-comemo = "0.4"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+comemo = "0.5.1"
 
 # Mermaid / SVG
 mermaid-rs-renderer = { version = "0.2", default-features = false }
@@ -123,7 +124,7 @@ usvg = "0.47.0"
 ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
 
 # Token counting
-tiktoken-rs = "0.9.1"
+tiktoken-rs = "0.12.0"
 
 # Agent memory
 memvid-core = { version = "2.0.139", default-features = false, features = ["lex", "temporal_track"] }
@@ -136,8 +137,8 @@ gpui-component-assets = "0.5.1"
 # TUI framework
 ratatui = "0.30.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
-tui-textarea = { package = "tui-textarea-2", version = "0.10.2" }
+tui-textarea = { package = "tui-textarea-2", version = "0.13.2" }
 clap = { version = "4.6.0", features = ["derive"] }
 
 # Unix-specific
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.31.3", features = ["signal"] }
