@@ -31,6 +31,10 @@ impl ChatView {
 
         // Clear any pending approval from previous conversation
         self.pending_approval = None;
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.set_mode(crate::chatty::views::transcript::ArtifactMode::Closed, cx);
+        });
         self.clear_agent_task_snapshot(cx);
 
         // Clear collapsed tool calls state from previous conversation

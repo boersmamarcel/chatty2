@@ -65,8 +65,9 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, Block, PlanBlock, PlanStrip, RunPin, RunPinKind, TurnRole,
-    adapt_messages_with_traces, estimate_turn_height, format_worked_for, render_typed_block,
+    ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, PlanBlock, PlanStrip,
+    RunPin, RunPinKind, TurnRole, adapt_messages_with_traces, estimate_turn_height,
+    format_worked_for, new_artifact_view, parse_unified_diff, render_typed_block,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -120,6 +121,9 @@ pub struct ChatView {
     thinking_indicator: Entity<ThinkingIndicator>,
     agent_task_snapshot: Option<AgentTaskSnapshot>,
     agent_task_panel_collapsed: bool,
+    artifact_view: Entity<ArtifactView>,
+    artifact_dismissed: bool,
+    artifact_close_wired: bool,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -278,6 +282,9 @@ impl ChatView {
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             agent_task_panel_collapsed: false,
+            artifact_view: new_artifact_view(cx),
+            artifact_dismissed: false,
+            artifact_close_wired: false,
         }
     }
 
@@ -737,6 +744,54 @@ impl ChatView {
         (done, tools.len())
     }
 
+    fn last_file_artifact(&self, cx: &App) -> Option<(PathBuf, String)> {
+        let traces = self.history_traces(cx);
+        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
+            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
+                continue;
+            };
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if let Some(parsed) = parse_unified_diff(tool.output.as_deref().unwrap_or(""))
+                    && !parsed.path.is_empty()
+                {
+                    let path = PathBuf::from(parsed.path);
+                    let source = if parsed.new.trim().is_empty() {
+                        std::fs::read_to_string(&path).unwrap_or_default()
+                    } else {
+                        parsed.new
+                    };
+                    return Some((path, source));
+                }
+            }
+        }
+        None
+    }
+
+    fn maybe_open_artifact_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.artifact_close_wired {
+            self.artifact_close_wired = true;
+            cx.subscribe(&self.artifact_view, |this, _, _: &ArtifactViewEvent, cx| {
+                this.artifact_dismissed = true;
+                cx.notify();
+            })
+            .detach();
+        }
+        if self.artifact_dismissed {
+            return;
+        }
+        if self.artifact_view.read(cx).mode != ArtifactMode::Closed {
+            return;
+        }
+        let Some((path, source)) = self.last_file_artifact(cx) else {
+            return;
+        };
+        self.artifact_view
+            .update(cx, |view, cx| view.open(path, source, cx));
+    }
+
     fn history_traces(&self, cx: &App) -> Vec<Option<SystemTrace>> {
         self.messages
             .iter()
@@ -1177,6 +1232,9 @@ static DEBUG_UI_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_render(window, cx);
+        self.maybe_open_artifact_panel(cx);
+        let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
+        let artifact = self.artifact_view.clone();
 
         let has_pending_approval = self.pending_approval.is_some();
         let view_entity_for_keys = cx.entity();
@@ -1186,14 +1244,13 @@ impl Render for ChatView {
             .map(|p| p.conversation_id.clone());
         let current_conv_id = self.conversation_id.clone();
 
-        div()
+        let column = div()
             .flex_1()
             .h_full()
-            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .relative()
-            .bg(cx.theme().background)
             .overflow_hidden()
             .when(cfg!(target_os = "macos"), |this| this.pt(px(24.)))
             .when(has_pending_approval, |this| {
@@ -1272,15 +1329,27 @@ impl Render for ChatView {
             .child(
                 div()
                     .flex_shrink_0()
+                    .px_4()
                     .pt_2()
                     .pb_4()
-                    .child(
-                        div()
-                            .when_some(self.render_agent_task_panel(cx), |this, panel| {
-                                this.child(panel)
-                            })
-                            .child(div().px_4().child(ChatInput::new(self.chat_input_state.clone()))),
-                    )
-            )
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .when_some(self.render_agent_task_panel(cx), |this, panel| {
+                        this.child(panel)
+                    })
+                    .child(ChatInput::new(self.chat_input_state.clone())),
+            );
+
+        div()
+            .flex_1()
+            .h_full()
+            .w_full()
+            .flex()
+            .flex_row()
+            .bg(cx.theme().background)
+            .overflow_hidden()
+            .child(column)
+            .when(docked, |this| this.child(artifact.into_any_element()))
     }
 }

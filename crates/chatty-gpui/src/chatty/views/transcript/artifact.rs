@@ -4,7 +4,6 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::popover::Popover;
-use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
@@ -18,6 +17,11 @@ pub enum ArtifactMode {
     Closed,
     Docked,
     Full,
+}
+
+#[derive(Clone, Debug)]
+pub enum ArtifactViewEvent {
+    Closed,
 }
 
 #[derive(IntoElement)]
@@ -170,16 +174,60 @@ impl Render for ArtifactView {
                 this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
             });
 
+        let title = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "Document".to_string());
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_family("monospace")
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                Button::new("artifact-close")
+                    .ghost()
+                    .small()
+                    .label("Close")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.mode = ArtifactMode::Closed;
+                        cx.emit(ArtifactViewEvent::Closed);
+                        cx.notify();
+                    })),
+            );
+
+        let panel = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .w(px(380.))
+            .min_w(px(280.))
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(header)
+            .child(body);
+
         if full {
-            div().size_full().child(body).into_any_element()
+            div().size_full().child(panel).into_any_element()
         } else {
-            h_resizable("artifact-dock")
-                .child(resizable_panel().child(div().flex_1()))
-                .child(resizable_panel().child(body))
-                .into_any_element()
+            panel.into_any_element()
         }
     }
 }
+
+impl EventEmitter<ArtifactViewEvent> for ArtifactView {}
 
 pub fn new_artifact_view(cx: &mut App) -> Entity<ArtifactView> {
     cx.new(ArtifactView::new)

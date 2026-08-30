@@ -27,9 +27,12 @@ pub use adapter::{
     adapt_messages_with_traces, estimate_turn_height, format_worked_for,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
-pub use artifact::{ArtifactCard, ArtifactMode, ArtifactView};
+pub use artifact::{
+    ArtifactCard, ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view,
+};
 pub use block_render::render_typed_block;
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
+pub use diff_parse::parse_unified_diff;
 pub use plan::{PlanBlock, PlanOverlay, PlanStrip};
 pub use run_pin::{RunPin, RunPinKind};
 pub use ticker::HeadlineTicker;
