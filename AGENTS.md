@@ -190,6 +190,9 @@ examples.
   `masked_env()` not `.env`. See "Security Practices" in CLAUDE.md.
 - **Rust edition** — 2024. Use `LazyLock`/`OnceLock` (std) rather than
   `lazy_static`/`once_cell`.
+- **GPUI / gpui-component skills** — When changing desktop UI, load
+  `.claude/skills/gpui` and `.claude/skills/gpui-component` (vendored from
+  `npx skills add longbridge/gpui-component`; lockfile `skills-lock.json`).
 
 ## Known gotchas
 
