@@ -19,7 +19,7 @@ resolver = "2"
 version = "0.3.31"
 edition = "2024"
 # AGE-26: declared MSRV for shipping research crates (also per-crate rust-version).
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # Core agent dependencies (rig 0.42 crate family — AGE-32 / AGE-26 exact-minor pins)
@@ -42,7 +42,7 @@ dirs = "6.0"
 uuid = { version = "1.23.0", features = ["v4"] }
 
 # Docker sandbox
-bollard = "0.20.2"
+bollard = "0.21"
 async-trait = "0.1"
 
 # Chat functionality
@@ -76,9 +76,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 thiserror = "2.0"
 
-# Azure authentication
-azure_identity = "0.20"
-azure_core = "0.20"
+# Azure authentication (AGE-122: 0.20 → 1.x; DefaultAzureCredential removed in 1.0)
+azure_identity = { version = "1.0.0", features = ["tokio"] }
+azure_core = "1.1.0"
 
 # Asset embedding
 rust-embed = "8.12.0"
