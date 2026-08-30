@@ -53,6 +53,10 @@ need "$WF/prepare-release.yml" \
   "prepare-release.yml gates workflow_dispatch to repository_owner"
 
 need "$WF/prepare-release.yml" \
+  "github\.actor == 'github-actions\[bot\]'" \
+  "prepare-release.yml allows github-actions[bot] workflow_dispatch after ship-auto merge"
+
+need "$WF/prepare-release.yml" \
   'head\.repo\.full_name == github\.repository' \
   "prepare-release.yml requires same-repo PR head"
 

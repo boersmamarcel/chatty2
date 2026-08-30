@@ -4,6 +4,9 @@ name: Ship-auto merge
 # auto-merge (squash) once the PR is open. Required status checks (CI, reserved,
 # ship-auto guard) still gate the actual merge.
 #
+# After the PR lands, if github-actions[bot] was the merger (GITHUB_TOKEN does
+# not emit pull_request.closed), dispatch prepare-release.yml with bump=patch.
+#
 # Closed-system: same-repo head only; only repository_owner (sender) or
 # github-actions[bot] (actor) may arm auto-merge. Fail closed otherwise.
 
@@ -54,3 +57,44 @@ jobs:
           set -euo pipefail
           gh pr merge "$PR" --repo "${{ github.repository }}" --auto --squash
           echo "Auto-merge enabled for PR #$PR"
+
+  # GITHUB_TOKEN squash-merges do not fire pull_request.closed, so prepare-release
+  # never starts on the ship-auto path. After automerge is armed, wait for GitHub
+  # to land the PR and dispatch prepare-release only when Actions was the merger.
+  dispatch-prepare-release:
+    needs: enable-automerge
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Wait for merge, then dispatch prepare-release if Actions merged
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          merged_by=""
+          for _ in $(seq 1 100); do
+            state="$(gh pr view "$PR" --repo "$REPO" --json state --jq '.state')"
+            if [ "$state" = "MERGED" ]; then
+              merged_by="$(gh pr view "$PR" --repo "$REPO" --json mergedBy --jq '.mergedBy.login // empty')"
+              echo "PR #$PR merged by ${merged_by:-unknown}"
+              break
+            fi
+            echo "PR #$PR state=$state; waiting for merge"
+            sleep 60
+          done
+          if [ -z "$merged_by" ]; then
+            echo "::error::Timed out waiting for PR #$PR to merge"
+            exit 1
+          fi
+          case "$merged_by" in
+            github-actions[bot]|app/github-actions)
+              echo "Actions merger — dispatching prepare-release (patch) on main"
+              gh workflow run prepare-release.yml --repo "$REPO" --ref main -f bump=patch
+              ;;
+            *)
+              echo "Merged by $merged_by — pull_request.closed should cut the release; not dispatching"
+              ;;
+          esac
