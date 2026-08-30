@@ -41,7 +41,7 @@ impl RenderOnce for PlanBlock {
             .id("plan-block")
             .w_full()
             .rounded_2xl()
-            .bg(cx.theme().green_light)
+            .bg(cx.theme().secondary)
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -164,7 +164,7 @@ impl RenderOnce for PlanStrip {
                     .compact()
                     .w_full()
                     .rounded(px(PLAN_STRIP_HEIGHT / 2.0))
-                    .bg(cx.theme().green_light)
+                    .bg(cx.theme().secondary)
                     .child(
                         div()
                             .id("plan-strip-inner")
