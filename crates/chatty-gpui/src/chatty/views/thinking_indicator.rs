@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt, App, AppContext, Context, Entity, IntoElement, ParentElement, Render,
-    Styled, Window, div, radians,
+    Styled, Window, div, px, radians,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName};
 
@@ -46,6 +46,7 @@ pub struct ThinkingIndicator {
     tick: usize,
     timer_started: bool,
     ticker: Entity<HeadlineTicker>,
+    attention: String,
 }
 
 impl ThinkingIndicator {
@@ -57,6 +58,15 @@ impl ThinkingIndicator {
             tick: 0,
             timer_started: false,
             ticker,
+            attention: String::new(),
+        }
+    }
+
+    pub fn set_attention(&mut self, attention: impl Into<String>, cx: &mut Context<Self>) {
+        let next = attention.into();
+        if next != self.attention {
+            self.attention = next;
+            cx.notify();
         }
     }
 
@@ -121,45 +131,94 @@ impl Render for ThinkingIndicator {
         };
         let word = self.current_word();
         let ticker = self.ticker.clone();
+        let phrase = if self.attention.is_empty() {
+            format!("{word} the current step{elapsed_label}")
+        } else {
+            format!("{word} {}{elapsed_label}", self.attention)
+        };
+        let pip_filled = ((elapsed as usize) % 7) + 1;
 
         div()
             .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .py_2()
+            .flex_col()
+            .gap_1()
+            .px_4()
+            .py_3()
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
                     .child(
-                        Icon::new(IconName::Asterisk)
-                            .text_color(primary)
+                        div()
+                            .child(
+                                Icon::new(IconName::Asterisk)
+                                    .text_color(primary)
+                                    .with_animation(
+                                        "running-glyph-rotate",
+                                        Animation::new(Duration::from_millis(GLYPH_ROTATE_MS))
+                                            .repeat(),
+                                        |this, delta| {
+                                            this.rotate(radians(delta * std::f32::consts::TAU))
+                                        },
+                                    ),
+                            )
                             .with_animation(
-                                "running-glyph-rotate",
-                                Animation::new(Duration::from_millis(GLYPH_ROTATE_MS)).repeat(),
-                                |this, delta| this.rotate(radians(delta * std::f32::consts::TAU)),
+                                "running-glyph-opacity",
+                                Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
+                                |this, delta| {
+                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                    this.opacity(0.45 + 0.55 * wave)
+                                },
                             ),
                     )
-                    .with_animation(
-                        "running-glyph-opacity",
-                        Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
-                        |this, delta| {
-                            let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                            this.opacity(0.45 + 0.55 * wave)
-                        },
-                    ),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(phrase)
+                            .with_animation(
+                                gpui::ElementId::NamedInteger(
+                                    "thinking-word".into(),
+                                    self.tick as u64,
+                                ),
+                                Animation::new(Duration::from_millis(400)),
+                                |this, delta| this.opacity(0.4 + 0.6 * delta),
+                            ),
+                    )
+                    .child(ticker),
             )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(format!("{word}…{elapsed_label}"))
-                    .with_animation(
-                        gpui::ElementId::NamedInteger("thinking-word".into(), self.tick as u64),
-                        Animation::new(Duration::from_millis(400)),
-                        |this, delta| this.opacity(0.4 + 0.6 * delta),
-                    ),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(3.))
+                    .pl(px(28.))
+                    .children((0..7).map(move |i| {
+                        let on = i < pip_filled;
+                        let pip = div().w(px(10.)).h(px(7.)).rounded_sm().bg(if on {
+                            primary
+                        } else {
+                            muted.opacity(0.35)
+                        });
+                        if i + 1 == pip_filled {
+                            pip.with_animation(
+                                gpui::ElementId::NamedInteger("running-pip".into(), i as u64),
+                                Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
+                                |this, delta| {
+                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                    this.opacity(0.55 + 0.45 * wave)
+                                },
+                            )
+                            .into_any_element()
+                        } else {
+                            pip.into_any_element()
+                        }
+                    })),
             )
-            .child(ticker)
     }
 }
 

@@ -65,8 +65,8 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, PlanBlock, PlanStrip, RunPin, RunPinKind, TurnRole, adapt_messages,
-    estimate_turn_height, format_worked_for,
+    ApprovalCard, Block, PlanBlock, PlanStrip, RunPin, RunPinKind, TurnRole,
+    adapt_messages_with_traces, estimate_turn_height, format_worked_for, render_typed_block,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -699,6 +699,20 @@ impl ChatView {
             .any(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
     }
 
+    fn history_traces(&self, cx: &App) -> Vec<Option<SystemTrace>> {
+        self.messages
+            .iter()
+            .map(|msg| {
+                msg.live_trace.clone().or_else(|| {
+                    msg.system_trace_view.as_ref().and_then(|view| {
+                        let trace = view.read(cx).get_trace().clone();
+                        trace.has_items().then_some(trace)
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
@@ -772,9 +786,31 @@ impl ChatView {
             .enumerate()
             .map(|(index, msg)| self.should_collapse_turn(index, msg))
             .collect();
-        let turns = adapt_messages(&self.messages, &collapsed);
+        let traces = self.history_traces(cx);
+        let turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
         let show_start_screen = turns.is_empty() && !is_awaiting;
         let thinking_visible = self.is_thinking_indicator_visible();
+        if thinking_visible {
+            let attention = self.messages.iter().rev().find_map(|msg| {
+                msg.live_trace.as_ref().and_then(|trace| {
+                    trace.items.iter().rev().find_map(|item| match item {
+                        crate::chatty::views::message_types::TraceItem::ToolCall(tool) => {
+                            Some(if tool.display_name.is_empty() {
+                                tool.tool_name.clone()
+                            } else {
+                                tool.display_name.clone()
+                            })
+                        }
+                        _ => None,
+                    })
+                })
+            });
+            if let Some(attention) = attention {
+                self.thinking_indicator.update(cx, |indicator, cx| {
+                    indicator.set_attention(attention, cx);
+                });
+            }
+        }
         let thinking_indicator = self.thinking_indicator.clone();
         let sizes = Rc::new(turns.iter().map(estimate_turn_height).collect::<Vec<_>>());
         let entity = cx.entity();
@@ -860,7 +896,8 @@ impl ChatView {
             .enumerate()
             .map(|(index, msg)| self.should_collapse_turn(index, msg))
             .collect();
-        let turns = adapt_messages(&self.messages, &collapsed);
+        let traces = self.history_traces(cx);
+        let turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
         let last_visible_assistant_idx = turns
             .iter()
             .rev()
@@ -909,8 +946,23 @@ impl ChatView {
                 } else {
                     None
                 };
-                let element = render_message(
-                    msg,
+                let typed: Vec<AnyElement> = turn
+                    .blocks
+                    .iter()
+                    .filter(|block| {
+                        !matches!(
+                            block,
+                            Block::User { .. } | Block::Text { .. } | Block::Plan { .. }
+                        )
+                    })
+                    .map(|block| render_typed_block(block, _window, cx))
+                    .collect();
+                let mut msg_for_text = msg.clone();
+                if !typed.is_empty() {
+                    msg_for_text.system_trace_view = None;
+                }
+                let text = render_message(
+                    &msg_for_text,
                     turn.message_index,
                     is_last_message,
                     &self.collapsed_tool_calls,
@@ -968,7 +1020,18 @@ impl ChatView {
                 if streaming_slot.is_some() {
                     self.streaming_parse_cache = streaming_slot;
                 }
-                element
+                if typed.is_empty() {
+                    text
+                } else {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .w_full()
+                        .children(typed)
+                        .child(text)
+                        .into_any_element()
+                }
             })
             .collect()
     }

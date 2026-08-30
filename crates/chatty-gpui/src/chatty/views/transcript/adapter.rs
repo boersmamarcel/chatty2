@@ -12,8 +12,20 @@ pub const COLLAPSED_TURN_HEIGHT: f32 = 36.0;
 
 /// Map one [`DisplayMessage`] onto one [`Turn`].
 pub fn adapt_message(msg: &DisplayMessage, message_index: usize, collapsed: bool) -> Turn {
+    adapt_message_with_trace(msg, message_index, collapsed, None)
+}
+
+/// Same as [`adapt_message`], but a persisted history trace can supply blocks
+/// when `live_trace` is empty (finalized conversations).
+pub fn adapt_message_with_trace(
+    msg: &DisplayMessage,
+    message_index: usize,
+    collapsed: bool,
+    history_trace: Option<&SystemTrace>,
+) -> Turn {
     let namespace = (message_index as u64).saturating_add(1);
     let mut blocks = Vec::new();
+    let trace = msg.live_trace.as_ref().or(history_trace);
 
     match msg.role {
         MessageRole::User => {
@@ -24,7 +36,6 @@ pub fn adapt_message(msg: &DisplayMessage, message_index: usize, collapsed: bool
             });
         }
         MessageRole::Assistant => {
-            let trace = msg.live_trace.as_ref();
             if let Some(trace) = trace {
                 push_trace_blocks(&mut blocks, namespace, trace);
             }
@@ -38,10 +49,7 @@ pub fn adapt_message(msg: &DisplayMessage, message_index: usize, collapsed: bool
         }
     }
 
-    let elapsed = msg
-        .live_trace
-        .as_ref()
-        .and_then(|trace| trace.total_duration);
+    let elapsed = trace.and_then(|trace| trace.total_duration);
 
     Turn {
         id: namespace,
@@ -163,6 +171,14 @@ fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Optio
 }
 
 pub fn adapt_messages(messages: &[DisplayMessage], collapsed_turns: &[bool]) -> Vec<Turn> {
+    adapt_messages_with_traces(messages, collapsed_turns, &[])
+}
+
+pub fn adapt_messages_with_traces(
+    messages: &[DisplayMessage],
+    collapsed_turns: &[bool],
+    traces: &[Option<SystemTrace>],
+) -> Vec<Turn> {
     messages
         .iter()
         .enumerate()
@@ -176,7 +192,12 @@ pub fn adapt_messages(messages: &[DisplayMessage], collapsed_turns: &[bool]) -> 
         })
         .map(|(index, msg)| {
             let collapsed = collapsed_turns.get(index).copied().unwrap_or(false);
-            adapt_message(msg, index, collapsed)
+            adapt_message_with_trace(
+                msg,
+                index,
+                collapsed,
+                traces.get(index).and_then(|t| t.as_ref()),
+            )
         })
         .collect()
 }

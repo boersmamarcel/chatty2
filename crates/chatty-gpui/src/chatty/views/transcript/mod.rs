@@ -10,7 +10,9 @@ mod activity;
 mod adapter;
 mod approval;
 mod artifact;
+mod block_render;
 mod diff;
+mod diff_parse;
 mod plan;
 mod run_pin;
 mod ticker;
@@ -21,10 +23,12 @@ mod verb;
 pub use action_bar::MessageActionBar;
 pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
-    COLLAPSED_TURN_HEIGHT, adapt_message, adapt_messages, estimate_turn_height, format_worked_for,
+    COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
+    adapt_messages_with_traces, estimate_turn_height, format_worked_for,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact::{ArtifactCard, ArtifactMode, ArtifactView};
+pub use block_render::render_typed_block;
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
 pub use plan::{PlanBlock, PlanOverlay, PlanStrip};
 pub use run_pin::{RunPin, RunPinKind};

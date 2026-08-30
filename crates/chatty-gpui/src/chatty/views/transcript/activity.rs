@@ -137,11 +137,12 @@ impl RenderOnce for ActivityGroup {
             .gap_2()
             .px_3()
             .py_2()
+            .bg(cx.theme().green_light.opacity(0.55))
             .child(
                 div()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().group_box_foreground)
+                    .text_color(cx.theme().foreground)
                     .child(tally.sentence()),
             )
             .when(running, |this| {
