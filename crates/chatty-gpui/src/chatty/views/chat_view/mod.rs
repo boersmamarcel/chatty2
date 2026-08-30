@@ -51,6 +51,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use std::collections::HashMap;
@@ -68,9 +69,8 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
     PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, Turn, TurnRole,
     adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff, plan_block_bottom,
-    plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
-    tool_file_path,
+    new_artifact_view, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    render_typed_block,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -129,6 +129,10 @@ pub struct ChatView {
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
+    /// Persists the right-pane width across dock open/close.
+    artifact_split: Entity<ResizableState>,
+    /// User expand/collapse for settled activity groups (`BlockId.0` → open).
+    activity_expanded: HashMap<u64, bool>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -292,6 +296,8 @@ impl ChatView {
             artifact_view: new_artifact_view(cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
+            artifact_split: cx.new(|_| ResizableState::default()),
+            activity_expanded: HashMap::new(),
         }
     }
 
@@ -779,60 +785,20 @@ impl ChatView {
         (done, tools.len())
     }
 
-    fn last_file_artifact(&self, cx: &App) -> Option<(PathBuf, String)> {
-        let traces = self.history_traces(cx);
-        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
-            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
-                continue;
-            };
-            for item in trace.items.iter().rev() {
-                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
-                    continue;
-                };
-                if let Some(parsed) = parse_unified_diff(tool.output.as_deref().unwrap_or(""))
-                    && !parsed.path.is_empty()
-                {
-                    let path = PathBuf::from(parsed.path);
-                    let source = if is_pdf_path(&path) || parsed.new.trim().is_empty() {
-                        read_artifact_source(&path)
-                    } else {
-                        parsed.new
-                    };
-                    return Some((path, source));
-                }
-                if is_produced_file_tool(&tool.tool_name, &tool.input)
-                    && let Some(path) = tool_file_path(&tool.input)
-                {
-                    return Some((path.clone(), read_artifact_source(&path)));
-                }
-            }
-        }
-        None
-    }
-
-    fn maybe_open_artifact_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.artifact_close_wired {
-            self.artifact_close_wired = true;
-            cx.subscribe(&self.artifact_view, |this, _, _: &ArtifactViewEvent, cx| {
-                this.artifact_dismissed = true;
-                cx.notify();
-            })
-            .detach();
-        }
-        if self.artifact_dismissed {
+    fn ensure_artifact_close_wired(&mut self, cx: &mut Context<Self>) {
+        if self.artifact_close_wired {
             return;
         }
-        if self.artifact_view.read(cx).mode != ArtifactMode::Closed {
-            return;
-        }
-        let Some((path, source)) = self.last_file_artifact(cx) else {
-            return;
-        };
-        self.artifact_view
-            .update(cx, |view, cx| view.open(path, source, cx));
+        self.artifact_close_wired = true;
+        cx.subscribe(&self.artifact_view, |this, _, _: &ArtifactViewEvent, cx| {
+            this.artifact_dismissed = true;
+            cx.notify();
+        })
+        .detach();
     }
 
     fn show_artifact(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
+        self.ensure_artifact_close_wired(cx);
         self.artifact_dismissed = false;
         self.artifact_view
             .update(cx, |view, cx| view.open(path, source, cx));
@@ -975,6 +941,9 @@ impl ChatView {
         let jump_turn = plan_turn_index(&turns);
         let jump_message = jump_turn.and_then(|ix| turns.get(ix).map(|turn| turn.message_index));
         let overlay_open = self.plan_overlay_open;
+        let pending_command = self
+            .active_approval_for_display()
+            .map(|p| p.command.clone());
 
         trace!(
             target: "chatty_gpui::render::list",
@@ -1004,12 +973,21 @@ impl ChatView {
                         .child(
                             PlanStrip::new(snapshot)
                                 .open(overlay_open)
+                                .pending_command(pending_command)
                                 .on_open_change({
                                     let entity = entity.clone();
                                     move |open, cx| {
                                         entity.update(cx, |view, cx| {
                                             view.plan_overlay_open = open;
                                             cx.notify();
+                                        });
+                                    }
+                                })
+                                .on_decide({
+                                    let entity = entity.clone();
+                                    move |approved, cx| {
+                                        entity.update(cx, |view, cx| {
+                                            view.handle_floating_approval(approved, cx);
                                         });
                                     }
                                 })
@@ -1164,12 +1142,38 @@ impl ChatView {
                         });
                     })
                 };
+                let on_activity_toggle = {
+                    let entity = entity.clone();
+                    Rc::new(move |block_id: u64, cx: &mut App| {
+                        entity.update(cx, |view, cx| {
+                            let current = view.activity_expanded.get(&block_id).copied();
+                            // Missing key → settled success is collapsed; toggle opens.
+                            let next = !current.unwrap_or(false);
+                            view.activity_expanded.insert(block_id, next);
+                            cx.notify();
+                        });
+                    })
+                };
                 let typed: Vec<AnyElement> = turn
                     .blocks
                     .iter()
                     .filter(|block| !matches!(block, Block::User { .. } | Block::Text { .. }))
                     .map(|block| {
-                        render_typed_block(block, Some(on_open.clone()), plan.as_ref(), _window, cx)
+                        let activity_open = match block {
+                            Block::Activity { id, .. } => {
+                                self.activity_expanded.get(&id.0).copied()
+                            }
+                            _ => None,
+                        };
+                        render_typed_block(
+                            block,
+                            Some(on_open.clone()),
+                            plan.as_ref(),
+                            activity_open,
+                            Some(on_activity_toggle.clone()),
+                            _window,
+                            cx,
+                        )
                     })
                     .collect();
                 let mut msg_for_text = msg.clone();
@@ -1352,9 +1356,10 @@ static DEBUG_UI_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_render(window, cx);
-        self.maybe_open_artifact_panel(cx);
+        self.ensure_artifact_close_wired(cx);
         let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         let artifact = self.artifact_view.clone();
+        let split = self.artifact_split.clone();
 
         let has_pending_approval = self.pending_approval.is_some();
         let view_entity_for_keys = cx.entity();
@@ -1459,15 +1464,32 @@ impl Render for ChatView {
                     }),
             );
 
-        div()
+        let root = div()
             .flex_1()
             .h_full()
             .w_full()
             .flex()
             .flex_row()
             .bg(cx.theme().background)
-            .overflow_hidden()
-            .child(column)
-            .when(docked, |this| this.child(artifact.into_any_element()))
+            .overflow_hidden();
+
+        if docked {
+            root.child(
+                div().flex_1().size_full().min_w_0().child(
+                    h_resizable("chat-artifact-split")
+                        .with_state(&split)
+                        .child(resizable_panel().child(column))
+                        .child(
+                            resizable_panel()
+                                .size(px(380.))
+                                .size_range(px(280.)..px(900.))
+                                .child(artifact.into_any_element()),
+                        ),
+                ),
+            )
+            .into_any_element()
+        } else {
+            root.child(column).into_any_element()
+        }
     }
 }

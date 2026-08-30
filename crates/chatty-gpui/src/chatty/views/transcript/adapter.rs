@@ -109,20 +109,24 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                         plan_emitted = true;
                     }
                 } else if is_diff_tool(tool) {
+                    // Keep the edit in the activity tally/rows, then show the
+                    // rich hunk list as its own block (AGE-131).
+                    activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
                     blocks.push(Block::Diff {
                         id: BlockId::from_parts(namespace, &tool.id),
                         tool: tool.clone(),
                     });
                 } else if is_produced_file_tool(&tool.tool_name, &tool.input) {
+                    // Count/show the write in the activity group, then attach
+                    // an artifact receipt so provenance stays next to the turn.
+                    activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
                     if let Some(path) = artifact_path(tool) {
                         blocks.push(Block::Artifact {
                             id: BlockId::from_parts(namespace, &tool.id),
                             path,
                         });
-                    } else {
-                        activity_tools.push(tool.clone());
                     }
                 } else if let Some(err) = tool_error(tool) {
                     flush_activity(blocks, &mut activity_tools);
@@ -498,6 +502,8 @@ mod tests {
             searches: 2,
             external: 1,
             commands: 1,
+            added: 0,
+            removed: 0,
         }
         .sentence();
         assert_eq!(

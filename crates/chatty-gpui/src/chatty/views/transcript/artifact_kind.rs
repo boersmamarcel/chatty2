@@ -37,8 +37,14 @@ pub fn tool_file_path(input: &str) -> Option<PathBuf> {
 }
 
 /// Write/create tools, plus PDF tools that name a `.pdf` path.
+///
+/// Agent plan tools (`write_todos`, …) are not file artifacts — they own the
+/// Plan block and must not auto-open the document panel.
 pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     let name = tool_name.to_ascii_lowercase();
+    if name.contains("todo") || name == "verify_completion" {
+        return false;
+    }
     if (name.contains("write") || name.contains("create")) && !name.contains("diff") {
         return true;
     }

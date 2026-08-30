@@ -1,19 +1,26 @@
+use std::rc::Rc;
+
+use chatty_core::models::message_types::ToolCallState;
 use chatty_core::services::AgentTaskSnapshot;
 use gpui::*;
 use gpui_component::ActiveTheme;
 
 use super::OpenArtifact;
-use super::activity::ActivityGroup;
+use super::activity::{ActivityGroup, RunTally};
 use super::approval::{ApprovalCard, ErrorBlock};
 use super::artifact::ArtifactCard;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
 use super::types::Block;
 
+pub type ActivityToggle = Rc<dyn Fn(u64, &mut App)>;
+
 pub fn render_typed_block(
     block: &Block,
     on_open: Option<OpenArtifact>,
     plan: Option<&AgentTaskSnapshot>,
+    activity_open: Option<bool>,
+    on_activity_toggle: Option<ActivityToggle>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -38,7 +45,19 @@ pub fn render_typed_block(
                 block.summary.clone()
             })
             .into_any_element(),
-        Block::Activity { tools, .. } => ActivityGroup::new(tools.clone()).into_any_element(),
+        Block::Activity { id, tools } => {
+            let running = tools
+                .iter()
+                .any(|t| matches!(t.state, ToolCallState::Running));
+            let default_open = running || RunTally::has_failure(tools);
+            let open = activity_open.unwrap_or(default_open);
+            let mut group = ActivityGroup::new(tools.clone()).open(open);
+            if let Some(toggle) = on_activity_toggle {
+                let block_id = id.0;
+                group = group.on_toggle(move |cx| toggle(block_id, cx));
+            }
+            group.into_any_element()
+        }
         Block::Diff { id, tool } => {
             let mut hunk = DiffHunkList::from_tool(id.0.to_string(), tool);
             if let Some(on_open) = on_open.clone() {

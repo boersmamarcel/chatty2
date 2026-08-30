@@ -41,6 +41,7 @@ impl ChatView {
         self.collapsed_tool_calls.clear();
         self.diff_expanded.clear();
         self.collapsed_turns.clear();
+        self.activity_expanded.clear();
         self.user_scrolled_away = false;
 
         // Clear parsed content cache from previous conversation

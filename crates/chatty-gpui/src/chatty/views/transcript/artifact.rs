@@ -17,10 +17,8 @@ use super::artifact_kind::{is_pdf_path, read_artifact_source};
 use super::diff::DiffHunkList;
 use super::run_pin::{RunPin, RunPinKind};
 
-/// Inner width of the 380px dock minus body padding. `img` only derives height
-/// from aspect ratio when width is an absolute `px()` — `w_full()` is relative,
-/// so GPUI would keep the PNG's pixel height and `ObjectFit::Contain` would
-/// center the sheet in that tall box (page sitting in the lower half).
+/// Inner width used when the dock is at its default 380px. `img` only derives
+/// height from aspect ratio when width is an absolute `px()`.
 const PDF_PAGE_DISPLAY_WIDTH: f32 = 348.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -516,8 +514,8 @@ impl Render for ArtifactView {
             .flex()
             .flex_col()
             .size_full()
-            .w(px(380.))
             .min_w(px(280.))
+            .w_full()
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
