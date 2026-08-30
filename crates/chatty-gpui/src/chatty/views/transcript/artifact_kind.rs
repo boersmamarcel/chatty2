@@ -38,9 +38,24 @@ pub fn read_artifact_source(path: &Path) -> String {
     }
 }
 
-/// Pull a file path out of a tool's JSON-ish input (`path` / `file_path` / `filename`).
+/// Pull a file path out of a tool's JSON-ish input or output.
+///
+/// Keys checked (longest first so `output_path` wins over the `path` substring):
+/// `output_path`, `saved_path`, `file_path`, `filename`, `path`.
 pub fn tool_file_path(input: &str) -> Option<PathBuf> {
-    for key in ["path", "file_path", "filename"] {
+    // Prefer structured JSON when present.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(input) {
+        for key in ["output_path", "saved_path", "file_path", "filename", "path"] {
+            if let Some(v) = json.get(key).and_then(|v| v.as_str()) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    return Some(PathBuf::from(trimmed));
+                }
+            }
+        }
+    }
+    // Fallback: substring scan (longest keys first).
+    for key in ["output_path", "saved_path", "file_path", "filename", "path"] {
         if let Some(idx) = input.find(key)
             && let Some(rest) = input.get(idx + key.len()..)
         {
@@ -57,7 +72,7 @@ pub fn tool_file_path(input: &str) -> Option<PathBuf> {
     None
 }
 
-/// Write/create tools, plus PDF tools that name a `.pdf` path.
+/// Write/create tools, Typst PDF compile, and PDF tools that name a `.pdf` path.
 ///
 /// Agent plan tools (`write_todos`, …) are not file artifacts — they own the
 /// Plan block and must not auto-open the document panel.
@@ -69,7 +84,25 @@ pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     if (name.contains("write") || name.contains("create")) && !name.contains("diff") {
         return true;
     }
+    // Typst always writes a PDF via output_path / saved_path.
+    if name == "compile_typst" || name.contains("typst") {
+        return tool_file_path(input).is_some_and(|p| is_pdf_path(&p)) || name == "compile_typst";
+    }
     name.starts_with("pdf_") && tool_file_path(input).is_some_and(|p| is_pdf_path(&p))
+}
+
+/// True when a produced-file tool result is a PDF the artifact panel should open.
+pub fn is_pdf_artifact_tool(tool_name: &str, input: &str, output: Option<&str>) -> bool {
+    if !is_produced_file_tool(tool_name, input) {
+        // compile_typst may only expose the absolute path on output.
+        let name = tool_name.to_ascii_lowercase();
+        if name != "compile_typst" && !name.contains("typst") {
+            return false;
+        }
+    }
+    tool_file_path(input)
+        .or_else(|| output.and_then(tool_file_path))
+        .is_some_and(|p| is_pdf_path(&p))
 }
 
 #[cfg(test)]
@@ -124,14 +157,36 @@ mod tests {
             tool_file_path(r#"{"path":"docs/report.pdf"}"#),
             Some(PathBuf::from("docs/report.pdf"))
         );
+        assert_eq!(
+            tool_file_path(r#"{"output_path":"reports/sales.pdf"}"#),
+            Some(PathBuf::from("reports/sales.pdf"))
+        );
+        assert_eq!(
+            tool_file_path(r#"{"saved_path":"/tmp/out.pdf","page_count":2}"#),
+            Some(PathBuf::from("/tmp/out.pdf"))
+        );
         assert!(is_produced_file_tool(
             "pdf_extract_text",
             r#"{"path":"docs/report.pdf"}"#
+        ));
+        assert!(is_produced_file_tool(
+            "compile_typst",
+            r#"{"content":"= Hi","output_path":"out.pdf"}"#
+        ));
+        assert!(is_pdf_artifact_tool(
+            "compile_typst",
+            r#"{"content":"= Hi","output_path":"out.pdf"}"#,
+            Some(r#"{"saved_path":"/abs/out.pdf","page_count":1}"#)
         ));
         assert!(is_produced_file_tool("write_file", r#"{"path":"a.md"}"#));
         assert!(!is_produced_file_tool(
             "google_search",
             r#"{"query":"pdf"}"#
+        ));
+        assert!(!is_pdf_artifact_tool(
+            "write_file",
+            r#"{"path":"a.md"}"#,
+            None
         ));
     }
 }

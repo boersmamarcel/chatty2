@@ -188,8 +188,8 @@ pub fn block_estimated_height(block: &Block, plan_steps: usize) -> f32 {
             content,
             attachments,
             ..
-        } => 28.0 + (content.len() as f32 / 48.0).min(240.0) + attachments.len() as f32 * 48.0,
-        Block::Text { content, .. } => 24.0 + (content.len() as f32 / 48.0).min(400.0),
+        } => 36.0 + (content.len() as f32 / 40.0).min(280.0) + attachments.len() as f32 * 48.0,
+        Block::Text { content, .. } => 36.0 + (content.len() as f32 / 40.0).min(480.0),
         Block::Thinking { .. } => 56.0,
         Block::Activity { tools, .. } => 40.0 + tools.len() as f32 * 28.0,
         Block::Diff { .. } => 120.0,
@@ -252,7 +252,11 @@ fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> boo
 fn artifact_path(
     tool: &chatty_core::models::message_types::ToolCallBlock,
 ) -> Option<std::path::PathBuf> {
-    tool_file_path(&tool.input)
+    // Prefer the resolved on-disk path from tool output (e.g. Typst saved_path).
+    tool.output
+        .as_deref()
+        .and_then(tool_file_path)
+        .or_else(|| tool_file_path(&tool.input))
 }
 
 fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Option<String> {
@@ -297,12 +301,31 @@ pub fn adapt_messages_with_traces(
 pub fn estimate_turn_height(turn: &Turn, plan_steps: usize) -> Size<Pixels> {
     // Folded turns still show the worked-for header plus receipts (artifacts,
     // approvals, plan, errors) and the assistant text — only the work trace
-    // (thinking / activity / diffs) is hidden.
-    let mut height = if turn.collapsed {
-        COLLAPSED_TURN_HEIGHT
+    // (thinking / activity / diffs) is hidden. Expanded turns with tools also
+    // render that header above the typed blocks.
+    let has_work_fold = matches!(turn.role, TurnRole::Assistant)
+        && !turn.streaming
+        && turn.blocks.iter().any(|block| {
+            matches!(
+                block,
+                Block::Thinking { .. }
+                    | Block::Activity { .. }
+                    | Block::Diff { .. }
+                    | Block::Artifact { .. }
+                    | Block::Approval { .. }
+                    | Block::Plan { .. }
+                    | Block::Error { .. }
+            )
+        });
+
+    // Header row (+ gap) when the Worked-for fold control is present; otherwise
+    // a small chrome pad. Under-estimates here paint the last turn over the composer.
+    let mut height = if has_work_fold {
+        COLLAPSED_TURN_HEIGHT + 8.0
     } else {
-        48.0_f32
+        16.0_f32
     };
+    let mut visible = 0u32;
     for block in &turn.blocks {
         if turn.collapsed
             && matches!(
@@ -313,7 +336,14 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize) -> Size<Pixels> {
             continue;
         }
         height += block_estimated_height(block, plan_steps);
+        visible += 1;
     }
+    // `gap_2` between header / typed blocks / message body.
+    if visible > 0 {
+        height += 8.0 * visible as f32;
+    }
+    // Slack so virtual-list slots don't under-clip into the composer.
+    height += 32.0;
     size(px(800.), px(height.max(36.0)))
 }
 
@@ -395,6 +425,50 @@ mod tests {
                 .iter()
                 .any(|block| matches!(block, Block::Artifact { path, .. } if path.ends_with("report.pdf"))),
             "pdf_* tools that name a .pdf should open as artifact cards, got {:?}",
+            turn.blocks
+        );
+    }
+
+    #[test]
+    fn compile_typst_becomes_artifact_from_saved_path() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "typ".into(),
+            tool_name: "compile_typst".into(),
+            display_name: "Generating PDF".into(),
+            input: r#"{"content":"= Hi","output_path":"reports/sales.pdf"}"#.into(),
+            output: Some(r#"{"saved_path":"/tmp/reports/sales.pdf","page_count":1}"#.into()),
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            turn.blocks.iter().any(|block| {
+                matches!(block, Block::Artifact { path, .. } if path.ends_with("sales.pdf"))
+            }),
+            "compile_typst should produce an artifact card, got {:?}",
             turn.blocks
         );
     }

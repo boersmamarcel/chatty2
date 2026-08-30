@@ -53,7 +53,29 @@ impl ChattyApp {
         attachments: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        debug!(message = %message, attachment_count = attachments.len(), "send_message called");
+        self.send_message_inner(message, attachments, true, cx);
+    }
+
+    /// Inject an agent-protocol / loop-guard follow-up for the LLM without
+    /// showing a user bubble. The plan UI (To-dos card / strip) is the only
+    /// visible signal for todo-protocol nudges.
+    pub(super) fn send_protocol_follow_up(&mut self, message: String, cx: &mut Context<Self>) {
+        self.send_message_inner(message, vec![], false, cx);
+    }
+
+    fn send_message_inner(
+        &mut self,
+        message: String,
+        attachments: Vec<PathBuf>,
+        show_in_transcript: bool,
+        cx: &mut Context<Self>,
+    ) {
+        debug!(
+            message = %message,
+            attachment_count = attachments.len(),
+            show_in_transcript,
+            "send_message called"
+        );
 
         // Block message sending until app is ready (initial conversation created/loaded)
         if !self.is_ready {
@@ -164,9 +186,13 @@ impl ChattyApp {
                 // and add the user/assistant messages AFTER conversation exists
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone(), cx);
-                    // Add user message to UI
-                    view.add_user_message(message.clone(), attachments.clone(), cx);
-                    debug!("User message added to UI");
+                    // Protocol follow-ups reach the LLM but skip the user bubble.
+                    if show_in_transcript {
+                        view.add_user_message(message.clone(), attachments.clone(), cx);
+                        debug!("User message added to UI");
+                    } else {
+                        debug!("Protocol follow-up: skipping user bubble in transcript");
+                    }
                     // Start assistant message in UI
                     view.start_assistant_message(cx);
                     debug!("Assistant message started");

@@ -69,8 +69,9 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
     PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, Turn, TurnRole,
     adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    new_artifact_view, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
-    render_typed_block,
+    is_pdf_artifact_tool, is_pdf_path, new_artifact_view, plan_block_bottom,
+    plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
+    tool_file_path,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -797,6 +798,49 @@ impl ChatView {
         .detach();
     }
 
+    /// Latest PDF produced by a tool (Typst / pdf_* / write…pdf). Used to auto-dock
+    /// the artifact panel — non-PDF produced files stay click-to-open only.
+    fn last_pdf_artifact(&self, cx: &App) -> Option<(PathBuf, String)> {
+        let traces = self.history_traces(cx);
+        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
+            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
+                continue;
+            };
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if !is_pdf_artifact_tool(&tool.tool_name, &tool.input, tool.output.as_deref()) {
+                    continue;
+                }
+                let path = tool
+                    .output
+                    .as_deref()
+                    .and_then(tool_file_path)
+                    .or_else(|| tool_file_path(&tool.input))?;
+                if !is_pdf_path(&path) {
+                    continue;
+                }
+                return Some((path.clone(), read_artifact_source(&path)));
+            }
+        }
+        None
+    }
+
+    fn maybe_open_pdf_artifact(&mut self, cx: &mut Context<Self>) {
+        self.ensure_artifact_close_wired(cx);
+        if self.artifact_dismissed {
+            return;
+        }
+        if self.artifact_view.read(cx).mode != ArtifactMode::Closed {
+            return;
+        }
+        let Some((path, source)) = self.last_pdf_artifact(cx) else {
+            return;
+        };
+        self.show_artifact(path, source, cx);
+    }
+
     fn show_artifact(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
         self.ensure_artifact_close_wired(cx);
         self.artifact_dismissed = false;
@@ -975,6 +1019,7 @@ impl ChatView {
             .relative()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .when_some(plan_strip, |this, snapshot| {
                 this.child(
                     div()
@@ -1041,6 +1086,7 @@ impl ChatView {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        .overflow_hidden()
                         .on_scroll_wheel({
                             let entity = entity.clone();
                             move |_, _, cx| {
@@ -1058,6 +1104,7 @@ impl ChatView {
                             )
                             .track_scroll(&self.list_scroll)
                             .p_4()
+                            .pb_12()
                             .flex_1(),
                         )
                         .when(overlay_open, |this| {
@@ -1418,7 +1465,7 @@ static DEBUG_UI_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_render(window, cx);
-        self.ensure_artifact_close_wired(cx);
+        self.maybe_open_pdf_artifact(cx);
         let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         let artifact = self.artifact_view.clone();
         let split = self.artifact_split.clone();

@@ -41,7 +41,8 @@ pub use artifact::{
     ArtifactCard, ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view,
 };
 pub use artifact_kind::{
-    is_pdf_path, is_produced_file_tool, read_artifact_source, resolve_artifact_path, tool_file_path,
+    is_pdf_artifact_tool, is_pdf_path, is_produced_file_tool, read_artifact_source,
+    resolve_artifact_path, tool_file_path,
 };
 pub use block_render::render_typed_block;
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};

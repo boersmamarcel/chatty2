@@ -9,7 +9,7 @@ use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
 use super::verb::tool_row_label;
 
-/// Compact tool-call row. Verb tense encodes state.
+/// Compact tool-call row. Verb tense encodes state; path and +/- are separate.
 #[derive(IntoElement)]
 pub struct ToolRow {
     tool: ToolCallBlock,
@@ -38,14 +38,25 @@ impl RenderOnce for ToolRow {
         } else {
             tool.id.clone()
         };
-        let label = tool_row_label(&tool.display_name, &tool.tool_name, &tool.state);
-        let (tag, tag_success) = match &tool.state {
-            ToolCallState::Success => (None, true),
-            ToolCallState::Error(err) => (Some(err.clone()), false),
-            ToolCallState::Running => (None, true),
+        let label = tool_row_label(
+            &tool.display_name,
+            &tool.tool_name,
+            &tool.state,
+            &tool.input,
+            tool.output.as_deref(),
+        );
+        let err = match &tool.state {
+            ToolCallState::Error(err) => Some(err.clone()),
+            _ => None,
         };
         let copy_value = tool.output.clone().unwrap_or_else(|| tool.input.clone());
         let icon = source_icon(&tool.source);
+        let verb_color = if matches!(tool.state, ToolCallState::Error(_)) {
+            cx.theme().danger
+        } else {
+            // Success stays on foreground — sage is reserved for +N tags.
+            cx.theme().foreground
+        };
 
         div()
             .id(ElementId::Name(format!("tool-row-{id}").into()))
@@ -71,21 +82,28 @@ impl RenderOnce for ToolRow {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if matches!(tool.state, ToolCallState::Error(_)) {
-                        cx.theme().danger
-                    } else if matches!(tool.state, ToolCallState::Success) {
-                        cx.theme().success
-                    } else {
-                        cx.theme().foreground
-                    })
-                    .child(label),
+                    .text_color(verb_color)
+                    .child(label.verb.clone()),
             )
-            .when_some(tag, |this, err| {
-                this.child(if tag_success {
-                    Tag::success().small().child(err)
-                } else {
-                    Tag::danger().small().child(err)
-                })
+            .when(!label.subject.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .min_w_0()
+                        .truncate()
+                        .font_family("monospace")
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label.subject.clone()),
+                )
+            })
+            .when_some(label.added, |this, n| {
+                this.child(Tag::success().small().child(format!("+{n}")))
+            })
+            .when_some(label.removed.filter(|n| *n > 0), |this, n| {
+                this.child(Tag::danger().small().child(format!("−{n}")))
+            })
+            .when_some(err, |this, err| {
+                this.child(Tag::danger().small().child(err))
             })
             .child(div().flex_1())
             .child(

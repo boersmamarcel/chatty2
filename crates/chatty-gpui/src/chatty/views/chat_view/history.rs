@@ -58,6 +58,11 @@ impl ChatView {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
                     let attachments = entry.attachment_paths.clone();
+                    if chatty_core::services::is_protocol_follow_up_text(&user_msg.text) {
+                        // Protocol nudges stay in the LLM history but are not
+                        // rendered as user bubbles (plan UI covers todo protocol).
+                        continue;
+                    }
                     if !user_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,
