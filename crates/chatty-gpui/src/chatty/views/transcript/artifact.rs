@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use chatty_core::services::pdf_thumbnail::{
-    PREVIEW_TEXT_PAGES, PREVIEW_WIDTH, PdfThumbnailError, extract_pdf_plain_text, pdf_page_count,
-    render_pdf_page,
+    PREVIEW_WIDTH, PdfThumbnailError, pdf_page_count, render_pdf_page,
 };
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -48,7 +47,6 @@ enum PdfPreview {
         page: u32,
         total: u32,
         image: PathBuf,
-        text: String,
     },
     Error(String),
 }
@@ -189,7 +187,7 @@ impl ArtifactView {
             self.rendered.clear();
             self.old.clear();
             self.tab = 0;
-            self.start_pdf_load(0, None, cx);
+            self.start_pdf_load(0, cx);
         } else {
             self.pdf = PdfPreview::Idle;
             self.source = source.clone();
@@ -206,7 +204,7 @@ impl ArtifactView {
         cx.notify();
     }
 
-    fn start_pdf_load(&mut self, page: u32, reuse_text: Option<String>, cx: &mut Context<Self>) {
+    fn start_pdf_load(&mut self, page: u32, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else {
             return;
         };
@@ -217,11 +215,7 @@ impl ArtifactView {
             let outcome = tokio::task::spawn_blocking(move || -> Result<_, PdfThumbnailError> {
                 let total = pdf_page_count(&path)?;
                 let image = render_pdf_page(&path, page, PREVIEW_WIDTH)?;
-                let text = match reuse_text {
-                    Some(text) => text,
-                    None => extract_pdf_plain_text(&path, PREVIEW_TEXT_PAGES)?.1,
-                };
-                Ok((total, image, text))
+                Ok((total, image))
             })
             .await;
             this.update(cx, |this, cx| {
@@ -229,14 +223,8 @@ impl ArtifactView {
                     return;
                 }
                 match outcome {
-                    Ok(Ok((total, image, text))) => {
-                        this.source = text.clone();
-                        this.pdf = PdfPreview::Ready {
-                            page,
-                            total,
-                            image,
-                            text,
-                        };
+                    Ok(Ok((total, image))) => {
+                        this.pdf = PdfPreview::Ready { page, total, image };
                     }
                     Ok(Err(e)) => this.pdf = PdfPreview::Error(e.to_string()),
                     Err(e) => this.pdf = PdfPreview::Error(e.to_string()),
@@ -250,10 +238,7 @@ impl ArtifactView {
     }
 
     fn turn_pdf_page(&mut self, next: bool, cx: &mut Context<Self>) {
-        let PdfPreview::Ready {
-            page, total, text, ..
-        } = &self.pdf
-        else {
+        let PdfPreview::Ready { page, total, .. } = &self.pdf else {
             return;
         };
         let new_page = if next {
@@ -264,8 +249,7 @@ impl ArtifactView {
         if new_page == *page {
             return;
         }
-        let text = text.clone();
-        self.start_pdf_load(new_page, Some(text), cx);
+        self.start_pdf_load(new_page, cx);
         cx.notify();
     }
 }
@@ -370,85 +354,83 @@ impl Render for ArtifactView {
         let is_pdf = self.path.as_ref().is_some_and(|path| is_pdf_path(path));
         let pdf = self.pdf.clone();
 
-        let body = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .child(
-                TabBar::new("artifact-modes")
-                    .segmented()
-                    .child(Tab::new().label("Rendered"))
-                    .child(Tab::new().label("Source"))
-                    .child(Tab::new().label("Diff"))
-                    .selected_index(tab)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |ix, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.tab = *ix;
-                                cx.notify();
-                            });
-                        }
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .p_2()
-                    .when(tab == 0 && is_pdf, |this| {
-                        this.child(pdf_rendered_body(&pdf, entity.clone(), cx))
-                    })
-                    .when(tab == 0 && !is_pdf, |this| {
-                        this.child(TextView::markdown("artifact-md", rendered, window, cx))
-                    })
-                    .when(tab == 1, |this| {
-                        this.child(
-                            div()
-                                .id("artifact-source")
-                                .font_family("monospace")
-                                .text_xs()
-                                .overflow_y_scroll()
-                                .child(if source.is_empty() && is_pdf {
-                                    "Extracting text…".to_string()
-                                } else {
-                                    source.clone()
-                                }),
-                        )
-                    })
-                    .when(tab == 2, |this| {
-                        if is_pdf && old.is_empty() {
+        let body = if is_pdf {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .p_2()
+                .child(pdf_rendered_body(&pdf, entity.clone(), cx))
+                .when(full, |this| {
+                    this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
+                })
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(
+                    TabBar::new("artifact-modes")
+                        .segmented()
+                        .child(Tab::new().label("Rendered"))
+                        .child(Tab::new().label("Source"))
+                        .child(Tab::new().label("Diff"))
+                        .selected_index(tab)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |ix, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.tab = *ix;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .p_2()
+                        .when(tab == 0, |this| {
+                            this.child(TextView::markdown("artifact-md", rendered, window, cx))
+                        })
+                        .when(tab == 1, |this| {
                             this.child(
                                 div()
+                                    .id("artifact-source")
+                                    .font_family("monospace")
                                     .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("No prior version to compare."),
+                                    .overflow_y_scroll()
+                                    .child(source.clone()),
                             )
-                        } else {
+                        })
+                        .when(tab == 2, |this| {
                             this.child(DiffHunkList::new("artifact-diff", old, source))
-                        }
-                    }),
-            )
-            .child(
-                Button::new("artifact-copy")
-                    .ghost()
-                    .small()
-                    .label("Copy")
-                    .on_click({
-                        let copy = self.source.clone();
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                        }
-                    }),
-            )
-            .when(full, |this| {
-                this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
-            });
+                        }),
+                )
+                .child(
+                    Button::new("artifact-copy")
+                        .ghost()
+                        .small()
+                        .label("Copy")
+                        .on_click({
+                            let copy = self.source.clone();
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                            }
+                        }),
+                )
+                .when(full, |this| {
+                    this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
+                })
+        };
 
         let title = self
             .path
@@ -499,6 +481,14 @@ impl Render for ArtifactView {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
                     )
+                    .when(is_pdf, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("PDF"),
+                        )
+                    })
                     .child(
                         Button::new("artifact-close")
                             .ghost()
