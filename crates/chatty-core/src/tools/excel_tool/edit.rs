@@ -275,10 +275,10 @@ fn apply_preserving_template_edits(
     for op in operations {
         match op {
             EditOperation::SetCell { sheet, cell, value } => {
-                let ws = workbook.get_sheet_by_name_mut(sheet).ok_or_else(|| {
+                let ws = workbook.sheet_by_name_mut(sheet).map_err(|_| {
                     ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
                 })?;
-                write_umya_cell_value(ws.get_cell_mut(cell.as_str()), value);
+                write_umya_cell_value(ws.cell_mut(cell.as_str()), value);
             }
             EditOperation::SetRange {
                 sheet,
@@ -286,19 +286,19 @@ fn apply_preserving_template_edits(
                 data,
             } => {
                 let (sr, sc) = parse_cell_ref(start_cell)?;
-                let ws = workbook.get_sheet_by_name_mut(sheet).ok_or_else(|| {
+                let ws = workbook.sheet_by_name_mut(sheet).map_err(|_| {
                     ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
                 })?;
                 for (ri, row_data) in data.iter().enumerate() {
                     for (ci, val) in row_data.iter().enumerate() {
                         let row = sr + ri as u32 + 1;
                         let col = sc as u32 + ci as u32 + 1;
-                        write_umya_cell_value(ws.get_cell_mut((col, row)), val);
+                        write_umya_cell_value(ws.cell_mut((col, row)), val);
                     }
                 }
             }
             EditOperation::AddSheet { name, data } => {
-                if workbook.get_sheet_by_name(name).is_some() {
+                if workbook.sheet_by_name(name).is_ok() {
                     warn!(sheet = %name, "Sheet already exists, skipping add_sheet");
                     continue;
                 }
@@ -309,7 +309,7 @@ fn apply_preserving_template_edits(
                         e
                     ))
                 })?;
-                let ws = workbook.get_sheet_by_name_mut(name).ok_or_else(|| {
+                let ws = workbook.sheet_by_name_mut(name).map_err(|_| {
                     ExcelToolError::OperationError(anyhow::anyhow!(
                         "Failed to retrieve newly created sheet '{}'",
                         name
@@ -317,7 +317,7 @@ fn apply_preserving_template_edits(
                 })?;
                 for (ri, row_data) in data.iter().enumerate() {
                     for (ci, val) in row_data.iter().enumerate() {
-                        write_umya_cell_value(ws.get_cell_mut((ci as u32 + 1, ri as u32 + 1)), val);
+                        write_umya_cell_value(ws.cell_mut((ci as u32 + 1, ri as u32 + 1)), val);
                     }
                 }
             }
@@ -326,23 +326,23 @@ fn apply_preserving_template_edits(
                 start_row,
                 count,
             } => {
-                if workbook.get_sheet_by_name(sheet).is_none() {
+                if workbook.sheet_by_name(sheet).is_err() {
                     return Err(ExcelToolError::OperationError(anyhow::anyhow!(
                         "Sheet '{}' not found",
                         sheet
                     )));
                 }
-                workbook.remove_row(sheet, &(*start_row as u32), &(*count as u32));
+                workbook.remove_row(sheet, *start_row as u32, *count as u32);
             }
             EditOperation::SetFormula {
                 sheet,
                 cell,
                 formula,
             } => {
-                let ws = workbook.get_sheet_by_name_mut(sheet).ok_or_else(|| {
+                let ws = workbook.sheet_by_name_mut(sheet).map_err(|_| {
                     ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
                 })?;
-                ws.get_cell_mut(cell.as_str()).set_formula(formula.as_str());
+                ws.cell_mut(cell.as_str()).set_formula(formula.as_str());
             }
             EditOperation::FormatRange { .. } => {
                 return Err(ExcelToolError::OperationError(anyhow::anyhow!(
@@ -361,9 +361,9 @@ fn apply_preserving_template_edits(
     })?;
 
     Ok(workbook
-        .get_sheet_collection_no_check()
+        .sheet_collection_no_check()
         .iter()
-        .map(|s| s.get_name().to_string())
+        .map(|s| s.name().to_string())
         .collect())
 }
 

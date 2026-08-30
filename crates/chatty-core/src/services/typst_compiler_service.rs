@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime};
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
@@ -33,7 +33,8 @@ impl FullWorld {
 
         let book = LazyHash::new(FontBook::from_fonts(fonts.iter()));
 
-        let main_id = FileId::new(None, VirtualPath::new("main.typ"));
+        let vpath = VirtualPath::new("main.typ").expect("valid virtual path");
+        let main_id = FileId::new(RootedPath::new(VirtualRoot::Project, vpath));
         let source = Source::new(main_id, content.to_string());
 
         Self {
@@ -48,7 +49,7 @@ impl FullWorld {
 
     fn resolve_path(&self, id: FileId) -> Option<PathBuf> {
         let base = self.base_dir.as_deref()?;
-        let rel = id.vpath().as_rootless_path();
+        let rel = id.vpath().get_without_slash();
         Some(base.join(rel))
     }
 }
@@ -73,10 +74,10 @@ impl World for FullWorld {
 
         let path = self
             .resolve_path(id)
-            .ok_or_else(|| FileError::NotFound(id.vpath().as_rootless_path().into()))?;
+            .ok_or_else(|| FileError::NotFound(id.vpath().get_without_slash().into()))?;
 
         let text = std::fs::read_to_string(&path)
-            .map_err(|_| FileError::NotFound(id.vpath().as_rootless_path().into()))?;
+            .map_err(|_| FileError::NotFound(id.vpath().get_without_slash().into()))?;
 
         Ok(Source::new(id, text))
     }
@@ -84,10 +85,10 @@ impl World for FullWorld {
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         let path = self
             .resolve_path(id)
-            .ok_or_else(|| FileError::NotFound(id.vpath().as_rootless_path().into()))?;
+            .ok_or_else(|| FileError::NotFound(id.vpath().get_without_slash().into()))?;
 
         let bytes = std::fs::read(&path)
-            .map_err(|_| FileError::NotFound(id.vpath().as_rootless_path().into()))?;
+            .map_err(|_| FileError::NotFound(id.vpath().get_without_slash().into()))?;
 
         Ok(Bytes::new(bytes))
     }
@@ -96,11 +97,11 @@ impl World for FullWorld {
         self.fonts.get(index).cloned()
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
         use chrono::{Datelike, Local, Utc};
 
-        let now = if let Some(offset_hours) = offset {
-            let offset_secs = (offset_hours * 3600) as i32;
+        let now = if let Some(offset) = offset {
+            let offset_secs = (offset.hours() * 3600.0) as i32;
             let fixed = chrono::FixedOffset::east_opt(offset_secs)?;
             Utc::now().with_timezone(&fixed).naive_local()
         } else {
@@ -125,14 +126,14 @@ impl TypstCompilerService {
         let world = FullWorld::new(content, base_dir);
 
         // Compile the typst source
-        let warned_result = typst::compile::<typst::layout::PagedDocument>(&world);
+        let warned_result = typst::compile::<typst_layout::PagedDocument>(&world);
 
         let document = warned_result.output.map_err(|errors| {
             let messages: Vec<String> = errors.iter().map(|e| e.message.to_string()).collect();
             anyhow::anyhow!("Typst compilation failed:\n{}", messages.join("\n"))
         })?;
 
-        let page_count = document.pages.len() as u32;
+        let page_count = document.pages().len() as u32;
 
         // Export to PDF
         let pdf_bytes = typst_pdf::pdf(&document, &PdfOptions::default())

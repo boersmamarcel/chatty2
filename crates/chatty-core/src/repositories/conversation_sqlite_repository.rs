@@ -101,7 +101,12 @@ impl ConversationSqliteRepository {
                 for statement in sql.split(';') {
                     let trimmed = statement.trim();
                     if !trimmed.is_empty() {
-                        sqlx::query(trimmed).execute(pool).await?;
+                        // Migration SQL is a compile-time constant split on ';',
+                        // not user input. sqlx 0.9 requires AssertSqlSafe for
+                        // non-'static query strings.
+                        sqlx::query(sqlx::AssertSqlSafe(trimmed.to_string()))
+                            .execute(pool)
+                            .await?;
                     }
                 }
                 sqlx::query("UPDATE schema_version SET version = ?")
