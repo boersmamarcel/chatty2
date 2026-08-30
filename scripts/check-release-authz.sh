@@ -72,6 +72,14 @@ need "$WF/ship-auto-merge.yml" \
   'repository_owner|OWNER' \
   "ship-auto-merge.yml requires repository_owner sender"
 
+need "$WF/ship-auto-merge.yml" \
+  'actions:[[:space:]]*write' \
+  "ship-auto-merge.yml has actions: write so GITHUB_TOKEN can dispatch prepare-release"
+
+need "$WF/ship-auto-merge.yml" \
+  'workflow run prepare-release.yml' \
+  "ship-auto-merge.yml dispatches prepare-release after an Actions squash"
+
 need "$WF/ship-auto-guard.yml" \
   'release:\(patch\|minor\|major\)|release:patch' \
   "ship-auto-guard.yml keys off release labels"

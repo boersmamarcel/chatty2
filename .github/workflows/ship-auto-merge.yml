@@ -14,9 +14,17 @@ on:
   pull_request:
     types: [opened, reopened, labeled, synchronize, ready_for_review]
 
+# One waiter per PR. opened+labeled would otherwise start two dispatch jobs
+# and double-bump (0.3.31 then 0.3.32).
+concurrency:
+  group: ship-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
+  # gh workflow run needs this; contents/pull-requests write is not enough.
+  actions: write
 
 jobs:
   enable-automerge:
@@ -91,6 +99,12 @@ jobs:
           fi
           case "$merged_by" in
             github-actions[bot]|app/github-actions)
+              already="$(gh run list --repo "$REPO" --workflow prepare-release.yml \
+                --json status,databaseId --jq '[.[] | select(.status=="queued" or .status=="in_progress") | .databaseId] | first // empty')"
+              if [ -n "$already" ]; then
+                echo "prepare-release already running ($already) — not dispatching again"
+                exit 0
+              fi
               echo "Actions merger — dispatching prepare-release (patch) on main"
               gh workflow run prepare-release.yml --repo "$REPO" --ref main -f bump=patch
               ;;
