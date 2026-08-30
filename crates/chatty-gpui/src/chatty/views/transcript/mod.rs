@@ -5,6 +5,14 @@
 
 #![allow(dead_code, unused_imports)]
 
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gpui::App;
+
+/// Open a produced file in the right-hand artifact workbench.
+pub type OpenArtifact = Rc<dyn Fn(PathBuf, String, &mut App)>;
+
 mod action_bar;
 mod activity;
 mod adapter;

@@ -65,8 +65,8 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, PlanBlock, PlanStrip,
-    RunPin, RunPinKind, TurnRole, adapt_messages_with_traces, estimate_turn_height,
+    ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact, PlanBlock,
+    PlanStrip, RunPin, RunPinKind, TurnRole, adapt_messages_with_traces, estimate_turn_height,
     format_worked_for, new_artifact_view, parse_unified_diff, render_typed_block,
 };
 use crate::chatty::models::MessageFeedback;
@@ -792,6 +792,13 @@ impl ChatView {
             .update(cx, |view, cx| view.open(path, source, cx));
     }
 
+    fn show_artifact(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
+        self.artifact_dismissed = false;
+        self.artifact_view
+            .update(cx, |view, cx| view.open(path, source, cx));
+        cx.notify();
+    }
+
     fn history_traces(&self, cx: &App) -> Vec<Option<SystemTrace>> {
         self.messages
             .iter()
@@ -1041,6 +1048,14 @@ impl ChatView {
                 } else {
                     None
                 };
+                let on_open: OpenArtifact = {
+                    let entity = entity.clone();
+                    Rc::new(move |path, source, cx| {
+                        entity.update(cx, |view, cx| {
+                            view.show_artifact(path, source, cx);
+                        });
+                    })
+                };
                 let typed: Vec<AnyElement> = turn
                     .blocks
                     .iter()
@@ -1050,7 +1065,7 @@ impl ChatView {
                             Block::User { .. } | Block::Text { .. } | Block::Plan { .. }
                         )
                     })
-                    .map(|block| render_typed_block(block, _window, cx))
+                    .map(|block| render_typed_block(block, Some(on_open.clone()), _window, cx))
                     .collect();
                 let mut msg_for_text = msg.clone();
                 if !typed.is_empty() {

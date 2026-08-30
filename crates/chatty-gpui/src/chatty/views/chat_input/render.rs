@@ -442,6 +442,8 @@ impl RenderOnce for ChatInput {
             // Main input box
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .border_1()
                     .px_3()
                     .py_3()

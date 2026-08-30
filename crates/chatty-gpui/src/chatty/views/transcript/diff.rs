@@ -1,10 +1,15 @@
+use std::path::PathBuf;
+use std::rc::Rc;
+
 use chatty_core::models::message_types::ToolCallBlock;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Sizable};
 use similar::{ChangeTag, TextDiff};
 
+use super::OpenArtifact;
 use super::diff_parse::{parse_unified_diff, split_path};
 
 #[derive(Clone, Debug)]
@@ -124,6 +129,7 @@ pub struct DiffHunkList {
     hunk: String,
     old: String,
     new: String,
+    on_open: Option<OpenArtifact>,
 }
 
 impl DiffHunkList {
@@ -134,7 +140,13 @@ impl DiffHunkList {
             hunk: String::new(),
             old: old.into(),
             new: new.into(),
+            on_open: None,
         }
+    }
+
+    pub fn on_open(mut self, f: impl Fn(PathBuf, String, &mut App) + 'static) -> Self {
+        self.on_open = Some(Rc::new(f));
+        self
     }
 
     pub fn from_tool(id: impl Into<String>, tool: &ToolCallBlock) -> Self {
@@ -146,6 +158,7 @@ impl DiffHunkList {
                 hunk: parsed.hunk,
                 old: parsed.old,
                 new: parsed.new,
+                on_open: None,
             };
         }
         Self {
@@ -154,6 +167,7 @@ impl DiffHunkList {
             hunk: String::new(),
             old: String::new(),
             new: output.to_string(),
+            on_open: None,
         }
     }
 }
@@ -253,8 +267,13 @@ impl RenderOnce for DiffHunkList {
             self.path.clone()
         };
 
+        let open_path = PathBuf::from(self.path.clone());
+        let open_source = self.new.clone();
+        let on_open = self.on_open.clone();
+
         div()
             .id(ElementId::Name(format!("diff-hunks-{}", self.id).into()))
+            .w_full()
             .max_h(px(400.))
             .overflow_y_scroll()
             .flex()
@@ -262,12 +281,30 @@ impl RenderOnce for DiffHunkList {
             .rounded_xl()
             .bg(cx.theme().group_box)
             .py_1()
-            .child(DiffStatRow::new(
-                self.id.clone(),
-                header_path,
-                added,
-                removed,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .child(div().flex_1().min_w_0().child(DiffStatRow::new(
+                        self.id.clone(),
+                        header_path,
+                        added,
+                        removed,
+                    )))
+                    .when_some(on_open, |this, cb| {
+                        this.child(
+                            Button::new(ElementId::Name(format!("open-diff-{}", self.id).into()))
+                                .ghost()
+                                .small()
+                                .label("Open in panel")
+                                .on_click(move |_, _, cx| {
+                                    cb(open_path.clone(), open_source.clone(), cx);
+                                }),
+                        )
+                    }),
+            )
             .when(!self.hunk.is_empty(), |this| {
                 this.child(
                     div()

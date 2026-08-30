@@ -167,6 +167,7 @@ impl RenderOnce for ActivityGroup {
 
         CollapsibleEl::new()
             .open(auto_open)
+            .w_full()
             .bg(cx.theme().group_box)
             .border_l_2()
             .border_color(cx.theme().border)

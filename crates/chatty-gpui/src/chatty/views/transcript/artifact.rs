@@ -1,13 +1,14 @@
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::popover::Popover;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
+use super::OpenArtifact;
 use super::diff::DiffHunkList;
 use super::run_pin::{RunPin, RunPinKind};
 
@@ -27,43 +28,98 @@ pub enum ArtifactViewEvent {
 #[derive(IntoElement)]
 pub struct ArtifactCard {
     path: PathBuf,
+    on_open: Option<OpenArtifact>,
 }
 
 impl ArtifactCard {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            on_open: None,
+        }
+    }
+
+    pub fn on_open(mut self, f: impl Fn(PathBuf, String, &mut App) + 'static) -> Self {
+        self.on_open = Some(Rc::new(f));
+        self
     }
 }
 
 impl RenderOnce for ArtifactCard {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let name = self
             .path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| self.path.display().to_string());
-        let path_display = self.path.display().to_string();
-        Popover::new(ElementId::Name(
-            format!("artifact-peek-{path_display}").into(),
-        ))
-        .trigger(
-            Button::new(ElementId::Name(
-                format!("artifact-card-{path_display}").into(),
+        let kind = self
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_uppercase())
+            .unwrap_or_else(|| "FILE".to_string());
+        let path = self.path.clone();
+        let on_open = self.on_open.clone();
+        div()
+            .id(ElementId::Name(
+                format!("artifact-card-{}", self.path.display()).into(),
             ))
-            .ghost()
-            .small()
-            .icon(Icon::new(IconName::File).size_3())
-            .label(name),
-        )
-        .appearance(false)
-        .content(move |_, _, cx| {
-            div()
-                .p_2()
-                .max_w(px(360.))
-                .bg(cx.theme().popover)
-                .text_xs()
-                .child(path_display.clone())
-        })
+            .w_full()
+            .rounded_xl()
+            .border_1()
+            .border_color(cx.theme().border)
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, {
+                let path = path.clone();
+                let on_open = on_open.clone();
+                move |_, _, cx| {
+                    if let Some(cb) = on_open.as_ref() {
+                        let source = std::fs::read_to_string(&path).unwrap_or_default();
+                        cb(path.clone(), source, cx);
+                    }
+                }
+            })
+            .child(Icon::new(IconName::File).size_4())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("Document · {kind} · open in panel")),
+                    ),
+            )
+            .child(
+                Button::new(ElementId::Name(
+                    format!("artifact-open-{}", self.path.display()).into(),
+                ))
+                .ghost()
+                .small()
+                .label("Open")
+                .on_click(move |_, _, cx| {
+                    if let Some(cb) = on_open.as_ref() {
+                        let source = std::fs::read_to_string(&path).unwrap_or_default();
+                        cb(path.clone(), source, cx);
+                    }
+                }),
+            )
     }
 }
 
@@ -74,6 +130,7 @@ pub struct ArtifactView {
     pub rendered: String,
     pub source: String,
     pub old: String,
+    files: Vec<(PathBuf, String)>,
     tab: usize,
 }
 
@@ -85,11 +142,15 @@ impl ArtifactView {
             rendered: String::new(),
             source: String::new(),
             old: String::new(),
+            files: Vec::new(),
             tab: 0,
         }
     }
 
     pub fn open(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
+        if !self.files.iter().any(|(existing, _)| existing == &path) {
+            self.files.push((path.clone(), source.clone()));
+        }
         self.path = Some(path);
         self.source = source.clone();
         self.rendered = source;
@@ -179,33 +240,72 @@ impl Render for ArtifactView {
             .as_ref()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_else(|| "Document".to_string());
+        let file_buttons: Vec<AnyElement> = self
+            .files
+            .iter()
+            .map(|(path, source)| {
+                let label = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let entity = entity.clone();
+                let path = path.clone();
+                let source = source.clone();
+                Button::new(ElementId::Name(format!("artifact-file-{}", label).into()))
+                    .ghost()
+                    .small()
+                    .label(label)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open(path.clone(), source.clone(), cx);
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
         let header = div()
             .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
+            .flex_col()
+            .gap_1()
             .px_2()
             .py_1()
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .font_family("monospace")
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        Button::new("artifact-close")
+                            .ghost()
+                            .small()
+                            .label("Close")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.mode = ArtifactMode::Closed;
+                                cx.emit(ArtifactViewEvent::Closed);
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(
-                Button::new("artifact-close")
-                    .ghost()
-                    .small()
-                    .label("Close")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.mode = ArtifactMode::Closed;
-                        cx.emit(ArtifactViewEvent::Closed);
-                        cx.notify();
-                    })),
-            );
+            .when(file_buttons.len() > 1, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(file_buttons),
+                )
+            });
 
         let panel = div()
             .flex()
