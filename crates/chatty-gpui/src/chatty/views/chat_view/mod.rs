@@ -68,7 +68,7 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
     PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, Turn, TurnRole,
     adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff, plan_block_top,
+    is_pdf_path, is_produced_file_tool, new_artifact_view, parse_unified_diff, plan_block_bottom,
     plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
     tool_file_path,
 };
@@ -966,8 +966,8 @@ impl ChatView {
             self.ensure_plan_scroll_watch(cx);
         }
         let show_strip = has_plan
-            && plan_block_top(&turns, plan_steps, px(16.0))
-                .is_some_and(|top| plan_is_above_viewport(top, -self.list_scroll.offset().y));
+            && plan_block_bottom(&turns, plan_steps, px(16.0))
+                .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
         if !show_strip {
             self.plan_overlay_open = false;
         }

@@ -217,9 +217,25 @@ pub fn plan_block_top(turns: &[Turn], plan_steps: usize, padding_top: Pixels) ->
     Some(y)
 }
 
-/// True when the plan card's origin has scrolled above the viewport.
-pub fn plan_is_above_viewport(plan_top: Pixels, viewport_top: Pixels) -> bool {
-    plan_top + px(8.0) <= viewport_top
+/// Content Y of the bottom of the inline plan block, including list top padding.
+pub fn plan_block_bottom(turns: &[Turn], plan_steps: usize, padding_top: Pixels) -> Option<Pixels> {
+    let top = plan_block_top(turns, plan_steps, padding_top)?;
+    let ix = plan_turn_index(turns)?;
+    let turn = &turns[ix];
+    if turn.collapsed {
+        return Some(top + px(COLLAPSED_TURN_HEIGHT));
+    }
+    Some(
+        top + px(block_estimated_height(
+            &Block::Plan { id: BlockId(0) },
+            plan_steps,
+        )),
+    )
+}
+
+/// True when the plan card has fully scrolled above the viewport.
+pub fn plan_is_above_viewport(plan_bottom: Pixels, viewport_top: Pixels) -> bool {
+    plan_bottom + px(8.0) <= viewport_top
 }
 
 fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> bool {
@@ -462,17 +478,17 @@ mod tests {
     }
 
     #[test]
-    fn plan_strip_shows_once_the_card_origin_is_above_the_viewport() {
-        let top = px(120.0);
+    fn plan_strip_hides_while_block_straddles_and_shows_when_fully_past() {
+        let bottom = px(120.0);
         assert!(
-            !plan_is_above_viewport(top, px(100.0)),
-            "card origin still in view"
+            !plan_is_above_viewport(bottom, px(100.0)),
+            "straddling the top edge must not show the strip"
         );
         assert!(
-            !plan_is_above_viewport(top, px(126.0)),
+            !plan_is_above_viewport(bottom, px(126.0)),
             "8px hysteresis keeps the boundary quiet"
         );
-        assert!(plan_is_above_viewport(top, px(130.0)));
+        assert!(plan_is_above_viewport(bottom, px(130.0)));
     }
 
     fn tally_sentence_matches_linear_1a_order() {
