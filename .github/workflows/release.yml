@@ -1,7 +1,9 @@
 name: Release
 
 # Entry points:
-#   1. Called by Prepare Release via workflow_call (primary path)
+#   1. Called by Prepare Release via workflow_call (primary path).
+#      Reusable workflows inherit the caller's github.event_name, so this path
+#      passes from_prepare=true rather than keying off event_name == workflow_call.
 #   2. Triggered by a published GitHub Release (fallback)
 #   3. Manual workflow_dispatch when the published event did not fire
 #      (AGE-35 recovery path: rebuild artifacts for an existing tag).
@@ -20,6 +22,14 @@ on:
         description: "Git tag to build from (e.g. v1.2.3)"
         required: true
         type: string
+      from_prepare:
+        description: >
+          True when invoked by prepare-release.yml. Reusable workflows inherit
+          the caller's github.event_name (actions/runner#3146), so a
+          prepare-release workflow_dispatch would otherwise look like a direct
+          dispatch of this file from main and refuse to build.
+        required: true
+        type: boolean
   release:
     types: [published]
 
@@ -32,15 +42,25 @@ env:
 
 jobs:
   # Validate that the tag is immutable, on main, and matches Cargo.toml.
-  # workflow_dispatch is owner-only (forks / outsiders must not arm releases).
+  # Direct workflow_dispatch of this file is owner-only. Reusable calls from
+  # prepare-release.yml pass from_prepare=true so github-actions[bot] dispatch
+  # of the caller still builds artifacts (v0.3.31 silent-skip).
   validate-version:
     runs-on: ubuntu-latest
-    if: github.event_name != 'workflow_dispatch' || github.actor == github.repository_owner
+    if: >-
+      inputs.from_prepare == true ||
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_call' ||
+      (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
       git_ref: ${{ steps.version.outputs.git_ref }}
+      checkout_mode: ${{ steps.resolve_tag.outputs.checkout_mode }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Resolve tag name
         id: resolve_tag
         env:
@@ -49,49 +69,14 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag_name || github.event.inputs.tag_name || '' }}
           RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # Never check out from the dispatch input (CodeQL cache-poisoning).
-            # Operator must run the workflow FROM the tag ref.
-            if [ "$REF_TYPE" != "tag" ]; then
-              echo "::error::workflow_dispatch must target the tag ref (gh workflow run --ref vX.Y.Z -f tag_name=vX.Y.Z). Got ref_type=$REF_TYPE ref_name=$REF_NAME"
-              exit 1
-            fi
-            TAG="$REF_NAME"
-            INPUT="${INPUT_TAG#refs/tags/}"
-            if [ -n "$INPUT" ] && [ "$INPUT" != "$TAG" ]; then
-              echo "::error::tag_name input ($INPUT) must match dispatch tag ref ($TAG)"
-              exit 1
-            fi
-            MODE="workflow_sha"
-          elif [ "$EVENT_NAME" = "release" ]; then
-            TAG="${RELEASE_TAG#refs/tags/}"
-            MODE="git_ref"
-          else
-            # workflow_call from prepare-release
-            TAG="${INPUT_TAG#refs/tags/}"
-            MODE="git_ref"
-          fi
+          FROM_PREPARE: ${{ inputs.from_prepare == true }}
+        run: bash scripts/release-resolve-tag.sh
 
-          if [ -z "$TAG" ]; then
-            echo "::error::No tag name provided"
-            exit 1
-          fi
-          if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::Invalid tag format: $TAG"
-            exit 1
-          fi
-
-          echo "checkout_mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "git_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: $TAG (mode=$MODE)"
-
-      - name: Checkout repository
+      - name: Checkout tag
         uses: actions/checkout@v4
         with:
-          # workflow_dispatch: github.sha is the tag the workflow was run against.
+          # Direct dispatch: github.sha is the tag the workflow was run against
+          # (never the dispatch input — CodeQL cache-poisoning).
           # workflow_call / release: immutable refs/tags/… only (never a bare name).
           ref: ${{ steps.resolve_tag.outputs.checkout_mode == 'git_ref' && steps.resolve_tag.outputs.git_ref || github.sha }}
           fetch-depth: 0
@@ -163,7 +148,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.validate-version.outputs.git_ref }}
+          # Do not key off github.event_name == workflow_dispatch: reusable
+          # calls inherit the caller's event, so that would check out the
+          # prepare-release SHA (pre-bump main) instead of the tag.
+          ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -281,7 +269,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.validate-version.outputs.git_ref }}
+          # Do not key off github.event_name == workflow_dispatch: reusable
+          # calls inherit the caller's event, so that would check out the
+          # prepare-release SHA (pre-bump main) instead of the tag.
+          ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -375,7 +366,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.validate-version.outputs.git_ref }}
+          # Do not key off github.event_name == workflow_dispatch: reusable
+          # calls inherit the caller's event, so that would check out the
+          # prepare-release SHA (pre-bump main) instead of the tag.
+          ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
