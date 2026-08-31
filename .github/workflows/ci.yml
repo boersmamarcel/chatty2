@@ -35,6 +35,11 @@ jobs:
         with:
           fetch-depth: 2
 
+      # Always — grep + decision-table tests, not a compile. Workflow-only
+      # PRs must still catch release-pipeline regressions (v0.3.31–v0.3.34).
+      - name: Check release authz gates (closed-system)
+        run: bash scripts/check-release-authz.sh
+
       - name: Detect compile-relevant changes
         uses: dorny/paths-filter@v3
         id: filter
@@ -145,7 +150,3 @@ jobs:
       - name: Check rig exact-minor pins (AGE-26)
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-rig-pins.sh
-
-      - name: Check release authz gates (closed-system)
-        if: needs.changes.outputs.rust == 'true'
-        run: bash scripts/check-release-authz.sh
