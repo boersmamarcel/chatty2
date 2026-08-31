@@ -212,43 +212,49 @@ impl RenderOnce for SessionChangeBar {
                             .px_3()
                             .py_2()
                             .child(
-                                div()
-                                    .id("session-change-bar-toggle")
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                Button::new("session-change-bar-toggle")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(move |_, _, cx| {
                                         if let Some(cb) = &on_toggle {
                                             cb(cx);
                                         }
                                     })
                                     .child(
-                                        Icon::new(chevron)
-                                            .size_3()
-                                            .text_color(cx.theme().muted_foreground),
-                                    )
-                                    .child(
                                         div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(cx.theme().foreground)
-                                            .child(format!("{count} {noun} changed")),
-                                    )
-                                    .when(added > 0, |this| {
-                                        this.child(
-                                            Tag::success().small().child(format!("+{added}")),
-                                        )
-                                    })
-                                    .when(removed > 0, |this| {
-                                        this.child(
-                                            Tag::danger().small().child(format!("−{removed}")),
-                                        )
-                                    }),
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(chevron)
+                                                    .size_3()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(cx.theme().foreground)
+                                                    .child(format!("{count} {noun} changed")),
+                                            )
+                                            .when(added > 0, |this| {
+                                                this.child(
+                                                    Tag::success()
+                                                        .small()
+                                                        .child(format!("+{added}")),
+                                                )
+                                            })
+                                            .when(removed > 0, |this| {
+                                                this.child(
+                                                    Tag::danger()
+                                                        .small()
+                                                        .child(format!("−{removed}")),
+                                                )
+                                            }),
+                                    ),
                             )
+                            .child(div().flex_1())
                             .when_some(self.on_review, |this, cb| {
                                 this.child(
                                     Button::new("session-review")
@@ -281,12 +287,11 @@ impl RenderOnce for SessionChangeBar {
                                     let path = change.path.clone();
                                     let on_open = on_open_file.clone();
                                     let row_id = format!("session-file-{}", change.path_display());
-                                    div()
-                                        .id(ElementId::Name(row_id.into()))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(cx.theme().secondary))
-                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    Button::new(ElementId::Name(row_id.into()))
+                                        .ghost()
+                                        .xsmall()
+                                        .w_full()
+                                        .on_click(move |_, _, cx| {
                                             if let Some(cb) = &on_open {
                                                 cb(path.clone(), cx);
                                             }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use chatty_core::services::pdf_thumbnail::{
@@ -466,7 +466,7 @@ fn tabular_rendered_body(tabular: &TabularPreview, cx: &App) -> AnyElement {
     }
 }
 
-fn image_rendered_body(path: &PathBuf, cx: &App) -> AnyElement {
+fn image_rendered_body(path: &Path, cx: &App) -> AnyElement {
     if !path.exists() {
         return div()
             .text_xs()
@@ -481,7 +481,7 @@ fn image_rendered_body(path: &PathBuf, cx: &App) -> AnyElement {
         .w_full()
         .overflow_y_scroll()
         .child(
-            img(path.clone())
+            img(path.to_path_buf())
                 .max_w(px(IMAGE_DISPLAY_WIDTH))
                 .max_h(px(520.0))
                 .object_fit(ObjectFit::Contain)
