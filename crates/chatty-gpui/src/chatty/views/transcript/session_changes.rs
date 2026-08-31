@@ -118,22 +118,39 @@ pub fn file_changes_height(changes: &[FileChange]) -> f32 {
 }
 
 type SessionAction = Rc<dyn Fn(&mut App)>;
+type SessionOpenFile = Rc<dyn Fn(PathBuf, &mut App)>;
 
 /// Compact session banner: "N files changed +X −Y" with Review / Keep all.
 #[derive(IntoElement)]
 pub struct SessionChangeBar {
     changes: Vec<FileChange>,
+    expanded: bool,
+    on_toggle: Option<SessionAction>,
     on_review: Option<SessionAction>,
     on_keep_all: Option<SessionAction>,
+    on_open_file: Option<SessionOpenFile>,
 }
 
 impl SessionChangeBar {
     pub fn new(changes: Vec<FileChange>) -> Self {
         Self {
             changes,
+            expanded: false,
+            on_toggle: None,
             on_review: None,
             on_keep_all: None,
+            on_open_file: None,
         }
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = expanded;
+        self
+    }
+
+    pub fn on_toggle(mut self, f: impl Fn(&mut App) + 'static) -> Self {
+        self.on_toggle = Some(Rc::new(f));
+        self
     }
 
     pub fn on_review(mut self, f: impl Fn(&mut App) + 'static) -> Self {
@@ -143,6 +160,11 @@ impl SessionChangeBar {
 
     pub fn on_keep_all(mut self, f: impl Fn(&mut App) + 'static) -> Self {
         self.on_keep_all = Some(Rc::new(f));
+        self
+    }
+
+    pub fn on_open_file(mut self, f: impl Fn(PathBuf, &mut App) + 'static) -> Self {
+        self.on_open_file = Some(Rc::new(f));
         self
     }
 }
@@ -156,6 +178,15 @@ impl RenderOnce for SessionChangeBar {
         let added: usize = self.changes.iter().map(|c| c.added).sum();
         let removed: usize = self.changes.iter().map(|c| c.removed).sum();
         let noun = if count == 1 { "file" } else { "files" };
+        let chevron = if self.expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        let on_toggle = self.on_toggle;
+        let on_open_file = self.on_open_file;
+        let expanded = self.expanded;
+        let changes = self.changes;
 
         div()
             .id("session-change-bar")
@@ -167,48 +198,106 @@ impl RenderOnce for SessionChangeBar {
                     .id("session-change-bar-inner")
                     .w_full()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
+                    .flex_col()
                     .rounded_xl()
                     .bg(cx.theme().group_box)
                     .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size_3()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().foreground)
-                            .child(format!("{count} {noun} changed")),
+                            .id("session-change-bar-header")
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .child(
+                                div()
+                                    .id("session-change-bar-toggle")
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        if let Some(cb) = &on_toggle {
+                                            cb(cx);
+                                        }
+                                    })
+                                    .child(
+                                        Icon::new(chevron)
+                                            .size_3()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child(format!("{count} {noun} changed")),
+                                    )
+                                    .when(added > 0, |this| {
+                                        this.child(
+                                            Tag::success().small().child(format!("+{added}")),
+                                        )
+                                    })
+                                    .when(removed > 0, |this| {
+                                        this.child(
+                                            Tag::danger().small().child(format!("−{removed}")),
+                                        )
+                                    }),
+                            )
+                            .when_some(self.on_review, |this, cb| {
+                                this.child(
+                                    Button::new("session-review")
+                                        .primary()
+                                        .xsmall()
+                                        .label("Review")
+                                        .on_click(move |_, _, cx| cb(cx)),
+                                )
+                            })
+                            .when_some(self.on_keep_all, |this, cb| {
+                                this.child(
+                                    Button::new("session-keep-all")
+                                        .outline()
+                                        .xsmall()
+                                        .label("Keep all")
+                                        .on_click(move |_, _, cx| cb(cx)),
+                                )
+                            }),
                     )
-                    .when(added > 0, |this| {
-                        this.child(Tag::success().small().child(format!("+{added}")))
-                    })
-                    .when(removed > 0, |this| {
-                        this.child(Tag::danger().small().child(format!("−{removed}")))
-                    })
-                    .child(div().flex_1())
-                    .when_some(self.on_review, |this, cb| {
+                    .when(expanded, |this| {
                         this.child(
-                            Button::new("session-review")
-                                .primary()
-                                .xsmall()
-                                .label("Review")
-                                .on_click(move |_, _, cx| cb(cx)),
-                        )
-                    })
-                    .when_some(self.on_keep_all, |this, cb| {
-                        this.child(
-                            Button::new("session-keep-all")
-                                .outline()
-                                .xsmall()
-                                .label("Keep all")
-                                .on_click(move |_, _, cx| cb(cx)),
+                            div()
+                                .id("session-change-bar-files")
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .px_2()
+                                .pb_2()
+                                .children(changes.into_iter().map(|change| {
+                                    let path = change.path.clone();
+                                    let on_open = on_open_file.clone();
+                                    let row_id = format!("session-file-{}", change.path_display());
+                                    div()
+                                        .id(ElementId::Name(row_id.into()))
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(cx.theme().secondary))
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            if let Some(cb) = &on_open {
+                                                cb(path.clone(), cx);
+                                            }
+                                        })
+                                        .child(DiffStatRow::new(
+                                            change.path_display(),
+                                            change.path_display(),
+                                            change.added,
+                                            change.removed,
+                                        ))
+                                })),
                         )
                     }),
             )

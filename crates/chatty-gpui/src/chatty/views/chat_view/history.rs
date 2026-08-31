@@ -44,6 +44,7 @@ impl ChatView {
         self.collapsed_turns.clear();
         self.activity_expanded.clear();
         self.session_review_dismissed = false;
+        self.session_bar_expanded = false;
         self.stream_started_at = None;
         self.user_scrolled_away = false;
 

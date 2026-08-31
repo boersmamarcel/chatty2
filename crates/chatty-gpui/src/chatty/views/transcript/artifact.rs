@@ -327,15 +327,24 @@ impl ArtifactView {
     }
 
     /// Open every session file in the dock, starting on the Diff tab when an
-    /// old body is available (review mode).
+    /// old body is available (review mode). `focus` selects which file to show.
     pub fn open_review(
         &mut self,
         files: Vec<(PathBuf, String, Option<String>)>,
         workspace_root: Option<String>,
+        focus: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         self.files = files;
-        let Some((path, source, old)) = self.files.first().cloned() else {
+        let selected = focus
+            .and_then(|want| {
+                self.files
+                    .iter()
+                    .find(|(path, _, _)| path == &want)
+                    .cloned()
+            })
+            .or_else(|| self.files.first().cloned());
+        let Some((path, source, old)) = selected else {
             return;
         };
         self.open(path, source, old, workspace_root, cx);

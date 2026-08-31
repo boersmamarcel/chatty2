@@ -148,6 +148,8 @@ pub struct ChatView {
     stream_started_at: Option<Instant>,
     /// Hide the session "N files changed" bar after Keep all.
     session_review_dismissed: bool,
+    /// Session files-changed bar is unfolded to the per-file list.
+    session_bar_expanded: bool,
     elapsed_tick_started: bool,
 }
 
@@ -319,6 +321,7 @@ impl ChatView {
             transcript_content_width: 480.0,
             stream_started_at: None,
             session_review_dismissed: false,
+            session_bar_expanded: false,
             elapsed_tick_started: false,
         }
     }
@@ -419,7 +422,8 @@ impl ChatView {
             .get(&index)
             .copied()
             .unwrap_or_else(|| {
-                msg.system_trace_view.is_some()
+                msg.is_streaming
+                    || msg.system_trace_view.is_some()
                     || msg
                         .live_trace
                         .as_ref()
@@ -1137,11 +1141,12 @@ impl ChatView {
         merge_file_changes(collected)
     }
 
-    fn open_session_review(&mut self, cx: &mut Context<Self>) {
+    fn open_session_review(&mut self, focus: Option<PathBuf>, cx: &mut Context<Self>) {
         let workspace = cx
             .try_global::<ExecutionSettingsModel>()
             .and_then(|s| s.workspace_dir.clone());
         let workspace_path = workspace.as_ref().map(PathBuf::from);
+        let focus_resolved = focus.map(|p| resolve_artifact_path(&p, workspace_path.as_deref()));
         let changes = self.session_file_changes(cx);
         let files: Vec<_> = changes
             .into_iter()
@@ -1166,7 +1171,7 @@ impl ChatView {
         self.ensure_artifact_close_wired(cx);
         self.artifact_dismissed = false;
         self.artifact_view.update(cx, |view, cx| {
-            view.open_review(files, workspace, cx);
+            view.open_review(files, workspace, focus_resolved, cx);
         });
         cx.notify();
     }
@@ -1326,6 +1331,7 @@ impl ChatView {
         );
         let entity = cx.entity();
         let session_entity = entity.clone();
+        let session_bar_expanded = self.session_bar_expanded;
         let session_changes = if self.session_review_dismissed {
             Vec::new()
         } else {
@@ -1464,18 +1470,53 @@ impl ChatView {
                                     .inset_0()
                                     .bg(cx.theme().overlay),
                             )
-                        }),
+                        })
+                        .child(
+                            RunPin::new(if has_approval && user_away {
+                                RunPinKind::PendingApproval
+                            } else {
+                                RunPinKind::JumpToLatest
+                            })
+                            .visible(user_away)
+                            .on_click({
+                                let entity = cx.entity();
+                                move |cx| {
+                                    entity.update(cx, |view, cx| {
+                                        view.activate_sticky_scroll();
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                        ),
                 )
                 .vertical_scrollbar(&self.list_scroll)
             })
             .when(!session_changes.is_empty(), |this| {
                 this.child(
                     SessionChangeBar::new(session_changes)
+                        .expanded(session_bar_expanded)
+                        .on_toggle({
+                            let entity = session_entity.clone();
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.session_bar_expanded = !view.session_bar_expanded;
+                                    cx.notify();
+                                });
+                            }
+                        })
                         .on_review({
                             let entity = session_entity.clone();
                             move |cx| {
                                 entity.update(cx, |view, cx| {
-                                    view.open_session_review(cx);
+                                    view.open_session_review(None, cx);
+                                });
+                            }
+                        })
+                        .on_open_file({
+                            let entity = session_entity.clone();
+                            move |path, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.open_session_review(Some(path), cx);
                                 });
                             }
                         })
@@ -1484,6 +1525,7 @@ impl ChatView {
                             move |cx| {
                                 entity.update(cx, |view, cx| {
                                     view.session_review_dismissed = true;
+                                    view.session_bar_expanded = false;
                                     cx.notify();
                                 });
                             }
@@ -1491,23 +1533,6 @@ impl ChatView {
                 )
             })
             .when(thinking_visible, |this| this.child(thinking_indicator))
-            .child(
-                RunPin::new(if has_approval && user_away {
-                    RunPinKind::PendingApproval
-                } else {
-                    RunPinKind::JumpToLatest
-                })
-                .visible(user_away)
-                .on_click({
-                    let entity = cx.entity();
-                    move |cx| {
-                        entity.update(cx, |view, cx| {
-                            view.activate_sticky_scroll();
-                            cx.notify();
-                        });
-                    }
-                }),
-            )
     }
 
     fn render_visible_turns(
@@ -1525,7 +1550,10 @@ impl ChatView {
 
         let entity = cx.entity();
         let plan = self.agent_task_snapshot.clone();
-        let live_elapsed = self.stream_started_at.map(|t| t.elapsed());
+        let live_elapsed = self.stream_started_at.map(|t| t.elapsed()).or_else(|| {
+            self.is_thinking_indicator_visible()
+                .then(|| self.thinking_indicator.read(cx).elapsed())
+        });
         range
             .filter_map(|ix| turns.get(ix).cloned())
             .map(|turn| {
@@ -1616,21 +1644,23 @@ impl ChatView {
                     .collect();
 
                 let show_work_fold = matches!(turn.role, TurnRole::Assistant)
-                    && turn.blocks.iter().any(|block| {
-                        matches!(
-                            block,
-                            Block::Thinking { .. }
-                                | Block::Activity { .. }
-                                | Block::Diff { .. }
-                                | Block::Artifact { .. }
-                                | Block::TablePreview { .. }
-                                | Block::Approval { .. }
-                                | Block::Plan { .. }
-                                | Block::Error { .. }
-                        )
-                    });
+                    && (turn.streaming
+                        || turn.blocks.iter().any(|block| {
+                            matches!(
+                                block,
+                                Block::Thinking { .. }
+                                    | Block::Activity { .. }
+                                    | Block::Diff { .. }
+                                    | Block::Artifact { .. }
+                                    | Block::TablePreview { .. }
+                                    | Block::Approval { .. }
+                                    | Block::Plan { .. }
+                                    | Block::Error { .. }
+                            )
+                        }));
                 let work_header = show_work_fold.then(|| {
-                    let label = if turn.streaming {
+                    let streaming = turn.streaming;
+                    let label = if streaming {
                         format_working_for(live_elapsed.unwrap_or_default())
                     } else {
                         format_worked_for(turn.elapsed)
@@ -1652,9 +1682,14 @@ impl ChatView {
                         .items_center()
                         .gap_2()
                         .px_3()
-                        .text_xs()
+                        .when(streaming, |this| this.text_sm())
+                        .when(!streaming, |this| this.text_xs())
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().muted_foreground)
+                        .text_color(if streaming {
+                            cx.theme().foreground
+                        } else {
+                            cx.theme().muted_foreground
+                        })
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             entity.update(cx, |view, cx| {
@@ -1787,12 +1822,13 @@ impl ChatView {
             .messages
             .iter()
             .filter(|msg| {
-                !(msg.is_streaming
-                    && msg.content.is_empty()
-                    && !msg
+                !msg.is_streaming
+                    || !msg.content.is_empty()
+                    || matches!(msg.role, MessageRole::Assistant)
+                    || msg
                         .live_trace
                         .as_ref()
-                        .is_some_and(|trace| trace.has_items()))
+                        .is_some_and(|trace| trace.has_items())
             })
             .count();
         let filtered = total - visible;

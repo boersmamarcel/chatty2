@@ -290,7 +290,8 @@ fn is_work_trace_block(block: &Block) -> bool {
 }
 
 fn turn_has_work_fold(turn: &Turn) -> bool {
-    matches!(turn.role, TurnRole::Assistant) && turn.blocks.iter().any(is_work_trace_block)
+    matches!(turn.role, TurnRole::Assistant)
+        && (turn.streaming || turn.blocks.iter().any(is_work_trace_block))
 }
 
 fn turn_message_is_empty(turn: &Turn) -> bool {
@@ -406,14 +407,6 @@ pub fn adapt_messages_with_traces(
     messages
         .iter()
         .enumerate()
-        .filter(|(_, msg)| {
-            !(msg.is_streaming
-                && msg.content.is_empty()
-                && !msg
-                    .live_trace
-                    .as_ref()
-                    .is_some_and(|trace| trace.has_items()))
-        })
         .map(|(index, msg)| {
             let collapsed = collapsed_turns.get(index).copied().unwrap_or(false);
             adapt_message_with_trace(
@@ -531,9 +524,7 @@ pub fn format_worked_for(elapsed: Option<Duration>) -> String {
 
 pub fn format_working_for(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
-    if secs < 1 {
-        "Working".to_string()
-    } else if secs < 60 {
+    if secs < 60 {
         format!("Working for {secs}s")
     } else {
         format!("Working for {}m {}s", secs / 60, secs % 60)
@@ -559,7 +550,7 @@ mod tests {
             format_worked_for(Some(Duration::from_secs(65))),
             "Worked for 1m 5s"
         );
-        assert_eq!(format_working_for(Duration::from_secs(0)), "Working");
+        assert_eq!(format_working_for(Duration::from_secs(0)), "Working for 0s");
         assert_eq!(
             format_working_for(Duration::from_secs(12)),
             "Working for 12s"
@@ -664,6 +655,29 @@ mod tests {
         assert!(
             height <= px(48.0),
             "collapsed work header should sit tight, got {height:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_empty_assistant_keeps_a_working_row() {
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: true,
+            system_trace_view: None,
+            live_trace: Some(chatty_core::models::message_types::SystemTrace::new()),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turns = adapt_messages(&[msg], &[true]);
+        assert_eq!(turns.len(), 1, "live turn must stay in the transcript");
+        assert!(turns[0].streaming);
+        let height = estimate_turn_height(&turns[0], 0, 400.0).height;
+        assert!(
+            height <= px(48.0),
+            "collapsed Working header should sit tight, got {height:?}"
         );
     }
 

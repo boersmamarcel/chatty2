@@ -152,11 +152,7 @@ pub fn chart_artifact_path(
 }
 
 /// True when a tool produced an image the artifact panel should preview.
-pub fn is_chart_artifact_tool(
-    tool_name: &str,
-    _input: &str,
-    output: Option<&str>,
-) -> bool {
+pub fn is_chart_artifact_tool(tool_name: &str, _input: &str, output: Option<&str>) -> bool {
     if tool_name != "create_chart" {
         return false;
     }

@@ -67,6 +67,10 @@ impl ThinkingIndicator {
         }
     }
 
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
     pub fn set_attention(&mut self, attention: impl Into<String>, cx: &mut Context<Self>) {
         let next = attention.into();
         if next != self.attention {
