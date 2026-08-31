@@ -140,7 +140,11 @@
           "variable.special": {
             "color": "#f7768e"
           }
-        }
+        },
+        "created.background": "#9ece6a33",
+        "deleted.background": "#f7768e",
+        "created.border": "#9ece6a",
+        "deleted.border": "#f7768e"
       }
     },
     {
@@ -272,7 +276,11 @@
           "variable.special": {
             "color": "#E19773"
           }
-        }
+        },
+        "created.background": "#9ece6a33",
+        "deleted.background": "#f7768e",
+        "created.border": "#3f72e2",
+        "deleted.border": "#f7768e"
       }
     },
     {
@@ -412,7 +420,11 @@
           "variable.special": {
             "color": "#ed8796"
           }
-        }
+        },
+        "created.background": "#c3e88d33",
+        "deleted.background": "#ff757f",
+        "created.border": "#c3e88d",
+        "deleted.border": "#ed8796"
       }
     }
   ]

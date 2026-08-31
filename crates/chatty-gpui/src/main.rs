@@ -131,9 +131,9 @@ fn main() {
             .expect("Failed to create SQLite conversation repository"),
     );
 
-    let app = Application::new()
-        .with_assets(gpui_component_assets::Assets)
-        .with_assets(ChattyAssets);
+    // ChattyAssets falls back to gpui-component's icon bundle internally; a second
+    // `with_assets` call would replace the source rather than chain to it.
+    let app = Application::new().with_assets(ChattyAssets);
 
     app.run(move |cx| {
         cx.activate(true);

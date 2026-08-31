@@ -1,10 +1,9 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
-use gpui::prelude::FluentBuilder;
+use crate::chatty::views::transcript::inline_chat_attachments;
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::Icon;
 use std::path::PathBuf;
 use tracing::debug;
 
@@ -18,6 +17,7 @@ use super::parsed_cache::{
     ParsedContentCache, StreamingParseState,
 };
 use super::trace_components::SystemTraceView;
+use super::transcript::{MessageActionBar, OpenTable};
 
 /// Message role indicator
 #[derive(Clone, Debug)]
@@ -211,6 +211,11 @@ fn is_image_file(path: &std::path::Path) -> bool {
 
 /// Render attachment images as thumbnails above the message text
 fn render_attachments(attachments: &[PathBuf], id_prefix: &str, cx: &App) -> Div {
+    let attachments = inline_chat_attachments(attachments.iter().cloned());
+    if attachments.is_empty() {
+        return div();
+    }
+
     let border_color = cx.theme().border;
 
     div()
@@ -361,6 +366,7 @@ fn render_interleaved_content<F, D>(
     caches: &mut MessageRenderCaches<'_>,
     on_toggle_tool: F,
     on_toggle_diff: D,
+    on_open_table: Option<OpenTable>,
     cx: &App,
 ) -> Div
 where
@@ -530,6 +536,23 @@ where
                 ));
             }
 
+            // If this is a successful query_data call, render the table preview inline
+            if tool_call.tool_name == "query_data"
+                && matches!(
+                    tool_call.state,
+                    super::message_types::ToolCallState::Success
+                )
+                && let Some(preview) = super::transcript::extract_table_preview(tool_call)
+            {
+                container = container.child(super::transcript::render_table_preview_card(
+                    preview,
+                    index,
+                    tool_idx,
+                    on_open_table.clone(),
+                    cx,
+                ));
+            }
+
             // If this is a successful daytona_run call with downloaded files, render them inline
             if tool_call.tool_name == "daytona_run"
                 && matches!(
@@ -587,101 +610,26 @@ fn render_assistant_actions<G, R>(
     is_last_message: bool,
     on_feedback: G,
     on_regenerate: R,
-    cx: &App,
-) -> Div
+    _cx: &App,
+) -> impl IntoElement
 where
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
     R: Fn(usize, &mut App) + 'static + Clone,
 {
-    let muted = cx.theme().muted_foreground;
-
-    let thumbs_up_active = matches!(feedback, Some(MessageFeedback::ThumbsUp));
-    let thumbs_down_active = matches!(feedback, Some(MessageFeedback::ThumbsDown));
-
-    div()
-        .flex()
-        .justify_end()
-        .gap_1()
-        .pt_2()
-        .child(
-            Button::new(ElementId::Name(format!("thumbs-up-msg-{}", index).into()))
-                .ghost()
-                .xsmall()
-                .icon(
-                    Icon::new(IconName::ThumbsUp).text_color(if thumbs_up_active {
-                        gpui_component::green_500()
-                    } else {
-                        muted
-                    }),
-                )
-                .tooltip("Good response")
-                .on_click({
-                    let on_feedback = on_feedback.clone();
-                    let new_feedback = if thumbs_up_active {
-                        None
-                    } else {
-                        Some(MessageFeedback::ThumbsUp)
-                    };
-                    move |_event, _window, cx| {
-                        on_feedback(index, new_feedback.clone(), cx);
-                    }
-                }),
-        )
-        .child(
-            Button::new(ElementId::Name(format!("thumbs-down-msg-{}", index).into()))
-                .ghost()
-                .xsmall()
-                .icon(
-                    Icon::new(IconName::ThumbsDown).text_color(if thumbs_down_active {
-                        gpui_component::red_500()
-                    } else {
-                        muted
-                    }),
-                )
-                .tooltip("Bad response")
-                .on_click({
-                    let on_feedback = on_feedback.clone();
-                    let new_feedback = if thumbs_down_active {
-                        None
-                    } else {
-                        Some(MessageFeedback::ThumbsDown)
-                    };
-                    move |_event, _window, cx| {
-                        on_feedback(index, new_feedback.clone(), cx);
-                    }
-                }),
-        )
-        .when(is_last_message, |this| {
-            this.child(
-                Button::new(ElementId::Name(format!("regenerate-msg-{}", index).into()))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(CustomIcon::Refresh).text_color(muted))
-                    .tooltip("Regenerate response")
-                    .on_click({
-                        let on_regenerate = on_regenerate.clone();
-                        move |_event, _window, cx| {
-                            on_regenerate(index, cx);
-                        }
-                    }),
-            )
+    MessageActionBar::new(format!("msg-{index}"), content)
+        .feedback(feedback.clone())
+        .always_visible(is_last_message)
+        .on_feedback({
+            let on_feedback = on_feedback.clone();
+            move |next, cx| on_feedback(index, next, cx)
         })
-        .child(
-            Button::new(ElementId::Name(format!("copy-msg-{}", index).into()))
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(CustomIcon::Copy))
-                .tooltip("Copy message")
-                .on_click({
-                    let content = content.to_string();
-                    move |_event, _window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
-                    }
-                }),
-        )
+        .on_regenerate({
+            let on_regenerate = on_regenerate.clone();
+            move |cx| on_regenerate(index, cx)
+        })
 }
 
-#[allow(clippy::too_many_arguments)] // Rendering function with 4 generic callbacks
+#[allow(clippy::too_many_arguments)] // Rendering function with 5 generic callbacks
 pub fn render_message<F, D, G, R>(
     msg: &DisplayMessage,
     index: usize,
@@ -693,6 +641,7 @@ pub fn render_message<F, D, G, R>(
     on_toggle_diff: D,
     on_feedback: G,
     on_regenerate: R,
+    on_open_table: Option<OpenTable>,
     cx: &App,
 ) -> AnyElement
 where
@@ -844,6 +793,7 @@ where
             caches,
             on_toggle_tool,
             on_toggle_diff,
+            on_open_table,
             cx,
         )
     } else if msg.is_markdown {

@@ -1,6 +1,4 @@
-pub mod agent_todo_panel;
 pub mod app_view;
-pub mod approval_prompt_bar;
 pub use chatty_core::models::attachment_validation;
 mod chart_renderer;
 pub mod chat_input;
@@ -24,6 +22,7 @@ pub mod syntax_highlighter;
 pub mod thinking_indicator;
 pub mod titlebar;
 pub mod trace_components;
+pub mod transcript;
 
 pub use chat_view::ChatView;
 pub use error_log_dialog::ErrorLogDialog;

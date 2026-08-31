@@ -338,9 +338,10 @@ pub(super) fn build_streaming_parse_result(
     let content_segment_count = content_segments.len();
 
     // Check if we can reuse the stable prefix from the previous render
-    let can_reuse_prefix = prev.is_some_and(|p| {
-        content.len() >= p.content_len && content_segment_count == p.content_segment_count
-    });
+    let can_reuse_prefix = content_segment_count > 0
+        && prev.is_some_and(|p| {
+            content.len() >= p.content_len && content_segment_count == p.content_segment_count
+        });
 
     let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
         // SAFETY: can_reuse_prefix checks prev.is_some_and(...)
@@ -357,7 +358,7 @@ pub(super) fn build_streaming_parse_result(
         }
 
         // Re-parse only the last content segment
-        // SAFETY: content_segment_count > 0 (checked by can_reuse_prefix)
+        // SAFETY: can_reuse_prefix requires content_segment_count > 0
         let last = content_segments.into_iter().last().unwrap();
         segments.push(parse_content_segment_streaming(last, prev_state, cx));
 
@@ -688,5 +689,14 @@ mod tests {
         // Empty thinking block is skipped, so we get Text + Text
         assert_eq!(segs.len(), 2);
         assert!(segs.iter().all(|s| matches!(s, ContentSegment::Text(_))));
+    }
+
+    #[test]
+    fn content_without_renderable_text_yields_no_segments() {
+        // build_streaming_parse_result must not assume a non-empty segment list:
+        // whitespace-only and empty-think-block content parse to zero segments.
+        for input in ["", "   \n ", "<think></think>"] {
+            assert!(parse_content_segments(input).is_empty(), "input: {input:?}");
+        }
     }
 }

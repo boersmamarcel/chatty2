@@ -46,12 +46,25 @@ pub(super) fn resolve_output_path(
         // When a workspace is configured, absolute paths must stay within it.
         if let Some(workspace) = workspace_dir {
             let workspace_norm = normalize_path(Path::new(workspace));
-            if !normalized.starts_with(&workspace_norm) {
-                return Err(format!(
-                    "Output path '{}' is outside the workspace directory",
-                    path
-                ));
+            if normalized.starts_with(&workspace_norm) {
+                return Ok(normalized);
             }
+            // Harbor / AppWorld agents often emit `/app/...`. Map that onto the
+            // configured workspace instead of rejecting or writing to a host `/app`.
+            if let Ok(rest) = normalized.strip_prefix(Path::new("/app")) {
+                let remapped = if rest.as_os_str().is_empty() {
+                    workspace_norm.clone()
+                } else {
+                    normalize_path(&workspace_norm.join(rest))
+                };
+                if remapped.starts_with(&workspace_norm) {
+                    return Ok(remapped);
+                }
+            }
+            return Err(format!(
+                "Output path '{}' is outside the workspace directory",
+                path
+            ));
         }
         return Ok(normalized);
     }
@@ -101,6 +114,16 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(err.contains("outside the workspace directory"));
+    }
+
+    #[test]
+    fn harbor_app_prefix_remaps_into_workspace() {
+        let resolved =
+            resolve_output_path("/app/charts/sales.png", Some("/Users/me/project")).unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/Users/me/project/charts/sales.png")
+        );
     }
 
     #[test]

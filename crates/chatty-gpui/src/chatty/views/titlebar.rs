@@ -2,7 +2,12 @@ use super::SidebarView;
 use gpui::*;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use gpui_component::{Icon, IconName, Sizable, TitleBar, button::Button, h_flex, menu::AppMenuBar};
+use gpui_component::{
+    Icon, IconName, Sizable, TitleBar,
+    button::{Button, ButtonVariants},
+    h_flex,
+    menu::AppMenuBar,
+};
 
 /// Custom titlebar component for Linux and Windows.
 /// On macOS, this renders nothing (uses native traffic lights).
@@ -35,6 +40,7 @@ impl RenderOnce for AppTitleBar {
             .w_full()
             .child(
                 Button::new("toggle-sidebar")
+                    .ghost()
                     .icon(Icon::new(if is_collapsed {
                         IconName::PanelLeftOpen
                     } else {
@@ -42,6 +48,8 @@ impl RenderOnce for AppTitleBar {
                     }))
                     .label("")
                     .small()
+                    .w(px(30.))
+                    .h(px(28.))
                     .on_click({
                         let sidebar = sidebar.clone();
                         move |_event, _window, cx| {

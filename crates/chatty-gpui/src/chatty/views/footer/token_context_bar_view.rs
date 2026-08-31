@@ -87,8 +87,8 @@ fn render_stacked_bar(
     let remaining = frac.remaining();
 
     let border_color: Hsla = match snap.status() {
-        ContextStatus::Critical => rgb(0xEF4444).into(), // Red-500
-        ContextStatus::High => rgb(0xF59E0B).into(),     // Amber-500
+        ContextStatus::Critical => cx.theme().danger,
+        ContextStatus::High => cx.theme().warning,
         _ => cx.theme().border,
     };
 
@@ -96,26 +96,45 @@ fn render_stacked_bar(
         .w(px(bar_width))
         .h(px(bar_height))
         .rounded_sm()
-        .bg(cx.theme().border) // default background = "remaining" colour
+        .bg(cx.theme().muted)
         .border_1()
         .border_color(border_color)
         .overflow_hidden()
         .flex()
         .flex_row()
-        .child(bar_segment(bar_width, frac.preamble as f32, COLOR_PREAMBLE))
-        .child(bar_segment(bar_width, frac.tools as f32, COLOR_TOOLS))
-        .child(bar_segment(bar_width, frac.history as f32, COLOR_HISTORY))
-        .child(bar_segment(bar_width, frac.user_msg as f32, COLOR_USER_MSG))
-        // Remaining: a slightly darker grey so it blends into the bg
+        .child(theme_bar_segment(
+            bar_width,
+            frac.preamble as f32,
+            cx.theme().info,
+        ))
+        .child(theme_bar_segment(
+            bar_width,
+            frac.tools as f32,
+            cx.theme().accent,
+        ))
+        .child(theme_bar_segment(
+            bar_width,
+            frac.history as f32,
+            cx.theme().success,
+        ))
+        .child(theme_bar_segment(
+            bar_width,
+            frac.user_msg as f32,
+            cx.theme().primary,
+        ))
         .when(remaining > 0.0, |this| {
-            this.child(bar_segment(bar_width, remaining as f32, 0x374151))
+            this.child(theme_bar_segment(
+                bar_width,
+                remaining as f32,
+                cx.theme().muted,
+            ))
         })
 }
 
 /// A single segment div with proportional width.
-fn bar_segment(total_width: f32, fraction: f32, color_hex: u32) -> Div {
+fn theme_bar_segment(total_width: f32, fraction: f32, color: Hsla) -> Div {
     let w = (total_width * fraction.clamp(0.0, 1.0)).max(0.0);
-    div().w(px(w)).h_full().bg(rgb(color_hex))
+    div().w(px(w)).h_full().bg(color)
 }
 
 // ── Empty bar (no snapshot) ───────────────────────────────────────────────────

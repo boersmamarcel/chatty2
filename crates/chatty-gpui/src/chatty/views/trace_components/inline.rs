@@ -15,14 +15,11 @@
 
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, text::TextView};
-use std::time::Duration;
 
 use super::super::code_block_component::CodeBlockComponent;
 use super::super::diff_view_component::DiffViewComponent;
 use super::super::message_types::{ToolCallBlock, ToolCallState};
-use super::badges::{
-    is_code_execution_tool, render_execution_mode_badge, render_sub_agent_mode_badge,
-};
+use super::super::transcript::ToolRow;
 
 pub struct InlineToolCallRenderArgs<'a, F, D>
 where
@@ -62,107 +59,17 @@ where
         tool_call.display_name, tool_call.state
     );
 
-    let is_running = matches!(tool_call.state, ToolCallState::Running);
-
-    let (prefix, prefix_color, state_label) = match &tool_call.state {
-        ToolCallState::Running => (">", cx.theme().primary, "running"),
-        ToolCallState::Success => ("✓", gpui::green(), "success"),
-        ToolCallState::Error(_) => ("✗", cx.theme().ring, "error"),
-    };
-
     let muted_text = cx.theme().muted_foreground;
     let text_color = cx.theme().foreground;
     let panel_bg = cx.theme().muted;
-    let badge_text = cx.theme().primary_foreground;
-
-    let inline_badge = div()
-        .id(ElementId::Name(
-            format!("inline-badge-{}-{}", message_index, tool_index).into(),
-        ))
-        .text_xs()
-        .px_2()
-        .py(px(0.5))
-        .rounded_sm()
-        .bg(prefix_color)
-        .text_color(badge_text)
-        .flex_shrink_0()
-        .child(state_label);
 
     // Compact clickable header (always visible)
     let header = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .overflow_hidden()
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             on_toggle(event, window, cx);
         })
-        .child(
-            div()
-                .text_color(muted_text)
-                .flex_shrink_0()
-                .child(if collapsed { "▶" } else { "▼" }),
-        )
-        .child(
-            div()
-                .text_color(prefix_color)
-                .font_weight(FontWeight::BOLD)
-                .flex_shrink_0()
-                .child(prefix),
-        )
-        .child(
-            div()
-                .text_color(text_color)
-                .font_weight(FontWeight::BOLD)
-                .font_family("monospace")
-                .text_sm()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(format_tool_call_header(tool_call)),
-        )
-        .map(|this| {
-            let this = if tool_call.tool_name == "sub_agent" {
-                this.child(render_sub_agent_mode_badge(&tool_call.source, badge_text))
-            } else if is_code_execution_tool(tool_call) {
-                if let Some(engine) = tool_call.execution_engine {
-                    this.child(render_execution_mode_badge(engine, badge_text))
-                } else {
-                    this
-                }
-            } else {
-                this
-            };
-
-            if is_running {
-                this.child(
-                    inline_badge.with_animation(
-                        ElementId::Name(
-                            format!("inline-badge-pulse-{}-{}", message_index, tool_index).into(),
-                        ),
-                        Animation::new(Duration::from_secs(2))
-                            .repeat()
-                            .with_easing(pulsating_between(0.4, 1.0)),
-                        |el, delta| el.opacity(delta),
-                    ),
-                )
-            } else {
-                this.child(inline_badge)
-            }
-        })
-        .when_some(tool_call.duration, |this, duration| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(muted_text)
-                    .flex_shrink_0()
-                    .child(format!("({:.1}s)", duration.as_secs_f32())),
-            )
-        });
+        .child(ToolRow::new(tool_call.clone()));
 
     // Build accordion content children (what shows when expanded)
     let mut content_children = Vec::new();
@@ -361,6 +268,7 @@ pub(super) fn render_code_run_input(
 ///
 /// Most tools show `$ <command>` (shell-style), but internet and memory tools use their
 /// friendly name as a prefix (e.g. "Searching online: rust async patterns").
+#[allow(dead_code)]
 pub(super) fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 

@@ -15,15 +15,24 @@ impl AssetSource for ChattyAssets {
             return Ok(None);
         }
 
-        Self::get(path)
-            .map(|f| Some(f.data))
-            .ok_or_else(|| anyhow!("could not find asset at path \"{path}\""))
+        // `Application::with_assets` replaces the asset source rather than chaining,
+        // so fall back to gpui-component's bundle for the built-in `IconName` icons
+        // we don't vendor ourselves.
+        if let Some(f) = Self::get(path) {
+            return Ok(Some(f.data));
+        }
+
+        gpui_component_assets::Assets
+            .load(path)
+            .map_err(|_| anyhow!("could not find asset at path \"{path}\""))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(Self::iter()
+        let mut paths: Vec<SharedString> = Self::iter()
             .filter_map(|p| p.starts_with(path).then(|| p.into()))
-            .collect())
+            .collect();
+        paths.extend(gpui_component_assets::Assets.list(path)?);
+        Ok(paths)
     }
 }
 

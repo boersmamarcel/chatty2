@@ -31,6 +31,8 @@ use super::super::message_types::{
 };
 use super::super::trace_components::SystemTraceView;
 use super::{ChatView, PendingApprovalInfo};
+use crate::chatty::views::chart_renderer::extract_chart_spec;
+use crate::chatty::views::transcript::{attachment_image_path, extract_table_preview};
 
 impl ChatView {
     /// Handle tool call started event
@@ -257,6 +259,33 @@ impl ChatView {
         // Update trace view - it will emit ToolCallStateChanged event automatically
         if let Some(last) = self.parent_streaming_message_mut() {
             if let Some(ref mut trace) = last.live_trace {
+                let preview = trace.items.iter().find_map(|item| {
+                    let TraceItem::ToolCall(tool) = item else {
+                        return None;
+                    };
+                    if tool.id != id {
+                        return None;
+                    }
+                    extract_table_preview(tool)
+                });
+                let chart_spec = trace.items.iter().find_map(|item| {
+                    let TraceItem::ToolCall(tool) = item else {
+                        return None;
+                    };
+                    if tool.id != id {
+                        return None;
+                    }
+                    extract_chart_spec(tool)
+                });
+                let attachment_image = trace.items.iter().find_map(|item| {
+                    let TraceItem::ToolCall(tool) = item else {
+                        return None;
+                    };
+                    if tool.id != id {
+                        return None;
+                    }
+                    attachment_image_path(tool)
+                });
                 trace.clear_active_tool();
                 let trace_clone = trace.clone();
                 if let Some(ref view_entity) = last.system_trace_view {
@@ -264,10 +293,19 @@ impl ChatView {
                         view.update_trace(trace_clone, cx); // This emits event!
                     });
                 }
+                if let Some(preview) = preview {
+                    self.try_auto_open_query_table(&id, preview, cx);
+                }
+                if let Some(spec) = chart_spec {
+                    self.try_auto_open_chart(&id, spec, cx);
+                }
+                if let Some(path) = attachment_image {
+                    self.try_auto_open_image_artifact(&id, path, cx);
+                }
             }
         }
 
-        // No need for cx.notify() - event handler calls it
+        cx.notify();
         // No need for manual auto-expand - event handler does it
     }
 

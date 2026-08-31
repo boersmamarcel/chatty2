@@ -8,11 +8,14 @@ use duckdb::Connection;
 
 use super::{ColumnInfo, DataQueryError, MAX_MARKDOWN_CELL_CHARS};
 
+pub(super) type MarkdownQueryResult =
+    (String, Vec<ColumnInfo>, usize, bool, bool, Vec<Vec<String>>);
+
 pub(super) fn results_to_markdown(
     conn: &Connection,
     sql: &str,
     max_rows: u32,
-) -> Result<(String, Vec<ColumnInfo>, usize, bool, bool), DataQueryError> {
+) -> Result<MarkdownQueryResult, DataQueryError> {
     // Use DESCRIBE to get column metadata before executing the query.
     // Calling column_type() before query() panics for dynamic queries like
     // SELECT * FROM read_parquet(...) because DuckDB needs to scan the file
@@ -88,7 +91,14 @@ pub(super) fn results_to_markdown(
     // Build markdown table
     let mut md = String::new();
     if columns.is_empty() {
-        return Ok((String::from("(no columns)"), columns, 0, false, false));
+        return Ok((
+            String::from("(no columns)"),
+            columns,
+            0,
+            false,
+            false,
+            Vec::new(),
+        ));
     }
 
     // Header row
@@ -118,7 +128,14 @@ pub(super) fn results_to_markdown(
         md.push('\n');
     }
 
-    Ok((md, columns, total_rows, truncated, shortened_values))
+    Ok((
+        md,
+        columns,
+        total_rows,
+        truncated,
+        shortened_values,
+        rows_data,
+    ))
 }
 
 /// Convert a DuckDB Value to a display string.
