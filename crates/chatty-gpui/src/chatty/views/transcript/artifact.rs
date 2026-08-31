@@ -4,6 +4,10 @@ use std::rc::Rc;
 use chatty_core::services::pdf_thumbnail::{
     PREVIEW_WIDTH, PdfThumbnailError, pdf_page_count, render_pdf_page,
 };
+use chatty_core::tools::chart_tool::ChartSpec;
+use chatty_core::tools::data_query_tool::{
+    FILE_PREVIEW_MAX_ROWS, TablePreview, load_file_table_preview,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
@@ -13,13 +17,20 @@ use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Sizable};
 use tracing::warn;
 
 use super::OpenArtifact;
-use super::artifact_kind::{is_pdf_path, read_artifact_source};
+use super::artifact_kind::{
+    artifact_language_for_path, is_code_artifact_path, is_image_path, is_markdown_artifact_path,
+    is_pdf_path, is_tabular_path, read_artifact_source,
+};
 use super::diff::DiffHunkList;
 use super::run_pin::{RunPin, RunPinKind};
+use super::table::render_table_preview_view;
+use crate::chatty::views::chart_renderer::render_chart_panel;
+use crate::chatty::views::code_block_component::CodeBlockComponent;
 
 /// Inner width used when the dock is at its default 380px. `img` only derives
 /// height from aspect ratio when width is an absolute `px()`.
 const PDF_PAGE_DISPLAY_WIDTH: f32 = 348.0;
+const IMAGE_DISPLAY_WIDTH: f32 = PDF_PAGE_DISPLAY_WIDTH;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ArtifactMode {
@@ -49,9 +60,19 @@ enum PdfPreview {
     Error(String),
 }
 
+#[derive(Clone, Debug, Default)]
+enum TabularPreview {
+    #[default]
+    Idle,
+    Loading,
+    Ready(TablePreview),
+    Error(String),
+}
+
 #[derive(IntoElement)]
 pub struct ArtifactCard {
     path: PathBuf,
+    old_content: Option<String>,
     on_open: Option<OpenArtifact>,
 }
 
@@ -59,11 +80,17 @@ impl ArtifactCard {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
+            old_content: None,
             on_open: None,
         }
     }
 
-    pub fn on_open(mut self, f: impl Fn(PathBuf, String, &mut App) + 'static) -> Self {
+    pub fn old_content(mut self, old: Option<String>) -> Self {
+        self.old_content = old;
+        self
+    }
+
+    pub fn on_open(mut self, f: impl Fn(super::ArtifactOpen, &mut App) + 'static) -> Self {
         self.on_open = Some(Rc::new(f));
         self
     }
@@ -84,6 +111,7 @@ impl RenderOnce for ArtifactCard {
             .unwrap_or_else(|| "FILE".to_string());
         let path = self.path.clone();
         let on_open = self.on_open.clone();
+        let old_content = self.old_content.clone();
         div()
             .id(ElementId::Name(
                 format!("artifact-card-{}", self.path.display()).into(),
@@ -102,10 +130,18 @@ impl RenderOnce for ArtifactCard {
             .on_mouse_down(MouseButton::Left, {
                 let path = path.clone();
                 let on_open = on_open.clone();
+                let old_content = old_content.clone();
                 move |_, _, cx| {
                     if let Some(cb) = on_open.as_ref() {
                         let source = read_artifact_source(&path);
-                        cb(path.clone(), source, cx);
+                        cb(
+                            super::ArtifactOpen {
+                                path: path.clone(),
+                                source,
+                                old: old_content.clone(),
+                            },
+                            cx,
+                        );
                     }
                 }
             })
@@ -137,10 +173,22 @@ impl RenderOnce for ArtifactCard {
                 .ghost()
                 .small()
                 .label("Open")
-                .on_click(move |_, _, cx| {
-                    if let Some(cb) = on_open.as_ref() {
-                        let source = read_artifact_source(&path);
-                        cb(path.clone(), source, cx);
+                .on_click({
+                    let path = path.clone();
+                    let on_open = on_open.clone();
+                    let old_content = old_content.clone();
+                    move |_, _, cx| {
+                        if let Some(cb) = on_open.as_ref() {
+                            let source = read_artifact_source(&path);
+                            cb(
+                                super::ArtifactOpen {
+                                    path: path.clone(),
+                                    source,
+                                    old: old_content.clone(),
+                                },
+                                cx,
+                            );
+                        }
                     }
                 }),
             )
@@ -154,9 +202,13 @@ pub struct ArtifactView {
     pub rendered: String,
     pub source: String,
     pub old: String,
-    files: Vec<(PathBuf, String)>,
+    files: Vec<(PathBuf, String, Option<String>)>,
     tab: usize,
     pdf: PdfPreview,
+    tabular: TabularPreview,
+    /// Interactive chart from `create_chart` (preferred over a saved PNG when set).
+    chart: Option<ChartSpec>,
+    workspace_root: Option<String>,
     load_gen: u64,
 }
 
@@ -171,25 +223,102 @@ impl ArtifactView {
             files: Vec::new(),
             tab: 0,
             pdf: PdfPreview::Idle,
+            tabular: TabularPreview::Idle,
+            chart: None,
+            workspace_root: None,
             load_gen: 0,
         }
     }
 
-    pub fn open(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
-        if !self.files.iter().any(|(existing, _)| existing == &path) {
-            self.files.push((path.clone(), source.clone()));
+    pub fn open_table(&mut self, preview: TablePreview, cx: &mut Context<Self>) {
+        if let chatty_core::tools::data_query_tool::TableSource::File { path } = &preview.source {
+            self.path = Some(PathBuf::from(path));
+        } else {
+            self.path = None;
+        }
+        self.tabular = TabularPreview::Ready(preview);
+        self.pdf = PdfPreview::Idle;
+        self.chart = None;
+        self.tab = 0;
+        if self.mode == ArtifactMode::Closed {
+            self.mode = ArtifactMode::Docked;
+        }
+        cx.notify();
+    }
+
+    pub fn open_chart(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
+        if let Some(saved) = spec.saved_path.as_ref() {
+            self.path = Some(PathBuf::from(saved));
+        } else {
+            self.path = None;
+        }
+        self.chart = Some(spec);
+        self.pdf = PdfPreview::Idle;
+        self.tabular = TabularPreview::Idle;
+        self.source.clear();
+        self.rendered.clear();
+        self.old.clear();
+        self.tab = 0;
+        if self.mode == ArtifactMode::Closed {
+            self.mode = ArtifactMode::Docked;
+        }
+        cx.notify();
+    }
+
+    pub fn open(
+        &mut self,
+        path: PathBuf,
+        source: String,
+        old: Option<String>,
+        workspace_root: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let old_snapshot = old.clone();
+        if !self.files.iter().any(|(existing, _, _)| existing == &path) {
+            self.files
+                .push((path.clone(), source.clone(), old_snapshot.clone()));
         }
         self.path = Some(path.clone());
+        self.workspace_root = workspace_root.clone();
         if is_pdf_path(&path) {
             self.source.clear();
             self.rendered.clear();
             self.old.clear();
+            self.tabular = TabularPreview::Idle;
+            self.chart = None;
             self.tab = 0;
             self.start_pdf_load(0, cx);
+        } else if is_tabular_path(&path) {
+            self.pdf = PdfPreview::Idle;
+            self.chart = None;
+            self.source = source.clone();
+            self.rendered = source.clone();
+            self.old = old_snapshot.clone().unwrap_or_default();
+            self.tab = 0;
+            self.start_tabular_load(path, workspace_root, cx);
+        } else if is_image_path(&path) {
+            self.pdf = PdfPreview::Idle;
+            self.tabular = TabularPreview::Idle;
+            self.chart = None;
+            self.source.clear();
+            self.rendered.clear();
+            self.old.clear();
+            self.tab = 0;
         } else {
             self.pdf = PdfPreview::Idle;
+            self.tabular = TabularPreview::Idle;
+            self.chart = None;
             self.source = source.clone();
-            self.rendered = source;
+            self.rendered = source.clone();
+            self.old = old_snapshot.clone().unwrap_or_default();
+            self.tab = if old_snapshot
+                .as_ref()
+                .is_some_and(|o| !o.is_empty() && o != &source)
+            {
+                2
+            } else {
+                0
+            };
         }
         if self.mode == ArtifactMode::Closed {
             self.mode = ArtifactMode::Docked;
@@ -235,6 +364,45 @@ impl ArtifactView {
         .detach();
     }
 
+    fn start_tabular_load(
+        &mut self,
+        path: PathBuf,
+        workspace_root: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace_root) = workspace_root.filter(|root| !root.is_empty()) else {
+            self.tabular = TabularPreview::Error(
+                "Set a workspace directory in Settings → Execution to preview tabular files."
+                    .into(),
+            );
+            return;
+        };
+        self.load_gen = self.load_gen.wrapping_add(1);
+        let load_id = self.load_gen;
+        self.tabular = TabularPreview::Loading;
+        let file_path = path.to_string_lossy().to_string();
+        cx.spawn(async move |this, cx| {
+            let outcome = tokio::task::spawn_blocking(move || {
+                load_file_table_preview(&workspace_root, &file_path, FILE_PREVIEW_MAX_ROWS)
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                if this.load_gen != load_id {
+                    return;
+                }
+                match outcome {
+                    Ok(Ok(preview)) => this.tabular = TabularPreview::Ready(preview),
+                    Ok(Err(e)) => this.tabular = TabularPreview::Error(e.to_string()),
+                    Err(e) => this.tabular = TabularPreview::Error(e.to_string()),
+                }
+                cx.notify();
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to apply tabular preview"))
+            .ok();
+        })
+        .detach();
+    }
+
     fn turn_pdf_page(&mut self, next: bool, cx: &mut Context<Self>) {
         let PdfPreview::Ready { page, total, .. } = &self.pdf else {
             return;
@@ -250,6 +418,48 @@ impl ArtifactView {
         self.start_pdf_load(new_page, cx);
         cx.notify();
     }
+}
+
+fn tabular_rendered_body(tabular: &TabularPreview, cx: &App) -> AnyElement {
+    match tabular {
+        TabularPreview::Idle | TabularPreview::Loading => div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("Loading preview…")
+            .into_any_element(),
+        TabularPreview::Error(message) => div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(message.clone())
+            .into_any_element(),
+        TabularPreview::Ready(preview) => {
+            render_table_preview_view("artifact-table", preview, cx).into_any_element()
+        }
+    }
+}
+
+fn image_rendered_body(path: &PathBuf, cx: &App) -> AnyElement {
+    if !path.exists() {
+        return div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("Image not found: {}", path.display()))
+            .into_any_element();
+    }
+    div()
+        .id("artifact-image")
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .overflow_y_scroll()
+        .child(
+            img(path.clone())
+                .max_w(px(IMAGE_DISPLAY_WIDTH))
+                .max_h(px(520.0))
+                .object_fit(ObjectFit::Contain)
+                .rounded_md(),
+        )
+        .into_any_element()
 }
 
 fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -> AnyElement {
@@ -338,6 +548,41 @@ fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -
     }
 }
 
+fn artifact_code_block(id: &'static str, source: &str, path: Option<&PathBuf>) -> AnyElement {
+    let language = path.and_then(|p| artifact_language_for_path(p));
+    let block = if language.is_some() {
+        CodeBlockComponent::new(language, source.to_string(), 0)
+    } else {
+        CodeBlockComponent::plain(None, source.to_string(), 0)
+    };
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .overflow_y_scroll()
+        .child(block)
+        .into_any_element()
+}
+
+fn artifact_primary_body(
+    path: Option<&PathBuf>,
+    rendered: &str,
+    source: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match path {
+        Some(path) if is_code_artifact_path(path) => {
+            artifact_code_block("artifact-code", source, Some(path))
+        }
+        Some(path) if is_markdown_artifact_path(path) => {
+            TextView::markdown("artifact-md", rendered.to_string(), window, cx).into_any_element()
+        }
+        _ => artifact_code_block("artifact-plain", source, path),
+    }
+}
+
 impl Render for ArtifactView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.mode == ArtifactMode::Closed {
@@ -350,7 +595,38 @@ impl Render for ArtifactView {
         let full = self.mode == ArtifactMode::Full;
         let entity = cx.entity();
         let is_pdf = self.path.as_ref().is_some_and(|path| is_pdf_path(path));
+        let is_chart = self.chart.is_some();
+        let is_image = !is_chart && self.path.as_ref().is_some_and(|path| is_image_path(path));
+        let is_tabular = matches!(self.tabular, TabularPreview::Ready(_))
+            || self.path.as_ref().is_some_and(|path| is_tabular_path(path));
+        let path_ref = self.path.clone();
         let pdf = self.pdf.clone();
+        let tabular = self.tabular.clone();
+        let chart = self.chart.clone();
+        let has_diff = !old.is_empty() && old != source;
+        let visible_tab = if !has_diff && tab > 1 {
+            0
+        } else if !has_diff && tab > 0 {
+            tab.min(1)
+        } else {
+            tab
+        };
+        let primary_label = if is_tabular {
+            "Table"
+        } else {
+            path_ref
+                .as_ref()
+                .map(|path| {
+                    if is_code_artifact_path(path) {
+                        "Code"
+                    } else if is_markdown_artifact_path(path) {
+                        "Rendered"
+                    } else {
+                        "Preview"
+                    }
+                })
+                .unwrap_or("Preview")
+        };
 
         let body = if is_pdf {
             div()
@@ -364,6 +640,36 @@ impl Render for ArtifactView {
                 .when(full, |this| {
                     this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
                 })
+                .into_any_element()
+        } else if let Some(spec) = chart {
+            div()
+                .id("artifact-chart")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .p_2()
+                .overflow_y_scroll()
+                .child(render_chart_panel(spec, cx))
+                .when(full, |this| {
+                    this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
+                })
+                .into_any_element()
+        } else if is_image {
+            let image_path = path_ref.clone().unwrap_or_default();
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .p_2()
+                .child(image_rendered_body(&image_path, cx))
+                .when(full, |this| {
+                    this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
+                })
+                .into_any_element()
         } else {
             div()
                 .flex()
@@ -374,15 +680,15 @@ impl Render for ArtifactView {
                 .child(
                     TabBar::new("artifact-modes")
                         .segmented()
-                        .child(Tab::new().label("Rendered"))
+                        .child(Tab::new().label(primary_label))
                         .child(Tab::new().label("Source"))
-                        .child(Tab::new().label("Diff"))
-                        .selected_index(tab)
+                        .when(has_diff, |this| this.child(Tab::new().label("Diff")))
+                        .selected_index(visible_tab)
                         .on_click({
                             let entity = entity.clone();
                             move |ix, _, cx| {
                                 entity.update(cx, |this, cx| {
-                                    this.tab = *ix;
+                                    this.tab = if has_diff { *ix } else { (*ix).min(1) };
                                     cx.notify();
                                 });
                             }
@@ -396,20 +702,27 @@ impl Render for ArtifactView {
                         .min_h_0()
                         .w_full()
                         .p_2()
-                        .when(tab == 0, |this| {
-                            this.child(TextView::markdown("artifact-md", rendered, window, cx))
+                        .when(visible_tab == 0, |this| {
+                            if is_tabular {
+                                this.child(tabular_rendered_body(&tabular, cx))
+                            } else {
+                                this.child(artifact_primary_body(
+                                    path_ref.as_ref(),
+                                    &rendered,
+                                    &source,
+                                    window,
+                                    cx,
+                                ))
+                            }
                         })
-                        .when(tab == 1, |this| {
-                            this.child(
-                                div()
-                                    .id("artifact-source")
-                                    .font_family("monospace")
-                                    .text_xs()
-                                    .overflow_y_scroll()
-                                    .child(source.clone()),
-                            )
+                        .when(visible_tab == 1, |this| {
+                            this.child(artifact_code_block(
+                                "artifact-source",
+                                &source,
+                                path_ref.as_ref(),
+                            ))
                         })
-                        .when(tab == 2, |this| {
+                        .when(has_diff && visible_tab == 2, |this| {
                             this.child(DiffHunkList::new("artifact-diff", old, source))
                         }),
                 )
@@ -428,17 +741,36 @@ impl Render for ArtifactView {
                 .when(full, |this| {
                     this.child(RunPin::new(RunPinKind::JumpToLatest).visible(true))
                 })
+                .into_any_element()
         };
 
         let title = self
-            .path
+            .chart
             .as_ref()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "Document".to_string());
+            .and_then(|spec| spec.title.clone())
+            .or_else(|| {
+                self.path
+                    .as_ref()
+                    .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+            })
+            .or_else(|| {
+                if let TabularPreview::Ready(preview) = &self.tabular {
+                    Some(preview.title.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                if self.chart.is_some() {
+                    "Chart".to_string()
+                } else {
+                    "Document".to_string()
+                }
+            });
         let file_buttons: Vec<AnyElement> = self
             .files
             .iter()
-            .map(|(path, source)| {
+            .map(|(path, source, old)| {
                 let label = path
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
@@ -446,13 +778,15 @@ impl Render for ArtifactView {
                 let entity = entity.clone();
                 let path = path.clone();
                 let source = source.clone();
+                let old = old.clone();
                 Button::new(ElementId::Name(format!("artifact-file-{}", label).into()))
                     .ghost()
                     .small()
                     .label(label)
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| {
-                            this.open(path.clone(), source.clone(), cx);
+                            let workspace = this.workspace_root.clone();
+                            this.open(path.clone(), source.clone(), old.clone(), workspace, cx);
                         });
                     })
                     .into_any_element()
@@ -485,6 +819,22 @@ impl Render for ArtifactView {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child("PDF"),
+                        )
+                    })
+                    .when(is_chart, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Chart"),
+                        )
+                    })
+                    .when(is_image, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Image"),
                         )
                     })
                     .child(

@@ -21,10 +21,16 @@
 mod markdown;
 mod profile;
 mod sql;
+pub mod table_preview;
 
 use markdown::*;
 use profile::*;
 use sql::*;
+pub use table_preview::{
+    FILE_PREVIEW_MAX_ROWS, INLINE_TABLE_MAX_HEIGHT_PX, INLINE_TABLE_PREVIEW_ROWS, TablePreview,
+    TableSource, UI_TABLE_MAX_COLS, UI_TABLE_MAX_ROWS, load_file_table_preview,
+    table_preview_from_query,
+};
 
 use duckdb::Connection;
 use rig_agent::tool::{Tool, ToolContext};
@@ -53,7 +59,7 @@ pub(super) type ProfileDataSummary = (
 // ─── shared types ───
 
 /// Column metadata returned by both tools.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -108,7 +114,7 @@ pub struct QueryDataArgs {
     pub max_rows: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct QueryDataOutput {
     /// Results formatted as a markdown table.
     pub markdown_table: String,
@@ -122,6 +128,8 @@ pub struct QueryDataOutput {
     pub truncated: bool,
     /// Optional note (e.g., truncation warning).
     pub note: Option<String>,
+    /// Structured preview for UI table cards (capped rows/columns).
+    pub preview: TablePreview,
 }
 
 #[derive(Clone)]
@@ -188,7 +196,8 @@ impl Tool for QueryDataTool {
 
         info!(query = %args.query, max_rows, "Executing data query");
 
-        let (markdown_table, columns, row_count, truncated, shortened_values) =
+        let query_for_preview = query.clone();
+        let (markdown_table, columns, row_count, truncated, shortened_values, preview_rows) =
             tokio::task::spawn_blocking(move || {
                 let workspace_root_str = workspace_root.to_string_lossy().to_string();
                 let rewritten_query = rewrite_query_file_literals(&query, &workspace_root)?;
@@ -197,6 +206,14 @@ impl Tool for QueryDataTool {
             })
             .await
             .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
+
+        let preview = table_preview_from_query(
+            query_for_preview,
+            columns.clone(),
+            preview_rows,
+            row_count,
+            truncated,
+        );
 
         let note = match (truncated, shortened_values) {
             (true, true) => Some(format!(
@@ -228,6 +245,7 @@ impl Tool for QueryDataTool {
             columns,
             truncated,
             note,
+            preview,
         })
     }
 }

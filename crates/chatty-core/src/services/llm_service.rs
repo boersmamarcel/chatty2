@@ -50,6 +50,37 @@ pub enum StreamChunk {
 /// Type alias for response streams
 pub type ResponseStream = BoxStream<'static, Result<StreamChunk>>;
 
+fn tool_result_looks_like_error(content_text: &str) -> bool {
+    let trimmed = content_text.trim_start();
+    trimmed.starts_with("Error:")
+        || trimmed.starts_with("ERROR:")
+        || trimmed.starts_with("error:")
+        // Rig redacts many typed tool errors to this generic feedback.
+        || trimmed.eq_ignore_ascii_case("the tool failed")
+        || trimmed.contains("malformed JSON")
+}
+
+fn tool_result_content_to_text(content: &rig_core::completion::message::ToolResultContent) -> Option<String> {
+    use rig_core::completion::message::ToolResultContent;
+
+    match content {
+        ToolResultContent::Text(text) => Some(text.text.clone()),
+        ToolResultContent::Image(_) => Some("[Image result]".to_string()),
+        ToolResultContent::Json { value } => serde_json::to_string(value).ok(),
+    }
+}
+
+fn streamed_tool_result_to_text(
+    tool_result: &rig_core::completion::message::ToolResult,
+) -> String {
+    tool_result
+        .content
+        .iter()
+        .filter_map(tool_result_content_to_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Helper macro to process agent streams
 macro_rules! process_agent_stream {
     ($stream:expr) => {
@@ -91,17 +122,9 @@ macro_rules! process_agent_stream {
                     }
                     Ok(MultiTurnStreamItem::StreamUserItem(user_content)) => {
                         use rig_core::streaming::StreamedUserContent;
-                        use rig_core::completion::message::ToolResultContent;
 
                         let StreamedUserContent::ToolResult { tool_result, internal_call_id } = user_content;
-                        let content_text = tool_result.content.iter()
-                            .filter_map(|c| match c {
-                                ToolResultContent::Text(text) => Some(text.text.clone()),
-                                ToolResultContent::Image(_) => Some("[Image result]".to_string()),
-                                ToolResultContent::Json { .. } => Some("[JSON result]".to_string()),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        let content_text = streamed_tool_result_to_text(&tool_result);
 
                         // Resolve a unique tool call ID (same logic as ToolCall arm above).
                         let call_id = tool_result
@@ -111,9 +134,7 @@ macro_rules! process_agent_stream {
                             .filter(|id| !id.is_empty())
                             .unwrap_or(internal_call_id);
 
-                        let is_error = content_text.trim_start().starts_with("Error:")
-                            || content_text.trim_start().starts_with("ERROR:")
-                            || content_text.trim_start().starts_with("error:");
+                        let is_error = tool_result_looks_like_error(&content_text);
 
                         if is_error {
                             use tracing::warn;
@@ -209,17 +230,9 @@ macro_rules! process_agent_stream_with_approvals {
                             }
                             Some(Ok(MultiTurnStreamItem::StreamUserItem(user_content))) => {
                                 use rig_core::streaming::StreamedUserContent;
-                                use rig_core::completion::message::ToolResultContent;
 
                                 let StreamedUserContent::ToolResult { tool_result, internal_call_id } = user_content;
-                                let content_text = tool_result.content.iter()
-                                    .filter_map(|c| match c {
-                                        ToolResultContent::Text(text) => Some(text.text.clone()),
-                                        ToolResultContent::Image(_) => Some("[Image result]".to_string()),
-                                        ToolResultContent::Json { .. } => Some("[JSON result]".to_string()),
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
+                                let content_text = streamed_tool_result_to_text(&tool_result);
 
                                 // Resolve a unique tool call ID (same logic as ToolCall arm above).
                                 let call_id = tool_result
@@ -229,9 +242,7 @@ macro_rules! process_agent_stream_with_approvals {
                                     .filter(|id| !id.is_empty())
                                     .unwrap_or(internal_call_id);
 
-                                let is_error = content_text.trim_start().starts_with("Error:")
-                                    || content_text.trim_start().starts_with("ERROR:")
-                                    || content_text.trim_start().starts_with("error:");
+                                let is_error = tool_result_looks_like_error(&content_text);
 
                                 if is_error {
                                     use tracing::warn;
@@ -349,4 +360,43 @@ pub async fn stream_prompt(
         };
 
     Ok((stream, user_message))
+}
+
+#[cfg(test)]
+mod tests {
+    use rig_core::completion::message::{ToolCallId, ToolResult, ToolResultContent};
+
+    use super::{streamed_tool_result_to_text, tool_result_looks_like_error};
+
+    #[test]
+    fn tool_result_looks_like_error_detects_rig_redacted_failures() {
+        assert!(tool_result_looks_like_error("the tool failed"));
+        assert!(tool_result_looks_like_error("Error: Data array must not be empty"));
+        assert!(!tool_result_looks_like_error(r#"{"saved_path":"charts/sales.png"}"#));
+    }
+
+    #[test]
+    fn streamed_tool_result_serializes_json_payload_for_ui() {
+        let tool_result = ToolResult {
+            call: ToolCallId::new("call-1").unwrap(),
+            name: "query_data".into(),
+            content: vec![ToolResultContent::json(serde_json::json!({
+                "markdown_table": "| a |\n| --- |\n| 1 |",
+                "preview": {
+                    "title": "query_data",
+                    "columns": [{"name": "a", "data_type": "INTEGER"}],
+                    "rows": [["1"]],
+                    "row_count": 1,
+                    "truncated": false,
+                    "source": {"kind": "query", "sql": "SELECT 1"}
+                }
+            }))],
+            provider: None,
+        };
+
+        let text = streamed_tool_result_to_text(&tool_result);
+        assert!(text.contains("\"preview\""));
+        assert!(text.contains("\"rows\""));
+        assert!(!text.contains("[JSON result]"));
+    }
 }

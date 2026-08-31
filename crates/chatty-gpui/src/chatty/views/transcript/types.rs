@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chatty_core::models::message_types::{ApprovalBlock, ThinkingBlock, ToolCallBlock};
+use chatty_core::tools::data_query_tool::TablePreview;
 
 /// Stable identifier for a transcript block. Never a list index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -62,6 +63,11 @@ pub enum Block {
     Artifact {
         id: BlockId,
         path: PathBuf,
+        old_content: Option<String>,
+    },
+    TablePreview {
+        id: BlockId,
+        preview: TablePreview,
     },
     Error {
         id: BlockId,
@@ -81,6 +87,7 @@ impl Block {
             | Self::Approval { id, .. }
             | Self::Plan { id }
             | Self::Artifact { id, .. }
+            | Self::TablePreview { id, .. }
             | Self::Error { id, .. } => *id,
         }
     }

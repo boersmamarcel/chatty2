@@ -1,5 +1,6 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
+use crate::chatty::views::transcript::inline_chat_attachments;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Icon;
@@ -16,7 +17,7 @@ use super::parsed_cache::{
     ParsedContentCache, StreamingParseState,
 };
 use super::trace_components::SystemTraceView;
-use super::transcript::MessageActionBar;
+use super::transcript::{MessageActionBar, OpenTable};
 
 /// Message role indicator
 #[derive(Clone, Debug)]
@@ -210,6 +211,11 @@ fn is_image_file(path: &std::path::Path) -> bool {
 
 /// Render attachment images as thumbnails above the message text
 fn render_attachments(attachments: &[PathBuf], id_prefix: &str, cx: &App) -> Div {
+    let attachments = inline_chat_attachments(attachments.iter().cloned());
+    if attachments.is_empty() {
+        return div();
+    }
+
     let border_color = cx.theme().border;
 
     div()
@@ -360,6 +366,7 @@ fn render_interleaved_content<F, D>(
     caches: &mut MessageRenderCaches<'_>,
     on_toggle_tool: F,
     on_toggle_diff: D,
+    on_open_table: Option<OpenTable>,
     cx: &App,
 ) -> Div
 where
@@ -529,6 +536,23 @@ where
                 ));
             }
 
+            // If this is a successful query_data call, render the table preview inline
+            if tool_call.tool_name == "query_data"
+                && matches!(
+                    tool_call.state,
+                    super::message_types::ToolCallState::Success
+                )
+                && let Some(preview) = super::transcript::extract_table_preview(tool_call)
+            {
+                container = container.child(super::transcript::render_table_preview_card(
+                    preview,
+                    index,
+                    tool_idx,
+                    on_open_table.clone(),
+                    cx,
+                ));
+            }
+
             // If this is a successful daytona_run call with downloaded files, render them inline
             if tool_call.tool_name == "daytona_run"
                 && matches!(
@@ -605,7 +629,7 @@ where
         })
 }
 
-#[allow(clippy::too_many_arguments)] // Rendering function with 4 generic callbacks
+#[allow(clippy::too_many_arguments)] // Rendering function with 5 generic callbacks
 pub fn render_message<F, D, G, R>(
     msg: &DisplayMessage,
     index: usize,
@@ -617,6 +641,7 @@ pub fn render_message<F, D, G, R>(
     on_toggle_diff: D,
     on_feedback: G,
     on_regenerate: R,
+    on_open_table: Option<OpenTable>,
     cx: &App,
 ) -> AnyElement
 where
@@ -768,6 +793,7 @@ where
             caches,
             on_toggle_tool,
             on_toggle_diff,
+            on_open_table,
             cx,
         )
     } else if msg.is_markdown {

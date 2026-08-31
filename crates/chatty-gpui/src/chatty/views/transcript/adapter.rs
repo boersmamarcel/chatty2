@@ -1,10 +1,14 @@
 use std::time::Duration;
 
-use chatty_core::models::message_types::{SystemTrace, TraceItem};
+use chatty_core::models::message_types::{SystemTrace, ToolCallState, TraceItem};
 use gpui::{Pixels, Size, px, size};
 
 use super::activity::{RunTally, classify_tool};
-use super::artifact_kind::{is_produced_file_tool, tool_file_path};
+use super::artifact_kind::{
+    artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
+    is_produced_file_tool, tool_file_path,
+};
+use super::table::{extract_table_preview, inline_table_card_height};
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
 
@@ -117,6 +121,43 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                         id: BlockId::from_parts(namespace, &tool.id),
                         tool: tool.clone(),
                     });
+                } else if tool.tool_name == "query_data"
+                    && matches!(tool.state, ToolCallState::Success)
+                    && extract_table_preview(tool).is_some()
+                {
+                    activity_tools.push(tool.clone());
+                    flush_activity(blocks, &mut activity_tools);
+                    if let Some(preview) = extract_table_preview(tool) {
+                        blocks.push(Block::TablePreview {
+                            id: BlockId::from_parts(namespace, &tool.id),
+                            preview,
+                        });
+                    }
+                } else if tool.tool_name == "create_chart"
+                    && matches!(tool.state, ToolCallState::Success)
+                    && chart_artifact_path(tool).is_some()
+                {
+                    activity_tools.push(tool.clone());
+                    flush_activity(blocks, &mut activity_tools);
+                    if let Some(path) = chart_artifact_path(tool) {
+                        blocks.push(Block::Artifact {
+                            id: BlockId::from_parts(namespace, &tool.id),
+                            path,
+                            old_content: None,
+                        });
+                    }
+                } else if matches!(tool.state, ToolCallState::Success)
+                    && attachment_image_path(tool).is_some()
+                {
+                    activity_tools.push(tool.clone());
+                    flush_activity(blocks, &mut activity_tools);
+                    if let Some(path) = attachment_image_path(tool) {
+                        blocks.push(Block::Artifact {
+                            id: BlockId::from_parts(namespace, &tool.id),
+                            path,
+                            old_content: None,
+                        });
+                    }
                 } else if is_produced_file_tool(&tool.tool_name, &tool.input) {
                     // Count/show the write in the activity group, then attach
                     // an artifact receipt so provenance stays next to the turn.
@@ -126,6 +167,7 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                         blocks.push(Block::Artifact {
                             id: BlockId::from_parts(namespace, &tool.id),
                             path,
+                            old_content: artifact_old_content_from_tool(tool),
                         });
                     }
                 } else if let Some(err) = tool_error(tool) {
@@ -182,30 +224,91 @@ pub fn plan_turn_index(turns: &[Turn]) -> Option<usize> {
     })
 }
 
-pub fn block_estimated_height(block: &Block, plan_steps: usize) -> f32 {
+/// Approximate usable text width inside a message bubble for line wrapping.
+pub fn transcript_chars_per_line(content_width_px: f32) -> f32 {
+    const AVG_CHAR_WIDTH: f32 = 7.2;
+    const MIN_CHARS: f32 = 16.0;
+    const MAX_CHARS: f32 = 80.0;
+    (content_width_px / AVG_CHAR_WIDTH).clamp(MIN_CHARS, MAX_CHARS)
+}
+
+/// Height of a user/assistant bubble rendered via [`render_message`].
+///
+/// Virtual-list slots use a fixed height; under-estimating here makes the next
+/// turn paint on top of this one (e.g. user prompt + “Worked for…” + artifact).
+pub fn estimate_message_bubble_height(
+    content: &str,
+    attachment_count: usize,
+    content_width_px: f32,
+) -> f32 {
+    const LINE_HEIGHT: f32 = 22.0;
+    const BUBBLE_PADDING: f32 = 28.0;
+    const ATTACHMENT_ROW: f32 = 56.0;
+
+    let chars_per_line = transcript_chars_per_line(content_width_px);
+    let wrapped_lines = (content.len().max(1) as f32 / chars_per_line).ceil();
+    let explicit_lines = content.lines().count().max(1) as f32;
+    let lines = wrapped_lines.max(explicit_lines);
+
+    BUBBLE_PADDING + lines * LINE_HEIGHT + attachment_count as f32 * ATTACHMENT_ROW
+}
+
+pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px: f32) -> f32 {
     match block {
         Block::User {
             content,
             attachments,
             ..
-        } => 36.0 + (content.len() as f32 / 40.0).min(280.0) + attachments.len() as f32 * 48.0,
-        Block::Text { content, .. } => 36.0 + (content.len() as f32 / 40.0).min(480.0),
+        } => estimate_message_bubble_height(content, attachments.len(), content_width_px),
+        Block::Text { content, .. } => estimate_message_bubble_height(content, 0, content_width_px),
         Block::Thinking { .. } => 56.0,
         Block::Activity { tools, .. } => 40.0 + tools.len() as f32 * 28.0,
         Block::Diff { .. } => 120.0,
         Block::Approval { .. } => 72.0,
         Block::Plan { .. } => 40.0 + 32.0 * plan_steps.max(1) as f32,
-        Block::Artifact { .. } => 56.0,
+        Block::Artifact { .. } => 68.0,
+        Block::TablePreview { preview, .. } => inline_table_card_height(preview),
         Block::Error { .. } => 64.0,
     }
 }
 
+fn is_work_trace_block(block: &Block) -> bool {
+    matches!(
+        block,
+        Block::Thinking { .. }
+            | Block::Activity { .. }
+            | Block::Diff { .. }
+            | Block::Artifact { .. }
+            | Block::TablePreview { .. }
+            | Block::Approval { .. }
+            | Block::Plan { .. }
+            | Block::Error { .. }
+    )
+}
+
+fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
+    if turn.collapsed
+        && matches!(
+            block,
+            Block::Thinking { .. } | Block::Activity { .. } | Block::Diff { .. }
+        )
+    {
+        return false;
+    }
+    !matches!(block, Block::User { .. } | Block::Text { .. })
+}
+
 /// Content Y of the top of the inline plan block, including list top padding.
-pub fn plan_block_top(turns: &[Turn], plan_steps: usize, padding_top: Pixels) -> Option<Pixels> {
+pub fn plan_block_top(
+    turns: &[Turn],
+    plan_steps: usize,
+    padding_top: Pixels,
+    content_width_px: f32,
+) -> Option<Pixels> {
     let ix = plan_turn_index(turns)?;
     let mut y = padding_top;
     for turn in &turns[..ix] {
-        y += estimate_turn_height(turn, plan_steps).height;
+        y += estimate_turn_height(turn, plan_steps, content_width_px).height;
     }
     let turn = &turns[ix];
     if turn.collapsed {
@@ -216,14 +319,19 @@ pub fn plan_block_top(turns: &[Turn], plan_steps: usize, padding_top: Pixels) ->
         if matches!(block, Block::Plan { .. }) {
             return Some(y);
         }
-        y += px(block_estimated_height(block, plan_steps));
+        y += px(block_estimated_height(block, plan_steps, content_width_px));
     }
     Some(y)
 }
 
 /// Content Y of the bottom of the inline plan block, including list top padding.
-pub fn plan_block_bottom(turns: &[Turn], plan_steps: usize, padding_top: Pixels) -> Option<Pixels> {
-    let top = plan_block_top(turns, plan_steps, padding_top)?;
+pub fn plan_block_bottom(
+    turns: &[Turn],
+    plan_steps: usize,
+    padding_top: Pixels,
+    content_width_px: f32,
+) -> Option<Pixels> {
+    let top = plan_block_top(turns, plan_steps, padding_top, content_width_px)?;
     let ix = plan_turn_index(turns)?;
     let turn = &turns[ix];
     if turn.collapsed {
@@ -233,6 +341,7 @@ pub fn plan_block_bottom(turns: &[Turn], plan_steps: usize, padding_top: Pixels)
         top + px(block_estimated_height(
             &Block::Plan { id: BlockId(0) },
             plan_steps,
+            content_width_px,
         )),
     )
 }
@@ -298,52 +407,68 @@ pub fn adapt_messages_with_traces(
         .collect()
 }
 
-pub fn estimate_turn_height(turn: &Turn, plan_steps: usize) -> Size<Pixels> {
-    // Folded turns still show the worked-for header plus receipts (artifacts,
-    // approvals, plan, errors) and the assistant text — only the work trace
-    // (thinking / activity / diffs) is hidden. Expanded turns with tools also
-    // render that header above the typed blocks.
+pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f32) -> Size<Pixels> {
+    // Mirror `render_visible_turns`: optional work header, typed blocks (not
+    // User/Text), then `render_message` for the bubble body.
     let has_work_fold = matches!(turn.role, TurnRole::Assistant)
         && !turn.streaming
-        && turn.blocks.iter().any(|block| {
-            matches!(
-                block,
-                Block::Thinking { .. }
-                    | Block::Activity { .. }
-                    | Block::Diff { .. }
-                    | Block::Artifact { .. }
-                    | Block::Approval { .. }
-                    | Block::Plan { .. }
-                    | Block::Error { .. }
-            )
-        });
+        && turn.blocks.iter().any(is_work_trace_block);
 
-    // Header row (+ gap) when the Worked-for fold control is present; otherwise
-    // a small chrome pad. Under-estimates here paint the last turn over the composer.
-    let mut height = if has_work_fold {
-        COLLAPSED_TURN_HEIGHT + 8.0
-    } else {
-        16.0_f32
-    };
-    let mut visible = 0u32;
+    let mut height = 0.0_f32;
+    let mut flex_children = 0u32;
+
+    if has_work_fold {
+        height += COLLAPSED_TURN_HEIGHT;
+        flex_children += 1;
+    }
+
+    let mut message_height = 0.0_f32;
     for block in &turn.blocks {
-        if turn.collapsed
-            && matches!(
-                block,
-                Block::Thinking { .. } | Block::Activity { .. } | Block::Diff { .. }
-            )
-        {
-            continue;
+        match block {
+            Block::User {
+                content,
+                attachments,
+                ..
+            } => {
+                message_height = message_height.max(estimate_message_bubble_height(
+                    content,
+                    attachments.len(),
+                    content_width_px,
+                ));
+            }
+            Block::Text { content, .. } => {
+                message_height = message_height.max(estimate_message_bubble_height(
+                    content,
+                    0,
+                    content_width_px,
+                ));
+            }
+            _ if block_visible_in_turn(turn, block) => {
+                height += block_estimated_height(block, plan_steps, content_width_px);
+                flex_children += 1;
+            }
+            _ => {}
         }
-        height += block_estimated_height(block, plan_steps);
-        visible += 1;
     }
-    // `gap_2` between header / typed blocks / message body.
-    if visible > 0 {
-        height += 8.0 * visible as f32;
+
+    let stacks_message_shell = has_work_fold || flex_children > 0;
+    if stacks_message_shell {
+        // Empty assistant turns still render a padded message shell under receipts.
+        height += message_height.max(32.0);
+        flex_children += 1;
+    } else {
+        height += message_height;
+        if message_height > 0.0 {
+            flex_children += 1;
+        }
     }
-    // Slack so virtual-list slots don't under-clip into the composer.
-    height += 32.0;
+
+    // `gap_2` between work header, typed blocks, and message bubble.
+    if flex_children > 1 {
+        height += 8.0 * (flex_children - 1) as f32;
+    }
+
+    height += 16.0;
     size(px(800.), px(height.max(36.0)))
 }
 
@@ -372,6 +497,87 @@ mod tests {
         assert_eq!(
             format_worked_for(Some(Duration::from_secs(65))),
             "Worked for 1m 5s"
+        );
+    }
+
+    #[test]
+    fn long_user_prompt_gets_enough_virtual_list_height() {
+        let prompt = "Create a short 2-page PDF report at workspace_notes.pdf using Typst. \
+            Page 1: title 'Chatty PDF QA', a one-paragraph poem, and the formula E = mc^2. \
+            Page 2: a small 2-column table (Item / Notes) with three rows. \
+            Then open it so I can flip pages in the document panel.";
+        let msg = DisplayMessage {
+            role: MessageRole::User,
+            content: prompt.into(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: None,
+            is_markdown: false,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        let wide = estimate_turn_height(&turn, 0, 520.0).height;
+        let narrow = estimate_turn_height(&turn, 0, 220.0).height;
+        assert!(
+            narrow > wide,
+            "narrow width should reserve more height (wide={wide:?}, narrow={narrow:?})"
+        );
+        assert!(
+            narrow >= px(170.0),
+            "narrow user bubble under-estimated at {narrow:?} for {} chars",
+            prompt.len()
+        );
+    }
+
+    #[test]
+    fn narrow_width_increases_wrapped_line_estimate() {
+        let prompt = "Create a short 2-page PDF report at workspace_notes.pdf using Typst.";
+        let wide = estimate_message_bubble_height(prompt, 0, 520.0);
+        let narrow = estimate_message_bubble_height(prompt, 0, 220.0);
+        assert!(narrow > wide);
+    }
+
+    #[test]
+    fn collapsed_assistant_with_artifact_reserves_work_header_and_receipt() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "pdf".into(),
+            tool_name: "compile_typst".into(),
+            display_name: "Generating PDF".into(),
+            input: r#"{"content":"= Hi","output_path":"workspace_notes.pdf"}"#.into(),
+            output: Some(r#"{"saved_path":"/tmp/workspace_notes.pdf","page_count":2}"#.into()),
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: Some(Duration::from_secs(3)),
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, true);
+        let height = estimate_turn_height(&turn, 0, 400.0).height;
+        assert!(
+            height >= px(140.0),
+            "assistant receipt turn under-estimated at {height:?}"
         );
     }
 
@@ -471,6 +677,106 @@ mod tests {
             "compile_typst should produce an artifact card, got {:?}",
             turn.blocks
         );
+    }
+
+    #[test]
+    fn query_data_becomes_table_preview_block() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "qd1".into(),
+            tool_name: "query_data".into(),
+            display_name: "Querying data".into(),
+            input: r#"{"query":"SELECT 1"}"#.into(),
+            output: Some(
+                r#"{"markdown_table":"| a |\n| --- |\n| 1 |","row_count":1,"column_count":1,"columns":[{"name":"a","data_type":"INTEGER"}],"truncated":false,"preview":{"title":"query_data","columns":[{"name":"a","data_type":"INTEGER"}],"rows":[["1"]],"row_count":1,"truncated":false,"source":{"kind":"query","sql":"SELECT 1"}}}"#.into(),
+            ),
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "One row returned.".into(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            turn.blocks
+                .iter()
+                .any(|block| matches!(block, Block::TablePreview { .. })),
+            "query_data should produce a table preview receipt, got {:?}",
+            turn.blocks
+        );
+    }
+
+    #[test]
+    fn create_chart_becomes_artifact_block() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let dir = std::env::temp_dir().join("adapter_chart_png");
+        let _ = std::fs::create_dir_all(&dir);
+        let png = dir.join("sales.png");
+        std::fs::write(&png, b"\x89PNG").expect("write png");
+
+        let tool = ToolCallBlock {
+            id: "ch1".into(),
+            tool_name: "create_chart".into(),
+            display_name: "Creating chart".into(),
+            input: r#"{"chart_type":"bar","save_path":"charts/sales.png","data":[]}"#.into(),
+            output: Some(format!(
+                r#"{{"chart_type":"bar","data":[],"saved_path":"{}"}}"#,
+                png.display()
+            )),
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "Chart saved.".into(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            turn.blocks
+                .iter()
+                .any(|block| matches!(block, Block::Artifact { .. })),
+            "create_chart with saved_path should produce an artifact card, got {:?}",
+            turn.blocks
+        );
+        let _ = std::fs::remove_file(&png);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     fn sample_tool(id: &str, name: &str) -> chatty_core::models::message_types::ToolCallBlock {

@@ -66,13 +66,14 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
-    PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, Turn, TurnRole,
-    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    is_pdf_artifact_tool, is_pdf_path, new_artifact_view, plan_block_bottom,
+    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
+    OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, TableOpen, Turn, TurnRole,
+    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, extract_table_preview,
+    format_worked_for, is_pdf_artifact_tool, is_pdf_path, new_artifact_view, plan_block_bottom,
     plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
-    tool_file_path,
+    tool_file_path, attachment_image_path,
 };
+use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::chatty::models::MessageFeedback;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
@@ -130,10 +131,16 @@ pub struct ChatView {
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
+    /// Tool id of the last query_data table auto-docked in the artifact panel.
+    last_auto_opened_table_id: Option<String>,
+    /// Tool id of the last create_chart PNG auto-docked in the artifact panel.
+    last_auto_opened_chart_id: Option<String>,
     /// Persists the right-pane width across dock open/close.
     artifact_split: Entity<ResizableState>,
     /// User expand/collapse for settled activity groups (`BlockId.0` → open).
     activity_expanded: HashMap<u64, bool>,
+    /// Usable transcript column width (px) for virtual-list height estimates.
+    transcript_content_width: f32,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -297,8 +304,11 @@ impl ChatView {
             artifact_view: new_artifact_view(cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
+            last_auto_opened_table_id: None,
+            last_auto_opened_chart_id: None,
             artifact_split: cx.new(|_| ResizableState::default()),
             activity_expanded: HashMap::new(),
+            transcript_content_width: 480.0,
         }
     }
 
@@ -554,6 +564,27 @@ impl ChatView {
             conversation_id = ?self.conversation_id,
             "finalize_assistant_message",
         );
+
+        if let Some(view) = self
+            .messages
+            .get(idx)
+            .and_then(|m| m.system_trace_view.as_ref())
+        {
+            let trace = view.read(cx).get_trace().clone();
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if let Some(preview) = extract_table_preview(tool) {
+                    self.try_auto_open_query_table(&tool.id, preview, cx);
+                    break;
+                }
+                if let Some(spec) = extract_chart_spec(tool) {
+                    self.try_auto_open_chart(&tool.id, spec, cx);
+                    break;
+                }
+            }
+        }
 
         cx.notify();
     }
@@ -838,10 +869,166 @@ impl ChatView {
         let Some((path, source)) = self.last_pdf_artifact(cx) else {
             return;
         };
-        self.show_artifact(path, source, cx);
+        self.show_artifact(path, source, None, cx);
     }
 
-    fn show_artifact(&mut self, path: PathBuf, source: String, cx: &mut Context<Self>) {
+    fn last_chart_spec(
+        &self,
+        cx: &App,
+    ) -> Option<(String, chatty_core::tools::chart_tool::ChartSpec)> {
+        let traces = self.history_traces(cx);
+        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
+            if msg.is_streaming {
+                continue;
+            }
+            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
+                continue;
+            };
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if let Some(spec) = extract_chart_spec(tool) {
+                    return Some((tool.id.clone(), spec));
+                }
+            }
+        }
+        None
+    }
+
+    fn maybe_open_chart_artifact(&mut self, cx: &mut Context<Self>) {
+        self.ensure_artifact_close_wired(cx);
+        if let Some((tool_id, spec)) = self.last_chart_spec(cx) {
+            self.try_auto_open_chart(&tool_id, spec, cx);
+            return;
+        }
+        let Some((tool_id, path)) = self.last_attachment_image(cx) else {
+            return;
+        };
+        self.try_auto_open_image_artifact(&tool_id, path, cx);
+    }
+
+    fn last_attachment_image(&self, cx: &App) -> Option<(String, PathBuf)> {
+        let traces = self.history_traces(cx);
+        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
+            if msg.is_streaming {
+                continue;
+            }
+            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
+                continue;
+            };
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if let Some(path) = attachment_image_path(tool) {
+                    return Some((tool.id.clone(), path));
+                }
+            }
+        }
+        None
+    }
+
+    fn try_auto_open_chart(
+        &mut self,
+        tool_id: &str,
+        spec: chatty_core::tools::chart_tool::ChartSpec,
+        cx: &mut Context<Self>,
+    ) {
+        if self.last_auto_opened_chart_id.as_deref() == Some(tool_id) {
+            return;
+        }
+        self.last_auto_opened_chart_id = Some(tool_id.to_string());
+        self.show_chart(spec, cx);
+    }
+
+    fn try_auto_open_image_artifact(
+        &mut self,
+        tool_id: &str,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.last_auto_opened_chart_id.as_deref() == Some(tool_id) {
+            return;
+        }
+        self.last_auto_opened_chart_id = Some(tool_id.to_string());
+        self.show_artifact(path, String::new(), None, cx);
+    }
+
+    fn show_chart(
+        &mut self,
+        spec: chatty_core::tools::chart_tool::ChartSpec,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_artifact_close_wired(cx);
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.open_chart(spec, cx);
+        });
+        cx.notify();
+    }
+
+    fn last_query_table_preview(
+        &self,
+        cx: &App,
+    ) -> Option<(String, chatty_core::tools::data_query_tool::TablePreview)> {
+        let traces = self.history_traces(cx);
+        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
+            if msg.is_streaming {
+                continue;
+            }
+            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
+                continue;
+            };
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if tool.tool_name != "query_data" {
+                    continue;
+                }
+                if !matches!(
+                    tool.state,
+                    chatty_core::models::message_types::ToolCallState::Success
+                ) {
+                    continue;
+                }
+                if let Some(preview) = extract_table_preview(tool) {
+                    return Some((tool.id.clone(), preview));
+                }
+            }
+        }
+        None
+    }
+
+    fn maybe_open_query_table(&mut self, cx: &mut Context<Self>) {
+        self.ensure_artifact_close_wired(cx);
+        let Some((tool_id, preview)) = self.last_query_table_preview(cx) else {
+            return;
+        };
+        self.try_auto_open_query_table(&tool_id, preview, cx);
+    }
+
+    fn try_auto_open_query_table(
+        &mut self,
+        tool_id: &str,
+        preview: chatty_core::tools::data_query_tool::TablePreview,
+        cx: &mut Context<Self>,
+    ) {
+        if self.last_auto_opened_table_id.as_deref() == Some(tool_id) {
+            return;
+        }
+        self.last_auto_opened_table_id = Some(tool_id.to_string());
+        self.show_table(preview, cx);
+    }
+
+    fn show_artifact(
+        &mut self,
+        path: PathBuf,
+        source: String,
+        old: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.ensure_artifact_close_wired(cx);
         self.artifact_dismissed = false;
         let workspace = cx
@@ -858,8 +1045,29 @@ impl ChatView {
                 from_disk
             }
         };
-        self.artifact_view
-            .update(cx, |view, cx| view.open(resolved, source, cx));
+        self.artifact_view.update(cx, |view, cx| {
+            view.open(
+                resolved,
+                source,
+                old,
+                cx.try_global::<ExecutionSettingsModel>()
+                    .and_then(|s| s.workspace_dir.clone()),
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    fn show_table(
+        &mut self,
+        preview: chatty_core::tools::data_query_tool::TablePreview,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_artifact_close_wired(cx);
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.open_table(preview, cx);
+        });
         cx.notify();
     }
 
@@ -879,6 +1087,10 @@ impl ChatView {
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
+        self.transcript_content_width =
+            Self::compute_transcript_content_width(window, artifact_docked);
+
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
         // async layout changes (image loading, SVG math, code blocks) always
         // converge to the true bottom. Detect user scroll-away to disable.
@@ -941,6 +1153,21 @@ impl ChatView {
         }
     }
 
+    /// Approximate message column width for virtual-list height estimates.
+    fn compute_transcript_content_width(window: &Window, artifact_docked: bool) -> f32 {
+        const SIDEBAR_AND_CHROME: f32 = 300.0;
+        const ARTIFACT_PANE: f32 = 400.0;
+        const LIST_AND_BUBBLE_INSET: f32 = 56.0;
+
+        let mut width: f32 = window.viewport_size().width.into();
+        width -= SIDEBAR_AND_CHROME;
+        if artifact_docked {
+            width -= ARTIFACT_PANE;
+        }
+        width -= LIST_AND_BUBBLE_INSET;
+        width.max(160.0)
+    }
+
     /// Render the scrollable message list area including the loading skeleton.
     fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_awaiting = self.is_awaiting_response();
@@ -976,10 +1203,11 @@ impl ChatView {
             .as_ref()
             .map(|snapshot| snapshot.todos.len())
             .unwrap_or(0);
+        let content_width = self.transcript_content_width;
         let sizes = Rc::new(
             turns
                 .iter()
-                .map(|turn| estimate_turn_height(turn, plan_steps))
+                .map(|turn| estimate_turn_height(turn, plan_steps, content_width))
                 .collect::<Vec<_>>(),
         );
         let entity = cx.entity();
@@ -990,7 +1218,7 @@ impl ChatView {
             self.ensure_plan_scroll_watch(cx);
         }
         let show_strip = has_plan
-            && plan_block_bottom(&turns, plan_steps, px(16.0))
+            && plan_block_bottom(&turns, plan_steps, px(16.0), content_width)
                 .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
         if !show_strip {
             self.plan_overlay_open = false;
@@ -1105,6 +1333,7 @@ impl ChatView {
                             .track_scroll(&self.list_scroll)
                             .p_4()
                             .pb_12()
+                            .gap_y_2()
                             .flex_1(),
                         )
                         .when(overlay_open, |this| {
@@ -1173,9 +1402,17 @@ impl ChatView {
                 };
                 let on_open: OpenArtifact = {
                     let entity = entity.clone();
-                    Rc::new(move |path, source, cx| {
+                    Rc::new(move |open: ArtifactOpen, cx| {
                         entity.update(cx, |view, cx| {
-                            view.show_artifact(path, source, cx);
+                            view.show_artifact(open.path, open.source, open.old, cx);
+                        });
+                    })
+                };
+                let on_open_table: OpenTable = {
+                    let entity = entity.clone();
+                    Rc::new(move |open: TableOpen, cx| {
+                        entity.update(cx, |view, cx| {
+                            view.show_table(open.preview, cx);
                         });
                     })
                 };
@@ -1205,6 +1442,7 @@ impl ChatView {
                             matches!(
                                 block,
                                 Block::Artifact { .. }
+                                    | Block::TablePreview { .. }
                                     | Block::Approval { .. }
                                     | Block::Plan { .. }
                                     | Block::Error { .. }
@@ -1222,7 +1460,9 @@ impl ChatView {
                         };
                         render_typed_block(
                             block,
+                            turn.message_index,
                             Some(on_open.clone()),
+                            Some(on_open_table.clone()),
                             plan.as_ref(),
                             activity_open,
                             Some(on_activity_toggle.clone()),
@@ -1241,6 +1481,7 @@ impl ChatView {
                                 | Block::Activity { .. }
                                 | Block::Diff { .. }
                                 | Block::Artifact { .. }
+                                | Block::TablePreview { .. }
                                 | Block::Approval { .. }
                                 | Block::Plan { .. }
                                 | Block::Error { .. }
@@ -1342,6 +1583,7 @@ impl ChatView {
                             }
                         });
                     },
+                    Some(on_open_table.clone()),
                     cx,
                 );
                 if streaming_slot.is_some() {
@@ -1466,6 +1708,8 @@ impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_render(window, cx);
         self.maybe_open_pdf_artifact(cx);
+        self.maybe_open_query_table(cx);
+        self.maybe_open_chart_artifact(cx);
         let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         let artifact = self.artifact_view.clone();
         let split = self.artifact_split.clone();

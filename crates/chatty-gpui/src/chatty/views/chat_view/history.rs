@@ -18,6 +18,7 @@ use gpui::*;
 
 use super::super::message_component::{DisplayMessage, MessageRole};
 use super::super::message_types::{SystemTrace, UserMessage};
+use super::super::transcript::inline_chat_attachments;
 use super::ChatView;
 
 impl ChatView {
@@ -51,13 +52,15 @@ impl ChatView {
         self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
+        self.last_auto_opened_table_id = None;
+        self.last_auto_opened_chart_id = None;
 
         for (idx, entry) in entries.iter().enumerate() {
             let feedback = entry.feedback.clone();
             match &entry.message {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
-                    let attachments = entry.attachment_paths.clone();
+                    let attachments = inline_chat_attachments(entry.attachment_paths.clone());
                     if chatty_core::services::is_protocol_follow_up_text(&user_msg.text) {
                         // Protocol nudges stay in the LLM history but are not
                         // rendered as user bubbles (plan UI covers todo protocol).
@@ -101,7 +104,7 @@ impl ChatView {
                         }
                     });
 
-                    let attachments = entry.attachment_paths.clone();
+                    let attachments = inline_chat_attachments(entry.attachment_paths.clone());
                     if !assistant_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::Assistant,

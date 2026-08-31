@@ -10,8 +10,24 @@ use std::rc::Rc;
 
 use gpui::App;
 
+/// Payload when opening a file in the artifact workbench.
+#[derive(Clone, Debug)]
+pub struct ArtifactOpen {
+    pub path: PathBuf,
+    pub source: String,
+    pub old: Option<String>,
+}
+
 /// Open a produced file in the right-hand artifact workbench.
-pub type OpenArtifact = Rc<dyn Fn(PathBuf, String, &mut App)>;
+pub type OpenArtifact = Rc<dyn Fn(ArtifactOpen, &mut App)>;
+
+/// Open a structured query snapshot in the artifact table view.
+#[derive(Clone, Debug)]
+pub struct TableOpen {
+    pub preview: chatty_core::tools::data_query_tool::TablePreview,
+}
+
+pub type OpenTable = Rc<dyn Fn(TableOpen, &mut App)>;
 
 mod action_bar;
 mod activity;
@@ -24,6 +40,7 @@ mod diff;
 mod diff_parse;
 mod plan;
 mod run_pin;
+mod table;
 mod ticker;
 mod tool_row;
 mod types;
@@ -41,14 +58,18 @@ pub use artifact::{
     ArtifactCard, ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view,
 };
 pub use artifact_kind::{
-    is_pdf_artifact_tool, is_pdf_path, is_produced_file_tool, read_artifact_source,
-    resolve_artifact_path, tool_file_path,
+    artifact_language_for_path, attachment_image_path, chart_artifact_path,
+    inline_chat_attachments, is_chart_artifact_tool, is_code_artifact_path, is_image_artifact_tool,
+    is_image_path, is_markdown_artifact_path, is_pdf_artifact_tool, is_pdf_path,
+    is_produced_file_tool, is_tabular_path, read_artifact_source, resolve_artifact_path,
+    tool_file_path,
 };
 pub use block_render::render_typed_block;
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
 pub use diff_parse::parse_unified_diff;
 pub use plan::{PLAN_LIST_TOP_PADDING, PLAN_STRIP_HEIGHT, PlanBlock, PlanOverlay, PlanStrip};
 pub use run_pin::{RunPin, RunPinKind};
+pub use table::{extract_table_preview, inline_table_card_height, render_table_preview_card};
 pub use ticker::HeadlineTicker;
 pub use tool_row::ToolRow;
 pub use types::{Block, BlockId, Turn, TurnRole};

@@ -34,6 +34,7 @@ use super::message_ops_internals::{
     select_recent_assistant_attachments,
 };
 use super::*;
+use crate::chatty::views::transcript::inline_chat_attachments;
 
 impl ChattyApp {
     /// Send a message to the LLM and stream the response.
@@ -688,23 +689,24 @@ impl ChattyApp {
                                     })
                             })
                             .unwrap_or_default();
+                        let inline_attachments = inline_chat_attachments(artifacts);
 
                         self.finalize_completed_stream(
                             conversation_id,
                             *token_usage,
                             trace_json.clone(),
-                            artifacts.clone(),
+                            inline_attachments.clone(),
                             *api_turn_count,
                             cx,
                         );
 
                         // Update display message with attachment paths
-                        if !artifacts.is_empty() {
+                        if !inline_attachments.is_empty() {
                             chat_view.update(cx, |view, cx| {
                                 if view.conversation_id() == Some(conversation_id)
                                     || conversation_id == "__pending__"
                                 {
-                                    view.set_last_assistant_attachments(artifacts, cx);
+                                    view.set_last_assistant_attachments(inline_attachments, cx);
                                 }
                             });
                         }

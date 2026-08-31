@@ -144,7 +144,7 @@ impl DiffHunkList {
         }
     }
 
-    pub fn on_open(mut self, f: impl Fn(PathBuf, String, &mut App) + 'static) -> Self {
+    pub fn on_open(mut self, f: impl Fn(super::ArtifactOpen, &mut App) + 'static) -> Self {
         self.on_open = Some(Rc::new(f));
         self
     }
@@ -269,6 +269,7 @@ impl RenderOnce for DiffHunkList {
 
         let open_path = PathBuf::from(self.path.clone());
         let open_source = self.new.clone();
+        let open_old = Some(self.old.clone());
         let on_open = self.on_open.clone();
 
         div()
@@ -300,7 +301,14 @@ impl RenderOnce for DiffHunkList {
                                 .small()
                                 .label("Open in panel")
                                 .on_click(move |_, _, cx| {
-                                    cb(open_path.clone(), open_source.clone(), cx);
+                                    cb(
+                                        super::ArtifactOpen {
+                                            path: open_path.clone(),
+                                            source: open_source.clone(),
+                                            old: open_old.clone(),
+                                        },
+                                        cx,
+                                    );
                                 }),
                         )
                     }),

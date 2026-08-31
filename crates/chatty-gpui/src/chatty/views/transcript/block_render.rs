@@ -6,18 +6,23 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 
 use super::OpenArtifact;
+use super::OpenTable;
 use super::activity::{ActivityGroup, RunTally};
 use super::approval::{ApprovalCard, ErrorBlock};
 use super::artifact::ArtifactCard;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
+use super::table::render_table_preview_card;
 use super::types::Block;
 
 pub type ActivityToggle = Rc<dyn Fn(u64, &mut App)>;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_typed_block(
     block: &Block,
+    message_index: usize,
     on_open: Option<OpenArtifact>,
+    on_open_table: Option<OpenTable>,
     plan: Option<&AgentTaskSnapshot>,
     activity_open: Option<bool>,
     on_activity_toggle: Option<ActivityToggle>,
@@ -61,18 +66,28 @@ pub fn render_typed_block(
         Block::Diff { id, tool } => {
             let mut hunk = DiffHunkList::from_tool(id.0.to_string(), tool);
             if let Some(on_open) = on_open.clone() {
-                hunk = hunk.on_open(move |path, source, cx| on_open(path, source, cx));
+                hunk = hunk.on_open(move |open, cx| on_open(open, cx));
             }
             hunk.into_any_element()
         }
         Block::Approval { approval, .. } => ApprovalCard::new(approval.clone()).into_any_element(),
-        Block::Artifact { path, .. } => {
-            let mut card = ArtifactCard::new(path.clone());
+        Block::Artifact {
+            path, old_content, ..
+        } => {
+            let mut card = ArtifactCard::new(path.clone()).old_content(old_content.clone());
             if let Some(on_open) = on_open.clone() {
-                card = card.on_open(move |path, source, cx| on_open(path, source, cx));
+                card = card.on_open(move |open, cx| on_open(open, cx));
             }
             card.into_any_element()
         }
+        Block::TablePreview { id, preview } => render_table_preview_card(
+            preview.clone(),
+            message_index,
+            id.0 as usize,
+            on_open_table.clone(),
+            cx,
+        )
+        .into_any_element(),
         Block::Error {
             id,
             message,
