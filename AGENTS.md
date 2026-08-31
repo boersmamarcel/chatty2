@@ -193,6 +193,10 @@ examples.
 - **GPUI / gpui-component skills** — When changing desktop UI, load
   `.claude/skills/gpui` and `.claude/skills/gpui-component` (vendored from
   `npx skills add longbridge/gpui-component`; lockfile `skills-lock.json`).
+- **Transcript blocks** — Typed block/turn types in
+  `chatty-gpui/src/chatty/views/transcript/` render the transcript;
+  persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
+  chatty-core. Don't leak transcript block types into chatty-core.
 
 ## Known gotchas
 
@@ -223,10 +227,10 @@ examples.
 
 7. **Large module directories.** Several complex areas have been split
    into sub-module directories (`chat_view/`, `chat_input/`,
-   `auto_updater/`, `trace_components/`, etc.). Start with the `mod.rs`
-   and its module-level docstring to scope what you need before loading
-   sibling files. The largest single files are `message_ops.rs` (~1260
-   lines) and `main.rs` (~1225 lines).
+   `auto_updater/`, `trace_components/`, `transcript/`, etc.). Start
+   with the `mod.rs` and its module-level docstring to scope what you
+   need before loading sibling files. The largest single files are
+   `message_ops.rs` (~1260 lines) and `main.rs` (~1225 lines).
 
 ## Deeper reading
 

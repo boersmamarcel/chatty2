@@ -170,6 +170,7 @@ sudo apt-get install -y \
   - **macOS**: `~/Library/Application Support/chatty/lib/`
   - **Linux**: `~/.local/share/chatty/lib/` or `$XDG_DATA_HOME/chatty/lib/`
   - **Windows**: `%APPDATA%\chatty\lib\`
+- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui.
 
 ## CI/CD
 
