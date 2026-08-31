@@ -130,7 +130,7 @@ You send a message
 
 You see every tool call, its inputs and outputs, and the agent's reasoning in real time — as collapsible trace blocks alongside the response.
 
-For multi-step tasks, the agent creates a **structured plan** before doing any work: a goal statement and an ordered list of todos. A collapsible **Agent plan** panel appears above the response, showing each step's status (pending, in-progress, done, or blocked) and an overall progress counter. The agent marks each step before and after working on it, then calls a verification step before writing its final reply — so you always know where it is in the work.
+For multi-step tasks, the agent creates a **structured plan** before doing any work: a goal statement and an ordered list of todos. A **To-dos** card appears inline in the transcript and updates in place as steps progress, showing each step's status (pending, in-progress, done, or blocked) and a progress counter. Scroll past it and a compact **Plan N of M** strip pins to the top of the transcript — click it to unfold the full plan, or press Esc to dismiss the overlay without cancelling the run. The agent marks each step before and after working on it, then calls a verification step before writing its final reply — so you always know where it is in the work.
 
 ### What Agents Can Do
 
