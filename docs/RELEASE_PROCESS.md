@@ -220,6 +220,17 @@ This caused two workflows to run simultaneously, racing to upload assets to the 
 1. Build job failed (check Linux/macOS/Windows build logs)
 2. Artifact upload failed (check artifact names match)
 3. `fail_on_unmatched_files: true` - files missing
+4. Prepare Release created the GitHub Release but `release.yml` did not build.
+   Reusable workflows inherit the caller's `github.event_name`, so a
+   `workflow_dispatch` of `prepare-release.yml` used to look like a direct
+   dispatch of `release.yml` from `main` (v0.3.31–v0.3.34). The reusable-call
+   path is marked with `from_prepare: true`.
+
+**Rebuild an existing tag** (owner only; runs the workflow from that tag):
+
+```bash
+gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z
+```
 
 **Debug:**
 - Check "Prepare release assets" step for warnings
