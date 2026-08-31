@@ -60,7 +60,9 @@ fn tool_result_looks_like_error(content_text: &str) -> bool {
         || trimmed.contains("malformed JSON")
 }
 
-fn tool_result_content_to_text(content: &rig_core::completion::message::ToolResultContent) -> Option<String> {
+fn tool_result_content_to_text(
+    content: &rig_core::completion::message::ToolResultContent,
+) -> Option<String> {
     use rig_core::completion::message::ToolResultContent;
 
     match content {
@@ -70,9 +72,7 @@ fn tool_result_content_to_text(content: &rig_core::completion::message::ToolResu
     }
 }
 
-fn streamed_tool_result_to_text(
-    tool_result: &rig_core::completion::message::ToolResult,
-) -> String {
+fn streamed_tool_result_to_text(tool_result: &rig_core::completion::message::ToolResult) -> String {
     tool_result
         .content
         .iter()
@@ -371,8 +371,12 @@ mod tests {
     #[test]
     fn tool_result_looks_like_error_detects_rig_redacted_failures() {
         assert!(tool_result_looks_like_error("the tool failed"));
-        assert!(tool_result_looks_like_error("Error: Data array must not be empty"));
-        assert!(!tool_result_looks_like_error(r#"{"saved_path":"charts/sales.png"}"#));
+        assert!(tool_result_looks_like_error(
+            "Error: Data array must not be empty"
+        ));
+        assert!(!tool_result_looks_like_error(
+            r#"{"saved_path":"charts/sales.png"}"#
+        ));
     }
 
     #[test]
