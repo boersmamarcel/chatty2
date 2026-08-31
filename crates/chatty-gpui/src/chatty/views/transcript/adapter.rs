@@ -8,6 +8,9 @@ use super::artifact_kind::{
     artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
     is_produced_file_tool, tool_file_path,
 };
+use super::session_changes::{
+    file_change_from_tool, file_changes_from_turn, file_changes_height, merge_file_changes,
+};
 use super::table::{extract_table_preview, inline_table_card_height};
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
@@ -65,7 +68,7 @@ pub fn adapt_message_with_trace(
         },
         blocks,
         elapsed,
-        collapsed: collapsed && !msg.is_streaming && matches!(msg.role, MessageRole::Assistant),
+        collapsed: collapsed && matches!(msg.role, MessageRole::Assistant),
         streaming: msg.is_streaming,
     }
 }
@@ -286,6 +289,22 @@ fn is_work_trace_block(block: &Block) -> bool {
     )
 }
 
+fn turn_has_work_fold(turn: &Turn) -> bool {
+    matches!(turn.role, TurnRole::Assistant) && turn.blocks.iter().any(is_work_trace_block)
+}
+
+fn turn_message_is_empty(turn: &Turn) -> bool {
+    !turn.blocks.iter().any(|block| match block {
+        Block::User {
+            content,
+            attachments,
+            ..
+        } => !content.is_empty() || !attachments.is_empty(),
+        Block::Text { content, .. } => !content.is_empty(),
+        _ => false,
+    })
+}
+
 fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
     if turn.collapsed
         && matches!(
@@ -410,9 +429,26 @@ pub fn adapt_messages_with_traces(
 pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f32) -> Size<Pixels> {
     // Mirror `render_visible_turns`: optional work header, typed blocks (not
     // User/Text), then `render_message` for the bubble body.
-    let has_work_fold = matches!(turn.role, TurnRole::Assistant)
-        && !turn.streaming
-        && turn.blocks.iter().any(is_work_trace_block);
+    let has_work_fold = turn_has_work_fold(turn);
+    let empty_message = turn_message_is_empty(turn);
+
+    // Consecutive collapsed work headers should sit tight — no empty bubble
+    // shell and no extra turn padding.
+    if has_work_fold && turn.collapsed && empty_message {
+        let mut receipt_height = 0.0_f32;
+        let mut receipts = 0u32;
+        for block in &turn.blocks {
+            if block_visible_in_turn(turn, block) {
+                receipt_height += block_estimated_height(block, plan_steps, content_width_px);
+                receipts += 1;
+            }
+        }
+        let mut height = COLLAPSED_TURN_HEIGHT + receipt_height;
+        if receipts > 0 {
+            height += 8.0 * receipts as f32;
+        }
+        return size(px(800.), px(height.max(28.0)));
+    }
 
     let mut height = 0.0_f32;
     let mut flex_children = 0u32;
@@ -420,6 +456,14 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
     if has_work_fold {
         height += COLLAPSED_TURN_HEIGHT;
         flex_children += 1;
+    }
+
+    if has_work_fold && !turn.collapsed {
+        let overview = file_changes_height(&file_changes_from_turn(turn));
+        if overview > 0.0 {
+            height += overview;
+            flex_children += 1;
+        }
     }
 
     let mut message_height = 0.0_f32;
@@ -451,16 +495,15 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
         }
     }
 
-    let stacks_message_shell = has_work_fold || flex_children > 0;
-    if stacks_message_shell {
-        // Empty assistant turns still render a padded message shell under receipts.
-        height += message_height.max(32.0);
-        flex_children += 1;
-    } else {
-        height += message_height;
-        if message_height > 0.0 {
-            flex_children += 1;
+    let show_message = !empty_message || (!has_work_fold && message_height > 0.0);
+    if show_message {
+        let stacks_message_shell = has_work_fold || flex_children > 0;
+        if stacks_message_shell {
+            height += message_height.max(32.0);
+        } else {
+            height += message_height;
         }
+        flex_children += 1;
     }
 
     // `gap_2` between work header, typed blocks, and message bubble.
@@ -468,18 +511,32 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
         height += 8.0 * (flex_children - 1) as f32;
     }
 
-    height += 16.0;
+    height += 8.0;
     size(px(800.), px(height.max(36.0)))
 }
 
 pub fn format_worked_for(elapsed: Option<Duration>) -> String {
-    let secs = elapsed.map(|d| d.as_secs()).unwrap_or(0);
+    let Some(duration) = elapsed else {
+        return "Worked for a moment".to_string();
+    };
+    let secs = duration.as_secs();
     if secs < 1 {
-        "Worked for a moment".to_string()
+        format!("Worked for a moment · {}ms", duration.as_millis().max(1))
     } else if secs < 60 {
         format!("Worked for {secs}s")
     } else {
         format!("Worked for {}m {}s", secs / 60, secs % 60)
+    }
+}
+
+pub fn format_working_for(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 1 {
+        "Working".to_string()
+    } else if secs < 60 {
+        format!("Working for {secs}s")
+    } else {
+        format!("Working for {}m {}s", secs / 60, secs % 60)
     }
 }
 
@@ -491,12 +548,25 @@ mod tests {
     fn worked_for_formats_seconds_and_minutes() {
         assert_eq!(format_worked_for(None), "Worked for a moment");
         assert_eq!(
+            format_worked_for(Some(Duration::from_millis(40))),
+            "Worked for a moment · 40ms"
+        );
+        assert_eq!(
             format_worked_for(Some(Duration::from_secs(4))),
             "Worked for 4s"
         );
         assert_eq!(
             format_worked_for(Some(Duration::from_secs(65))),
             "Worked for 1m 5s"
+        );
+        assert_eq!(format_working_for(Duration::from_secs(0)), "Working");
+        assert_eq!(
+            format_working_for(Duration::from_secs(12)),
+            "Working for 12s"
+        );
+        assert_eq!(
+            format_working_for(Duration::from_secs(75)),
+            "Working for 1m 15s"
         );
     }
 
@@ -576,8 +646,24 @@ mod tests {
         let turn = adapt_message(&msg, 0, true);
         let height = estimate_turn_height(&turn, 0, 400.0).height;
         assert!(
-            height >= px(140.0),
+            height >= px(100.0),
             "assistant receipt turn under-estimated at {height:?}"
+        );
+        assert!(
+            height < px(140.0),
+            "collapsed receipt should not reserve an empty message shell, got {height:?}"
+        );
+    }
+
+    #[test]
+    fn collapsed_work_only_turn_is_compact() {
+        let mut msg = assistant_with_tools(vec![sample_tool("a", "read_file")]);
+        msg.content.clear();
+        let turn = adapt_message(&msg, 0, true);
+        let height = estimate_turn_height(&turn, 0, 400.0).height;
+        assert!(
+            height <= px(48.0),
+            "collapsed work header should sit tight, got {height:?}"
         );
     }
 
@@ -902,5 +988,45 @@ mod tests {
             sentence,
             "Edited 4 files, explored 6 files, 2 searches, 1 tool, ran 1 command"
         );
+    }
+
+    #[test]
+    fn apply_diff_becomes_a_file_change() {
+        let mut t = sample_tool("a", "apply_diff");
+        t.input =
+            r#"{"path":"src/main.rs","old_content":"fn a()\n","new_content":"fn b()\nfn c()\n"}"#
+                .into();
+        t.output = Some(r#"{"path":"src/main.rs","insertions":2,"deletions":1}"#.into());
+        let change = file_change_from_tool(&t).expect("edit");
+        assert_eq!(change.path, std::path::PathBuf::from("src/main.rs"));
+        assert_eq!(change.added, 2);
+        assert_eq!(change.removed, 1);
+        assert!(change.old.contains("fn a"));
+        assert!(change.new.contains("fn c"));
+    }
+
+    #[test]
+    fn merge_sums_repeated_edits_to_the_same_path() {
+        let mut first = sample_tool("a", "apply_diff");
+        first.input = r#"{"path":"a.yml","old_content":"x","new_content":"y"}"#.into();
+        first.output = Some(r#"{"path":"a.yml","insertions":4,"deletions":1}"#.into());
+        let mut second = sample_tool("b", "apply_diff");
+        second.input = r#"{"path":"a.yml","old_content":"y","new_content":"z"}"#.into();
+        second.output = Some(r#"{"path":"a.yml","insertions":2,"deletions":0}"#.into());
+        let merged = merge_file_changes([
+            file_change_from_tool(&first).unwrap(),
+            file_change_from_tool(&second).unwrap(),
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].added, 6);
+        assert_eq!(merged[0].removed, 1);
+        assert_eq!(merged[0].old, "x");
+        assert_eq!(merged[0].new, "z");
+    }
+
+    #[test]
+    fn explore_tools_are_not_file_changes() {
+        let t = sample_tool("r", "read_file");
+        assert!(file_change_from_tool(&t).is_none());
     }
 }

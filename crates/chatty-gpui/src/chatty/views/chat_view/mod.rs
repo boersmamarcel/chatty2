@@ -57,6 +57,7 @@ use gpui_component::{Icon, IconName, VirtualListScrollHandle, v_virtual_list};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
 use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
@@ -66,15 +67,17 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, OpenArtifact,
-    OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, TableOpen, Turn, TurnRole,
-    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, extract_table_preview,
-    format_worked_for, is_pdf_artifact_tool, is_pdf_path, new_artifact_view, plan_block_bottom,
+    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, FileChange,
+    OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind,
+    SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
+    attach_plan_block, attachment_image_path, estimate_turn_height, extract_table_preview,
+    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
+    is_pdf_artifact_tool, is_pdf_path, merge_file_changes, new_artifact_view, plan_block_bottom,
     plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
-    tool_file_path, attachment_image_path,
+    resolve_artifact_path, tool_file_path,
 };
-use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::chatty::models::MessageFeedback;
+use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
 
@@ -141,6 +144,11 @@ pub struct ChatView {
     activity_expanded: HashMap<u64, bool>,
     /// Usable transcript column width (px) for virtual-list height estimates.
     transcript_content_width: f32,
+    /// Wall clock for the in-flight assistant turn (work-fold timer + duration stamp).
+    stream_started_at: Option<Instant>,
+    /// Hide the session "N files changed" bar after Keep all.
+    session_review_dismissed: bool,
+    elapsed_tick_started: bool,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -309,6 +317,9 @@ impl ChatView {
             artifact_split: cx.new(|_| ResizableState::default()),
             activity_expanded: HashMap::new(),
             transcript_content_width: 480.0,
+            stream_started_at: None,
+            session_review_dismissed: false,
+            elapsed_tick_started: false,
         }
     }
 
@@ -401,7 +412,7 @@ impl ChatView {
     }
 
     fn should_collapse_turn(&self, index: usize, msg: &DisplayMessage) -> bool {
-        if msg.is_streaming || !matches!(msg.role, MessageRole::Assistant) {
+        if !matches!(msg.role, MessageRole::Assistant) {
             return false;
         }
         self.collapsed_turns
@@ -460,6 +471,7 @@ impl ChatView {
 
         // Reset the thinking indicator so the elapsed counter restarts
         // and the user sees a fresh word for the new turn.
+        self.stream_started_at = Some(Instant::now());
         self.thinking_indicator
             .update(cx, |indicator, cx| indicator.reset(cx));
 
@@ -525,6 +537,7 @@ impl ChatView {
             return;
         }
 
+        self.stamp_trace_duration();
         let last = &mut self.messages[idx];
         let had_live_trace = last.live_trace.is_some();
         let had_streaming_cache = self.streaming_parse_cache.is_some();
@@ -625,6 +638,7 @@ impl ChatView {
         let Some(idx) = self.parent_streaming_assistant_index() else {
             return;
         };
+        self.stamp_trace_duration();
         let last = &mut self.messages[idx];
         // Append cancellation notice to the message
         if !last.content.is_empty() {
@@ -657,6 +671,7 @@ impl ChatView {
 
     /// Extract the current trace before finalizing (for persistence)
     pub fn extract_current_trace(&mut self) -> Option<SystemTrace> {
+        self.stamp_trace_duration();
         // Prefer a trace that actually has items. The continuation bubble
         // below a sub-agent card starts with an empty live_trace and must
         // not hide the pre-tool parent's tool calls (or the Conversation
@@ -673,6 +688,21 @@ impl ChatView {
             }
         }
         None
+    }
+
+    fn stamp_trace_duration(&mut self) {
+        let Some(started) = self.stream_started_at else {
+            return;
+        };
+        let elapsed = started.elapsed();
+        for msg in self.messages.iter_mut().rev() {
+            if let Some(trace) = msg.live_trace.as_mut() {
+                if trace.total_duration.is_none() {
+                    trace.total_duration = Some(elapsed);
+                }
+                return;
+            }
+        }
     }
 
     /// Restore a live trace from a saved SystemTrace (e.g. when switching back to a streaming conversation).
@@ -1085,6 +1115,89 @@ impl ChatView {
             .collect()
     }
 
+    fn session_file_changes(&self, cx: &App) -> Vec<FileChange> {
+        let mut collected = Vec::new();
+        for msg in &self.messages {
+            let live = msg.live_trace.as_ref();
+            let stored = msg
+                .system_trace_view
+                .as_ref()
+                .map(|view| view.read(cx).get_trace());
+            let trace = live.or(stored);
+            if let Some(trace) = trace {
+                for item in &trace.items {
+                    if let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item
+                        && let Some(change) = file_change_from_tool(tool)
+                    {
+                        collected.push(change);
+                    }
+                }
+            }
+        }
+        merge_file_changes(collected)
+    }
+
+    fn open_session_review(&mut self, cx: &mut Context<Self>) {
+        let workspace = cx
+            .try_global::<ExecutionSettingsModel>()
+            .and_then(|s| s.workspace_dir.clone());
+        let workspace_path = workspace.as_ref().map(PathBuf::from);
+        let changes = self.session_file_changes(cx);
+        let files: Vec<_> = changes
+            .into_iter()
+            .map(|change| {
+                let resolved = resolve_artifact_path(&change.path, workspace_path.as_deref());
+                let new = if change.new.is_empty() {
+                    read_artifact_source(&resolved)
+                } else {
+                    change.new
+                };
+                let old = if change.old.is_empty() {
+                    None
+                } else {
+                    Some(change.old)
+                };
+                (resolved, new, old)
+            })
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        self.ensure_artifact_close_wired(cx);
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.open_review(files, workspace, cx);
+        });
+        cx.notify();
+    }
+
+    fn ensure_elapsed_tick(&mut self, cx: &mut Context<Self>) {
+        if self.elapsed_tick_started || !self.is_thinking_indicator_visible() {
+            return;
+        }
+        self.elapsed_tick_started = true;
+        cx.spawn(async move |entity, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let keep = entity
+                    .update(cx, |this, cx| {
+                        if this.is_thinking_indicator_visible() {
+                            cx.notify();
+                            true
+                        } else {
+                            this.elapsed_tick_started = false;
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
@@ -1175,6 +1288,7 @@ impl ChatView {
         let show_start_screen = turns.is_empty() && !is_awaiting;
         let thinking_visible = self.is_thinking_indicator_visible();
         if thinking_visible {
+            self.ensure_elapsed_tick(cx);
             let attention = self.messages.iter().rev().find_map(|msg| {
                 msg.live_trace.as_ref().and_then(|trace| {
                     trace.items.iter().rev().find_map(|item| match item {
@@ -1211,6 +1325,12 @@ impl ChatView {
                 .collect::<Vec<_>>(),
         );
         let entity = cx.entity();
+        let session_entity = entity.clone();
+        let session_changes = if self.session_review_dismissed {
+            Vec::new()
+        } else {
+            self.session_file_changes(cx)
+        };
         let user_away = self.user_scrolled_away;
         let has_approval = self.active_approval_for_display().is_some();
         let has_plan = self.plan_snapshot_active();
@@ -1348,6 +1468,28 @@ impl ChatView {
                 )
                 .vertical_scrollbar(&self.list_scroll)
             })
+            .when(!session_changes.is_empty(), |this| {
+                this.child(
+                    SessionChangeBar::new(session_changes)
+                        .on_review({
+                            let entity = session_entity.clone();
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.open_session_review(cx);
+                                });
+                            }
+                        })
+                        .on_keep_all({
+                            let entity = session_entity;
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.session_review_dismissed = true;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+            })
             .when(thinking_visible, |this| this.child(thinking_indicator))
             .child(
                 RunPin::new(if has_approval && user_away {
@@ -1383,6 +1525,7 @@ impl ChatView {
 
         let entity = cx.entity();
         let plan = self.agent_task_snapshot.clone();
+        let live_elapsed = self.stream_started_at.map(|t| t.elapsed());
         range
             .filter_map(|ix| turns.get(ix).cloned())
             .map(|turn| {
@@ -1473,7 +1616,6 @@ impl ChatView {
                     .collect();
 
                 let show_work_fold = matches!(turn.role, TurnRole::Assistant)
-                    && !turn.streaming
                     && turn.blocks.iter().any(|block| {
                         matches!(
                             block,
@@ -1488,7 +1630,11 @@ impl ChatView {
                         )
                     });
                 let work_header = show_work_fold.then(|| {
-                    let label = format_worked_for(turn.elapsed);
+                    let label = if turn.streaming {
+                        format_working_for(live_elapsed.unwrap_or_default())
+                    } else {
+                        format_worked_for(turn.elapsed)
+                    };
                     let msg_index = turn.message_index;
                     let entity = entity.clone();
                     let collapsed = turn.collapsed;
@@ -1524,6 +1670,11 @@ impl ChatView {
                         )
                         .into_any_element()
                 });
+                let file_overview = (!turn.collapsed && show_work_fold).then(|| {
+                    let changes = file_changes_from_turn(&turn);
+                    (!changes.is_empty()).then(|| TurnFileOverview::new(changes).into_any_element())
+                });
+                let skip_empty_message = msg.content.is_empty() && work_header.is_some();
 
                 let mut msg_for_text = msg.clone();
                 if !typed.is_empty() || work_header.is_some() {
@@ -1592,14 +1743,20 @@ impl ChatView {
                 if typed.is_empty() && work_header.is_none() {
                     text
                 } else {
+                    let gap = if skip_empty_message && typed.is_empty() {
+                        px(2.)
+                    } else {
+                        px(8.)
+                    };
                     div()
                         .flex()
                         .flex_col()
-                        .gap_2()
+                        .gap(gap)
                         .w_full()
                         .children(work_header)
+                        .children(file_overview.flatten())
                         .children(typed)
-                        .child(text)
+                        .when(!skip_empty_message, |this| this.child(text))
                         .into_any_element()
                 }
             })

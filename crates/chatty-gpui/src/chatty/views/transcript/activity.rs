@@ -193,8 +193,8 @@ impl RenderOnce for ActivityGroup {
             .tools
             .iter()
             .any(|t| matches!(t.state, ToolCallState::Running));
-        // Failures and in-flight groups stay expanded; settled success uses `open`.
-        let open = if running || RunTally::has_failure(&self.tools) {
+        // Failures stay expanded; in-flight groups follow `open` (default collapsed).
+        let open = if RunTally::has_failure(&self.tools) {
             true
         } else {
             self.open

@@ -326,6 +326,25 @@ impl ArtifactView {
         cx.notify();
     }
 
+    /// Open every session file in the dock, starting on the Diff tab when an
+    /// old body is available (review mode).
+    pub fn open_review(
+        &mut self,
+        files: Vec<(PathBuf, String, Option<String>)>,
+        workspace_root: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.files = files;
+        let Some((path, source, old)) = self.files.first().cloned() else {
+            return;
+        };
+        self.open(path, source, old, workspace_root, cx);
+        if !self.old.is_empty() && self.old != self.source {
+            self.tab = 2;
+        }
+        cx.notify();
+    }
+
     pub fn set_mode(&mut self, mode: ArtifactMode, cx: &mut Context<Self>) {
         self.mode = mode;
         cx.notify();

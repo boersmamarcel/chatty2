@@ -1,6 +1,5 @@
 use std::rc::Rc;
 
-use chatty_core::models::message_types::ToolCallState;
 use chatty_core::services::AgentTaskSnapshot;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -51,10 +50,7 @@ pub fn render_typed_block(
             })
             .into_any_element(),
         Block::Activity { id, tools } => {
-            let running = tools
-                .iter()
-                .any(|t| matches!(t.state, ToolCallState::Running));
-            let default_open = running || RunTally::has_failure(tools);
+            let default_open = RunTally::has_failure(tools);
             let open = activity_open.unwrap_or(default_open);
             let mut group = ActivityGroup::new(tools.clone()).open(open);
             if let Some(toggle) = on_activity_toggle {

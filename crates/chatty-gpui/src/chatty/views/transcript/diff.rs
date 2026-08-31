@@ -161,6 +161,38 @@ impl DiffHunkList {
                 on_open: None,
             };
         }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool.input) {
+            let path = json
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let old = json
+                .get("old_content")
+                .or_else(|| json.get("old_string"))
+                .or_else(|| json.get("old"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let new = json
+                .get("new_content")
+                .or_else(|| json.get("new_string"))
+                .or_else(|| json.get("new"))
+                .or_else(|| json.get("content"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if !old.is_empty() || !new.is_empty() {
+                return Self {
+                    id: id.into(),
+                    path,
+                    hunk: String::new(),
+                    old,
+                    new,
+                    on_open: None,
+                };
+            }
+        }
         Self {
             id: id.into(),
             path: String::new(),

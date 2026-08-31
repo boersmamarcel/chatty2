@@ -189,7 +189,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn diff_stats(
+pub(crate) fn diff_stats(
     tool_name: &str,
     input: &str,
     output: Option<&str>,
