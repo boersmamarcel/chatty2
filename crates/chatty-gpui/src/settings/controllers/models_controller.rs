@@ -1,6 +1,24 @@
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
+use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 use gpui::{App, AsyncApp};
-use tracing::error;
+use tracing::{error, info, warn};
+
+/// Emit `ModelsChanged` so the main window chat-input model picker refreshes.
+fn notify_models_changed(cx: &mut App) {
+    if let Some(notifier) = cx
+        .try_global::<GlobalModelsNotifier>()
+        .and_then(|g| g.get())
+    {
+        info!("Notifying models changed — refreshing chat input picker");
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(ModelsNotifierEvent::ModelsChanged);
+        });
+    } else {
+        warn!(
+            "notify_models_changed: GlobalModelsNotifier not found — chat input will not refresh"
+        );
+    }
+}
 
 /// Create a new model
 pub fn create_model(mut config: ModelConfig, cx: &mut App) {
@@ -18,6 +36,7 @@ pub fn create_model(mut config: ModelConfig, cx: &mut App) {
 
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
+    notify_models_changed(cx);
 
     // 4. Save async with error handling
     save_models_async(models_to_save, cx);
@@ -38,6 +57,7 @@ pub fn update_model(updated_config: ModelConfig, cx: &mut App) {
 
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
+    notify_models_changed(cx);
 
     // 4. Save async with error handling
     save_models_async(models_to_save, cx);
@@ -58,6 +78,7 @@ pub fn delete_model(model_id: String, cx: &mut App) {
 
     // 3. Refresh UI immediately (optimistic update)
     cx.refresh_windows();
+    notify_models_changed(cx);
 
     // 4. Save async with error handling
     save_models_async(models_to_save, cx);

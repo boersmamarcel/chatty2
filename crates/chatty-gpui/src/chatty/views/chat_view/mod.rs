@@ -1261,7 +1261,9 @@ impl ChatView {
             }
         }
 
-        // Refresh available models from global store (in case they changed)
+        // Refresh available models from global store (safety net if a change
+        // notification was missed). Sync even when the list is empty so deletes
+        // clear the picker.
         if let Some(models_model) = cx.try_global::<ModelsModel>() {
             let models_list: Vec<ModelOption> = models_model
                 .models()
@@ -1269,16 +1271,12 @@ impl ChatView {
                 .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
                 .collect();
 
-            if !models_list.is_empty() {
-                self.chat_input_state.update(cx, |state, _cx| {
-                    if state.available_models().is_empty()
-                        || state.available_models() != models_list.as_slice()
-                    {
-                        let default_model_id = models_list.first().map(|model| model.id.clone());
-                        state.set_available_models(models_list, default_model_id);
-                    }
-                });
-            }
+            self.chat_input_state.update(cx, |state, cx| {
+                if state.available_models() != models_list.as_slice() {
+                    let default_model_id = models_list.first().map(|model| model.id.clone());
+                    state.set_available_models(models_list, default_model_id, cx);
+                }
+            });
         }
     }
 

@@ -167,14 +167,30 @@ impl ChatInputState {
         &self.available_skills
     }
 
-    /// Set available models for selection
-    pub fn set_available_models(&mut self, models: Vec<ModelOption>, default_id: Option<String>) {
+    /// Set available models for selection and notify so the picker re-renders.
+    ///
+    /// If the current selection is missing from the new list (or was unset),
+    /// falls back to `default_id` then the first model.
+    pub fn set_available_models(
+        &mut self,
+        models: Vec<ModelOption>,
+        default_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.available_models = models;
 
-        if self.selected_model_id.is_none() {
-            self.selected_model_id =
-                default_id.or_else(|| self.available_models.first().map(|m| m.id.clone()));
+        let selection_missing = self
+            .selected_model_id
+            .as_ref()
+            .is_none_or(|id| !self.available_models.iter().any(|m| &m.id == id));
+
+        if selection_missing {
+            self.selected_model_id = default_id
+                .filter(|id| self.available_models.iter().any(|m| &m.id == id))
+                .or_else(|| self.available_models.first().map(|m| m.id.clone()));
         }
+
+        cx.notify();
     }
 
     /// Get the available models list
