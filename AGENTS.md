@@ -15,6 +15,26 @@
 > Take only `owner:ai` issues unless told otherwise. Never answer or close a
 > `gate:reflection` issue. Ordinary chatty2 work is unaffected by any of this.
 >
+> ### Recorded decisions: `ADR-NNNN`
+>
+> An issue citing **`ADR-NNNN`** carries an architecture decision recorded outside
+> this repo, in the maintainer's notes vault. Its Decision, Kill criteria and
+> rejected Alternatives are mirrored into the issue body — **that mirror is the
+> normative copy for you**, and it is deliberately one-way: vault → Linear, never
+> back.
+>
+> Build to it. Do not re-litigate a recorded decision in code, in comments, or in
+> the issue. If you think one is wrong or has been overtaken by the code, **say so
+> and stop** — revising it means a new ADR, which is Marcel's call, not an agent's.
+>
+> **Three places record decisions today.** Know which one you are in:
+> [`docs/research/`](docs/research/README.md) — repo-local decision records (crate
+> promises, Harbor pivot, cost model), the ones you can read from here ·
+> **Linear `gate:product-decision`** — product policy Marcel answers in a comment ·
+> **`ADR-NNNN`** — decisions recorded in Marcel's notes vault and mirrored into the
+> issue that cites them. Do not create a fourth. If a decision fits `docs/research/`,
+> put it there rather than inventing a new folder.
+>
 > ### Auto-ship (zero-human patch releases)
 >
 > Low-risk work may merge and **patch-release** without Marcel when — and only when —

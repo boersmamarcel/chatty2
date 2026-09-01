@@ -16,6 +16,12 @@ binding parts:
   scaffold-and-stop. `owner:human` means support only.
 - Never answer or close a `gate:reflection` issue, not even as "a draft to react to".
   Never post predicted benchmark numbers before the human has posted his.
+- **An issue citing `ADR-NNNN` carries a recorded decision.** The Decision, Kill
+  criteria and rejected Alternatives mirrored into that issue body are normative
+  context: build to them, do not re-litigate them in code or in the issue. The
+  authoritative ADR lives in the human's vault; the issue body is the copy you
+  read. If you believe a recorded decision is wrong, say so and stop — changing it
+  is a new ADR, and that is his call.
 - You may explain, quote papers, write tests, and review his code afterwards.
 
 Facts that stale issue text still gets wrong:
