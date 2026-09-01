@@ -3,10 +3,10 @@
 > How Chatty communicates with agents — both remote A2A services and locally installed WASM modules.
 
 **Authoring WASM plugins?** Start with
-[Build a WASM plugin](../guides/build-wasm-module.md)
+[Build a WASM plugin](../docs-site/src/dev/guides/build-wasm-module.md)
 (quick start + host LLM diagrams), then the
-[echo-agent](../guides/tutorial-echo-agent.md) and
-[benford-agent](../guides/tutorial-benford-agent.md)
+[echo-agent](../docs-site/src/dev/guides/tutorial-echo-agent.md) and
+[benford-agent](../docs-site/src/dev/guides/tutorial-benford-agent.md)
 tutorials.
 
 ---

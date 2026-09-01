@@ -206,7 +206,7 @@ flowchart LR
   LLM --> Providers[LLM providers]
 ```
 
-See [build-wasm-module guide](../guides/build-wasm-module.md)
+See [build-wasm-module guide](../docs-site/src/dev/guides/build-wasm-module.md)
 (sequence diagrams) and [a2a-and-wasm-modules.md](a2a-and-wasm-modules.md).
 
 ## Persistence map
