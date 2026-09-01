@@ -82,7 +82,9 @@ impl RenderOnce for DiffStatRow {
             .flex()
             .flex_row()
             .items_center()
+            .justify_start()
             .gap_2()
+            .w_full()
             .px_2()
             .py_1()
             .child(

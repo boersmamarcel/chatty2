@@ -17,11 +17,10 @@ use gpui_component::button::{Button, ButtonVariants, DropdownButton};
 use gpui_component::input::{Input, InputState, Position};
 use gpui_component::list::ListItem;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::tree::{TreeItem, TreeState, tree};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Icon, IconName, Sizable, v_flex};
 use tracing::warn;
 
 use super::artifact_card::reveal_path_in_os;
@@ -786,13 +785,15 @@ fn artifact_primary_body(
 }
 
 fn artifact_source_input(editor: &Entity<InputState>) -> AnyElement {
-    div()
+    // Match gpui-component inspector: v_flex().flex_1() parent + Input::h_full().
+    // The panel body slot must also be flex-col (see render) or flex_1 never resolves.
+    v_flex()
         .id("artifact-source")
         .flex_1()
         .min_h_0()
+        .h_full()
         .w_full()
-        .overflow_y_scrollbar()
-        .child(Input::new(editor).w_full().appearance(true))
+        .child(Input::new(editor).h_full().w_full().appearance(true))
         .into_any_element()
 }
 
@@ -893,6 +894,7 @@ impl Render for ArtifactView {
                 .flex_col()
                 .flex_1()
                 .min_h_0()
+                .h_full()
                 .w_full()
                 .child(
                     TabBar::new("artifact-modes")
@@ -917,6 +919,7 @@ impl Render for ArtifactView {
                         .flex_row()
                         .flex_1()
                         .min_h_0()
+                        .h_full()
                         .w_full()
                         .when(show_outline, |this| {
                             this.child(
@@ -944,23 +947,33 @@ impl Render for ArtifactView {
                                 .flex_col()
                                 .flex_1()
                                 .min_h_0()
+                                .h_full()
                                 .w_full()
                                 .when(visible_tab == 0, |this| {
                                     if is_tabular {
-                                        this.p_2().child(tabular_rendered_body(&tabular, cx))
+                                        this.flex_1()
+                                            .min_h_0()
+                                            .p_2()
+                                            .child(tabular_rendered_body(&tabular, cx))
                                     } else {
-                                        this.child(artifact_primary_body(
-                                            path_ref.as_ref(),
-                                            &rendered,
-                                            &editor,
-                                            full,
-                                            window,
-                                            cx,
-                                        ))
+                                        this.flex_1()
+                                            .min_h_0()
+                                            .h_full()
+                                            .child(artifact_primary_body(
+                                                path_ref.as_ref(),
+                                                &rendered,
+                                                &editor,
+                                                full,
+                                                window,
+                                                cx,
+                                            ))
                                     }
                                 })
                                 .when(visible_tab == 1, |this| {
-                                    this.child(artifact_source_input(&editor))
+                                    this.flex_1()
+                                        .min_h_0()
+                                        .h_full()
+                                        .child(artifact_source_input(&editor))
                                 })
                                 .when(has_diff && visible_tab == 2, |this| {
                                     this.p_2().child(
@@ -1001,31 +1014,44 @@ impl Render for ArtifactView {
             .as_ref()
             .map(|p| artifact_format_token(p))
             .unwrap_or_default();
-        let file_buttons: Vec<AnyElement> = self
-            .files
-            .iter()
-            .map(|(path, source, old)| {
-                let label = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                let entity = entity.clone();
-                let path = path.clone();
-                let source = source.clone();
-                let old = old.clone();
-                Button::new(ElementId::Name(format!("artifact-file-{label}").into()))
-                    .ghost()
-                    .small()
-                    .label(label)
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            let workspace = this.workspace_root.clone();
-                            this.open(path.clone(), source.clone(), old.clone(), workspace, cx);
-                        });
-                    })
-                    .into_any_element()
+        let selected_file_index = self
+            .path
+            .as_ref()
+            .and_then(|active| {
+                self.files
+                    .iter()
+                    .position(|(path, _, _)| path == active)
             })
-            .collect();
+            .unwrap_or(0);
+        let file_tab_bar = (self.files.len() > 1).then(|| {
+            let files = self.files.clone();
+            TabBar::new("artifact-files")
+                .small()
+                .menu(true)
+                .selected_index(selected_file_index)
+                .on_click({
+                    let entity = entity.clone();
+                    move |ix, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            let Some((path, source, old)) = this.files.get(*ix).cloned() else {
+                                return;
+                            };
+                            if this.path.as_ref() == Some(&path) {
+                                return;
+                            }
+                            let workspace = this.workspace_root.clone();
+                            this.open(path, source, old, workspace, cx);
+                        });
+                    }
+                })
+                .children(files.iter().map(|(path, _, _)| {
+                    let label = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    Tab::new().label(label)
+                }))
+        });
 
         let expand_icon = if full {
             IconName::Minimize
@@ -1125,8 +1151,8 @@ impl Render for ArtifactView {
                                 .small()
                                 .icon(Icon::new(IconName::ExternalLink).size_3())
                                 .tooltip("Reveal")
-                                .on_click(move |_, _, _cx| {
-                                    reveal_path_in_os(&path);
+                                .on_click(move |_, _, cx| {
+                                    reveal_path_in_os(&path, cx);
                                 }),
                         )
                     })
@@ -1151,16 +1177,7 @@ impl Render for ArtifactView {
                             })),
                     ),
             )
-            .when(file_buttons.len() > 1, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_1()
-                        .children(file_buttons),
-                )
-            });
+            .when_some(file_tab_bar, |this, tabs| this.child(tabs));
 
         let stale_banner = self.stale.then(|| {
             div()
@@ -1208,8 +1225,11 @@ impl Render for ArtifactView {
             .when_some(stale_banner, |this, banner| this.child(banner))
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .h_full()
                     .w_full()
                     .relative()
                     .child(body)

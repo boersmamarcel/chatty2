@@ -12,8 +12,9 @@ use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 use super::OpenArtifact;
 use super::artifact_kind::{
     artifact_file_name, artifact_meta_line, artifact_peek_lines, csv_stat_line, is_image_path,
-    is_pdf_path, is_tabular_path, read_artifact_source,
+    is_pdf_path, is_tabular_path, read_artifact_source, resolve_artifact_path,
 };
+use crate::settings::models::execution_settings::ExecutionSettingsModel;
 
 const IMAGE_THUMB_PX: f32 = 120.0;
 const PEEK_LINES: usize = 20;
@@ -70,24 +71,54 @@ fn open_payload(
     }
 }
 
-pub fn reveal_path_in_os(path: &Path) {
-    let result = {
+pub fn reveal_path_in_os(path: &Path, cx: &App) {
+    let workspace = cx
+        .try_global::<ExecutionSettingsModel>()
+        .and_then(|settings| settings.workspace_dir.as_deref())
+        .map(Path::new);
+    let resolved = resolve_artifact_path(path, workspace);
+    let target = if resolved.exists() {
+        resolved
+    } else if let Some(parent) = resolved.parent().filter(|parent| !parent.as_os_str().is_empty())
+    {
+        parent.to_path_buf()
+    } else {
+        resolved
+    };
+
+    let result = if target.is_dir() {
         #[cfg(target_os = "macos")]
         {
-            Command::new("open").arg("-R").arg(path).spawn()
+            Command::new("open").arg(&target).spawn()
         }
         #[cfg(target_os = "windows")]
         {
-            Command::new("explorer").arg("/select,").arg(path).spawn()
+            Command::new("explorer").arg(&target).spawn()
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let parent = path.parent().unwrap_or(path);
+            Command::new("xdg-open").arg(&target).spawn()
+        }
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg("-R").arg(&target).spawn()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Command::new("explorer")
+                .arg("/select,")
+                .arg(&target)
+                .spawn()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let parent = target.parent().unwrap_or(&target);
             Command::new("xdg-open").arg(parent).spawn()
         }
     };
     if let Err(error) = result {
-        tracing::warn!(error = ?error, path = %path.display(), "Failed to reveal artifact path");
+        tracing::warn!(error = ?error, path = %target.display(), "Failed to reveal artifact path");
     }
 }
 
@@ -151,6 +182,7 @@ impl RenderOnce for ArtifactCard {
             .overflow_hidden()
             .flex()
             .flex_row()
+            .items_center()
             .child(div().w(px(4.)).bg(if open {
                 cx.theme().accent
             } else {
@@ -158,12 +190,10 @@ impl RenderOnce for ArtifactCard {
             }))
             .child(
                 div()
-                    .w(px(36.))
-                    .overflow_hidden()
                     .flex()
-                    .items_end()
+                    .items_center()
                     .justify_center()
-                    .mb(px(-10.))
+                    .px_1()
                     .child(glyph),
             )
             .child(
@@ -248,8 +278,8 @@ impl RenderOnce for ArtifactCard {
                         .label("Reveal")
                         .on_click({
                             let path = path.clone();
-                            move |_, _, _cx| {
-                                reveal_path_in_os(&path);
+                            move |_, _, cx| {
+                                reveal_path_in_os(&path, cx);
                             }
                         }),
                     )

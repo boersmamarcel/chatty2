@@ -287,21 +287,31 @@ impl RenderOnce for SessionChangeBar {
                                     let path = change.path.clone();
                                     let on_open = on_open_file.clone();
                                     let row_id = format!("session-file-{}", change.path_display());
-                                    Button::new(ElementId::Name(row_id.into()))
-                                        .ghost()
-                                        .xsmall()
+                                    div()
+                                        .id(ElementId::Name(row_id.into()))
                                         .w_full()
-                                        .on_click(move |_, _, cx| {
-                                            if let Some(cb) = &on_open {
-                                                cb(path.clone(), cx);
-                                            }
-                                        })
-                                        .child(DiffStatRow::new(
-                                            change.path_display(),
-                                            change.path_display(),
-                                            change.added,
-                                            change.removed,
-                                        ))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_start()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_, _, cx| {
+                                                if let Some(cb) = &on_open {
+                                                    cb(path.clone(), cx);
+                                                }
+                                            },
+                                        )
+                                        .child(
+                                            DiffStatRow::new(
+                                                change.path_display(),
+                                                change.path_display(),
+                                                change.added,
+                                                change.removed,
+                                            ),
+                                        )
                                 })),
                         )
                     }),
