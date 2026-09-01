@@ -456,6 +456,13 @@ cat > "$OUT/llms.txt" << EOF
 - [GPUI event catalog](${SITE_BASE}/dev/reference/event-catalog.html)
 - [Singleton inventory](${SITE_BASE}/dev/reference/singleton-inventory.html)
 
+## User guides
+
+- [Getting started](${SITE_BASE}/user/getting-started.html)
+- [Agents](${SITE_BASE}/user/agents.html)
+- [Agentic tools](${SITE_BASE}/user/agentic-tools.html)
+- [Terminal interface](${SITE_BASE}/user/terminal.html)
+
 ## How-to guides
 
 - [Add a provider](${SITE_BASE}/dev/guides/add-provider.html)
@@ -473,7 +480,7 @@ cat > "$OUT/llms.txt" << EOF
 ## Optional
 
 - [Full context bundle](${SITE_BASE}/llms-full.txt): concatenated key pages for large-context agents
-- [Marketing site](https://github.com/boersmamarcel/chatty): end-user README and screenshots
+- [Marketing site](https://github.com/boersmamarcel/chatty): product marketing and extra demos
 - [Source repo](https://github.com/boersmamarcel/chatty2)
 EOF
 

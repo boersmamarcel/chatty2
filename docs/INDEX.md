@@ -9,6 +9,26 @@ for coding patterns and behavioural rules read
 
 **Published site:** GitHub Pages mdBook (run `make docs-serve` locally).
 
+## User guides (mdBook `/user/`)
+
+End-user how-to pages are hand-written in `docs-site/src/user/` (not copies of
+`docs/`). The repo [README.md](../README.md) is a short landing page that
+points here.
+
+| File | When to read |
+|---|---|
+| [`../docs-site/src/user/getting-started.md`](../docs-site/src/user/getting-started.md) | First-run download, provider, model, tools |
+| [`../docs-site/src/user/overview.md`](../docs-site/src/user/overview.md) | What Chatty is (docs voice) |
+| [`../docs-site/src/user/agents.md`](../docs-site/src/user/agents.md) | Agent loop, plans, context window |
+| [`../docs-site/src/user/providers-and-models.md`](../docs-site/src/user/providers-and-models.md) | Providers, models, capabilities |
+| [`../docs-site/src/user/agentic-tools.md`](../docs-site/src/user/agentic-tools.md) | Built-in tools and MCP |
+| [`../docs-site/src/user/memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and skills |
+| [`../docs-site/src/user/sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless `chatty-tui` children |
+| [`../docs-site/src/user/security.md`](../docs-site/src/user/security.md) | Workspace, shell, approval, secrets |
+| [`../docs-site/src/user/features.md`](../docs-site/src/user/features.md) | Rendering, traces, export, themes |
+| [`../docs-site/src/user/terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` modes and keybindings |
+| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | AGE-97 split decisions (GIF placement) |
+
 ## Architecture & design
 
 | File | When to read | What it covers |

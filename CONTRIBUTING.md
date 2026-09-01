@@ -7,11 +7,13 @@ Thank you for contributing to [chatty2](https://github.com/boersmamarcel/chatty2
 | Resource | Location |
 |----------|----------|
 | **Developer docs (site)** | `make docs-serve` → [GitHub Pages](https://boersmamarcel.github.io/chatty2/) |
+| **User guides** | [Getting started](https://boersmamarcel.github.io/chatty2/user/getting-started.html) (`docs-site/src/user/`) |
+| **Repo landing page** | [`README.md`](README.md) (short; not the user manual) |
 | **Agent quick-start** | [`AGENTS.md`](AGENTS.md) |
 | **Coding patterns** | [`CLAUDE.md`](CLAUDE.md) |
 | **Architecture index** | [`docs/INDEX.md`](docs/INDEX.md) |
 | **Component diagrams** | [`docs/component-map.md`](docs/component-map.md) |
-| **Marketing / end users** | [github.com/boersmamarcel/chatty](https://github.com/boersmamarcel/chatty) |
+| **Marketing / extra demos** | [github.com/boersmamarcel/chatty](https://github.com/boersmamarcel/chatty) |
 
 ## Development workflow
 
