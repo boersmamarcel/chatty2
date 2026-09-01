@@ -124,6 +124,7 @@ source_files:
   - crates/chatty-core/src/settings/repositories/generic_json_repository.rs
   - crates/chatty-core/src/settings/repositories/oauth_credential_json_repository.rs
   - crates/chatty-core/src/settings/repositories/module_settings_json_repository.rs
+  - crates/chatty-core/src/services/mcp_token_store.rs
   - crates/chatty-core/src/settings/models/
 related:
   - ./env-vars.md
@@ -146,9 +147,9 @@ for a persisted setting. Source of truth:
 
 ## Config vs data directories
 
-JSON settings live under `dirs::config_dir()/chatty` — resolved by
-`generic_json_repository::chatty_config_dir()`. WASM module **binaries**
-and agent memory live under `dirs::data_dir()/chatty`.
+JSON settings live under `dirs::config_dir()/chatty` (used by
+`GenericJsonRepository`). WASM module **binaries** and agent memory live
+under `dirs::data_dir()/chatty`.
 
 | Kind | Resolver | Linux | macOS | Windows |
 |------|----------|-------|-------|---------|
@@ -162,7 +163,8 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 
 - **Single-object files** (`load` / `save`): missing file → `T::default()`.
 - **List files** (`load_all` / `save_all`): missing file → `[]`.
-- **Writes** are atomic: pretty-printed JSON to `*.json.<pid>.tmp`, then rename.
+- **Settings JSON writes** are atomic: pretty-printed JSON to a sibling
+  `*.json.<pid>.tmp`, then rename (`GenericJsonRepository`).
 - Serde field names are snake_case unless a table notes otherwise.
 - `#[serde(skip)]` fields are runtime-only and never written to disk.
 
@@ -182,7 +184,7 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 | `models.json` | array | `ModelConfig` | `JsonModelsRepository` |
 | `mcp_servers.json` | array | `McpServerConfig` | `JsonMcpRepository` |
 | `a2a_agents.json` | array | `A2aAgentConfig` | `A2aJsonRepository` |
-| `mcp_oauth_<sanitized>.json` | object | opaque `StoredCredentials` JSON | `JsonOAuthCredentialRepository` |
+| `mcp_oauth_<sanitized>.json` | object | opaque `StoredCredentials` JSON | live: `FileCredentialStore`; also `JsonOAuthCredentialRepository` |
 
 Secrets in **bold** must never appear in logs, traces, or LLM-facing tool
 output. Docs examples use `"****"` or omit the field.
@@ -352,7 +354,7 @@ Source: `settings/models/providers_store.rs`. See also
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `name` | `String` | required | Display name |
-| `provider_type` | `ProviderType` | required | JSON: `openrouter`, `ollama`, `azure_openai`. Legacy aliases `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as `openrouter` |
+| `provider_type` | `ProviderType` | required | JSON: `open_router`, `ollama`, `azure_openai`. Serde `rename_all = "snake_case"` on the variant `OpenRouter` yields `open_router` — the string `openrouter` **does not** deserialize. Legacy aliases `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter |
 | **`api_key`** | `Option<String>` | omitted if `null` | Secret. Never expose to the LLM |
 | `base_url` | `Option<String>` | omitted if `null` | Ollama / Azure / OpenAI-compat |
 | `extra_config` | `Map<String, String>` | `{}` (omitted if empty) | Azure: `auth_method` = `api_key` (default) or `entra_id` |
@@ -370,7 +372,7 @@ Source: `settings/models/models_store.rs`.
 |-------|------|---------|-------|
 | `id` | `String` | required | Internal UUID (not the API model name) |
 | `name` | `String` | required | UI label |
-| `provider_type` | `ProviderType` | required | Same enum as providers |
+| `provider_type` | `ProviderType` | required | Same enum as providers (`open_router` / `ollama` / `azure_openai`) |
 | `model_identifier` | `String` | required | API / Ollama model id |
 | `temperature` | `f32` | `1.0` | |
 | `preamble` | `String` | `""` | System prompt / GEPA target |
@@ -429,6 +431,11 @@ characters in the server name (except `-` `_`) become `_`.
 Example: server `my server/with:special.chars` →
 `mcp_oauth_my_server_with_special_chars.json`.
 
+The **live writer** is `FileCredentialStore` (`mcp_token_store.rs`), used by
+`McpService`. `JsonOAuthCredentialRepository` uses the same filenames but is
+not registered in `init_repositories()`. `FileCredentialStore` writes the
+JSON directly (not the temp-file rename used by settings repos).
+
 Shape is opaque `rmcp::StoredCredentials` JSON (`client_id`,
 `token_response`, `granted_scopes`, …). **Do not paste real token files
 into issues, PRs, or docs.** Corrupt files are deleted on load.
@@ -448,6 +455,9 @@ into issues, PRs, or docs.** Corrupt files are deleted on load.
 
 Planned research settings (`FlowSettingsModel`, playbook store) are **not
 implemented** — see [settings integration map](../adrs/settings-integration-map.md).
+
+`openrouter_curated.json` also lives in the config dir (GPUI OpenRouter catalog
+override: `[{id, name}, …]`). It is **not** a settings repository.
 
 ## Related
 
@@ -500,7 +510,7 @@ Source: `crates/chatty-core/src/settings/models/providers_store.rs`,
 ### OpenRouter
 
 - Gateway to 200+ upstream models (Anthropic, OpenAI, Google, Mistral, Meta, …).
-- Legacy JSON values `open_ai`, `anthropic`, `gemini`, `mistral` deserialize as `openrouter` for backward compatibility.
+- Persisted `ProviderType` JSON is `open_router` (serde snake_case). Legacy values `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter. The string `openrouter` is **not** accepted.
 - `configured_providers()` requires a non-empty `api_key`.
 - Rig client: `rig_core::providers::openrouter::Client`.
 - MCP tools are sanitized for OpenAI-compatible schemas before attachment.
