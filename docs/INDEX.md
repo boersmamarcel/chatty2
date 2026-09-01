@@ -37,6 +37,7 @@ for coding patterns and behavioural rules read
 | File | When to read | What it covers |
 |---|---|---|
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Version bump, changelog, GH Release |
+| [`stale-doc-policy.md`](stale-doc-policy.md) | Code changed, unsure if docs must | Same-PR rule, drift reports, update-agent-docs |
 | [`monty-sandbox.md`](monty-sandbox.md) | Code execution | Docker / Monty sandbox |
 | [`debug_ui.md`](debug_ui.md) | Layout/rendering bugs | `CHATTY_DEBUG_UI` overlay |
 | [`refactor-followups.md`](refactor-followups.md) | Large-file splits | Deferred agent-friendliness work |
