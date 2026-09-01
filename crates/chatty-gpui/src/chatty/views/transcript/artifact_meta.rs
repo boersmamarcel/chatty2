@@ -185,10 +185,10 @@ pub fn parse_headings(source: &str) -> Vec<Heading> {
 }
 
 pub fn heading_index_for_line(headings: &[Heading], line: u32) -> usize {
-    match headings.iter().rposition(|h| h.source_line <= line) {
-        Some(idx) => idx,
-        None => 0,
-    }
+    headings
+        .iter()
+        .rposition(|h| h.source_line <= line)
+        .unwrap_or_default()
 }
 
 /// Capture a content-relative anchor from a pixel scroll fraction.
@@ -321,9 +321,12 @@ fn reveal_command(path: &Path) -> std::io::Result<std::process::ExitStatus> {
 }
 
 /// Nested outline items: `(id = source_line, label, children)`.
-pub fn outline_tree(headings: &[Heading]) -> Vec<(String, String, Vec<(String, String)>)> {
+type OutlineChild = (String, String);
+type OutlineRoot = (String, String, Vec<OutlineChild>);
+
+pub fn outline_tree(headings: &[Heading]) -> Vec<OutlineRoot> {
     // Flattened parent/child pairs for tests; the view builds TreeItem from this.
-    let mut roots: Vec<(String, String, Vec<(String, String)>)> = Vec::new();
+    let mut roots: Vec<OutlineRoot> = Vec::new();
     let mut current_root: Option<usize> = None;
     for h in headings {
         let id = h.source_line.to_string();
