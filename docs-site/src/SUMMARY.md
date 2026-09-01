@@ -114,6 +114,9 @@
 
 # How-to guides
 
+- [Build a WASM plugin](./dev/guides/build-wasm-module.md)
+- [Tutorial: echo-agent](./dev/guides/tutorial-echo-agent.md)
+- [Tutorial: benford-agent](./dev/guides/tutorial-benford-agent.md)
 - [Add a new LLM provider](./dev/guides/add-provider.md)
 - [Add a new LLM tool](./dev/guides/add-tool.md)
 - [Add a slash command](./dev/guides/add-slash-command.md)

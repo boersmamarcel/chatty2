@@ -28,6 +28,8 @@ for f in "$ROOT"/docs/*.md; do
   base="$(basename "$f")"
   [[ "$base" == "INDEX.md" ]] && continue
   copy "$f" "$ARCH/$base"
+  # mdBook layout: guides live at dev/guides/, not docs-site/src/dev/guides/
+  sed -i 's|](../docs-site/src/dev/guides/|](../guides/|g' "$ARCH/$base"
 done
 
 # ADRs / research decisions

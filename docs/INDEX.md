@@ -47,6 +47,9 @@ points here.
 
 | File | When to read | What it covers |
 |---|---|---|
+| [`../docs-site/src/dev/guides/build-wasm-module.md`](../docs-site/src/dev/guides/build-wasm-module.md) | **Author a WASM plugin** | Quick start, host LLM Mermaid diagrams, testing |
+| [`../docs-site/src/dev/guides/tutorial-echo-agent.md`](../docs-site/src/dev/guides/tutorial-echo-agent.md) | First WASM tutorial | echo-agent SDK walkthrough |
+| [`../docs-site/src/dev/guides/tutorial-benford-agent.md`](../docs-site/src/dev/guides/tutorial-benford-agent.md) | Agentic WASM tutorial | benford-agent LLM + tool loop |
 | [`a2a-and-wasm-modules.md`](a2a-and-wasm-modules.md) | WASM agents or A2A | End-to-end module flow |
 | [`wit-reference.md`](wit-reference.md) | Authoring WASM modules | WIT interface schemas |
 | [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded MCP catalog |
