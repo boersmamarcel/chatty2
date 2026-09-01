@@ -29,12 +29,11 @@ pub fn set_global_write_approval_mode(mode: ApprovalMode) {
 /// Maximum characters to show in content preview
 const PREVIEW_MAX_CHARS: usize = 200;
 
-/// Truncate a string for preview display
-fn preview(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
+/// Truncate a string for preview display (character-safe for UTF-8).
+fn preview(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        None => s.to_string(),
+        Some((byte_ix, _)) => format!("{}...", &s[..byte_ix]),
     }
 }
 
@@ -699,7 +698,21 @@ impl Tool for MoveFileTool {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_final_answer;
+    use super::{normalize_final_answer, preview};
+
+    #[test]
+    fn preview_truncates_on_char_boundary_not_bytes() {
+        // '─' is 3 bytes; a 200-byte cut can land inside it and panic with byte indexing.
+        let content = "─".repeat(100);
+        let result = preview(&content, 50);
+        assert_eq!(result.chars().count(), 53); // 50 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn preview_short_string_unchanged() {
+        assert_eq!(preview("hello", 200), "hello");
+    }
 
     #[test]
     fn final_answer_normalizes_scalar_wrappers() {

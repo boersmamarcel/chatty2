@@ -91,6 +91,14 @@ pub fn is_standalone_artifact_path(path: &Path) -> bool {
     is_image_path(path) || is_pdf_path(path) || is_tabular_path(path)
 }
 
+/// Deliverables that earn a transcript artifact receipt card.
+pub fn is_transcript_artifact_receipt(path: &Path) -> bool {
+    is_markdown_artifact_path(path)
+        || is_pdf_path(path)
+        || is_image_path(path)
+        || is_tabular_path(path)
+}
+
 /// Previous file body for diff view when a tool carried it (e.g. `apply_diff`).
 pub fn artifact_old_content_from_tool(
     tool: &chatty_core::models::message_types::ToolCallBlock,
@@ -105,6 +113,27 @@ pub fn artifact_old_content_from_tool(
         .or_else(|| json.get("old"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// Path for UI display: relative to workspace when possible.
+pub fn artifact_display_path(path: &Path, workspace: Option<&Path>) -> String {
+    let resolved = resolve_artifact_path(path, workspace);
+    if let Some(ws) = workspace.filter(|w| !w.as_os_str().is_empty()) {
+        if let Ok(rel) = resolved.strip_prefix(ws) {
+            let trimmed = rel
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .trim_start_matches('\\')
+                .to_string();
+            if !trimmed.is_empty() {
+                return trimmed.replace('\\', "/");
+            }
+        }
+    }
+    if path.is_relative() {
+        return path.to_string_lossy().replace('\\', "/");
+    }
+    resolved.to_string_lossy().replace('\\', "/")
 }
 
 /// Resolve a tool-produced path against the workspace (and cwd). Relative
@@ -260,6 +289,10 @@ pub fn tool_file_path(input: &str) -> Option<PathBuf> {
 pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     let name = tool_name.to_ascii_lowercase();
     if name.contains("todo") || name == "verify_completion" {
+        return false;
+    }
+    // Directory creation is an activity-row event, not a document artifact.
+    if name == "create_directory" {
         return false;
     }
     if (name.contains("write") || name.contains("create")) && !name.contains("diff") {
@@ -581,6 +614,14 @@ mod tests {
         let resolved = resolve_artifact_path(Path::new("poem.md"), Some(&dir));
         assert_eq!(resolved, file);
         assert_eq!(read_artifact_source(&resolved), "# hi");
+        assert_eq!(artifact_display_path(&file, Some(&dir)), "poem.md");
+        assert_eq!(
+            artifact_display_path(
+                &dir.join("docs/report.md"),
+                Some(&dir),
+            ),
+            "docs/report.md"
+        );
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&dir);
     }
@@ -622,6 +663,10 @@ mod tests {
             Some(r#"{"saved_path":"/abs/out.pdf","page_count":1}"#)
         ));
         assert!(is_produced_file_tool("write_file", r#"{"path":"a.md"}"#));
+        assert!(!is_produced_file_tool(
+            "create_directory",
+            r#"{"path":"src/components"}"#
+        ));
         assert!(!is_produced_file_tool(
             "google_search",
             r#"{"query":"pdf"}"#
@@ -750,6 +795,17 @@ mod tests {
             presentation_on_open(ArtifactMode::Docked, false),
             ArtifactMode::Docked
         );
+    }
+
+    #[test]
+    fn transcript_artifact_receipt_allowlist() {
+        assert!(is_transcript_artifact_receipt(Path::new("README.md")));
+        assert!(is_transcript_artifact_receipt(Path::new("report.pdf")));
+        assert!(is_transcript_artifact_receipt(Path::new("chart.png")));
+        assert!(is_transcript_artifact_receipt(Path::new("data.csv")));
+        assert!(!is_transcript_artifact_receipt(Path::new("index.html")));
+        assert!(!is_transcript_artifact_receipt(Path::new("main.rs")));
+        assert!(!is_transcript_artifact_receipt(Path::new("app.py")));
     }
 
     #[test]

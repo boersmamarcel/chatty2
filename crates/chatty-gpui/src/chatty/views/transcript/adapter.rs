@@ -7,7 +7,8 @@ use gpui::{Pixels, Size, px, size};
 use super::activity::{RunTally, classify_tool};
 use super::artifact_kind::{
     artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
-    is_produced_file_tool, is_standalone_artifact_path, tool_file_path,
+    is_produced_file_tool, is_standalone_artifact_path, is_transcript_artifact_receipt,
+    tool_file_path,
 };
 use super::session_changes::{
     file_change_from_tool, file_changes_from_turn, file_changes_height, merge_file_changes,
@@ -144,7 +145,9 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                 {
                     activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
-                    if let Some(path) = chart_artifact_path(tool) {
+                    if let Some(path) = chart_artifact_path(tool)
+                        && is_transcript_artifact_receipt(&path)
+                    {
                         blocks.push(Block::Artifact {
                             id: BlockId::from_parts(namespace, &tool.id),
                             path,
@@ -156,7 +159,9 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                 {
                     activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
-                    if let Some(path) = attachment_image_path(tool) {
+                    if let Some(path) = attachment_image_path(tool)
+                        && is_transcript_artifact_receipt(&path)
+                    {
                         blocks.push(Block::Artifact {
                             id: BlockId::from_parts(namespace, &tool.id),
                             path,
@@ -168,7 +173,9 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                     // an artifact receipt so provenance stays next to the turn.
                     activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
-                    if let Some(path) = artifact_path(tool) {
+                    if let Some(path) = artifact_path(tool)
+                        && is_transcript_artifact_receipt(&path)
+                    {
                         blocks.push(Block::Artifact {
                             id: BlockId::from_parts(namespace, &tool.id),
                             path,
@@ -220,9 +227,23 @@ fn consolidate_receipt_artifacts(blocks: &mut Vec<Block>, namespace: u64) {
         match block {
             Block::Artifact {
                 path, old_content, ..
-            } if !is_standalone_artifact_path(&path) => {
+            } if is_transcript_artifact_receipt(&path) && !is_standalone_artifact_path(&path) => {
                 pending.push((path, old_content));
             }
+            Block::Artifact {
+                path,
+                old_content,
+                id,
+                ..
+            } if is_transcript_artifact_receipt(&path) => {
+                flush_batch(&mut pending, &mut out);
+                out.push(Block::Artifact {
+                    id,
+                    path,
+                    old_content,
+                });
+            }
+            Block::Artifact { .. } => {}
             other => {
                 flush_batch(&mut pending, &mut out);
                 out.push(other);
@@ -1103,6 +1124,147 @@ mod tests {
         assert_eq!(merged[0].removed, 1);
         assert_eq!(merged[0].old, "x");
         assert_eq!(merged[0].new, "z");
+    }
+
+    #[test]
+    fn write_file_html_does_not_become_artifact_block() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "w1".into(),
+            tool_name: "write_file".into(),
+            display_name: "Writing file".into(),
+            input: r#"{"path":"index.html","content":"<html></html>"}"#.into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            !turn
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::Artifact { .. } | Block::ArtifactBatch { .. })),
+            "code/html writes should not produce artifact cards, got {:?}",
+            turn.blocks
+        );
+        assert!(
+            turn.blocks
+                .iter()
+                .any(|block| matches!(block, Block::Activity { .. })),
+            "write should still appear in activity, got {:?}",
+            turn.blocks
+        );
+    }
+
+    #[test]
+    fn write_file_markdown_becomes_artifact_block() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "w2".into(),
+            tool_name: "write_file".into(),
+            display_name: "Writing file".into(),
+            input: r#"{"path":"README.md","content":"Hello world"}"#.into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            turn.blocks.iter().any(|block| {
+                matches!(block, Block::Artifact { path, .. } if path.ends_with("README.md"))
+            }),
+            "markdown writes should produce artifact cards, got {:?}",
+            turn.blocks
+        );
+    }
+
+    #[test]
+    fn create_directory_does_not_become_artifact_block() {
+        use chatty_core::models::message_types::{
+            SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+        };
+
+        let tool = ToolCallBlock {
+            id: "d1".into(),
+            tool_name: "create_directory".into(),
+            display_name: "Creating directory".into(),
+            input: r#"{"path":"src/components"}"#.into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: Some(SystemTrace {
+                items: vec![TraceItem::ToolCall(tool)],
+                total_duration: None,
+                active_tool_index: None,
+            }),
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: None,
+        };
+        let turn = adapt_message(&msg, 0, false);
+        assert!(
+            !turn
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::Artifact { .. } | Block::ArtifactBatch { .. })),
+            "create_directory should not produce artifact cards, got {:?}",
+            turn.blocks
+        );
     }
 
     #[test]
