@@ -15,14 +15,11 @@ use super::artifact_kind::artifact_display_path;
 use super::artifact_view::ArtifactView;
 use super::diff_parse::split_path;
 use crate::chatty::views::diff_view_component::{
-    CachedDiffView, DiffRenderCache, REVIEW_MAX_LINES, REVIEW_PREVIEW_LINES, diff_line_stats_fast,
-    prepare_diff_cache,
+    CachedDiffView, DiffRenderCache, diff_line_stats_fast, prepare_diff_cache,
+    review_diff_estimated_height,
 };
 
 const REVIEW_HEADER_HEIGHT: f32 = 36.0;
-const REVIEW_DIFF_LINE_HEIGHT: f32 = 20.0;
-const REVIEW_DIFF_PADDING: f32 = 20.0;
-const REVIEW_EXPANDER_HEIGHT: f32 = 28.0;
 
 /// Directory (muted, may truncate) immediately followed by basename.
 fn review_path_header(dir: &str, base: &str, muted: Hsla, foreground: Hsla) -> impl IntoElement {
@@ -75,22 +72,7 @@ impl ReviewDiffPane {
     }
 
     pub fn estimated_height(&self) -> f32 {
-        let total_items = self.cache.items.len();
-        if total_items == 0 {
-            return REVIEW_DIFF_PADDING + 24.0;
-        }
-        let visible = if self.fully_expanded {
-            total_items.min(REVIEW_MAX_LINES)
-        } else {
-            total_items.min(REVIEW_PREVIEW_LINES)
-        };
-        let mut height = REVIEW_DIFF_PADDING + visible as f32 * REVIEW_DIFF_LINE_HEIGHT;
-        if !self.fully_expanded && total_items > REVIEW_PREVIEW_LINES {
-            height += REVIEW_EXPANDER_HEIGHT;
-        } else if self.fully_expanded && total_items > REVIEW_MAX_LINES {
-            height += 24.0;
-        }
-        height
+        review_diff_estimated_height(&self.cache, self.fully_expanded)
     }
 }
 
@@ -113,6 +95,7 @@ pub struct ReviewFileSection {
     base: String,
     old_content: String,
     new_content: String,
+    diff_cache: DiffRenderCache,
     added: usize,
     removed: usize,
     collapsed: bool,
@@ -136,12 +119,14 @@ impl ReviewFileSection {
         let (dir, base) = split_path(&path_display);
         let old_content = old_content.unwrap_or_default();
         let (added, removed) = diff_line_stats_fast(&old_content, &new_content);
+        let diff_cache = prepare_diff_cache(&old_content, &new_content);
         Self {
             path,
             dir,
             base,
             old_content,
             new_content,
+            diff_cache,
             added,
             removed,
             collapsed,
@@ -164,16 +149,14 @@ impl ReviewFileSection {
                 .diff_pane
                 .as_ref()
                 .map(|pane| pane.read(cx).estimated_height())
-                .unwrap_or(
-                    REVIEW_DIFF_PADDING + REVIEW_PREVIEW_LINES as f32 * REVIEW_DIFF_LINE_HEIGHT,
-                )
+                .unwrap_or_else(|| review_diff_estimated_height(&self.diff_cache, false))
     }
 
     fn ensure_diff_pane(&mut self, cx: &mut Context<Self>) {
         if self.diff_pane.is_some() {
             return;
         }
-        let cache = prepare_diff_cache(&self.old_content, &self.new_content);
+        let cache = self.diff_cache.clone();
         let file_ix = self.file_ix;
         let artifact_view = self.artifact_view.clone();
         self.diff_pane = Some(cx.new(|_| ReviewDiffPane {
@@ -197,6 +180,9 @@ impl ReviewFileSection {
 
 impl Render for ReviewFileSection {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.collapsed {
+            self.ensure_diff_pane(cx);
+        }
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let chevron = if self.collapsed {
@@ -219,11 +205,14 @@ impl Render for ReviewFileSection {
         let base = self.base.clone();
         let diff_pane = self.diff_pane.clone();
         let foreground = cx.theme().foreground;
+        let section_height = self.estimated_height(cx);
 
         div()
             .flex()
             .flex_col()
             .w_full()
+            .h(px(section_height))
+            .min_h_0()
             .overflow_hidden()
             .border_b_1()
             .border_color(border)

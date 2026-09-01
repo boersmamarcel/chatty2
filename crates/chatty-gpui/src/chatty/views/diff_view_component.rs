@@ -18,6 +18,30 @@ pub const REVIEW_PREVIEW_LINES: usize = 8;
 /// Session review: hard cap on rendered diff rows even after "Show more".
 pub const REVIEW_MAX_LINES: usize = 32;
 
+const REVIEW_DIFF_LINE_HEIGHT: f32 = 20.0;
+const REVIEW_DIFF_PADDING: f32 = 20.0;
+const REVIEW_EXPANDER_HEIGHT: f32 = 28.0;
+
+/// Height reserved for one review diff block (must match rendered layout).
+pub fn review_diff_estimated_height(cache: &DiffRenderCache, fully_expanded: bool) -> f32 {
+    let total_items = cache.items.len();
+    if total_items == 0 {
+        return REVIEW_DIFF_PADDING + 24.0;
+    }
+    let visible = if fully_expanded {
+        total_items.min(REVIEW_MAX_LINES)
+    } else {
+        total_items.min(REVIEW_PREVIEW_LINES)
+    };
+    let mut height = REVIEW_DIFF_PADDING + visible as f32 * REVIEW_DIFF_LINE_HEIGHT;
+    if !fully_expanded && total_items > REVIEW_PREVIEW_LINES {
+        height += REVIEW_EXPANDER_HEIGHT;
+    } else if fully_expanded && total_items > REVIEW_MAX_LINES {
+        height += 24.0;
+    }
+    height
+}
+
 /// Number of equal (context) lines to show around each change hunk.
 const CONTEXT_LINES: usize = 3;
 
@@ -411,7 +435,7 @@ fn render_diff_from_cache(
                     ChangeTag::Equal => (gpui::transparent_black(), " ", muted_text),
                 };
                 let display_text = text.trim_end_matches('\n').to_string();
-                div()
+                let mut line = div()
                     .id(ElementId::Name(
                         format!("diff-line-{message_index}-{tool_index}-{i}").into(),
                     ))
@@ -435,9 +459,13 @@ fn render_diff_from_cache(
                             .flex_1()
                             .min_w_0()
                             .text_color(line_color)
+                            .when(review_mode, |this| this.overflow_hidden().truncate())
                             .child(display_text),
-                    )
-                    .into_any_element()
+                    );
+                if review_mode {
+                    line = line.h(px(REVIEW_DIFF_LINE_HEIGHT)).overflow_hidden();
+                }
+                line.into_any_element()
             }
             DiffDisplayItem::CollapsedEqual(count) => div()
                 .id(ElementId::Name(
