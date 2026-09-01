@@ -362,7 +362,7 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 
 **Source files:** `stream_manager.rs`, `sidebar_view.rs`, `chat_input/mod.rs`, `chat_view/mod.rs`, `message_types.rs` (TraceEvent), `models_notifier.rs`, `agent_config_notifier.rs`, `error_notifier.rs`.
 
-**Adding a new event:** define an enum on the emitter entity, `impl EventEmitter<YourEvent>`, subscribe in the parent (usually `ChattyApp` or `ChatView`). Never use `Arc<dyn Fn>` callbacks between entities.
+**Adding a new event:** define an enum on the emitter entity, `impl EventEmitter<YourEvent>`, subscribe in the parent (usually `ChattyApp` or `ChatView`). Never use `Arc<dyn Fn>` callbacks between entities. Step-by-step: [Add a desktop GPUI view](../guides/add-gpui-view.md).
 EOF
 
 # ── Singleton inventory ──────────────────────────────────────────────────────
@@ -456,11 +456,19 @@ cat > "$OUT/llms.txt" << EOF
 - [GPUI event catalog](${SITE_BASE}/dev/reference/event-catalog.html)
 - [Singleton inventory](${SITE_BASE}/dev/reference/singleton-inventory.html)
 
+## User guides
+
+- [Getting started](${SITE_BASE}/user/getting-started.html)
+- [Agents](${SITE_BASE}/user/agents.html)
+- [Agentic tools](${SITE_BASE}/user/agentic-tools.html)
+- [Terminal interface](${SITE_BASE}/user/terminal.html)
+
 ## How-to guides
 
 - [Add a provider](${SITE_BASE}/dev/guides/add-provider.html)
 - [Add a tool](${SITE_BASE}/dev/guides/add-tool.html)
 - [Add a slash command](${SITE_BASE}/dev/guides/add-slash-command.html)
+- [Add a desktop GPUI view](${SITE_BASE}/dev/guides/add-gpui-view.html)
 - [Debug streams](${SITE_BASE}/dev/guides/debug-streams.html)
 - [Build & package](${SITE_BASE}/dev/guides/build-package.html)
 
@@ -472,7 +480,7 @@ cat > "$OUT/llms.txt" << EOF
 ## Optional
 
 - [Full context bundle](${SITE_BASE}/llms-full.txt): concatenated key pages for large-context agents
-- [Marketing site](https://github.com/boersmamarcel/chatty): end-user README and screenshots
+- [Marketing site](https://github.com/boersmamarcel/chatty): product marketing and extra demos
 - [Source repo](https://github.com/boersmamarcel/chatty2)
 EOF
 
