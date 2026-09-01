@@ -3,6 +3,9 @@
 Forensic Benford's Law audit agent — a chatty WASM module that demonstrates a
 **full agentic tool-calling loop** running entirely inside the WASM sandbox.
 
+**Tutorial:** [benford-agent walkthrough](https://boersmamarcel.github.io/chatty2/dev/guides/tutorial-benford-agent.html)
+(mdBook) · full source in this directory.
+
 ---
 
 ## What it does

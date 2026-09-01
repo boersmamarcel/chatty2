@@ -106,6 +106,17 @@ items show type (**Agent**, **MCP**, **A2A**) and context:
 
 WASM modules that support both modes get **Switch to Local** / **Switch to Cloud**.
 
+### Build your own WASM module
+
+Developer guide:
+[Build a WASM plugin](../dev/guides/build-wasm-module.md)
+with tutorials for the reference modules
+[echo-agent](../dev/guides/tutorial-echo-agent.md) and
+[benford-agent](../dev/guides/tutorial-benford-agent.md).
+Source lives under
+[`modules/`](https://github.com/boersmamarcel/chatty2/tree/main/modules)
+in the repository.
+
 ### Built-in catalog
 
 Pre-loaded under **Installed**, disabled until you click **Enable**:

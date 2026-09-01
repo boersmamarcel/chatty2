@@ -12,6 +12,7 @@ flowchart TD
   LLM -->|New tool| Tool["chatty-core/src/tools/ + agent_factory"]
   LLM -->|New provider| Prov["ProviderType + agent_factory/"]
   LLM -->|Stream bug| SM["stream-manager.md + StreamManager"]
+  LLM -->|WASM plugin| WASM["build-wasm-module.md + tutorials"]
   LLM -->|No| Data{Change data/settings?}
   Data -->|New setting| Set["settings/models + repositories + GPUI settings"]
   Data -->|Persistence| Repo["repositories/ or settings/repositories/"]
@@ -29,6 +30,7 @@ flowchart TD
 | Understand the big picture | [system-overview.md](./architecture/system-overview.md) |
 | See component diagrams | [component-map.md](./architecture/component-map.md) |
 | Find a workspace crate | [crates.md](./crates.md) |
+| Build a WASM plugin | [build-wasm-module.md](./guides/build-wasm-module.md) · [echo tutorial](./guides/tutorial-echo-agent.md) · [benford tutorial](./guides/tutorial-benford-agent.md) |
 | Add an LLM tool | [add-tool.md](./guides/add-tool.md) |
 | Add a provider | [add-provider.md](./guides/add-provider.md) |
 | Add a slash command | [add-slash-command.md](./guides/add-slash-command.md) |
