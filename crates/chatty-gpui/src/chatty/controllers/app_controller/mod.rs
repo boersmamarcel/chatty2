@@ -32,8 +32,8 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
-use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 use chatty_core::exporters::atif_exporter::conversation_to_atif;
 use chatty_core::exporters::jsonl_exporter::{
     SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,

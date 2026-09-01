@@ -126,15 +126,7 @@ impl ModelsListView {
                     let show_catalog =
                         current_tab == 0 && is_openrouter && !catalog_models.is_empty();
 
-                    let form = div().id("add-model-form");
-                    let form = if show_catalog {
-                        form
-                    } else {
-                        form.overflow_y_scrollbar().max_h(px(350.))
-                    };
-
-                    form.child(
-                            v_flex()
+                    let form_body = v_flex()
                                 .gap_3()
                                 .p_4()
                                 .child({
@@ -514,8 +506,18 @@ impl ModelsListView {
                                                 }
                                             }),
                                         ),
-                                ),
-                        ),
+                                );
+
+                    if show_catalog {
+                        form_body.into_any_element()
+                    } else {
+                        div()
+                            .id("add-model-form")
+                            .overflow_y_scrollbar()
+                            .max_h(px(350.))
+                            .child(form_body)
+                            .into_any_element()
+                    }
                 })
         });
     }
