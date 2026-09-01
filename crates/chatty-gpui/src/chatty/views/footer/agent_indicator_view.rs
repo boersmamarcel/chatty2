@@ -142,7 +142,7 @@ impl RenderOnce for AgentIndicatorView {
             [one] => one.name.clone(),
             [first, ..] => format!("{} +{}", first.name, enabled_count - 1),
         };
-        let agent_color = rgb(0x22C55E); // Green-500
+        let agent_color = cx.theme().primary;
 
         div().when(total_count > 0, |this| {
             let indicator_button = Button::new("agent-indicator")

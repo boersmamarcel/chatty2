@@ -9,6 +9,26 @@ for coding patterns and behavioural rules read
 
 **Published site:** GitHub Pages mdBook (run `make docs-serve` locally).
 
+## User guides (mdBook `/user/`)
+
+End-user how-to pages are hand-written in `docs-site/src/user/` (not copies of
+`docs/`). The repo [README.md](../README.md) is a short landing page that
+points here.
+
+| File | When to read |
+|---|---|
+| [`../docs-site/src/user/getting-started.md`](../docs-site/src/user/getting-started.md) | First-run download, provider, model, tools |
+| [`../docs-site/src/user/overview.md`](../docs-site/src/user/overview.md) | What Chatty is (docs voice) |
+| [`../docs-site/src/user/agents.md`](../docs-site/src/user/agents.md) | Agent loop, plans, context window |
+| [`../docs-site/src/user/providers-and-models.md`](../docs-site/src/user/providers-and-models.md) | Providers, models, capabilities |
+| [`../docs-site/src/user/agentic-tools.md`](../docs-site/src/user/agentic-tools.md) | Built-in tools and MCP |
+| [`../docs-site/src/user/memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and skills |
+| [`../docs-site/src/user/sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless `chatty-tui` children |
+| [`../docs-site/src/user/security.md`](../docs-site/src/user/security.md) | Workspace, shell, approval, secrets |
+| [`../docs-site/src/user/features.md`](../docs-site/src/user/features.md) | Rendering, traces, export, themes |
+| [`../docs-site/src/user/terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` modes and keybindings |
+| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | AGE-97 split decisions (GIF placement) |
+
 ## Architecture & design
 
 | File | When to read | What it covers |
@@ -17,7 +37,7 @@ for coding patterns and behavioural rules read
 | [`component-map.md`](component-map.md) | Need diagrams of how parts connect | Crate/module/entity relationship visuals |
 | [`architecture-overview.md`](architecture-overview.md) | Contributor onboarding | Workspace structure, data flow, persistence |
 | [`workspace-crate-split.md`](workspace-crate-split.md) | Why core/gpui/tui exist | Crate split rationale |
-| [`entity-communication.md`](entity-communication.md) | GPUI event wiring | EventEmitter / `cx.subscribe()` pattern |
+| [`entity-communication.md`](entity-communication.md) | GPUI event wiring | EventEmitter / `cx.subscribe()` pattern. How-to: [add a desktop GPUI view](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/guides/add-gpui-view.md) |
 | [`stream-manager.md`](stream-manager.md) | Stream bugs or cancellation | LLM stream lifecycle, events |
 | [`rendering-system.md`](rendering-system.md) | Markdown/math/mermaid UI | Rendering pipeline |
 | [`token-tracking.md`](token-tracking.md) | Context window / compact | Token budget accounting |
@@ -27,6 +47,9 @@ for coding patterns and behavioural rules read
 
 | File | When to read | What it covers |
 |---|---|---|
+| [`../docs-site/src/dev/guides/build-wasm-module.md`](../docs-site/src/dev/guides/build-wasm-module.md) | **Author a WASM plugin** | Quick start, host LLM Mermaid diagrams, testing |
+| [`../docs-site/src/dev/guides/tutorial-echo-agent.md`](../docs-site/src/dev/guides/tutorial-echo-agent.md) | First WASM tutorial | echo-agent SDK walkthrough |
+| [`../docs-site/src/dev/guides/tutorial-benford-agent.md`](../docs-site/src/dev/guides/tutorial-benford-agent.md) | Agentic WASM tutorial | benford-agent LLM + tool loop |
 | [`a2a-and-wasm-modules.md`](a2a-and-wasm-modules.md) | WASM agents or A2A | End-to-end module flow |
 | [`wit-reference.md`](wit-reference.md) | Authoring WASM modules | WIT interface schemas |
 | [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded MCP catalog |
@@ -37,6 +60,7 @@ for coding patterns and behavioural rules read
 | File | When to read | What it covers |
 |---|---|---|
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Version bump, changelog, GH Release |
+| [`stale-doc-policy.md`](stale-doc-policy.md) | Code changed, unsure if docs must | Same-PR rule, drift reports, update-agent-docs |
 | [`monty-sandbox.md`](monty-sandbox.md) | Code execution | Docker / Monty sandbox |
 | [`debug_ui.md`](debug_ui.md) | Layout/rendering bugs | `CHATTY_DEBUG_UI` overlay |
 | [`refactor-followups.md`](refactor-followups.md) | Large-file splits | Deferred agent-friendliness work |
@@ -115,7 +139,7 @@ Regenerate with `make docs-gen`. Synced into the mdBook site on build.
 | `slash-commands.md` | `/` commands in GPUI |
 | `cli-flags.md` | `chatty-tui --help` when the binary is already built; otherwise a static fallback |
 | `env-vars.md` | `CHATTY_*` and related env vars |
-| `settings-schema.md` | Persisted settings JSON files, models, defaults (AGE-101 pair review) |
+| `settings-schema.md` | Persisted settings JSON: paths, fields, defaults (AGE-101 pair review) |
 | `event-catalog.md` | GPUI entity events and subscribers |
 | `singleton-inventory.md` | Process-global state and repositories |
 | `llms.txt` | Agent discovery index (curated links) |

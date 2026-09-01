@@ -2,6 +2,9 @@
 
 Reference chatty WASM module — the canonical quickstart for module authors.
 
+**Tutorial:** [echo-agent walkthrough](https://boersmamarcel.github.io/chatty2/dev/guides/tutorial-echo-agent.html)
+(mdBook) · full source in this directory.
+
 This module is both:
 
 * **Reference implementation** — shows every SDK feature in ~130 lines.

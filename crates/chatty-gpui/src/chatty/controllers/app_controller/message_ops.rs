@@ -34,6 +34,7 @@ use super::message_ops_internals::{
     select_recent_assistant_attachments,
 };
 use super::*;
+use crate::chatty::views::transcript::inline_chat_attachments;
 
 impl ChattyApp {
     /// Send a message to the LLM and stream the response.
@@ -53,7 +54,29 @@ impl ChattyApp {
         attachments: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        debug!(message = %message, attachment_count = attachments.len(), "send_message called");
+        self.send_message_inner(message, attachments, true, cx);
+    }
+
+    /// Inject an agent-protocol / loop-guard follow-up for the LLM without
+    /// showing a user bubble. The plan UI (To-dos card / strip) is the only
+    /// visible signal for todo-protocol nudges.
+    pub(super) fn send_protocol_follow_up(&mut self, message: String, cx: &mut Context<Self>) {
+        self.send_message_inner(message, vec![], false, cx);
+    }
+
+    fn send_message_inner(
+        &mut self,
+        message: String,
+        attachments: Vec<PathBuf>,
+        show_in_transcript: bool,
+        cx: &mut Context<Self>,
+    ) {
+        debug!(
+            message = %message,
+            attachment_count = attachments.len(),
+            show_in_transcript,
+            "send_message called"
+        );
 
         // Block message sending until app is ready (initial conversation created/loaded)
         if !self.is_ready {
@@ -164,9 +187,13 @@ impl ChattyApp {
                 // and add the user/assistant messages AFTER conversation exists
                 chat_view.update(cx, |view, cx| {
                     view.set_conversation_id(conv_id.clone(), cx);
-                    // Add user message to UI
-                    view.add_user_message(message.clone(), attachments.clone(), cx);
-                    debug!("User message added to UI");
+                    // Protocol follow-ups reach the LLM but skip the user bubble.
+                    if show_in_transcript {
+                        view.add_user_message(message.clone(), attachments.clone(), cx);
+                        debug!("User message added to UI");
+                    } else {
+                        debug!("Protocol follow-up: skipping user bubble in transcript");
+                    }
                     // Start assistant message in UI
                     view.start_assistant_message(cx);
                     debug!("Assistant message started");
@@ -662,23 +689,24 @@ impl ChattyApp {
                                     })
                             })
                             .unwrap_or_default();
+                        let inline_attachments = inline_chat_attachments(artifacts);
 
                         self.finalize_completed_stream(
                             conversation_id,
                             *token_usage,
                             trace_json.clone(),
-                            artifacts.clone(),
+                            inline_attachments.clone(),
                             *api_turn_count,
                             cx,
                         );
 
                         // Update display message with attachment paths
-                        if !artifacts.is_empty() {
+                        if !inline_attachments.is_empty() {
                             chat_view.update(cx, |view, cx| {
                                 if view.conversation_id() == Some(conversation_id)
                                     || conversation_id == "__pending__"
                                 {
-                                    view.set_last_assistant_attachments(artifacts, cx);
+                                    view.set_last_assistant_attachments(inline_attachments, cx);
                                 }
                             });
                         }

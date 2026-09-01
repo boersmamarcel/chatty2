@@ -41,7 +41,7 @@ impl ChatView {
         self.sub_agent_progress_msg_idx = None;
         self.pending_approval = None;
         self.agent_task_snapshot = None;
-        self.agent_task_panel_collapsed = false;
+        self.plan_overlay_open = false;
         cx.notify();
     }
 

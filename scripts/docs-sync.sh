@@ -28,6 +28,8 @@ for f in "$ROOT"/docs/*.md; do
   base="$(basename "$f")"
   [[ "$base" == "INDEX.md" ]] && continue
   copy "$f" "$ARCH/$base"
+  # mdBook layout: guides live at dev/guides/, not docs-site/src/dev/guides/
+  sed -i 's|](../docs-site/src/dev/guides/|](../guides/|g' "$ARCH/$base"
 done
 
 # ADRs / research decisions
@@ -59,5 +61,23 @@ if [[ -d "$ROOT/docs/generated" ]]; then
     copy "$f" "$REF/$(basename "$f")"
   done
 fi
+
+# Docs-sized GIFs only. Hero HQ + 15–50 MB walkthroughs stay in assets/animations/
+# and are linked from user pages, not copied into the book.
+ANIM_SRC="$ROOT/assets/animations"
+ANIM_DEST="$SITE_SRC/assets/animations"
+mkdir -p "$ANIM_DEST"
+for name in \
+  mermaid.gif \
+  codehighlighting.gif \
+  advanced_math_rendering.gif \
+  advanced_token_tracking.gif \
+  webfetch.gif \
+  advanced_internet_access_settings.gif
+do
+  if [[ -f "$ANIM_SRC/$name" ]]; then
+    copy "$ANIM_SRC/$name" "$ANIM_DEST/$name"
+  fi
+done
 
 echo "docs-sync: synced markdown into $SITE_SRC"

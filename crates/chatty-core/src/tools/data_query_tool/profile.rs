@@ -49,7 +49,7 @@ pub(super) fn profile_data_file(
         sample_columns.join(", ")
     };
     let sample_sql = format!("SELECT {sample_select} FROM {source} LIMIT {sample_rows}");
-    let (sample_rows_markdown, _, _, _, shortened_values) =
+    let (sample_rows_markdown, _, _, _, shortened_values, _) =
         results_to_markdown(&conn, &sample_sql, sample_rows)?;
 
     let mut notes = Vec::new();

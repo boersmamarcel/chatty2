@@ -18,6 +18,7 @@ use gpui::*;
 
 use super::super::message_component::{DisplayMessage, MessageRole};
 use super::super::message_types::{SystemTrace, UserMessage};
+use super::super::transcript::inline_chat_attachments;
 use super::ChatView;
 
 impl ChatView {
@@ -31,11 +32,21 @@ impl ChatView {
 
         // Clear any pending approval from previous conversation
         self.pending_approval = None;
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.set_mode(crate::chatty::views::transcript::ArtifactMode::Closed, cx);
+        });
         self.clear_agent_task_snapshot(cx);
 
         // Clear collapsed tool calls state from previous conversation
         self.collapsed_tool_calls.clear();
         self.diff_expanded.clear();
+        self.collapsed_turns.clear();
+        self.activity_expanded.clear();
+        self.session_review_dismissed = false;
+        self.session_bar_expanded = false;
+        self.stream_started_at = None;
+        self.user_scrolled_away = false;
 
         // Clear parsed content cache from previous conversation
         self.parsed_cache.clear();
@@ -44,13 +55,20 @@ impl ChatView {
         self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
+        self.last_auto_opened_table_id = None;
+        self.last_auto_opened_chart_id = None;
 
         for (idx, entry) in entries.iter().enumerate() {
             let feedback = entry.feedback.clone();
             match &entry.message {
                 Message::User { content, .. } => {
                     let user_msg = UserMessage::from_rig_content(content);
-                    let attachments = entry.attachment_paths.clone();
+                    let attachments = inline_chat_attachments(entry.attachment_paths.clone());
+                    if chatty_core::services::is_protocol_follow_up_text(&user_msg.text) {
+                        // Protocol nudges stay in the LLM history but are not
+                        // rendered as user bubbles (plan UI covers todo protocol).
+                        continue;
+                    }
                     if !user_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::User,
@@ -89,7 +107,7 @@ impl ChatView {
                         }
                     });
 
-                    let attachments = entry.attachment_paths.clone();
+                    let attachments = inline_chat_attachments(entry.attachment_paths.clone());
                     if !assistant_msg.text.is_empty() || !attachments.is_empty() {
                         self.messages.push(DisplayMessage {
                             role: MessageRole::Assistant,

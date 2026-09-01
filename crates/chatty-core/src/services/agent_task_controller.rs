@@ -331,6 +331,18 @@ impl AgentTaskController {
     }
 }
 
+/// True for injected agent-protocol / loop-guard follow-ups that must reach the
+/// LLM but must not appear as a user/system bubble in the transcript.
+pub fn is_protocol_follow_up_text(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with("This has become a multi-step task. Call write_todos")
+        || t.starts_with("Before writing the final reply, call verify_completion")
+        || t.starts_with("A todo is still in progress. Call update_todo")
+        || t.starts_with("LOOP DETECTED:")
+        || t.starts_with("DEADLINE:")
+        || t.starts_with("Agent protocol follow-up:")
+}
+
 fn response(message: &str, state: &AgentTaskState, should_ask_user: bool) -> AgentTaskResponse {
     AgentTaskResponse {
         message: message.to_string(),
@@ -473,6 +485,18 @@ mod tests {
 
         assert!(prompt.is_some());
         assert!(prompt.unwrap().contains("write_todos"));
+    }
+
+    #[test]
+    fn protocol_follow_up_text_is_recognized() {
+        let controller = controller();
+        let _ = controller.observe_tool_result("read_file");
+        let prompt = controller.observe_tool_result("search_code").unwrap();
+        assert!(is_protocol_follow_up_text(&prompt));
+        assert!(is_protocol_follow_up_text(
+            "LOOP DETECTED: You just called `read_file` with the same arguments twice"
+        ));
+        assert!(!is_protocol_follow_up_text("Please summarize the report."));
     }
 
     #[test]

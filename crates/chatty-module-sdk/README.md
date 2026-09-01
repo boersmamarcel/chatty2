@@ -20,8 +20,9 @@ single-crate project rooted at the module directory.
 ## Quick start
 
 See the rustdoc on [`ModuleExports`] in [`src/lib.rs`](src/lib.rs) for a
-working example, and the reference modules under
-[`../../modules/`](../../modules/) (`echo-agent`, `benford-agent`).
+working example, the reference modules under
+[`../../modules/`](../../modules/) (`echo-agent`, `benford-agent`), and the
+[Build a WASM plugin guide](../../docs-site/src/dev/guides/build-wasm-module.md).
 
 ## Build
 

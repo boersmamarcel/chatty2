@@ -170,6 +170,7 @@ sudo apt-get install -y \
   - **macOS**: `~/Library/Application Support/chatty/lib/`
   - **Linux**: `~/.local/share/chatty/lib/` or `$XDG_DATA_HOME/chatty/lib/`
   - **Windows**: `%APPDATA%\chatty\lib\`
+- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui.
 
 ## CI/CD
 
@@ -184,7 +185,7 @@ sudo apt-get install -y \
 | **Rig canary** (`rig-canary.yml`) | Weekly, or PR that touches Cargo manifests | Informational `cargo update` + `cargo check` against latest rig (AGE-26). |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
 | **Update README** (`update-readme.yml`) | PR merged to `main` | Claude analyzes the diff; if user-facing features changed, opens a follow-up PR with README updates. Add `skip-readme` label to opt out. |
-| **Update Agent Docs** (`update-agent-docs.yml`) | PR merged to `main` | Claude analyzes the merged PR for guidance drift and opens a follow-up PR to sync `CLAUDE.md` / `AGENTS.md` when needed. Add `skip-agent-docs` label to opt out. |
+| **Update Agent Docs** (`update-agent-docs.yml`) | PR merged to `main` | Claude analyzes the merged PR for guidance drift and opens a follow-up PR to sync `CLAUDE.md` / `AGENTS.md` when needed. Add `skip-agent-docs` label to opt out. Does not cover architecture, user, or reference pages — see [`docs/stale-doc-policy.md`](docs/stale-doc-policy.md). |
 | **UI Sync Check** (`ui-sync-check.yml`) | PR merged to `main` | Claude checks if one UI crate (chatty-gpui/chatty-tui) changed without the other; creates `ui-sync` labeled issue if sync needed. Add `skip-sync-check` label to opt out. |
 | **Dependency Check** (`dependency-check.yml`) | Weekly (Monday 9:00 UTC) or manual | Checks crates.io for dependency updates, files grouped work in Linear only (auto-ship, agent tech debt, or human tech debt track) — no GitHub issues; requires `LINEAR_API_KEY`. |
 

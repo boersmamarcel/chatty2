@@ -133,7 +133,12 @@
           "variable.special": {
             "color": "#E19773"
           }
-        }
+        },
+        "deleted": "#c06d44",
+        "created.background": "#afb97a33",
+        "deleted.background": "#c06d44",
+        "created.border": "#3f72e2",
+        "deleted.border": "#c06d44"
       }
     }
   ]

@@ -7,6 +7,10 @@ use parking_lot::Mutex;
 use super::pdfium_utils::create_pdfium;
 
 const THUMBNAIL_SIZE: u32 = 64;
+/// Width used by the artifact-panel page preview (fits a ~380px dock at 2x).
+pub const PREVIEW_WIDTH: u32 = 720;
+/// Cap extracted text so a 200-page PDF does not stall the panel.
+pub const PREVIEW_TEXT_PAGES: u32 = 50;
 
 /// Session-scoped temp directory for PDF thumbnails
 static THUMBNAIL_DIR: std::sync::LazyLock<Arc<Mutex<Option<PathBuf>>>> =
@@ -119,9 +123,100 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
     Ok(temp_path)
 }
 
+fn bind_pdfium() -> Result<Pdfium, PdfThumbnailError> {
+    create_pdfium().map_err(|e| PdfThumbnailError::Pdfium(format!("Failed to bind pdfium: {}", e)))
+}
+
+fn path_hash(pdf_path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(pdf_path.to_string_lossy().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Number of pages in `pdf_path`.
+pub fn pdf_page_count(pdf_path: &Path) -> Result<u32, PdfThumbnailError> {
+    let pdfium = bind_pdfium()?;
+    let document = pdfium.load_pdf_from_file(pdf_path, None)?;
+    Ok(document.pages().len() as u32)
+}
+
+/// Render one page to a PNG in the session temp directory.
+///
+/// Files are named by path hash, page, and width so a later call for the same
+/// page is a cache hit.
+pub fn render_pdf_page(
+    pdf_path: &Path,
+    page_idx: u32,
+    target_width: u32,
+) -> Result<PathBuf, PdfThumbnailError> {
+    let pdfium = bind_pdfium()?;
+    let document = pdfium.load_pdf_from_file(pdf_path, None)?;
+    let total = document.pages().len() as u32;
+    if page_idx >= total {
+        return Err(PdfThumbnailError::Pdfium(format!(
+            "Page {page_idx} is out of range ({total} page(s))"
+        )));
+    }
+    let page = document.pages().get(page_idx as i32)?;
+    let width = target_width.max(64) as i32;
+    let page_w = page.width().value;
+    let aspect = if page_w > 0.0 {
+        page.height().value / page_w
+    } else {
+        1.0
+    };
+    let height = ((width as f32) * aspect).max(1.0) as i32;
+    let render_config = PdfRenderConfig::new()
+        .set_target_width(width)
+        .set_maximum_height(height);
+    let bitmap = page.render_with_config(&render_config)?;
+    let image = bitmap.as_image()?;
+    let preview_dir = get_thumbnail_dir()?;
+    let hash = path_hash(pdf_path);
+    let temp_path = preview_dir.join(format!(
+        "preview_{}_{}_{}.png",
+        &hash[..12.min(hash.len())],
+        page_idx,
+        width
+    ));
+    if temp_path.exists() {
+        return Ok(temp_path);
+    }
+    image.save_with_format(&temp_path, image::ImageFormat::Png)?;
+    Ok(temp_path)
+}
+
+/// Extract plain text from the first `max_pages` pages.
+///
+/// Returns `(total_pages, text)`. Pages are labelled when more than one is read.
+pub fn extract_pdf_plain_text(
+    pdf_path: &Path,
+    max_pages: u32,
+) -> Result<(u32, String), PdfThumbnailError> {
+    let pdfium = bind_pdfium()?;
+    let document = pdfium.load_pdf_from_file(pdf_path, None)?;
+    let total = document.pages().len() as u32;
+    let limit = total.min(max_pages.max(1));
+    let mut parts = Vec::with_capacity(limit as usize);
+    for page_idx in 0..limit {
+        let page = document.pages().get(page_idx as i32)?;
+        let text = page.text().map(|t| t.all()).unwrap_or_default();
+        if limit > 1 {
+            parts.push(format!("--- page {} ---\n{text}", page_idx + 1));
+        } else {
+            parts.push(text);
+        }
+    }
+    Ok((total, parts.join("\n\n")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PdfThumbnailError, cleanup_thumbnails, get_thumbnail_dir, render_pdf_thumbnail};
+    use super::{
+        PREVIEW_WIDTH, PdfThumbnailError, cleanup_thumbnails, extract_pdf_plain_text,
+        get_thumbnail_dir, pdf_page_count, render_pdf_page, render_pdf_thumbnail,
+    };
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -399,6 +494,34 @@ startxref
             "Same PDF should produce same thumbnail path"
         );
 
+        cleanup_thumbnails();
+    }
+
+    #[test]
+    fn test_page_count_and_preview_render() {
+        let temp_dir = std::env::temp_dir();
+        let pdf_path = temp_dir.join("test_preview_page.pdf");
+        create_test_pdf(&pdf_path).expect("Failed to create test PDF");
+
+        let count = pdf_page_count(&pdf_path).expect("page count");
+        assert_eq!(count, 1);
+
+        let preview = render_pdf_page(&pdf_path, 0, PREVIEW_WIDTH).expect("preview render");
+        assert!(preview.exists(), "preview PNG should exist at {preview:?}");
+        assert_eq!(preview.extension().and_then(|s| s.to_str()), Some("png"));
+
+        let again = render_pdf_page(&pdf_path, 0, PREVIEW_WIDTH).expect("cached preview");
+        assert_eq!(preview, again, "same page should reuse the cached PNG");
+
+        let missing = render_pdf_page(&pdf_path, 3, PREVIEW_WIDTH);
+        assert!(missing.is_err(), "out-of-range page should fail");
+
+        let (_total, text) = extract_pdf_plain_text(&pdf_path, 4).expect("extract text");
+        // The fixture is a one-page PDF; extracted text may be empty if the
+        // font is missing, but the call itself must succeed.
+        let _ = text;
+
+        let _ = fs::remove_file(&pdf_path);
         cleanup_thumbnails();
     }
 }

@@ -10,10 +10,27 @@ use gpui_component::{Icon, Sizable};
 
 use super::message_types::ToolCallBlock;
 
-/// Extract chart specification from a `create_chart` tool call output JSON.
-pub(super) fn extract_chart_spec(tool_call: &ToolCallBlock) -> Option<ChartSpec> {
-    let output = tool_call.output.as_ref()?;
+/// Extract chart specification from a successful `create_chart` tool call output JSON.
+pub fn extract_chart_spec(tool_call: &ToolCallBlock) -> Option<ChartSpec> {
+    if tool_call.tool_name != "create_chart" {
+        return None;
+    }
+    if !matches!(
+        tool_call.state,
+        crate::chatty::views::message_types::ToolCallState::Success
+    ) {
+        return None;
+    }
+    let output = tool_call
+        .output
+        .as_deref()
+        .or(tool_call.output_preview.as_deref())?;
     serde_json::from_str(output).ok()
+}
+
+/// Render a chart for the artifact panel (full-width, no message index coupling).
+pub fn render_chart_panel(spec: ChartSpec, cx: &App) -> impl IntoElement {
+    render_chart(spec, 0, 0, cx)
 }
 
 /// A chart data point with a pre-assigned color index for themed rendering.

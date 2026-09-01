@@ -434,10 +434,13 @@ jobs:
 
   # Build cross-platform artifacts and upload to the GitHub release.
   # Called directly via workflow_call — no event-based handoff needed.
+  # from_prepare is required: reusable workflows inherit the caller's
+  # github.event_name, so release.yml cannot key off workflow_call.
   build-and-upload:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.should_build == 'true'
     uses: ./.github/workflows/release.yml
     with:
       tag_name: ${{ needs.prepare.outputs.tag }}
+      from_prepare: true
     secrets: inherit

@@ -1,30 +1,17 @@
-//! Animated "thinking" indicator shown in [`ChatView`] while the
-//! assistant has not yet produced its first token (the empty-streaming
-//! state replaced by the loading skeleton).
-//!
-//! It combines a [`gpui_component::spinner::Spinner`] with a label that
-//! cycles through a small set of playful verbs every ~2 seconds. The
-//! intent (modeled after Claude Code, Cursor, Aider, etc.) is to give
-//! the user a constant signal that the agent is doing something even
-//! when no streaming text is arriving (typical while tools execute).
-//!
-//! The entity owns its own background timer so it keeps animating even
-//! when no stream events are firing — `ChatView` would otherwise only
-//! re-render when text/tool chunks arrive, leaving the indicator
-//! visually frozen during long silent tool calls.
+//! Running indicator: terracotta asterisk on two periods, shared headline ticker.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     Animation, AnimationExt, App, AppContext, Context, Entity, IntoElement, ParentElement, Render,
-    Styled, Window, div,
+    Styled, Window, div, px, radians,
 };
-use gpui_component::{ActiveTheme as _, Sizable, Size, spinner::Spinner};
+use gpui_component::{ActiveTheme as _, Icon, IconName};
 
-/// Rotating verbs shown next to the spinner. Order is random per stream
-/// to keep the experience fresh; keep the list short so users see each
-/// one occasionally rather than always the same first three.
+use super::transcript::{GLYPH_OPACITY_MS, GLYPH_ROTATE_MS, HeadlineTicker};
+
 const THINKING_WORDS: &[&str] = &[
     "Thinking",
     "Pondering",
@@ -48,13 +35,6 @@ const THINKING_WORDS: &[&str] = &[
     "Percolating",
 ];
 
-/// How often the label rotates to the next word.
-const ROTATE_INTERVAL: Duration = Duration::from_millis(1800);
-
-/// Process-wide monotonic counter that picks the starting word for each
-/// new indicator (or `reset()` call). Using a counter instead of an RNG
-/// keeps the dependency footprint zero while still ensuring that
-/// consecutive turns visibly start on a different word.
 static START_OFFSET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn next_start_offset() -> usize {
@@ -62,34 +42,56 @@ fn next_start_offset() -> usize {
 }
 
 pub struct ThinkingIndicator {
-    /// Starting offset into `THINKING_WORDS` so two consecutive streams
-    /// don't always begin with "Thinking".
     start_offset: usize,
-    /// Wall-clock time the indicator was first shown — drives the
-    /// "Xs" elapsed counter so the user gets a sense of progress.
     started_at: Instant,
-    /// Number of `tick()` calls so far. We rotate the word on each
-    /// tick, and the tick is scheduled on the background executor at
-    /// `ROTATE_INTERVAL`.
     tick: usize,
-    /// Whether the timer loop is running. Once started, the entity
-    /// reschedules itself every tick until dropped.
     timer_started: bool,
+    ticker: Entity<HeadlineTicker>,
+    attention: String,
+    steps_done: usize,
+    steps_total: usize,
 }
 
 impl ThinkingIndicator {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let ticker = cx.new(HeadlineTicker::new);
         Self {
             start_offset: next_start_offset(),
             started_at: Instant::now(),
             tick: 0,
             timer_started: false,
+            ticker,
+            attention: String::new(),
+            steps_done: 0,
+            steps_total: 0,
         }
     }
 
-    /// Reset the elapsed counter and pick a fresh starting word. Called
-    /// when a new assistant turn begins so the "Xs" counter doesn't
-    /// keep counting from the previous turn.
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    pub fn set_attention(&mut self, attention: impl Into<String>, cx: &mut Context<Self>) {
+        let next = attention.into();
+        if next != self.attention {
+            self.attention = next;
+            cx.notify();
+        }
+    }
+
+    pub fn set_progress(&mut self, done: usize, total: usize, cx: &mut Context<Self>) {
+        if done != self.steps_done || total != self.steps_total {
+            self.steps_done = done;
+            self.steps_total = total;
+            cx.notify();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn ticker(&self) -> Entity<HeadlineTicker> {
+        self.ticker.clone()
+    }
+
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.start_offset = next_start_offset();
         self.started_at = Instant::now();
@@ -104,15 +106,20 @@ impl ThinkingIndicator {
         self.timer_started = true;
         cx.spawn(async move |entity, cx| {
             loop {
-                cx.background_executor().timer(ROTATE_INTERVAL).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(GLYPH_OPACITY_MS))
+                    .await;
                 if entity
                     .update(cx, |this, cx| {
                         this.tick = this.tick.wrapping_add(1);
+                        let word = this.current_word();
+                        this.ticker.update(cx, |ticker, cx| {
+                            ticker.push(format!("{word}…"), cx);
+                        });
                         cx.notify();
                     })
                     .is_err()
                 {
-                    // Entity dropped — stop the loop.
                     break;
                 }
             }
@@ -121,18 +128,17 @@ impl ThinkingIndicator {
     }
 
     fn current_word(&self) -> &'static str {
-        let idx = (self.start_offset + self.tick) % THINKING_WORDS.len();
+        let steps = (self.started_at.elapsed().as_millis() as u64 / GLYPH_ROTATE_MS) as usize;
+        let idx = (self.start_offset + steps) % THINKING_WORDS.len();
         THINKING_WORDS[idx]
     }
 }
 
 impl Render for ThinkingIndicator {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Start (or keep) the rotation timer on first render. Render is
-        // the natural place to do this because the entity is created
-        // before being added to the view tree.
         self.schedule_tick(cx);
 
+        let primary = cx.theme().primary;
         let muted = cx.theme().muted_foreground;
         let elapsed = self.started_at.elapsed().as_secs();
         let elapsed_label = if elapsed >= 1 {
@@ -141,31 +147,97 @@ impl Render for ThinkingIndicator {
             String::new()
         };
         let word = self.current_word();
+        let phrase = if self.attention.is_empty() {
+            format!("{word}{elapsed_label}")
+        } else {
+            format!("{word} {}{elapsed_label}", self.attention)
+        };
+        let (pip_filled, step_label) = if self.steps_total > 0 {
+            let filled = ((self.steps_done * 7) / self.steps_total.max(1)).clamp(1, 7);
+            (
+                filled,
+                format!("{} of {} steps", self.steps_done, self.steps_total),
+            )
+        } else {
+            (((self.tick % 7) + 1), String::new())
+        };
 
+        // 1a: terracotta asterisk, attention phrase, seven step pips on one row.
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .py_2()
-            .text_color(muted)
-            .child(Spinner::new().with_size(Size::Small).color(muted))
+            .gap_3()
+            .px_4()
+            .py_3()
             .child(
-                // Wrap label in a key'd animation so each word change
-                // gently fades in instead of swapping abruptly.
                 div()
+                    .child(
+                        Icon::new(IconName::Asterisk)
+                            .text_color(primary)
+                            .with_animation(
+                                "running-glyph-rotate",
+                                Animation::new(Duration::from_millis(GLYPH_ROTATE_MS)).repeat(),
+                                |this, delta| this.rotate(radians(delta * std::f32::consts::TAU)),
+                            ),
+                    )
+                    .with_animation(
+                        "running-glyph-opacity",
+                        Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
+                        |this, delta| {
+                            let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                            this.opacity(0.45 + 0.55 * wave)
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
                     .text_sm()
-                    .child(format!("{word}…{elapsed_label}"))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(phrase)
                     .with_animation(
                         gpui::ElementId::NamedInteger("thinking-word".into(), self.tick as u64),
                         Animation::new(Duration::from_millis(400)),
                         |this, delta| this.opacity(0.4 + 0.6 * delta),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(3.))
+                    .children((0..7).map(move |i| {
+                        let on = i < pip_filled;
+                        let pip = div().w(px(10.)).h(px(7.)).rounded_sm().bg(if on {
+                            primary
+                        } else {
+                            muted.opacity(0.35)
+                        });
+                        if i + 1 == pip_filled {
+                            pip.with_animation(
+                                gpui::ElementId::NamedInteger("running-pip".into(), i as u64),
+                                Animation::new(Duration::from_millis(GLYPH_OPACITY_MS)).repeat(),
+                                |this, delta| {
+                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                    this.opacity(0.55 + 0.45 * wave)
+                                },
+                            )
+                            .into_any_element()
+                        } else {
+                            pip.into_any_element()
+                        }
+                    })),
+            )
+            .when(!step_label.is_empty(), |this| {
+                this.child(div().text_xs().text_color(muted).child(step_label))
+            })
     }
 }
 
-/// Convenience constructor used by `chat_view`.
 pub fn new_thinking_indicator(cx: &mut App) -> Entity<ThinkingIndicator> {
     cx.new(ThinkingIndicator::new)
 }

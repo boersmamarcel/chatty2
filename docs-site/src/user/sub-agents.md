@@ -1,13 +1,14 @@
 # Sub-agents
 
-**When to read this:** Delegate parallel or isolated subtasks to headless `chatty-tui` agents.
+**When to read this:** Delegate parallel or isolated subtasks to headless
+`chatty-tui` processes.
 
 ## Why sub-agents?
 
 - **Parallelism** — independent subtasks run concurrently
-- **Isolation** — separate context and tools; mistakes don't pollute the parent conversation
-- **Composition** — chain agents where one output feeds the next
-- **Specialization** — focused prompts and toolsets per sub-agent
+- **Isolation** — each child has its own conversation context and tools; mistakes stay out of the parent transcript
+- **Composition** — one agent's stdout can feed the next
+- **Specialization** — focused prompt and toolset per child
 
 ## From the desktop UI
 
@@ -15,18 +16,20 @@ Type `/agent <your prompt>` to launch a headless sub-agent inline.
 
 ## Via the `sub_agent` tool
 
-The LLM can spawn sub-agents programmatically:
+The parent model can spawn children programmatically:
 
 ```
 Task: "Refactor all modules and write tests for each"
 
-→ sub_agent("Refactor authentication module and write tests")
-→ sub_agent("Refactor billing module and write tests")
-→ sub_agent("Refactor notifications module and write tests")
-→ Parent merges results into final summary
+→ sub_agent("Refactor the authentication module and write tests")
+→ sub_agent("Refactor the billing module and write tests")
+→ sub_agent("Refactor the notifications module and write tests")
+→ Parent merges results into a final summary
 ```
 
-Each sub-agent is a full `chatty-tui --headless` process with the same configured tools and models. Sub-agents can spawn further sub-agents.
+Each child is `chatty-tui --headless` with the same configured tools and
+models. Children can spawn further children. `sub_agent` is an approval-gated
+tool; see [Security & sandboxing](./security.md).
 
 ## From the terminal
 
@@ -37,13 +40,13 @@ chatty-tui --headless -m "Summarize the changes in the last 5 commits"
 # Pipe input
 git diff HEAD~3 | chatty-tui --pipe
 
-# Chain agents
+# Chain: first agent lists TODOs, second consumes that list
 chatty-tui --headless -m "List all TODO comments in src/" | chatty-tui --pipe
 ```
 
-See [Terminal interface](./terminal.md) for install, modes, and keybindings.
+Install, modes, and keybindings: [Terminal interface](./terminal.md).
 
 ## Related
 
 - [Agents](./agents.md)
-- [Security](./security.md) — approval flows for `sub_agent`
+- [Agentic tools](./agentic-tools.md)
