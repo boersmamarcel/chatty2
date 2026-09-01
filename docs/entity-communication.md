@@ -88,3 +88,9 @@ sidebar.update(cx, |sidebar, _cx| {
     });
 });
 ```
+
+## How-to
+
+Task-oriented steps (new file, event enum, `ChattyApp` subscribe, `Render`):
+[Add a desktop GPUI view](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/guides/add-gpui-view.md)
+(mdBook: **How-to guides → Add a desktop GPUI view**).
