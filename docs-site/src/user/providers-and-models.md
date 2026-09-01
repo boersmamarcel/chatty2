@@ -1,29 +1,40 @@
 # Providers & models
 
-**When to read this:** Configure LLM backends and model capabilities.
+Connect an LLM backend and choose which models appear in the picker.
 
-## Providers
+## Add a provider
 
-Open **Settings → Providers → Add Provider**. Supported types include Anthropic,
-OpenAI, Gemini, Ollama, Mistral, Azure OpenAI, and OpenRouter.
+**Settings → Providers → Add Provider.** Supported types include OpenRouter,
+Azure OpenAI, Ollama, Anthropic, OpenAI, Gemini, and Mistral.
 
-Ollama connects to your local instance automatically — no API key required.
+Ollama connects to a local instance automatically — no API key.
 
-## Models
+## Add a model
 
-**Settings → Models → Add Model**: pick a provider and enter a model ID
-(e.g. `claude-sonnet-4-20250514`, `gpt-4o`, `qwen2.5:0.5b`).
+**Settings → Models → Add Model**: pick the provider and enter a model ID
+(for example `claude-sonnet-4-20250514`, `gpt-4o`, `qwen2.5:0.5b`).
 
-Chatty stores per-model capabilities in `ModelConfig`:
+Chatty stores per-model capabilities so the UI can show the right attachment
+buttons and temperature control:
 
-| Field | Meaning |
-|-------|---------|
-| `supports_images` | Vision attachments |
-| `supports_pdf` | PDF attachments |
-| `supports_temperature` | Temperature slider (off for reasoning models) |
+| Capability | What it controls |
+|------------|------------------|
+| Images | Vision attachments in the chat input |
+| PDF | PDF attachments |
+| Temperature | Temperature slider (hidden for reasoning models that reject it) |
 
-Defaults come from `ProviderType::default_capabilities()`; Ollama models are
-detected per-model via `/api/show`.
+Ollama capabilities are detected per model via the local `/api/show` API.
 
-Developer reference: [Provider matrix](../dev/reference/provider-matrix.md) ·
-[agent_factory](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-core/src/factories/agent_factory).
+| Provider | Images | PDF | Temperature | Notes |
+|----------|:------:|:---:|:-----------:|-------|
+| OpenRouter | Per-model | Per-model | Yes | Routes to Anthropic, OpenAI, Google, Mistral, and others |
+| Azure OpenAI | Yes | Lossy | Yes | API key or Entra ID |
+| Ollama | Per-model | Per-model | — | Detected locally |
+
+The full provider matrix (auth, TUI flags, defaults) is in the
+[developer reference](../dev/reference/provider-matrix.md).
+
+## Next
+
+- [Getting started](./getting-started.md)
+- [Agents](./agents.md)

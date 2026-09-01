@@ -10,6 +10,7 @@ if ! command -v lychee >/dev/null 2>&1; then
 fi
 
 bash scripts/gen-docs-reference.sh
+bash scripts/docs-sync.sh
 
 # Source-of-truth paths only. docs-site/src copies rewrite relative paths and
 # would duplicate checks; mdBook HTML pulls in RESERVED via cross-links.

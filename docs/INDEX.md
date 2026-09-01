@@ -7,7 +7,28 @@ For the top-level orientation read [`AGENTS.md`](../AGENTS.md) first;
 for coding patterns and behavioural rules read
 [`CLAUDE.md`](../CLAUDE.md).
 
-**Published site:** GitHub Pages mdBook (run `make docs-serve` locally).
+**Published site:** GitHub Pages mdBook
+([boersmamarcel.github.io/chatty2](https://boersmamarcel.github.io/chatty2/);
+run `make docs-serve` locally).
+
+## User guides
+
+Hand-written pages under `docs-site/src/user/` (edit in place; not synced from
+`docs/`). Published at `/user/` on the docs site.
+
+| File | When to read | What it covers |
+|---|---|---|
+| [`../docs-site/src/user/getting-started.md`](../docs-site/src/user/getting-started.md) | First install | Download, provider, model, first chat |
+| [`../docs-site/src/user/overview.md`](../docs-site/src/user/overview.md) | Product overview | Why Chatty, privacy, sandboxing |
+| [`../docs-site/src/user/agents.md`](../docs-site/src/user/agents.md) | Agent loop | Turns, plans, slash commands, context bar |
+| [`../docs-site/src/user/providers-and-models.md`](../docs-site/src/user/providers-and-models.md) | Settings → Providers/Models | Capabilities table |
+| [`../docs-site/src/user/agentic-tools.md`](../docs-site/src/user/agentic-tools.md) | Enable tools | Categories, MCP, GIFs |
+| [`../docs-site/src/user/memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Memory / skills | Store paths, slash-picker skills |
+| [`../docs-site/src/user/sub-agents.md`](../docs-site/src/user/sub-agents.md) | Delegation | `/agent`, `sub_agent`, headless |
+| [`../docs-site/src/user/security.md`](../docs-site/src/user/security.md) | Trust / sandbox | Workspace, bubblewrap, approvals |
+| [`../docs-site/src/user/features.md`](../docs-site/src/user/features.md) | Product surface | Rendering, cost, export, themes |
+| [`../docs-site/src/user/terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` | Modes, keybindings, install |
+| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | DOC-15 / AGE-97 | README split decisions (GIF map) |
 
 ## Architecture & design
 
@@ -45,6 +66,7 @@ for coding patterns and behavioural rules read
 
 | File | When to read | What it covers |
 |---|---|---|
+| [`research/README.md`](research/README.md) | ADR landing page | Pair-review note, links to decision records |
 | [`research/app-research-bridge.md`](research/app-research-bridge.md) | **App ↔ research map** | Memory, context window, loop, traces → M0–M4 |
 | [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | Research pipeline | SOTA → experiment → product flow |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
