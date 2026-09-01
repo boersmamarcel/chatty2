@@ -31,9 +31,12 @@ Tool calls, inputs, outputs, and reasoning render as collapsible trace blocks
 beside the response.
 
 For multi-step work the agent writes a **structured plan** first: a goal and an
-ordered todo list. A collapsible **Agent plan** panel shows each step (pending,
-in-progress, done, blocked) and a progress counter. The agent marks steps as it
-goes, then runs a verification step before the final reply.
+ordered todo list. A **To-dos** card appears inline in the transcript and
+updates in place (pending, in-progress, done, blocked) with a progress
+counter. Scroll past it and a compact **Plan N of M** strip pins to the top of
+the transcript — click to unfold the full plan, or press Esc to dismiss the
+overlay without cancelling the run. The agent marks steps as it goes, then
+runs a verification step before the final reply.
 
 ## What agents can do
 
