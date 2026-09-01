@@ -1,35 +1,158 @@
 # Agentic tools
 
-**When to read this:** Enable filesystem, shell, MCP, and sub-agent capabilities.
+**When to read this:** Enable filesystem, shell, MCP, and related tools, and
+see what the agent can call.
+
+The generated [tools catalog](../dev/reference/tools-catalog.md) is the
+name-by-name lookup. This page is the user-facing map.
 
 ## Enable in Settings
 
 1. **Settings → Code Execution**
-2. Set **workspace directory** (absolute path)
+2. Set a **workspace directory** (absolute path)
 3. Toggle **code execution** on
 4. Choose **approval mode**: ask every time / auto-approve / deny all
 
-## Tool categories
+Most filesystem and bash tools are scoped to that workspace. Internet tools
+have a separate toggle under **Settings → Search**.
 
-See the full [tools catalog](../dev/reference/tools-catalog.md).
+![Web fetch](../assets/animations/webfetch.gif)
 
-| Category | Examples |
-|----------|----------|
-| Filesystem | `read_file`, `write_file`, `glob_search` |
-| Shell | `shell_execute`, `shell_cd` |
-| Git | `git_status`, `git_commit`, … |
-| MCP | `list_mcp_services` + configured servers |
-| Memory | `remember`, `search_memory`, `save_skill` |
-| Agents | `sub_agent`, `invoke_agent`, `list_agents` |
-| Sandbox | `execute_code`, `daytona_run` |
+![Internet access settings](../assets/animations/advanced_internet_access_settings.gif)
 
-## Slash commands
+File-edit, shell, and MCP management recordings are large GIFs in
+[`assets/animations/`](https://github.com/boersmamarcel/chatty2/tree/main/assets/animations)
+(`file_add_edit_delete.gif`, `shell_command.gif`, `mcp_add_edit_delete2.gif`) —
+open them on GitHub rather than inlining them here.
 
-Type `/` in the chat input for `/clear`, `/compact`, `/context`, `/cwd`, etc.
-See [slash commands reference](../dev/reference/slash-commands.md).
+## Built-in tools
 
-## Security
+Approval `✓` means the call can be gated by the approval mode.
+
+### Filesystem & code
+
+| Tool | What the agent can do | Approval |
+|------|----------------------|:--------:|
+| `read_file` | Read any text file in the workspace | — |
+| `read_binary` | Read binary files as base64 | — |
+| `list_directory` | List directory contents with metadata | — |
+| `glob_search` | Find files (`**/*.rs`, `src/**/*.test.js`, …) | — |
+| `write_file` | Create or overwrite files | ✓ |
+| `apply_diff` | Apply unified diffs to existing files | ✓ |
+| `create_directory` | Create directories | ✓ |
+| `delete_file` | Delete files or directories | ✓ |
+| `move_file` | Move or rename files | ✓ |
+
+### Shell & code execution
+
+| Tool | What the agent can do | Approval |
+|------|----------------------|:--------:|
+| `shell_execute` | Sandboxed shell with streaming output | ✓ |
+| `shell_cd` / `shell_set_env` / `shell_status` | Working directory, env, session status | — |
+| `execute_code` | Python (MontySandbox or Docker), JS, TS, Rust, or Bash | ✓ |
+
+Git (`git_status`, `git_diff`, `git_commit`, …) and code search (`search_code`,
+`find_files`, `find_definition`) are in the [tools catalog](../dev/reference/tools-catalog.md).
+
+### Data & documents
+
+| Tool | What the agent can do | Approval |
+|------|----------------------|:--------:|
+| `query_data` | SQL over Parquet, CSV, JSON via DuckDB | — |
+| `describe_data` | Schema of Parquet, CSV, or JSON | — |
+| `read_excel` / `write_excel` / `edit_excel` | Spreadsheets | write/edit ✓ |
+| `read_docx` / `write_docx` | Word documents | write ✓ |
+| `read_pptx` / `write_pptx` | PowerPoint | write ✓ |
+| `pdf_to_image` / `pdf_info` / `pdf_extract_text` | PDF preview, metadata, text | — |
+| `compile_typst` | Typst markup → PDF | ✓ |
+| `doc_retriever` | BM25 search over workspace docs and source | — |
+
+### Visuals, web, memory, agents
+
+| Tool | What the agent can do | Approval |
+|------|----------------------|:--------:|
+| `add_attachment` | Show a generated image or PDF in chat | — |
+| `create_chart` | Bar, line, pie, donut, area, candlestick | — |
+| `search_web` | Tavily / Brave / DuckDuckGo lite fallback | — |
+| `fetch` | Fetch a URL as readable text | — |
+| `browser_use` | [browser-use](https://browser-use.com) cloud browser agent | — |
+| `daytona_run` | Isolated [Daytona](https://app.daytona.io) cloud sandbox | ✓ |
+| `remember` / `search_memory` | Persistent memory | — |
+| `save_skill` / `read_skill` | Named procedures | — |
+| `list_tools` | List tools and schemas | — |
+| `list_agents` / `invoke_agent` | Discover and call configured agents | — |
+| `write_todos` / `update_todo` / `verify_completion` | Plan + verify | — |
+| `sub_agent` | Headless `chatty-tui` child agent | ✓ |
+| `publish_wasm_module` | Publish WASM to Hive (when Hive MCP is configured) | ✓ |
+
+`search_web`, `fetch`, `browser_use`, and `daytona_run` require **Internet
+Access** in Settings → Search. `browser_use` and `daytona_run` also need API
+keys in that page's External Services section. Set the key to activate; use
+the toggle to disable without deleting the key.
+
+## Extensions & MCP
+
+**Settings → Extensions** lists MCP servers, A2A agents, and WASM modules.
+
+**Hive Marketplace** — search and install community extensions. Installed
+items show type (**Agent**, **MCP**, **A2A**) and context:
+
+| Badge | Meaning |
+|-------|---------|
+| **• Local** | WASM module on this machine |
+| **☁ Cloud** / **☁ Cloud Only** | Hive runner; cloud-only modules have no local toggle |
+| **↗ External** | MCP or A2A at an external URL |
+| **Paid** | Non-free pricing model |
+
+WASM modules that support both modes get **Switch to Local** / **Switch to Cloud**.
+
+### Built-in catalog
+
+Pre-loaded under **Installed**, disabled until you click **Enable**:
+
+| Integration | What it provides | Auth |
+|-------------|------------------|------|
+| **Hugging Face** | Hub models, datasets, Spaces | Optional token |
+| **Notion** | Pages, databases, comments | OAuth |
+| **Atlassian** | Jira issues, Confluence pages | OAuth |
+
+Notion and Atlassian speak SSE. Chatty's MCP client is streamable HTTP;
+those endpoints may need an SSE bridge until native SSE lands. Developer
+notes: [Curated MCP catalog](../dev/architecture/curated-mcp-catalog.md).
+
+### Add a custom MCP server
+
+1. Start the MCP server yourself (Chatty connects; it does not launch it)
+2. **Settings → Extensions → Add Custom Extension → Add MCP Server**
+3. Enter the **URL** and optional **API key** (`Authorization: Bearer <key>`)
+
+The agent can list servers at runtime via `list_mcp_services`. Keys are
+masked (`****`); the model never sees the real value.
+
+### Servers that pair well
+
+Start the process, then add its URL in Extensions. Examples:
+
+| Server | Typical start |
+|--------|----------------|
+| GitHub | `npx -y @modelcontextprotocol/server-github` (`GITHUB_TOKEN`) |
+| Filesystem | `npx -y @modelcontextprotocol/server-filesystem /path/to/dir` |
+| PostgreSQL | `npx -y @modelcontextprotocol/server-postgres` (`POSTGRES_CONNECTION_STRING`) |
+| Brave Search | `npx -y @modelcontextprotocol/server-brave-search` (`BRAVE_API_KEY`) |
+| Memory | `npx -y @modelcontextprotocol/server-memory` |
+| Puppeteer | `npx -y @modelcontextprotocol/server-puppeteer` |
+| Fetch | `npx -y @modelcontextprotocol/server-fetch` |
+| Hugging Face (hosted) | URL `https://huggingface.co/mcp` + access token |
+
+Also preconfigured (disabled by default): Atlassian, Google Calendar, Gmail,
+Google Drive. Enabling them starts the provider OAuth flow; tokens stay local.
+
+Write your own against the [MCP specification](https://modelcontextprotocol.io/).
+
+## Security notes
 
 - MCP env vars sent to the LLM are **masked** (`****` sentinel)
-- Shell and write tools respect approval stores
+- Side-effect tools (writes, shell, sub-agents) respect approval mode
 - Workspace path restricts filesystem access
+
+See [Security & sandboxing](./security.md).

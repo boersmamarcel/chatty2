@@ -266,6 +266,211 @@ pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     name.starts_with("pdf_") && tool_file_path(input).is_some_and(|p| is_pdf_path(&p))
 }
 
+/// Verbatim basename. Never slugified — `agentic-chat-ui-gpui.md` stays that way.
+pub fn artifact_file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Display title kept as a separate field from [`artifact_file_name`].
+/// Default is the filename; do not title-case or unslugify.
+pub fn artifact_display_title(path: &Path) -> String {
+    artifact_file_name(path)
+}
+
+/// Format token (`MD`, `RS`, `CSV`, `PNG`, `PDF`, `FILE`).
+pub fn artifact_format_token(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_uppercase())
+        .unwrap_or_else(|| "FILE".to_string())
+}
+
+/// Type token (`Document`, `Code`, `Image`, `Data`).
+pub fn artifact_type_token(path: &Path) -> &'static str {
+    if is_tabular_path(path) {
+        "Data"
+    } else if is_image_path(path) || is_pdf_path(path) {
+        "Image"
+    } else if is_code_artifact_path(path) {
+        "Code"
+    } else {
+        "Document"
+    }
+}
+
+/// Exactly two muted tokens: `Document · MD`.
+pub fn artifact_meta_line(path: &Path) -> String {
+    format!(
+        "{} · {}",
+        artifact_type_token(path),
+        artifact_format_token(path)
+    )
+}
+
+/// Panel title, character-identical to the card filename plus `· MD`.
+pub fn artifact_panel_title(path: &Path) -> String {
+    format!(
+        "{} · {}",
+        artifact_file_name(path),
+        artifact_format_token(path)
+    )
+}
+
+/// First `n` source lines for the card peek popover.
+pub fn artifact_peek_lines(source: &str, n: usize) -> String {
+    source.lines().take(n).collect::<Vec<_>>().join("\n")
+}
+
+/// `(rows, columns)` from a CSV/TSV body. Rows count non-empty lines.
+pub fn csv_shape(source: &str) -> Option<(usize, usize)> {
+    let mut lines = source.lines().filter(|line| !line.trim().is_empty());
+    let header = lines.next()?;
+    let delim = if header.contains('\t') { '\t' } else { ',' };
+    let columns = header.split(delim).count().max(1);
+    let rows = 1 + lines.count();
+    Some((rows, columns))
+}
+
+pub fn format_count(n: usize) -> String {
+    let raw = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in raw.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+pub fn csv_stat_line(source: &str) -> Option<String> {
+    let (rows, cols) = csv_shape(source)?;
+    Some(format!(
+        "{} rows · {} columns",
+        format_count(rows),
+        format_count(cols)
+    ))
+}
+
+/// On-disk identity used to detect an open panel going stale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArtifactVersion {
+    pub mtime_secs: u64,
+    pub len: u64,
+}
+
+pub fn artifact_version(path: &Path) -> Option<ArtifactVersion> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime_secs = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(ArtifactVersion {
+        mtime_secs,
+        len: meta.len(),
+    })
+}
+
+/// Markdown ATX heading (`#`–`######`) with 0-based source line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactHeading {
+    pub level: u8,
+    pub title: String,
+    pub line: u32,
+}
+
+pub fn markdown_headings(source: &str) -> Vec<ArtifactHeading> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(ix, line)| {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('#') {
+                return None;
+            }
+            let hashes = trimmed.bytes().take_while(|b| *b == b'#').count();
+            if !(1..=6).contains(&hashes) {
+                return None;
+            }
+            let rest = &trimmed[hashes..];
+            if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
+                return None;
+            }
+            let title = rest.trim().trim_end_matches('#').trim();
+            if title.is_empty() {
+                return None;
+            }
+            Some(ArtifactHeading {
+                level: hashes as u8,
+                title: title.to_string(),
+                line: ix as u32,
+            })
+        })
+        .collect()
+}
+
+/// Content position for rendered↔source toggle. Prefer a heading over pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ViewAnchor {
+    SourceLine(u32),
+    BlockIndex(usize),
+    ScrollFraction(f32),
+}
+
+/// Nearest heading at or before `line`.
+pub fn heading_index_for_line(headings: &[ArtifactHeading], line: u32) -> Option<usize> {
+    headings
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, heading)| heading.line <= line)
+        .map(|(ix, _)| ix)
+        .or_else(|| headings.first().map(|_| 0))
+}
+
+pub fn anchor_from_source_line(headings: &[ArtifactHeading], line: u32) -> ViewAnchor {
+    match heading_index_for_line(headings, line) {
+        Some(ix) => ViewAnchor::BlockIndex(ix),
+        None => ViewAnchor::SourceLine(line),
+    }
+}
+
+pub fn source_line_from_anchor(headings: &[ArtifactHeading], anchor: ViewAnchor) -> u32 {
+    match anchor {
+        ViewAnchor::SourceLine(line) => line,
+        ViewAnchor::BlockIndex(ix) => headings.get(ix).map(|h| h.line).unwrap_or(0),
+        ViewAnchor::ScrollFraction(fraction) => {
+            if headings.is_empty() {
+                return 0;
+            }
+            let ix = ((fraction.clamp(0.0, 1.0) * headings.len() as f32) as usize)
+                .min(headings.len().saturating_sub(1));
+            headings[ix].line
+        }
+    }
+}
+
+pub fn block_index_from_anchor(headings: &[ArtifactHeading], anchor: ViewAnchor) -> Option<usize> {
+    match anchor {
+        ViewAnchor::BlockIndex(ix) if ix < headings.len() => Some(ix),
+        ViewAnchor::BlockIndex(_) => headings.len().checked_sub(1),
+        ViewAnchor::SourceLine(line) => heading_index_for_line(headings, line),
+        ViewAnchor::ScrollFraction(fraction) => {
+            if headings.is_empty() {
+                return None;
+            }
+            Some(
+                ((fraction.clamp(0.0, 1.0) * headings.len() as f32) as usize)
+                    .min(headings.len().saturating_sub(1)),
+            )
+        }
+    }
+}
+
 /// True when a produced-file tool result is a PDF the artifact panel should open.
 pub fn is_pdf_artifact_tool(tool_name: &str, input: &str, output: Option<&str>) -> bool {
     if !is_produced_file_tool(tool_name, input) {
@@ -471,5 +676,80 @@ mod tests {
         assert_eq!(chart_artifact_path(&missing), None);
         let _ = std::fs::remove_file(&png);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn display_title_is_not_unslugified() {
+        let path = Path::new("docs/agentic-chat-ui-gpui.md");
+        assert_eq!(artifact_file_name(path), "agentic-chat-ui-gpui.md");
+        assert_eq!(artifact_display_title(path), "agentic-chat-ui-gpui.md");
+        assert_eq!(artifact_meta_line(path), "Document · MD");
+        assert_eq!(artifact_panel_title(path), "agentic-chat-ui-gpui.md · MD");
+        assert_eq!(artifact_type_token(Path::new("lib.rs")), "Code");
+        assert_eq!(artifact_type_token(Path::new("sales.csv")), "Data");
+        assert_eq!(artifact_type_token(Path::new("plot.png")), "Image");
+    }
+
+    #[test]
+    fn csv_shape_and_peek() {
+        let csv = "a,b,c\n1,2,3\n4,5,6\n\n";
+        assert_eq!(csv_shape(csv), Some((3, 3)));
+        assert_eq!(csv_stat_line(csv).as_deref(), Some("3 rows · 3 columns"));
+        assert_eq!(format_count(1240), "1,240");
+        assert_eq!(artifact_peek_lines("one\ntwo\nthree\nfour", 2), "one\ntwo");
+    }
+
+    #[test]
+    fn headings_and_toggle_anchor_stay_on_same_heading() {
+        let source = "# Intro\n\npara\n## Details\nmore\n# End\n";
+        let headings = markdown_headings(source);
+        assert_eq!(headings.len(), 3);
+        assert_eq!(headings[1].title, "Details");
+        assert_eq!(headings[1].line, 3);
+
+        let mut anchor = ViewAnchor::BlockIndex(1);
+        for _ in 0..3 {
+            let line = source_line_from_anchor(&headings, anchor);
+            assert_eq!(line, 3);
+            anchor = anchor_from_source_line(&headings, line);
+        }
+        assert_eq!(anchor, ViewAnchor::BlockIndex(1));
+        assert_eq!(heading_index_for_line(&headings, 4), Some(1));
+        assert_eq!(
+            block_index_from_anchor(&headings, ViewAnchor::SourceLine(4)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn opening_another_path_returns_to_docked() {
+        use super::super::artifact_view::{ArtifactMode, presentation_on_open};
+        assert_eq!(
+            presentation_on_open(ArtifactMode::Closed, false),
+            ArtifactMode::Docked
+        );
+        assert_eq!(
+            presentation_on_open(ArtifactMode::Full, false),
+            ArtifactMode::Docked
+        );
+        assert_eq!(
+            presentation_on_open(ArtifactMode::Full, true),
+            ArtifactMode::Full
+        );
+        assert_eq!(
+            presentation_on_open(ArtifactMode::Docked, false),
+            ArtifactMode::Docked
+        );
+    }
+
+    #[test]
+    fn artifact_version_changes_when_file_rewritten() {
+        let path = std::env::temp_dir().join("artifact_kind_version.md");
+        std::fs::write(&path, "v1").expect("write");
+        let first = artifact_version(&path).expect("stat");
+        std::fs::write(&path, "v2-longer").expect("rewrite");
+        let second = artifact_version(&path).expect("stat");
+        assert_ne!(first.len, second.len);
+        let _ = std::fs::remove_file(&path);
     }
 }

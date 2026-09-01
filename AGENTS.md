@@ -43,10 +43,11 @@ Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper
 via the links below.
 
-For human-oriented documentation, see [`README.md`](README.md). For
-detailed coding patterns and behavioral guidelines, see
-[`CLAUDE.md`](CLAUDE.md). For full architecture details, see
-[`docs/`](docs/).
+For human-oriented documentation, see the [user guides](docs-site/src/user/getting-started.md)
+(published at <https://boersmamarcel.github.io/chatty2/>). The repo
+[`README.md`](README.md) is a short landing page (download, links, dev
+quick-start). For coding patterns see [`CLAUDE.md`](CLAUDE.md). For
+architecture, see [`docs/INDEX.md`](docs/INDEX.md).
 
 ---
 
