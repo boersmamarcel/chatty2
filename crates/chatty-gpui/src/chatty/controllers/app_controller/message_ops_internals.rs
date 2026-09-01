@@ -561,15 +561,15 @@ pub(super) async fn run_llm_stream(
         .ok();
     }
 
-    // 7. AgentLoopGuard follow-up: inject pivot or verbosity prompt as a new message.
-    // This runs AFTER finalization so the UI shows the previous response first.
+    // 7. Protocol / loop-guard follow-up: inject after finalization so the UI
+    // shows the previous response first. Hidden from the transcript bubble list.
     if let Some(follow_up) = pending_follow_up {
-        debug!(conv_id = %conv_id, "AgentLoopGuard: injecting follow-up message after stream");
+        debug!(conv_id = %conv_id, "Injecting protocol follow-up after stream");
         weak_ctrl
             .update(&mut *cx, |app, cx| {
-                app.send_message(follow_up, vec![], cx);
+                app.send_protocol_follow_up(follow_up, cx);
             })
-            .map_err(|e| warn!(error = ?e, "Failed to inject AgentLoopGuard follow-up"))
+            .map_err(|e| warn!(error = ?e, "Failed to inject protocol follow-up"))
             .ok();
     }
 

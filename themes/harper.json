@@ -142,7 +142,11 @@
           "variable.special": {
             "color": "#ff5874"
           }
-        }
+        },
+        "created.background": "#489e4833",
+        "deleted.background": "#ff5874",
+        "created.border": "#489e48",
+        "deleted.border": "#ff5874"
       }
     }
   ]

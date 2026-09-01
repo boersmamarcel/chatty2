@@ -1,40 +1,31 @@
 name: Claude Code Review
 
-# Automated PR review for Cursor cloud-agent (and human) PRs.
-#
-# Loop prevention (by design):
-# - This job is comment-only (no git push) → comments never fire `synchronize`.
-# - Concurrency cancels stale runs when Cursor pushes several fix commits quickly.
-# - Prompt asks for a merge verdict and forbids @claude / automated fix requests.
-# - Draft PRs and `documentation`-labeled PRs are skipped.
-#
-# Ping-pong only happens if Cursor keeps pushing after every review — that is
-# a workflow choice, not an infinite Actions loop. Merge when CI is green.
-
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]
-    paths-ignore:
-      - 'docs/generated/**'
-      - 'docs-site/book/**'
-
-concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+    types: [opened, synchronize, ready_for_review, reopened]
+    # Skip docs-only / markdown-only PRs (saves Claude minutes).
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "modules/**/*.rs"
+      - "modules/**/Cargo.toml"
+      - "scripts/**/*.sh"
+      - ".github/workflows/**"
+      - "Makefile"
 
 jobs:
   claude-review:
+    # Optional: Filter by PR author
+    # if: |
+    #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
+    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+
     runs-on: ubuntu-latest
-
-    # Skip forks (no OAuth secret), drafts, and auto-doc sync PRs.
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.draft == false &&
-      !contains(github.event.pull_request.labels.*.name, 'documentation')
-
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
       issues: read
       id-token: write
 
@@ -49,42 +40,14 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          show_full_output: true
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
+          # Cursor Cloud Agents sync PRs as the `cursor` bot. The action
+          # rejects non-human actors unless listed here (prefer an explicit
+          # name over '*' on a public repo).
+          allowed_bots: cursor
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
 
-          # Cursor cloud-agent PRs: `cursoragent` (legacy) and `cursor` (Cloud Agent).
-          allowed_bots: cursoragent,cursor
-
-          track_progress: true
-          use_sticky_comment: true
-
-          # Do not feed prior bot review threads back into the model (saves tokens,
-          # avoids the model reacting to its own earlier sticky comment).
-          exclude_comments_by_actor: claude[bot],github-actions[bot],cursoragent
-
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            Review this pull request once. Be proportionate: focus on bugs,
-            security, correctness, and meaningful style issues — not nits that
-            should not block merge.
-
-            Check:
-            - Code quality and best practices (see CLAUDE.md)
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage for non-trivial logic
-
-            Rules:
-            - Prefer inline comments on relevant lines; keep the summary short.
-            - Do NOT mention @claude and do NOT ask any bot to push fixes.
-            - Do NOT request an automated follow-up PR or commit.
-            - If there are no blocking issues, say so clearly.
-
-            End the sticky summary with exactly one verdict line:
-            **Verdict: Ready to merge** | **Verdict: Minor nits (non-blocking)** | **Verdict: Blocking issues**
-
-          claude_args: >-
-            --allowedTools
-            "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"

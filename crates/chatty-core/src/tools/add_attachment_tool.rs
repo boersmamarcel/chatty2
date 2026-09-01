@@ -47,11 +47,12 @@ impl Tool for AddAttachmentTool {
     type Output = AddAttachmentOutput;
 
     fn description(&self) -> String {
-        "Display an image or PDF file inline in the chat response. \
-                         Use this to show generated plots, charts, screenshots, or documents \
-                         to the user. The file will appear visually in your response message.\n\
+        "Display an image file inline in the chat response. \
+                         Use this to show generated plots, charts, or screenshots to the user. \
+                         PDF documents produced by Typst or write tools appear as artifact cards \
+                         in the transcript instead.\n\
                          \n\
-                         Supported formats: PNG, JPG, JPEG, GIF, WebP, SVG, BMP (images), PDF (documents).\n\
+                         Supported formats: PNG, JPG, JPEG, GIF, WebP, SVG, BMP (images).\n\
                          Maximum file size: 5MB.\n\
                          \n\
                          Note: the file is always displayed to the user, but on text-only models \
@@ -59,8 +60,7 @@ impl Tool for AddAttachmentTool {
                          \n\
                          Examples:\n\
                          - Show a generated plot: {\"path\": \"output/chart.png\"}\n\
-                         - Display a screenshot: {\"path\": \"screenshots/page.png\"}\n\
-                         - Show a PDF document: {\"path\": \"reports/analysis.pdf\"}"
+                         - Display a screenshot: {\"path\": \"screenshots/page.png\"}"
                 .to_string()
     }
 
@@ -105,18 +105,26 @@ impl Tool for AddAttachmentTool {
             "image".to_string()
         };
 
-        // Queue the path for inline display after the stream completes
-        if let Ok(mut artifacts) = self.pending_artifacts.lock() {
+        // Queue the path for inline display after the stream completes (images only;
+        // PDFs use artifact cards in the typed transcript).
+        if !is_pdf && let Ok(mut artifacts) = self.pending_artifacts.lock() {
             artifacts.push(canonical.clone());
         }
 
         Ok(AddAttachmentOutput {
             path: canonical.display().to_string(),
             file_type: file_type.clone(),
-            message: format!(
-                "File '{}' ({}) will be displayed inline in your response.",
-                args.path, file_type
-            ),
+            message: if is_pdf {
+                format!(
+                    "File '{}' (pdf) is available in the artifact panel.",
+                    args.path
+                )
+            } else {
+                format!(
+                    "File '{}' ({}) will be displayed inline in your response.",
+                    args.path, file_type
+                )
+            },
         })
     }
 }
@@ -173,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_call_queues_valid_pdf() {
+    async fn test_call_pdf_succeeds_without_inline_queue() {
         let (tool, pending, workspace) = create_test_tool().await;
         create_test_file(&workspace, "report.pdf", 2048);
 
@@ -189,7 +197,8 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.file_type, "pdf");
-        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert!(output.message.contains("artifact panel"));
+        assert!(pending.lock().unwrap().is_empty());
 
         let _ = fs::remove_file(workspace.join("report.pdf"));
     }
@@ -226,7 +235,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(pending.lock().unwrap().len(), 3);
+        assert_eq!(pending.lock().unwrap().len(), 2);
 
         let _ = fs::remove_file(workspace.join("a.png"));
         let _ = fs::remove_file(workspace.join("b.jpg"));

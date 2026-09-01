@@ -142,6 +142,16 @@ async fn query_data_reads_workspace_relative_paths() {
     assert_eq!(output.column_count, 2);
     assert!(output.markdown_table.contains("book"));
     assert!(output.markdown_table.contains("game"));
+    assert_eq!(output.preview.row_count, 2);
+    assert_eq!(output.preview.column_count(), 2);
+    assert!(
+        output
+            .preview
+            .rows
+            .iter()
+            .flatten()
+            .any(|c| c.contains("book"))
+    );
 }
 
 #[tokio::test]

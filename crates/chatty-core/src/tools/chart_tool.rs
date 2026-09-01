@@ -1,6 +1,6 @@
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolError;
@@ -95,46 +95,14 @@ impl Tool for CreateChartTool {
     type Output = ChartSpec;
 
     fn description(&self) -> String {
-        "Create and display a chart inline in the chat response.\n\
-                         \n\
-                         Chart types:\n\
-                         - \"bar\": Vertical bar chart for comparing categories (shows value labels on bars)\n\
-                         - \"line\": Line chart for trends and time series. Supports multiple series via 'series' field.\n\
-                         - \"pie\": Pie chart for proportions (use 'pad_angle' for gaps between slices)\n\
-                         - \"donut\": Donut chart — like pie but with a hole (use 'inner_radius' to control hole size, default 50)\n\
-                         - \"area\": Area chart for trends with filled area below the line. Supports multiple series via 'series' field.\n\
-                         - \"candlestick\": OHLC candlestick chart for financial/stock data\n\
-                         \n\
-                         Multi-series line/area: use 'series' instead of 'data' to plot multiple lines or areas.\n\
-                         \n\
-                         Saving to disk: pass 'save_path' with an absolute file path (e.g. \"/home/user/report/chart.png\") \
-                         to save the chart as a PNG file. The tool returns the saved path in 'saved_path' so you can \
-                         reference it in Markdown reports or other files. Parent directories are created automatically.\n\
-                         \n\
-                         Note on y-axis numbers: Bar charts show values on top of each bar. \
-                         For line/area charts, a value table is shown below. \
-                         True y-axis tick marks are not supported.\n\
-                         \n\
-                         Examples:\n\
-                         - Bar: {\"chart_type\": \"bar\", \"title\": \"Sales by Region\", \
-                           \"data\": [{\"label\": \"North\", \"value\": 120}, {\"label\": \"South\", \"value\": 85}]}\n\
-                         - Line (single): {\"chart_type\": \"line\", \"title\": \"Monthly Revenue\", \
-                           \"data\": [{\"label\": \"Jan\", \"value\": 1000}, {\"label\": \"Feb\", \"value\": 1200}]}\n\
-                         - Line (multi): {\"chart_type\": \"line\", \"title\": \"Revenue vs Expenses\", \
-                           \"series\": [{\"name\": \"Revenue\", \"data\": [{\"label\": \"Jan\", \"value\": 1000}, {\"label\": \"Feb\", \"value\": 1200}]}, \
-                           {\"name\": \"Expenses\", \"data\": [{\"label\": \"Jan\", \"value\": 800}, {\"label\": \"Feb\", \"value\": 950}]}]}\n\
-                         - Pie: {\"chart_type\": \"pie\", \"title\": \"Market Share\", \"pad_angle\": 0.05, \
-                           \"data\": [{\"label\": \"A\", \"value\": 45}, {\"label\": \"B\", \"value\": 30}]}\n\
-                         - Donut: {\"chart_type\": \"donut\", \"title\": \"Budget\", \"inner_radius\": 60, \
-                           \"data\": [{\"label\": \"Dev\", \"value\": 50}, {\"label\": \"Marketing\", \"value\": 30}]}\n\
-                         - Area: {\"chart_type\": \"area\", \"title\": \"Visitors\", \
-                           \"data\": [{\"label\": \"Mon\", \"value\": 400}, {\"label\": \"Tue\", \"value\": 520}]}\n\
-                         - Candlestick: {\"chart_type\": \"candlestick\", \"title\": \"AAPL\", \
-                           \"candlestick_data\": [{\"date\": \"2024-01\", \"open\": 150, \"high\": 160, \"low\": 145, \"close\": 158}]}\n\
-                         - Save to disk: {\"chart_type\": \"bar\", \"title\": \"Sales\", \
-                           \"data\": [{\"label\": \"A\", \"value\": 100}], \
-                           \"save_path\": \"/home/user/report/sales.png\"}"
-                .to_string()
+        "Create and display a chart inline. Prefer this over matplotlib/shell.\n\
+                         Keep the title short plain text. Always send one complete JSON object with a full \
+                         `data` (or `series`) array — never put JSON inside the title.\n\
+                         Types: bar, line, pie, donut, area, candlestick.\n\
+                         Save with workspace-relative save_path, e.g. \"charts/sales.png\".\n\
+                         Example: {\"chart_type\":\"bar\",\"title\":\"Sales\",\"save_path\":\"charts/sales.png\",\
+                         \"data\":[{\"label\":\"Jan\",\"value\":45},{\"label\":\"Feb\",\"value\":52}]}"
+            .to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -148,42 +116,33 @@ impl Tool for CreateChartTool {
                 },
                 "title": {
                     "type": "string",
-                    "description": "Optional title displayed above the chart"
+                    "description": "Short plain-text title (do not embed JSON here)"
                 },
                 "data": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "label": {
-                                "type": "string",
-                                "description": "Category label or x-axis value"
-                            },
-                            "value": {
-                                "type": "number",
-                                "description": "Numeric value for this data point"
-                            }
+                            "label": { "type": "string" },
+                            "value": { "type": "number" }
                         },
                         "required": ["label", "value"]
                     },
-                    "description": "Data points for single-series charts (bar, pie, donut, area, line). Use 'series' instead for multi-line/area."
+                    "description": "Points for bar/pie/donut/line/area. Use series for multi-line/area."
                 },
                 "series": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "Series name shown in the legend"
-                            },
+                            "name": { "type": "string" },
                             "data": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "label": { "type": "string", "description": "X-axis label" },
-                                        "value": { "type": "number", "description": "Y value" }
+                                        "label": { "type": "string" },
+                                        "value": { "type": "number" }
                                     },
                                     "required": ["label", "value"]
                                 }
@@ -191,40 +150,36 @@ impl Tool for CreateChartTool {
                         },
                         "required": ["name", "data"]
                     },
-                    "description": "Multiple named series for line and area charts. Each series has a name and its own data array. All series should share the same x-axis labels."
+                    "description": "Named series for multi-line/area charts"
                 },
                 "candlestick_data": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "date": { "type": "string", "description": "Date or time label" },
-                            "open": { "type": "number", "description": "Opening price" },
-                            "high": { "type": "number", "description": "Highest price" },
-                            "low": { "type": "number", "description": "Lowest price" },
-                            "close": { "type": "number", "description": "Closing price" }
+                            "date": { "type": "string" },
+                            "open": { "type": "number" },
+                            "high": { "type": "number" },
+                            "low": { "type": "number" },
+                            "close": { "type": "number" }
                         },
                         "required": ["date", "open", "high", "low", "close"]
-                    },
-                    "description": "OHLC data points for candlestick charts"
+                    }
                 },
-                "inner_radius": {
-                    "type": "number",
-                    "description": "Inner radius for donut charts (default: 50). Larger = bigger hole."
-                },
-                "pad_angle": {
-                    "type": "number",
-                    "description": "Gap between pie/donut slices in radians (e.g. 0.03 to 0.1)"
-                },
+                "inner_radius": { "type": "number" },
+                "pad_angle": { "type": "number" },
                 "save_path": {
                     "type": "string",
-                    "description": "Absolute file path to save the chart as a PNG file (e.g. \"/home/user/report/chart.png\"). \
-                                    Parent directories are created automatically. \
-                                    The saved path is returned in 'saved_path' so you can reference it in Markdown or other files."
+                    "description": "Workspace-relative PNG path (e.g. charts/sales.png)"
                 }
             },
             "required": ["chart_type"]
         })
+    }
+
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        let message = error.to_string();
+        ToolExecutionError::from_error(error).with_model_feedback(format!("Error: {message}"))
     }
 
     async fn call(

@@ -71,8 +71,8 @@ cx.global::<GlobalTokenBudget>().update_with_actuals(input_tokens, output_tokens
 
 ## Research connection (GEPA / ACE)
 
-Context headroom and token cost feed optimizer economics ([cost model](../research/cost-model.md))
-and ACE playbook growth bounds. See [app ↔ research bridge](../research/app-research-bridge.md#context-window--token-budget).
+Context headroom and token cost feed optimizer economics ([cost model](research/cost-model.md))
+and ACE playbook growth bounds. See [app ↔ research bridge](research/app-research-bridge.md#context-window--token-budget).
 
 ## `TokenBudgetSnapshot`
 

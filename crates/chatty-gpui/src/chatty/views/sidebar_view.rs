@@ -1,7 +1,9 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Collapsible, Icon, IconName, Sizable, button::Button, h_flex, v_flex,
+    ActiveTheme, Collapsible, Icon, IconName, Sizable,
+    button::{Button, ButtonVariants},
+    h_flex, v_flex,
 };
 
 use super::conversation_item::ConversationItem;
@@ -140,8 +142,10 @@ impl Render for SidebarView {
                         .when(cfg!(target_os = "macos"), |this| this.pt(px(40.0)))
                         .child(
                             Button::new("new-chat")
+                                .primary()
                                 .label(if self.is_collapsed { "+" } else { "New Chat" })
                                 .small()
+                                .rounded(px(999.))
                                 .w_full()
                                 .on_click({
                                     let entity = sidebar_entity.clone();
@@ -176,7 +180,7 @@ impl Render for SidebarView {
                                             let is_active = active_id.as_ref() == Some(id);
 
                                             div()
-                                                .id(ix)
+                                                .id(ElementId::Name(id.clone().into()))
                                                 .child(
                                                     ConversationItem::new(
                                                         id.clone(),

@@ -139,7 +139,12 @@
           "variable.special": {
             "color": "#E19773"
           }
-        }
+        },
+        "deleted": "#e27373",
+        "created.background": "#94b97933",
+        "deleted.background": "#e27373",
+        "created.border": "#3f72e2",
+        "deleted.border": "#e27373"
       }
     }
   ]

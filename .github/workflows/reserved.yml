@@ -3,11 +3,16 @@ name: Reserved symbols
 # Fails if a function reserved in RESERVED.md has been implemented without either its
 # todo!("human: ...") marker or a `// HUMAN-WRITTEN: <symbol>` attestation.
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
+
+concurrency:
+  group: reserved-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check-reserved:

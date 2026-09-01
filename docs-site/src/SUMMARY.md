@@ -7,8 +7,15 @@
 # User guides
 
 - [Getting started](./user/getting-started.md)
+- [Why Chatty?](./user/overview.md)
+- [Agents](./user/agents.md)
 - [Providers & models](./user/providers-and-models.md)
 - [Agentic tools](./user/agentic-tools.md)
+- [Memory & skills](./user/memory-and-skills.md)
+- [Sub-agents](./user/sub-agents.md)
+- [Security & sandboxing](./user/security.md)
+- [Features](./user/features.md)
+- [Terminal interface](./user/terminal.md)
 
 ---
 
@@ -49,6 +56,7 @@
 
 # Crates
 
+- [Workspace crate index](./dev/crates.md)
 - [chatty-core](./dev/crates/chatty-core.md)
 - [chatty-gpui](./dev/crates/chatty-gpui.md)
 - [chatty-tui](./dev/crates/chatty-tui.md)
@@ -82,6 +90,7 @@
 
 # ADRs & research
 
+- [ADR index (pair review)](./dev/adrs/README.md)
 - [Harbor pivot](./dev/adrs/harbor-pivot.md)
 - [chatty-trace promises](./dev/adrs/crate-promises-chatty-trace.md)
 - [chatty-playbook promises](./dev/adrs/crate-promises-chatty-playbook.md)
@@ -94,13 +103,20 @@
 # Reference
 
 - [Tools catalog](./dev/reference/tools-catalog.md)
+- [Provider matrix](./dev/reference/provider-matrix.md)
 - [Slash commands](./dev/reference/slash-commands.md)
 - [CLI flags (chatty-tui)](./dev/reference/cli-flags.md)
 - [Environment variables](./dev/reference/env-vars.md)
+- [Settings schema](./dev/reference/settings-schema.md)
+- [GPUI event catalog](./dev/reference/event-catalog.md)
+- [Singleton inventory](./dev/reference/singleton-inventory.md)
 
 # How-to guides
 
 - [Add a new LLM provider](./dev/guides/add-provider.md)
 - [Add a new LLM tool](./dev/guides/add-tool.md)
+- [Add a slash command](./dev/guides/add-slash-command.md)
+- [Add a desktop GPUI view](./dev/guides/add-gpui-view.md)
+- [Doc frontmatter schema](./dev/guides/doc-frontmatter.md)
 - [Debug streams & rendering](./dev/guides/debug-streams.md)
 - [Build & package](./dev/guides/build-package.md)

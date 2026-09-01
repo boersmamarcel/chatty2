@@ -170,6 +170,7 @@ sudo apt-get install -y \
   - **macOS**: `~/Library/Application Support/chatty/lib/`
   - **Linux**: `~/.local/share/chatty/lib/` or `$XDG_DATA_HOME/chatty/lib/`
   - **Windows**: `%APPDATA%\chatty\lib\`
+- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui.
 
 ## CI/CD
 
@@ -177,15 +178,16 @@ sudo apt-get install -y \
 
 | Workflow | Trigger | Purpose |
 |:---------|:--------|:--------|
-| **CI** (`ci.yml`) | PR to `main` | Tests, formatting check, clippy lints. Cargo dependencies and build artifacts are cached. |
+| **CI** (`ci.yml`) | PR / push to `main` | Tests, formatting, clippy. Docs-only diffs skip compile (required `test` job still passes). Stale PR runs are cancelled. `Swatinem/rust-cache` is warmed on `main`. |
 | **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version via a `cut-release` PR (main is protected), generates changelog, tags, creates the GitHub Release, then calls Release via `workflow_call`. |
 | **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
-| **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated | Automated AI code review via Claude. |
+| **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated (Rust/CI paths only) | Automated AI code review via Claude. Skipped for docs-only PRs. |
+| **Rig canary** (`rig-canary.yml`) | Weekly, or PR that touches Cargo manifests | Informational `cargo update` + `cargo check` against latest rig (AGE-26). |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |
 | **Update README** (`update-readme.yml`) | PR merged to `main` | Claude analyzes the diff; if user-facing features changed, opens a follow-up PR with README updates. Add `skip-readme` label to opt out. |
 | **Update Agent Docs** (`update-agent-docs.yml`) | PR merged to `main` | Claude analyzes the merged PR for guidance drift and opens a follow-up PR to sync `CLAUDE.md` / `AGENTS.md` when needed. Add `skip-agent-docs` label to opt out. |
 | **UI Sync Check** (`ui-sync-check.yml`) | PR merged to `main` | Claude checks if one UI crate (chatty-gpui/chatty-tui) changed without the other; creates `ui-sync` labeled issue if sync needed. Add `skip-sync-check` label to opt out. |
-| **Dependency Check** (`dependency-check.yml`) | Weekly (Monday 9:00 UTC) or manual | Checks crates.io for dependency updates, creates grouped tech-debt issues. |
+| **Dependency Check** (`dependency-check.yml`) | Weekly (Monday 9:00 UTC) or manual | Checks crates.io for dependency updates, files grouped work in Linear only (auto-ship, agent tech debt, or human tech debt track) — no GitHub issues; requires `LINEAR_API_KEY`. |
 
 ### Release Flow
 

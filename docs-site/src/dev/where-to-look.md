@@ -25,10 +25,15 @@ flowchart TD
 
 | I want to… | Open |
 |------------|------|
+| Read the user manual | [getting-started.md](../user/getting-started.md) · [user guides](../user/overview.md) |
 | Understand the big picture | [system-overview.md](./architecture/system-overview.md) |
 | See component diagrams | [component-map.md](./architecture/component-map.md) |
+| Find a workspace crate | [crates.md](./crates.md) |
 | Add an LLM tool | [add-tool.md](./guides/add-tool.md) |
 | Add a provider | [add-provider.md](./guides/add-provider.md) |
+| Add a slash command | [add-slash-command.md](./guides/add-slash-command.md) |
+| Add a GPUI view | [add-gpui-view.md](./guides/add-gpui-view.md) |
+| Look up a persisted setting | [settings-schema.md](./reference/settings-schema.md) |
 | Fix stream/cancel bugs | [stream-manager.md](./architecture/stream-manager.md) |
 | Fix rendering/layout | [debug_ui.md](./architecture/debug_ui.md) |
 | Look up a tool name | [tools-catalog.md](./reference/tools-catalog.md) |

@@ -22,14 +22,15 @@ use std::time::Duration;
 use super::super::message_types::{
     ApprovalState, ThinkingBlock, ToolCallBlock, ToolCallState, TraceItem,
 };
+use super::super::transcript::ToolRow;
 use super::SystemTraceView;
 use super::badges::{
     execution_engine_badge, is_code_execution_tool, render_execution_mode_badge,
-    render_outline_badge, render_sub_agent_mode_badge, tool_source_badge,
+    render_outline_badge, tool_source_badge,
 };
 use super::inline::{
-    SelectableText, extract_command_display, extract_full_command, format_tool_output,
-    render_code_run_input, render_full_command_box,
+    SelectableText, extract_full_command, format_tool_output, render_code_run_input,
+    render_full_command_box,
 };
 
 impl SystemTraceView {
@@ -292,101 +293,44 @@ impl SystemTraceView {
         tool_call: &ToolCallBlock,
         cx: &App,
     ) -> impl IntoElement {
-        let is_running = matches!(tool_call.state, ToolCallState::Running);
-
-        let (prefix, prefix_color, state_label) = match &tool_call.state {
-            ToolCallState::Running => (">", cx.theme().primary, "running"),
-            ToolCallState::Success => ("✓", cx.theme().accent, "success"),
-            ToolCallState::Error(_) => ("✗", cx.theme().ring, "error"),
-        };
-
         let muted_text = cx.theme().muted_foreground;
         let border_color = cx.theme().border;
         let text_color = cx.theme().foreground;
         let panel_bg = cx.theme().muted;
-        let badge_text = cx.theme().primary_foreground;
 
-        let badge = div()
-            .id(ElementId::Name(format!("tool-badge-{}", index).into()))
-            .text_xs()
-            .px_2()
-            .py(px(0.5))
-            .rounded_sm()
-            .bg(prefix_color)
-            .text_color(badge_text)
-            .child(state_label);
-
-        let mut container = div().flex().flex_col().gap_1().child(
-            // Command invocation line
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .font_family("monospace")
-                .text_sm()
-                .child(
-                    div()
-                        .text_color(prefix_color)
-                        .font_weight(FontWeight::BOLD)
-                        .child(prefix),
-                )
-                .child(
-                    div()
-                        .text_color(text_color)
-                        .font_weight(FontWeight::BOLD)
-                        .child(extract_command_display(tool_call)),
-                )
-                .map(|this| {
-                    let this = if tool_call.tool_name == "sub_agent" {
-                        this.child(render_sub_agent_mode_badge(&tool_call.source, badge_text))
-                    } else if is_code_execution_tool(tool_call) {
-                        if let Some(engine) = tool_call.execution_engine {
-                            this.child(render_execution_mode_badge(engine, badge_text))
-                        } else {
-                            this
-                        }
-                    } else {
-                        this
-                    };
-
-                    let this = if is_running {
-                        this.child(
-                            badge.with_animation(
-                                ElementId::Name(format!("tool-badge-pulse-{}", index).into()),
-                                Animation::new(Duration::from_secs(2))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 1.0)),
-                                |el, delta| el.opacity(delta),
-                            ),
-                        )
-                    } else {
-                        this.child(badge)
-                    };
-
-                    if tool_call.tool_name != "sub_agent" && !is_code_execution_tool(tool_call) {
-                        if let Some(engine) = tool_call.execution_engine {
-                            let (badge_text, badge_color) = execution_engine_badge(engine);
-                            this.child(render_outline_badge(badge_text, badge_color))
-                        } else if let Some((badge_text, badge_color)) =
-                            tool_source_badge(&tool_call.source)
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(ToolRow::new(tool_call.clone()))
+            .child(
+                div()
+                    .map(|this| {
+                        if tool_call.tool_name != "sub_agent" && !is_code_execution_tool(tool_call)
                         {
-                            this.child(render_outline_badge(badge_text, badge_color))
+                            if let Some(engine) = tool_call.execution_engine {
+                                let (badge_text, badge_color) = execution_engine_badge(engine);
+                                this.child(render_outline_badge(badge_text, badge_color))
+                            } else if let Some((badge_text, badge_color)) =
+                                tool_source_badge(&tool_call.source)
+                            {
+                                this.child(render_outline_badge(badge_text, badge_color))
+                            } else {
+                                this
+                            }
                         } else {
                             this
                         }
-                    } else {
-                        this
-                    }
-                })
-                .when_some(tool_call.duration, |this, duration| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_text)
-                            .child(format!("({:.1}s)", duration.as_secs_f32())),
-                    )
-                }),
-        );
+                    })
+                    .when_some(tool_call.duration, |this, duration| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_text)
+                                .child(format!("({:.1}s)", duration.as_secs_f32())),
+                        )
+                    }),
+            );
 
         // Show runnable code with syntax highlighting when available.
         if let Some(code_block) = render_code_run_input(tool_call, index) {

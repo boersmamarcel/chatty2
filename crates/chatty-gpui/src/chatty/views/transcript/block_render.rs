@@ -1,0 +1,100 @@
+use std::rc::Rc;
+
+use chatty_core::services::AgentTaskSnapshot;
+use gpui::*;
+use gpui_component::ActiveTheme;
+
+use super::OpenArtifact;
+use super::OpenTable;
+use super::activity::{ActivityGroup, RunTally};
+use super::approval::{ApprovalCard, ErrorBlock};
+use super::artifact::ArtifactCard;
+use super::diff::DiffHunkList;
+use super::plan::PlanBlock;
+use super::table::render_table_preview_card;
+use super::types::Block;
+
+pub type ActivityToggle = Rc<dyn Fn(u64, &mut App)>;
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_typed_block(
+    block: &Block,
+    message_index: usize,
+    on_open: Option<OpenArtifact>,
+    on_open_table: Option<OpenTable>,
+    plan: Option<&AgentTaskSnapshot>,
+    activity_open: Option<bool>,
+    on_activity_toggle: Option<ActivityToggle>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match block {
+        Block::User { .. } | Block::Text { .. } => div().into_any_element(),
+        Block::Plan { .. } => match plan {
+            Some(snapshot) if snapshot.write_todos_called && !snapshot.todos.is_empty() => {
+                PlanBlock::new(snapshot.clone()).into_any_element()
+            }
+            _ => div().into_any_element(),
+        },
+        Block::Thinking { id, block } => div()
+            .id(id.element_id())
+            .px_3()
+            .py_1()
+            .text_xs()
+            .italic()
+            .text_color(cx.theme().muted_foreground)
+            .child(if block.summary.is_empty() {
+                format!("Thought {}", format_secs(block.duration))
+            } else {
+                block.summary.clone()
+            })
+            .into_any_element(),
+        Block::Activity { id, tools } => {
+            let default_open = RunTally::has_failure(tools);
+            let open = activity_open.unwrap_or(default_open);
+            let mut group = ActivityGroup::new(tools.clone()).open(open);
+            if let Some(toggle) = on_activity_toggle {
+                let block_id = id.0;
+                group = group.on_toggle(move |cx| toggle(block_id, cx));
+            }
+            group.into_any_element()
+        }
+        Block::Diff { id, tool } => {
+            let mut hunk = DiffHunkList::from_tool(id.0.to_string(), tool);
+            if let Some(on_open) = on_open.clone() {
+                hunk = hunk.on_open(move |open, cx| on_open(open, cx));
+            }
+            hunk.into_any_element()
+        }
+        Block::Approval { approval, .. } => ApprovalCard::new(approval.clone()).into_any_element(),
+        Block::Artifact {
+            path, old_content, ..
+        } => {
+            let mut card = ArtifactCard::new(path.clone()).old_content(old_content.clone());
+            if let Some(on_open) = on_open.clone() {
+                card = card.on_open(move |open, cx| on_open(open, cx));
+            }
+            card.into_any_element()
+        }
+        Block::TablePreview { id, preview } => render_table_preview_card(
+            preview.clone(),
+            message_index,
+            id.0 as usize,
+            on_open_table.clone(),
+            cx,
+        )
+        .into_any_element(),
+        Block::Error {
+            id,
+            message,
+            detail,
+        } => ErrorBlock::new(id.0.to_string(), message.clone(), detail.clone()).into_any_element(),
+    }
+}
+
+fn format_secs(duration: Option<std::time::Duration>) -> String {
+    match duration.map(|d| d.as_secs()).unwrap_or(0) {
+        0 => "a moment".to_string(),
+        n => format!("{n}s"),
+    }
+}

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use azure_core::auth::TokenCredential;
-use azure_identity::{DefaultAzureCredential, TokenCredentialOptions};
+use azure_core::credentials::TokenCredential;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
@@ -16,7 +15,7 @@ struct CachedToken {
 
 /// Global cache for Azure Entra ID credentials and tokens
 ///
-/// This cache stores a single `DefaultAzureCredential` instance (expensive to create)
+/// This cache stores a single Entra credential instance (expensive to create)
 /// and manages token lifecycle with automatic refresh before expiry.
 ///
 /// Token refresh triggers:
@@ -30,7 +29,7 @@ struct CachedToken {
 #[derive(Clone)]
 pub struct AzureTokenCache {
     /// Singleton credential instance (reused for all token fetches)
-    credential: Arc<DefaultAzureCredential>,
+    credential: Arc<dyn TokenCredential>,
     /// Cached token with expiry timestamp
     cached_token: Arc<RwLock<Option<CachedToken>>>,
     /// Mutex to prevent concurrent refresh operations
@@ -40,22 +39,22 @@ pub struct AzureTokenCache {
 impl AzureTokenCache {
     /// Create a new token cache with Azure credentials
     ///
-    /// Uses `DefaultAzureCredential` which tries (in order):
-    /// 1. Environment variables (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_CLIENT_SECRET)
-    /// 2. Managed Identity (if running on Azure)
-    /// 3. Azure CLI (`az login`)
-    /// 4. Interactive browser authentication (if configured)
+    /// Uses the same credential selection as `fetch_entra_id_token`:
+    /// 1. Service principal env vars (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`)
+    /// 2. Workload identity (`AZURE_FEDERATED_TOKEN_FILE`)
+    /// 3. Managed identity (`IDENTITY_ENDPOINT` / `MSI_ENDPOINT`)
+    /// 4. Developer tools (`az login` / `azd auth`)
     pub fn new() -> Result<Self> {
-        tracing::info!("Creating Azure token cache with DefaultAzureCredential");
+        tracing::info!("Creating Azure token cache");
 
         // Ensure az CLI is findable when app is launched as a GUI (no shell PATH)
         super::azure_auth::augment_gui_app_path();
 
-        let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())
-            .context("Failed to create DefaultAzureCredential")?;
+        let credential = super::azure_auth::create_entra_credential()
+            .context("Failed to create Entra ID credential")?;
 
         Ok(Self {
-            credential: Arc::new(credential),
+            credential,
             cached_token: Arc::new(RwLock::new(None)),
             refresh_lock: Arc::new(Mutex::new(())),
         })
@@ -131,12 +130,12 @@ impl AzureTokenCache {
 
         let token_response = self
             .credential
-            .get_token(&[AZURE_OPENAI_SCOPE])
+            .get_token(&[AZURE_OPENAI_SCOPE], None)
             .await
             .context("Failed to refresh Azure Entra ID token")?;
 
         let token_string = token_response.token.secret().to_string();
-        let expires_at: SystemTime = token_response.expires_on.into();
+        let expires_at = SystemTime::from(token_response.expires_on);
 
         // Cache the new token
         {

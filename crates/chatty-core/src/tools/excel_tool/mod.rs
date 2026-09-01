@@ -202,22 +202,19 @@ mod tests {
         cell: &str,
     ) -> (bool, String, String) {
         let workbook = umya_spreadsheet::reader::xlsx::read(path).unwrap();
-        let worksheet = workbook.get_sheet_by_name(sheet).unwrap();
+        let worksheet = workbook.sheet_by_name(sheet).unwrap();
         let styled_cell = worksheet.get_cell(cell).unwrap();
         let style = styled_cell.get_style();
-        let bold = style
-            .get_font()
-            .map(|font| *font.get_bold())
-            .unwrap_or(false);
+        let bold = style.get_font().map(|font| font.bold()).unwrap_or(false);
         let font_color = style
             .get_font()
-            .map(|font| font.get_color().get_argb().to_string())
+            .map(|font| font.get_color().argb_str())
             .unwrap_or_default();
         let bg_color = style
             .get_fill()
             .and_then(|fill| fill.get_pattern_fill())
             .and_then(|pattern| pattern.get_foreground_color())
-            .map(|color| color.get_argb().to_string())
+            .map(|color| color.argb_str())
             .unwrap_or_default();
         (bold, font_color, bg_color)
     }

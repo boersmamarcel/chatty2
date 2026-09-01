@@ -20,8 +20,11 @@
 > Low-risk work may merge and **patch-release** without Marcel when — and only when —
 > all of the following hold:
 >
-> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** (not Self-improving chatty2).
+> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** or **[Chatty tech debt](https://linear.app/agents-research/project/chatty-tech-debt-16da7cdefe96)** (not Self-improving chatty2).
+>    **Chatty auto-ship** — CVEs and safe infra patch/minor only.
+>    **Chatty tech debt** — grouped dependency/crate bumps agents may implement (`ship:auto`).
 >    Project members = Marcel (closed-system allowlist).
+>    Weekly `dependency-check.yml` files work in Linear only (no GitHub tech-debt issues).
 > 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
 >    `ship:auto` + `release:patch` (never minor/major). Privileged labels are
 >    owner / `github-actions[bot]` only; outsiders are stripped.
@@ -40,10 +43,11 @@ Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper
 via the links below.
 
-For human-oriented documentation, see [`README.md`](README.md). For
-detailed coding patterns and behavioral guidelines, see
-[`CLAUDE.md`](CLAUDE.md). For full architecture details, see
-[`docs/`](docs/).
+For human-oriented documentation, see the [user guides](docs-site/src/user/getting-started.md)
+(published at <https://boersmamarcel.github.io/chatty2/>). The repo
+[`README.md`](README.md) is a short landing page (download, links, dev
+quick-start). For coding patterns see [`CLAUDE.md`](CLAUDE.md). For
+architecture, see [`docs/INDEX.md`](docs/INDEX.md).
 
 ---
 
@@ -102,6 +106,10 @@ trait impls live behind the `gpui-globals` feature.
 **The CI workflow** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 **is the ground truth.** If a command is not here, it is not what CI runs.
 
+Docs-only PRs (and other diffs that do not match the Rust path filter in
+`ci.yml`) skip compile, test, and clippy. The required `test` check still
+goes green. Stale CI runs on the same PR are cancelled on the next push.
+
 ```bash
 make setup            # one-time: install Linux deps + wasm32-wasip2 target
 make build            # cargo build (debug)
@@ -117,7 +125,10 @@ make wasm-modules     # build the echo-agent WASM module (needed by tests)
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
-make ci               # everything CI runs, locally, in order
+make docs-check-links # lychee link check (AGE-117)
+make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
+make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
+make ci               # everything the Rust CI path runs, locally, in order
 ```
 
 Or use cargo directly:
@@ -127,8 +138,6 @@ cargo build
 cargo test --all-features -- --test-threads=1
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo build -p chatty-tui
-./target/debug/chatty-tui --help
 ```
 
 ### Test-thread footgun
@@ -182,6 +191,13 @@ examples.
   `masked_env()` not `.env`. See "Security Practices" in CLAUDE.md.
 - **Rust edition** — 2024. Use `LazyLock`/`OnceLock` (std) rather than
   `lazy_static`/`once_cell`.
+- **GPUI / gpui-component skills** — When changing desktop UI, load
+  `.claude/skills/gpui` and `.claude/skills/gpui-component` (vendored from
+  `npx skills add longbridge/gpui-component`; lockfile `skills-lock.json`).
+- **Transcript blocks** — Typed block/turn types in
+  `chatty-gpui/src/chatty/views/transcript/` render the transcript;
+  persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
+  chatty-core. Don't leak transcript block types into chatty-core.
 
 ## Known gotchas
 
@@ -212,10 +228,10 @@ examples.
 
 7. **Large module directories.** Several complex areas have been split
    into sub-module directories (`chat_view/`, `chat_input/`,
-   `auto_updater/`, `trace_components/`, etc.). Start with the `mod.rs`
-   and its module-level docstring to scope what you need before loading
-   sibling files. The largest single files are `message_ops.rs` (~1260
-   lines) and `main.rs` (~1225 lines).
+   `auto_updater/`, `trace_components/`, `transcript/`, etc.). Start
+   with the `mod.rs` and its module-level docstring to scope what you
+   need before loading sibling files. The largest single files are
+   `message_ops.rs` (~1260 lines) and `main.rs` (~1225 lines).
 
 ## Deeper reading
 
@@ -244,9 +260,10 @@ packages, the Rust toolchain, and the `cc`/`c++` alternatives below are baked
 into the VM; the startup/update script only re-runs
 `rustup target add wasm32-wasip2` + `make wasm-modules`.
 
-- **Toolchain must be ≥ 1.85 (edition 2024).** The base VM image historically
-  pinned `rustup default` to an older toolchain (1.83), which cannot compile
-  this workspace (`feature edition2024 is required`). The default is set to
+- **Toolchain must be ≥ 1.95 (edition 2024).** Workspace `rust-version` is 1.95
+  (AGE-123 / bollard 0.21). The base VM image historically pinned
+  `rustup default` to an older toolchain (1.83), which cannot compile this
+  workspace (`feature edition2024 is required`). The default is set to
   `stable`. If a build suddenly fails with an edition-2024 error, run
   `rustup default stable`.
 
