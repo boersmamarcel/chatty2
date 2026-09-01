@@ -66,6 +66,7 @@ Hand-written pages under `docs-site/src/user/` (edit in place; not synced from
 
 | File | When to read | What it covers |
 |---|---|---|
+| [`research/README.md`](research/README.md) | ADR landing page | Pair-review note, links to decision records |
 | [`research/app-research-bridge.md`](research/app-research-bridge.md) | **App ↔ research map** | Memory, context window, loop, traces → M0–M4 |
 | [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | Research pipeline | SOTA → experiment → product flow |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
