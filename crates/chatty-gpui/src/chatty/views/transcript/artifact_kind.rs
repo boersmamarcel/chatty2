@@ -616,10 +616,7 @@ mod tests {
         assert_eq!(read_artifact_source(&resolved), "# hi");
         assert_eq!(artifact_display_path(&file, Some(&dir)), "poem.md");
         assert_eq!(
-            artifact_display_path(
-                &dir.join("docs/report.md"),
-                Some(&dir),
-            ),
+            artifact_display_path(&dir.join("docs/report.md"), Some(&dir),),
             "docs/report.md"
         );
         let _ = std::fs::remove_file(&file);

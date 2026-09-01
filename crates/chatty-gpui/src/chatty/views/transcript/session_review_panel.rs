@@ -11,8 +11,8 @@ use gpui_component::{
     ActiveTheme, Icon, IconName, Sizable, VirtualListScrollHandle, v_virtual_list,
 };
 
-use super::artifact_view::ArtifactView;
 use super::artifact_kind::artifact_display_path;
+use super::artifact_view::ArtifactView;
 use super::diff_parse::split_path;
 use crate::chatty::views::diff_view_component::{
     CachedDiffView, DiffRenderCache, REVIEW_MAX_LINES, REVIEW_PREVIEW_LINES, diff_line_stats_fast,
