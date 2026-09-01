@@ -8,6 +8,8 @@ use chatty_core::tools::chart_tool::ChartSpec;
 use chatty_core::tools::data_query_tool::{
     FILE_PREVIEW_MAX_ROWS, TablePreview, load_file_table_preview,
 };
+use std::ops::Range;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -20,7 +22,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::tree::{TreeItem, TreeState, tree};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Icon, IconName, Sizable, VirtualListScrollHandle, v_flex};
 use tracing::warn;
 
 use super::artifact_card::reveal_path_in_os;
@@ -32,8 +34,10 @@ use super::artifact_kind::{
 };
 use super::diff::DiffHunkList;
 use super::run_pin::{RunPin, RunPinKind};
+use super::session_review_panel::{ReviewFileSection, SessionReviewPanel};
 use super::table::render_table_preview_view;
 use crate::chatty::views::chart_renderer::render_chart_panel;
+use crate::chatty::views::diff_view_component::diff_line_stats_fast;
 
 const PDF_PAGE_DISPLAY_WIDTH: f32 = 348.0;
 const IMAGE_DISPLAY_WIDTH: f32 = PDF_PAGE_DISPLAY_WIDTH;
@@ -112,6 +116,12 @@ pub struct ArtifactView {
     outline_synced_gen: u64,
     pending_jump_line: Option<u32>,
     anchors: HashMap<(String, usize), ViewAnchor>,
+    session_review: bool,
+    review_sections: Vec<Entity<ReviewFileSection>>,
+    review_total_added: usize,
+    review_total_removed: usize,
+    review_scroll: VirtualListScrollHandle,
+    review_layout_gen: u64,
 }
 
 impl ArtifactView {
@@ -156,6 +166,12 @@ impl ArtifactView {
             outline_synced_gen: u64::MAX,
             pending_jump_line: None,
             anchors: HashMap::new(),
+            session_review: false,
+            review_sections: Vec::new(),
+            review_total_added: 0,
+            review_total_removed: 0,
+            review_scroll: VirtualListScrollHandle::new(),
+            review_layout_gen: 0,
         }
     }
 
@@ -169,6 +185,11 @@ impl ArtifactView {
         pending_approval: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.session_review {
+            self.run_visible = run_visible;
+            self.pending_approval = pending_approval;
+            return;
+        }
         let approval_break = pending_approval && self.mode == ArtifactMode::Full;
         if self.run_visible == run_visible
             && self.pending_approval == pending_approval
@@ -186,6 +207,8 @@ impl ArtifactView {
     }
 
     pub fn open_table(&mut self, preview: TablePreview, cx: &mut Context<Self>) {
+        self.session_review = false;
+        self.review_sections.clear();
         let next_path = match &preview.source {
             chatty_core::tools::data_query_tool::TableSource::File { path } => {
                 Some(PathBuf::from(path))
@@ -205,6 +228,8 @@ impl ArtifactView {
     }
 
     pub fn open_chart(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
+        self.session_review = false;
+        self.review_sections.clear();
         let next_path = spec.saved_path.as_ref().map(PathBuf::from);
         self.mode = presentation_on_open(self.mode, next_path.as_ref() == self.path.as_ref());
         self.path = next_path;
@@ -229,6 +254,8 @@ impl ArtifactView {
         workspace_root: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.session_review = false;
+        self.review_sections.clear();
         let same_path = self.path.as_ref() == Some(&path);
         self.mode = presentation_on_open(self.mode, same_path);
         let old_snapshot = old.clone();
@@ -288,8 +315,7 @@ impl ArtifactView {
         cx.notify();
     }
 
-    /// Open every session file in the dock, starting on the Diff tab when an
-    /// old body is available (review mode). `focus` selects which file to show.
+    /// Open every session file in stacked review mode. `focus` expands that file.
     pub fn open_review(
         &mut self,
         files: Vec<(PathBuf, String, Option<String>)>,
@@ -297,23 +323,101 @@ impl ArtifactView {
         focus: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.files = files;
-        let selected = focus
-            .and_then(|want| {
-                self.files
-                    .iter()
-                    .find(|(path, _, _)| path == &want)
-                    .cloned()
-            })
-            .or_else(|| self.files.first().cloned());
-        let Some((path, source, old)) = selected else {
+        if files.is_empty() {
             return;
-        };
-        self.open(path, source, old, workspace_root, cx);
-        if !self.old.is_empty() && self.old != self.source {
-            self.tab = 2;
         }
+        self.session_review = true;
+        self.files = files;
+        self.workspace_root = workspace_root;
+        self.rebuild_review_sections(focus.as_ref(), cx);
+        self.mode = presentation_on_open(self.mode, false);
+        self.path = None;
+        self.source.clear();
+        self.rendered.clear();
+        self.old.clear();
+        self.pdf = PdfPreview::Idle;
+        self.tabular = TabularPreview::Idle;
+        self.chart = None;
+        self.tab = 0;
+        self.stale = false;
+        self.headings.clear();
+        cx.emit(ArtifactViewEvent::PresentationChanged);
         cx.notify();
+    }
+
+    fn rebuild_review_sections(&mut self, focus: Option<&PathBuf>, cx: &mut Context<Self>) {
+        self.review_sections.clear();
+        self.review_total_added = 0;
+        self.review_total_removed = 0;
+
+        let expand_ix = focus
+            .and_then(|want| self.files.iter().position(|(path, _, _)| path == want))
+            .or_else(|| {
+                self.files.iter().position(|(_, new, old)| {
+                    old.as_ref()
+                        .is_some_and(|o| !o.is_empty() && o.as_str() != new.as_str())
+                })
+            });
+
+        let artifact_view = cx.entity();
+        let workspace_root = self.workspace_root.clone();
+        for (file_ix, (path, new, old)) in self.files.iter().enumerate() {
+            let old_text = old.as_deref().unwrap_or("");
+            let (added, removed) = diff_line_stats_fast(old_text, new);
+            self.review_total_added += added;
+            self.review_total_removed += removed;
+            let collapsed = Some(file_ix) != expand_ix;
+            let section = cx.new(|_| {
+                ReviewFileSection::new(
+                    path.clone(),
+                    new.clone(),
+                    old.clone(),
+                    file_ix,
+                    collapsed,
+                    workspace_root.clone(),
+                    artifact_view.clone(),
+                )
+            });
+            self.review_sections.push(section);
+        }
+        self.review_layout_gen = self.review_layout_gen.wrapping_add(1);
+    }
+
+    pub fn bump_review_layout(&mut self, cx: &mut Context<Self>) {
+        self.review_layout_gen = self.review_layout_gen.wrapping_add(1);
+        cx.notify();
+    }
+
+    pub fn review_section_sizes(&self, cx: &App) -> Vec<Size<Pixels>> {
+        self.review_sections
+            .iter()
+            .map(|section| {
+                let height = section.read(cx).estimated_height(cx);
+                size(px(400.), px(height.max(36.0)))
+            })
+            .collect()
+    }
+
+    pub fn render_review_sections(
+        &mut self,
+        range: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Vec<Entity<ReviewFileSection>> {
+        range
+            .filter_map(|ix| self.review_sections.get(ix).cloned())
+            .collect()
+    }
+
+    pub fn open_single_from_review(
+        &mut self,
+        path: PathBuf,
+        source: String,
+        old: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace_root.clone();
+        self.open(path, source, old, workspace, cx);
     }
 
     pub fn set_mode(&mut self, mode: ArtifactMode, cx: &mut Context<Self>) {
@@ -338,6 +442,8 @@ impl ArtifactView {
     }
 
     fn close_panel(&mut self, cx: &mut Context<Self>) {
+        self.session_review = false;
+        self.review_sections.clear();
         if self.mode == ArtifactMode::Full {
             self.set_mode(ArtifactMode::Docked, cx);
         } else {
@@ -785,12 +891,15 @@ fn artifact_primary_body(
 }
 
 fn artifact_source_input(editor: &Entity<InputState>) -> AnyElement {
-    div()
+    // Match gpui-component inspector: v_flex().flex_1() parent + Input::h_full().
+    // The panel body slot must also be flex-col (see render) or flex_1 never resolves.
+    v_flex()
         .id("artifact-source")
         .flex_1()
         .min_h_0()
+        .h_full()
         .w_full()
-        .child(Input::new(editor).h_full().appearance(true))
+        .child(Input::new(editor).h_full().w_full().appearance(true))
         .into_any_element()
 }
 
@@ -799,9 +908,12 @@ impl Render for ArtifactView {
         if self.mode == ArtifactMode::Closed {
             return div().into_any_element();
         }
-        self.refresh_staleness();
-        self.sync_editor(window, cx);
-        self.sync_outline(cx);
+        let session_review = self.session_review;
+        if !session_review {
+            self.refresh_staleness();
+            self.sync_editor(window, cx);
+            self.sync_outline(cx);
+        }
 
         let tab = self.tab;
         let source = self.source.clone();
@@ -852,7 +964,17 @@ impl Render for ArtifactView {
             RunPinKind::JumpToLatest
         };
 
-        let body = if is_pdf {
+        let body = if session_review {
+            SessionReviewPanel::new(
+                self.files.len(),
+                self.review_total_added,
+                self.review_total_removed,
+                self.review_layout_gen,
+                entity.clone(),
+                self.review_scroll.clone(),
+            )
+            .into_any_element()
+        } else if is_pdf {
             div()
                 .flex()
                 .flex_col()
@@ -891,6 +1013,7 @@ impl Render for ArtifactView {
                 .flex_col()
                 .flex_1()
                 .min_h_0()
+                .h_full()
                 .w_full()
                 .child(
                     TabBar::new("artifact-modes")
@@ -915,6 +1038,7 @@ impl Render for ArtifactView {
                         .flex_row()
                         .flex_1()
                         .min_h_0()
+                        .h_full()
                         .w_full()
                         .when(show_outline, |this| {
                             this.child(
@@ -942,23 +1066,32 @@ impl Render for ArtifactView {
                                 .flex_col()
                                 .flex_1()
                                 .min_h_0()
+                                .h_full()
                                 .w_full()
                                 .when(visible_tab == 0, |this| {
                                     if is_tabular {
-                                        this.p_2().child(tabular_rendered_body(&tabular, cx))
+                                        this.flex_1()
+                                            .min_h_0()
+                                            .p_2()
+                                            .child(tabular_rendered_body(&tabular, cx))
                                     } else {
-                                        this.child(artifact_primary_body(
-                                            path_ref.as_ref(),
-                                            &rendered,
-                                            &editor,
-                                            full,
-                                            window,
-                                            cx,
-                                        ))
+                                        this.flex_1().min_h_0().h_full().child(
+                                            artifact_primary_body(
+                                                path_ref.as_ref(),
+                                                &rendered,
+                                                &editor,
+                                                full,
+                                                window,
+                                                cx,
+                                            ),
+                                        )
                                     }
                                 })
                                 .when(visible_tab == 1, |this| {
-                                    this.child(artifact_source_input(&editor))
+                                    this.flex_1()
+                                        .min_h_0()
+                                        .h_full()
+                                        .child(artifact_source_input(&editor))
                                 })
                                 .when(has_diff && visible_tab == 2, |this| {
                                     this.p_2().child(
@@ -975,55 +1108,67 @@ impl Render for ArtifactView {
                 .into_any_element()
         };
 
-        let title = self
-            .chart
-            .as_ref()
-            .and_then(|spec| spec.title.clone())
-            .or_else(|| self.path.as_ref().map(|p| artifact_panel_title(p)))
-            .or_else(|| {
-                if let TabularPreview::Ready(preview) = &self.tabular {
-                    Some(preview.title.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| {
-                if self.chart.is_some() {
-                    "Chart".to_string()
-                } else {
-                    "Document".to_string()
-                }
-            });
+        let title = if session_review {
+            format!("Review · {} files", self.files.len())
+        } else {
+            self.chart
+                .as_ref()
+                .and_then(|spec| spec.title.clone())
+                .or_else(|| self.path.as_ref().map(|p| artifact_panel_title(p)))
+                .or_else(|| {
+                    if let TabularPreview::Ready(preview) = &self.tabular {
+                        Some(preview.title.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if self.chart.is_some() {
+                        "Chart".to_string()
+                    } else {
+                        "Document".to_string()
+                    }
+                })
+        };
         let format_token = self
             .path
             .as_ref()
             .map(|p| artifact_format_token(p))
             .unwrap_or_default();
-        let file_buttons: Vec<AnyElement> = self
-            .files
-            .iter()
-            .map(|(path, source, old)| {
-                let label = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                let entity = entity.clone();
-                let path = path.clone();
-                let source = source.clone();
-                let old = old.clone();
-                Button::new(ElementId::Name(format!("artifact-file-{label}").into()))
-                    .ghost()
-                    .small()
-                    .label(label)
-                    .on_click(move |_, _, cx| {
+        let selected_file_index = self
+            .path
+            .as_ref()
+            .and_then(|active| self.files.iter().position(|(path, _, _)| path == active))
+            .unwrap_or(0);
+        let file_tab_bar = (!session_review && self.files.len() > 1).then(|| {
+            let files = self.files.clone();
+            TabBar::new("artifact-files")
+                .small()
+                .menu(true)
+                .selected_index(selected_file_index)
+                .on_click({
+                    let entity = entity.clone();
+                    move |ix, _, cx| {
                         entity.update(cx, |this, cx| {
+                            let Some((path, source, old)) = this.files.get(*ix).cloned() else {
+                                return;
+                            };
+                            if this.path.as_ref() == Some(&path) {
+                                return;
+                            }
                             let workspace = this.workspace_root.clone();
-                            this.open(path.clone(), source.clone(), old.clone(), workspace, cx);
+                            this.open(path, source, old, workspace, cx);
                         });
-                    })
-                    .into_any_element()
-            })
-            .collect();
+                    }
+                })
+                .children(files.iter().map(|(path, _, _)| {
+                    let label = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    Tab::new().label(label)
+                }))
+        });
 
         let expand_icon = if full {
             IconName::Minimize
@@ -1056,7 +1201,9 @@ impl Render for ArtifactView {
                             .child(title),
                     )
                     .when(
-                        !format_token.is_empty() && (is_pdf || is_chart || is_image),
+                        !session_review
+                            && !format_token.is_empty()
+                            && (is_pdf || is_chart || is_image),
                         |this| {
                             this.child(
                                 div()
@@ -1066,45 +1213,17 @@ impl Render for ArtifactView {
                             )
                         },
                     )
-                    .child(
-                        DropdownButton::new("artifact-copy")
-                            .small()
-                            .ghost()
-                            .button(
-                                Button::new("artifact-copy-main")
-                                    .ghost()
-                                    .small()
-                                    .label("Copy")
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        move |_, _, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                this.copy_kind("plain", cx);
-                                            });
-                                        }
-                                    }),
-                            )
-                            .dropdown_menu({
-                                let entity = entity.clone();
-                                move |menu, _, _| {
-                                    menu.item(PopupMenuItem::new("Markdown").on_click({
-                                        let entity = entity.clone();
-                                        move |_, _, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                this.copy_kind("markdown", cx);
-                                            });
-                                        }
-                                    }))
-                                    .item(PopupMenuItem::new("Rendered").on_click({
-                                        let entity = entity.clone();
-                                        move |_, _, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                this.copy_kind("rendered", cx);
-                                            });
-                                        }
-                                    }))
-                                    .item(
-                                        PopupMenuItem::new("Plain").on_click({
+                    .when(!session_review, |this| {
+                        this.child(
+                            DropdownButton::new("artifact-copy")
+                                .small()
+                                .ghost()
+                                .button(
+                                    Button::new("artifact-copy-main")
+                                        .ghost()
+                                        .small()
+                                        .label("Copy")
+                                        .on_click({
                                             let entity = entity.clone();
                                             move |_, _, cx| {
                                                 entity.update(cx, |this, cx| {
@@ -1112,21 +1231,53 @@ impl Render for ArtifactView {
                                                 });
                                             }
                                         }),
-                                    )
-                                }
-                            }),
-                    )
-                    .when_some(self.path.clone(), |this, path| {
-                        this.child(
-                            Button::new("artifact-reveal")
-                                .ghost()
-                                .small()
-                                .icon(Icon::new(IconName::ExternalLink).size_3())
-                                .tooltip("Reveal")
-                                .on_click(move |_, _, _cx| {
-                                    reveal_path_in_os(&path);
+                                )
+                                .dropdown_menu({
+                                    let entity = entity.clone();
+                                    move |menu, _, _| {
+                                        menu.item(PopupMenuItem::new("Markdown").on_click({
+                                            let entity = entity.clone();
+                                            move |_, _, cx| {
+                                                entity.update(cx, |this, cx| {
+                                                    this.copy_kind("markdown", cx);
+                                                });
+                                            }
+                                        }))
+                                        .item(PopupMenuItem::new("Rendered").on_click({
+                                            let entity = entity.clone();
+                                            move |_, _, cx| {
+                                                entity.update(cx, |this, cx| {
+                                                    this.copy_kind("rendered", cx);
+                                                });
+                                            }
+                                        }))
+                                        .item(
+                                            PopupMenuItem::new("Plain").on_click({
+                                                let entity = entity.clone();
+                                                move |_, _, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.copy_kind("plain", cx);
+                                                    });
+                                                }
+                                            }),
+                                        )
+                                    }
                                 }),
                         )
+                    })
+                    .when(!session_review, |this| {
+                        this.when_some(self.path.clone(), |this, path| {
+                            this.child(
+                                Button::new("artifact-reveal")
+                                    .ghost()
+                                    .small()
+                                    .icon(Icon::new(IconName::ExternalLink).size_3())
+                                    .tooltip("Reveal")
+                                    .on_click(move |_, _, cx| {
+                                        reveal_path_in_os(&path, cx);
+                                    }),
+                            )
+                        })
                     })
                     .child(
                         Button::new("artifact-expand")
@@ -1149,16 +1300,7 @@ impl Render for ArtifactView {
                             })),
                     ),
             )
-            .when(file_buttons.len() > 1, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_1()
-                        .children(file_buttons),
-                )
-            });
+            .when_some(file_tab_bar, |this, tabs| this.child(tabs));
 
         let stale_banner = self.stale.then(|| {
             div()
@@ -1206,8 +1348,11 @@ impl Render for ArtifactView {
             .when_some(stale_banner, |this, banner| this.child(banner))
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .h_full()
                     .w_full()
                     .relative()
                     .child(body)

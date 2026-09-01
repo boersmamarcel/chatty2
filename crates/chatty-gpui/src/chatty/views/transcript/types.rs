@@ -65,6 +65,11 @@ pub enum Block {
         path: PathBuf,
         old_content: Option<String>,
     },
+    /// Compact receipt for several text/code files produced in one run.
+    ArtifactBatch {
+        id: BlockId,
+        files: Vec<(PathBuf, Option<String>)>,
+    },
     TablePreview {
         id: BlockId,
         preview: TablePreview,
@@ -87,6 +92,7 @@ impl Block {
             | Self::Approval { id, .. }
             | Self::Plan { id }
             | Self::Artifact { id, .. }
+            | Self::ArtifactBatch { id, .. }
             | Self::TablePreview { id, .. }
             | Self::Error { id, .. } => *id,
         }

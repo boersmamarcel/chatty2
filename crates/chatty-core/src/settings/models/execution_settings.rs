@@ -88,7 +88,7 @@ impl Default for ExecutionSettingsModel {
     fn default() -> Self {
         Self {
             enabled: false, // Opt-in by default for security
-            approval_mode: ApprovalMode::AlwaysAsk,
+            approval_mode: ApprovalMode::AutoApproveSandboxed,
             workspace_dir: None,
             filesystem_read_enabled: true, // Enabled by default when workspace is set
             filesystem_write_enabled: true, // Enabled by default when workspace is set

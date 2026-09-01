@@ -215,7 +215,7 @@ opt-in (`false`) for security.
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `enabled` | `bool` | `false` | Master code-execution toggle |
-| `approval_mode` | `ApprovalMode` | `"AlwaysAsk"` | JSON enum: `AlwaysAsk`, `AutoApproveSandboxed`, `AutoApproveAll` |
+| `approval_mode` | `ApprovalMode` | `"AutoApproveSandboxed"` | JSON enum: `AlwaysAsk`, `AutoApproveSandboxed`, `AutoApproveAll` |
 | `workspace_dir` | `Option<String>` | `null` | Absolute path required for filesystem / git tools |
 | `filesystem_read_enabled` | `bool` | `true` | Requires `workspace_dir` |
 | `filesystem_write_enabled` | `bool` | `true` | Requires `workspace_dir` + approval |

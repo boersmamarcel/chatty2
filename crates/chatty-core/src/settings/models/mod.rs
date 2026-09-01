@@ -98,7 +98,7 @@ mod schema_docs {
 
         let exec = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
         assert_eq!(exec["enabled"], false);
-        assert_eq!(exec["approval_mode"], "AlwaysAsk");
+        assert_eq!(exec["approval_mode"], "AutoApproveSandboxed");
         assert!(exec["workspace_dir"].is_null());
         assert_eq!(exec["filesystem_read_enabled"], true);
         assert_eq!(exec["filesystem_write_enabled"], true);
