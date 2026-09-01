@@ -33,6 +33,7 @@ mod action_bar;
 mod activity;
 mod adapter;
 mod approval;
+mod artifact_batch_card;
 mod artifact_card;
 mod artifact_kind;
 mod artifact_view;
@@ -56,6 +57,7 @@ pub use adapter::{
     format_working_for, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
+pub use artifact_batch_card::ArtifactBatchCard;
 pub use artifact_card::ArtifactCard;
 pub use artifact_kind::{
     ArtifactHeading, ArtifactVersion, ViewAnchor, artifact_display_title, artifact_file_name,
@@ -63,8 +65,9 @@ pub use artifact_kind::{
     artifact_version, attachment_image_path, chart_artifact_path, csv_shape, csv_stat_line,
     heading_index_for_line, inline_chat_attachments, is_chart_artifact_tool, is_code_artifact_path,
     is_image_artifact_tool, is_image_path, is_markdown_artifact_path, is_pdf_artifact_tool,
-    is_pdf_path, is_produced_file_tool, is_tabular_path, markdown_headings, read_artifact_source,
-    resolve_artifact_path, source_line_from_anchor, tool_file_path,
+    is_pdf_path, is_produced_file_tool, is_standalone_artifact_path, is_tabular_path,
+    markdown_headings, read_artifact_source, resolve_artifact_path, source_line_from_anchor,
+    tool_file_path,
 };
 pub use artifact_view::{
     ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view, presentation_on_open,

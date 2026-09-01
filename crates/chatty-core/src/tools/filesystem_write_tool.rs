@@ -40,7 +40,8 @@ fn preview(s: &str, max: usize) -> String {
 
 /// Request user approval for a write operation.
 /// Posts a request to the shared pending approvals store, then waits for the UI to resolve it.
-/// If `approval_mode` is `AutoApproveAll`, approves immediately without user interaction.
+/// If `approval_mode` is `AutoApproveAll` or `AutoApproveSandboxed`, approves immediately
+/// without user interaction. `AlwaysAsk` prompts for each write.
 pub async fn request_write_approval(
     pending: &PendingWriteApprovals,
     operation: WriteOperation,
@@ -50,7 +51,7 @@ pub async fn request_write_approval(
     // Check global auto-approve setting
     if let Some(mode) = GLOBAL_WRITE_APPROVAL_MODE.get() {
         let mode = mode.lock().clone();
-        if mode == ApprovalMode::AutoApproveAll {
+        if mode == ApprovalMode::AutoApproveAll || mode == ApprovalMode::AutoApproveSandboxed {
             return Ok(true);
         }
     }

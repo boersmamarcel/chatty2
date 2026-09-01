@@ -61,6 +61,7 @@ pub fn artifact_language_for_path(path: &Path) -> Option<String> {
         "html" | "htm" => "html",
         "css" | "scss" => "css",
         "md" | "mdx" => "markdown",
+        "txt" => "plaintext",
         "zig" => "zig",
         "proto" => "proto",
         "graphql" | "gql" => "graphql",
@@ -83,6 +84,11 @@ pub fn is_code_artifact_path(path: &Path) -> bool {
         && !is_tabular_path(path)
         && !is_markdown_artifact_path(path)
         && artifact_language_for_path(path).is_some()
+}
+
+/// Images, PDFs, and tabular exports stay as full artifact cards — not batched receipts.
+pub fn is_standalone_artifact_path(path: &Path) -> bool {
+    is_image_path(path) || is_pdf_path(path) || is_tabular_path(path)
 }
 
 /// Previous file body for diff view when a tool carried it (e.g. `apply_diff`).
@@ -527,8 +533,8 @@ mod tests {
             Some("python")
         );
         assert!(is_code_artifact_path(Path::new("lib.go")));
+        assert!(is_code_artifact_path(Path::new("requirements.txt")));
         assert!(is_markdown_artifact_path(Path::new("README.md")));
-        assert!(!is_code_artifact_path(Path::new("notes.txt")));
     }
 
     #[test]
@@ -686,6 +692,10 @@ mod tests {
         assert_eq!(artifact_meta_line(path), "Document · MD");
         assert_eq!(artifact_panel_title(path), "agentic-chat-ui-gpui.md · MD");
         assert_eq!(artifact_type_token(Path::new("lib.rs")), "Code");
+        assert_eq!(
+            artifact_meta_line(Path::new("requirements.txt")),
+            "Code · TXT"
+        );
         assert_eq!(artifact_type_token(Path::new("sales.csv")), "Data");
         assert_eq!(artifact_type_token(Path::new("plot.png")), "Image");
     }

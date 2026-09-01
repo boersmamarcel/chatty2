@@ -1,12 +1,13 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
-use chatty_core::models::message_types::{SystemTrace, ToolCallState, TraceItem};
+use chatty_core::models::message_types::{ApprovalState, SystemTrace, ToolCallState, TraceItem};
 use gpui::{Pixels, Size, px, size};
 
 use super::activity::{RunTally, classify_tool};
 use super::artifact_kind::{
     artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
-    is_produced_file_tool, tool_file_path,
+    is_produced_file_tool, is_standalone_artifact_path, tool_file_path,
 };
 use super::session_changes::{
     file_change_from_tool, file_changes_from_turn, file_changes_height, merge_file_changes,
@@ -46,6 +47,7 @@ pub fn adapt_message_with_trace(
         MessageRole::Assistant => {
             if let Some(trace) = trace {
                 push_trace_blocks(&mut blocks, namespace, trace);
+                consolidate_receipt_artifacts(&mut blocks, namespace);
             }
             if !msg.content.is_empty() {
                 blocks.push(Block::Text {
@@ -189,6 +191,48 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
     flush_activity(blocks, &mut activity_tools);
 }
 
+/// Merge consecutive text/code artifact receipts into one batch card.
+fn consolidate_receipt_artifacts(blocks: &mut Vec<Block>, namespace: u64) {
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut pending: Vec<(PathBuf, Option<String>)> = Vec::new();
+
+    let flush_batch = |pending: &mut Vec<(PathBuf, Option<String>)>, out: &mut Vec<Block>| {
+        if pending.is_empty() {
+            return;
+        }
+        if pending.len() == 1 {
+            let (path, old_content) = pending.pop().expect("batch");
+            out.push(Block::Artifact {
+                id: BlockId::from_parts(namespace, &format!("artifact-{}", path.display())),
+                path,
+                old_content,
+            });
+        } else {
+            let key = pending[0].0.display().to_string();
+            out.push(Block::ArtifactBatch {
+                id: BlockId::from_parts(namespace, &format!("artifact-batch-{key}")),
+                files: std::mem::take(pending),
+            });
+        }
+    };
+
+    for block in blocks.drain(..) {
+        match block {
+            Block::Artifact {
+                path, old_content, ..
+            } if !is_standalone_artifact_path(&path) => {
+                pending.push((path, old_content));
+            }
+            other => {
+                flush_batch(&mut pending, &mut out);
+                out.push(other);
+            }
+        }
+    }
+    flush_batch(&mut pending, &mut out);
+    *blocks = out;
+}
+
 pub(crate) fn is_agent_todo_tool(name: &str) -> bool {
     matches!(name, "write_todos" | "update_todo" | "verify_completion")
 }
@@ -265,15 +309,31 @@ pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px
         } => estimate_message_bubble_height(content, attachments.len(), content_width_px),
         Block::Text { content, .. } => estimate_message_bubble_height(content, 0, content_width_px),
         Block::Thinking { .. } => 56.0,
-        Block::Activity { tools, .. } => 40.0 + tools.len() as f32 * 28.0,
+        Block::Activity { tools, .. } => {
+            if RunTally::has_failure(tools) {
+                40.0 + tools.len() as f32 * 28.0
+            } else {
+                40.0
+            }
+        }
         Block::Diff { .. } => 120.0,
-        Block::Approval { .. } => 72.0,
+        Block::Approval { approval, .. } => match approval.state {
+            ApprovalState::Pending => 72.0,
+            ApprovalState::Approved | ApprovalState::Denied => 28.0,
+        },
         Block::Plan { .. } => 40.0 + 32.0 * plan_steps.max(1) as f32,
         Block::Artifact { path, .. } => {
             if super::artifact_kind::is_image_path(path) {
                 160.0
             } else {
                 76.0
+            }
+        }
+        Block::ArtifactBatch { files, .. } => {
+            if files.len() <= 1 {
+                76.0
+            } else {
+                52.0 + files.len().min(4) as f32 * 28.0
             }
         }
         Block::TablePreview { preview, .. } => inline_table_card_height(preview),
@@ -288,6 +348,7 @@ fn is_work_trace_block(block: &Block) -> bool {
             | Block::Activity { .. }
             | Block::Diff { .. }
             | Block::Artifact { .. }
+            | Block::ArtifactBatch { .. }
             | Block::TablePreview { .. }
             | Block::Approval { .. }
             | Block::Plan { .. }

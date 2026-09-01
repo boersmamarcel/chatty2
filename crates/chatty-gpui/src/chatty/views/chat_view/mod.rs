@@ -1625,6 +1625,7 @@ impl ChatView {
                             matches!(
                                 block,
                                 Block::Artifact { .. }
+                                    | Block::ArtifactBatch { .. }
                                     | Block::TablePreview { .. }
                                     | Block::Approval { .. }
                                     | Block::Plan { .. }
@@ -1665,6 +1666,7 @@ impl ChatView {
                                     | Block::Activity { .. }
                                     | Block::Diff { .. }
                                     | Block::Artifact { .. }
+                                    | Block::ArtifactBatch { .. }
                                     | Block::TablePreview { .. }
                                     | Block::Approval { .. }
                                     | Block::Plan { .. }

@@ -733,6 +733,10 @@ fn main() {
             // Apply execution settings result
             match exec_settings_result {
                 Ok(settings) => {
+                    let approval_mode = settings.approval_mode.clone();
+                    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
+                        approval_mode,
+                    );
                     cx.update(|cx| {
                         info!(
                             enabled = settings.enabled,
@@ -748,6 +752,10 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load execution settings, using defaults");
+                    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
+                        chatty_core::settings::models::execution_settings::ExecutionSettingsModel::default()
+                            .approval_mode,
+                    );
                     // Defaults will be used (enabled=false); conversations will still load
                 }
             }

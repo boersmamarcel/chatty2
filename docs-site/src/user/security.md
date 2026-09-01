@@ -36,9 +36,11 @@ Side-effect tools (file writes, shell, sub-agents) honor three modes:
 
 | Mode | Behavior |
 |------|----------|
-| **Ask every time** | Prompt before each call; you see the exact command |
-| **Auto-approve** | Run immediately — for trusted workflows |
-| **Deny all** | Tools stay visible in context but do not execute |
+| **Ask every time** | Prompt before each side effect; you see the exact command or file path |
+| **Auto-approve sandboxed** | Shell commands run when sandboxed without prompting; **workspace file writes apply immediately** (Cursor / Claude Code style) |
+| **Auto-approve all** | All side effects run without prompting |
+
+File writes inside the configured workspace directory are auto-approved under **Auto-approve sandboxed** and **Auto-approve all**. Use **Ask every time** if you want to confirm every `write_file`, edit, or diff before it lands.
 
 ## Secrets & key masking
 

@@ -8,6 +8,7 @@ use super::OpenArtifact;
 use super::OpenTable;
 use super::activity::{ActivityGroup, RunTally};
 use super::approval::{ApprovalCard, ErrorBlock};
+use super::artifact_batch_card::ArtifactBatchCard;
 use super::artifact_card::ArtifactCard;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
@@ -74,6 +75,14 @@ pub fn render_typed_block(
             let mut card = ArtifactCard::new(path.clone())
                 .old_content(old_content.clone())
                 .open(open_artifact.is_some_and(|open| open == path.as_path()));
+            if let Some(on_open) = on_open.clone() {
+                card = card.on_open(move |open, cx| on_open(open, cx));
+            }
+            card.into_any_element()
+        }
+        Block::ArtifactBatch { files, .. } => {
+            let open_path = open_artifact.map(|p| p.to_path_buf());
+            let mut card = ArtifactBatchCard::new(files.clone()).open_path(open_path);
             if let Some(on_open) = on_open.clone() {
                 card = card.on_open(move |open, cx| on_open(open, cx));
             }

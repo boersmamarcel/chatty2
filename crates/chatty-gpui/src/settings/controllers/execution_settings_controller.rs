@@ -80,7 +80,8 @@ pub fn set_workspace_dir(dir: Option<String>, cx: &mut App) {
 /// Update approval mode and persist to disk
 pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     // 1. Apply update immediately
-    cx.global_mut::<ExecutionSettingsModel>().approval_mode = mode;
+    cx.global_mut::<ExecutionSettingsModel>().approval_mode = mode.clone();
+    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(mode);
 
     // 2. Get updated state for async save
     let settings = cx.global::<ExecutionSettingsModel>().clone();

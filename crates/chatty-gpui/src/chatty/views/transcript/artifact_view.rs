@@ -17,6 +17,7 @@ use gpui_component::button::{Button, ButtonVariants, DropdownButton};
 use gpui_component::input::{Input, InputState, Position};
 use gpui_component::list::ListItem;
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::tree::{TreeItem, TreeState, tree};
@@ -790,7 +791,8 @@ fn artifact_source_input(editor: &Entity<InputState>) -> AnyElement {
         .flex_1()
         .min_h_0()
         .w_full()
-        .child(Input::new(editor).h_full().appearance(true))
+        .overflow_y_scrollbar()
+        .child(Input::new(editor).w_full().appearance(true))
         .into_any_element()
 }
 
