@@ -7,6 +7,7 @@ Thank you for contributing to [chatty2](https://github.com/boersmamarcel/chatty2
 | Resource | Location |
 |----------|----------|
 | **Developer docs (site)** | `make docs-serve` → [GitHub Pages](https://boersmamarcel.github.io/chatty2/) |
+| **User guides** | [Docs `/user/`](https://boersmamarcel.github.io/chatty2/user/getting-started.html) (`docs-site/src/user/`) |
 | **Agent quick-start** | [`AGENTS.md`](AGENTS.md) |
 | **Coding patterns** | [`CLAUDE.md`](CLAUDE.md) |
 | **Architecture index** | [`docs/INDEX.md`](docs/INDEX.md) |

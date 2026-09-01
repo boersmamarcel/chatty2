@@ -1,35 +1,43 @@
 # Features
 
-**When to read this:** Product capabilities beyond the agent loop.
+Product capabilities beyond the agent loop. Setup is in
+[Getting started](./getting-started.md).
 
 ## Multi-provider support
 
-Connect multiple LLM providers from one interface. Per-model capabilities (vision, PDF, temperature) are stored in `ModelConfig`. See [Providers & models](./providers-and-models.md).
-
-| Provider | Images | PDF | Temperature | Notes |
-|----------|:------:|:---:|:-----------:|-------|
-| OpenRouter | Per-model | Per-model | Yes | Routes to Anthropic, OpenAI, Google, Mistral, hundreds more |
-| Azure OpenAI | Yes | Lossy | Yes | API Key or Entra ID |
-| Ollama | Per-model | Per-model | — | Auto-detected, fully local |
+Connect more than one LLM provider and switch models mid-conversation.
+Per-model vision, PDF, and temperature support is stored with the model.
+See [Providers & models](./providers-and-models.md).
 
 ## Rich rendering
 
-- **Markdown** with full formatting
+- **Markdown** with standard formatting
 - **Syntax-highlighted code** (30+ languages via tree-sitter) with one-click copy
-- **LaTeX math** — inline and block, rendered to SVG via Typst
+- **LaTeX math** — inline `$...$` and block `$$...$$`, compiled to SVG via Typst
 - **Mermaid diagrams** — 23 diagram types, theme-aware, copy as PNG
 - **Image and PDF** previews inline in chat
 
+![LaTeX math rendering](./img/advanced_math_rendering.gif)
+
+![Mermaid diagram rendering](./img/mermaid.gif)
+
+![Syntax-highlighted code](./img/codehighlighting.gif)
+
 ## Tool call traces
 
-Every tool call is a collapsible trace block: name, arguments, output, duration, status. `apply_diff` calls show a visual diff (additions green, deletions red).
+Each tool call is a collapsible block: name, arguments, output, duration, and
+status. `apply_diff` calls show a visual diff (additions green, deletions red).
+Long unchanged spans collapse; large diffs offer "Show N more lines".
 
 ## Conversations & cost tracking
 
-- Persistent SQLite storage (no Chatty-hosted sync)
-- Auto-generated titles, sidebar search, export to Markdown
-- Per-conversation cost in sidebar; per-message token usage
-- Regeneration tracking creates DPO preference pairs
+- Conversations persist in a local SQLite database (no Chatty-hosted sync)
+- Auto-generated titles; search from the title-bar search icon
+- Export a conversation to Markdown from the sidebar `…` menu
+- Per-conversation cost in the sidebar; per-message token counts
+- Regenerating a reply keeps the original, which can become a DPO pair
+
+![Token and cost tracking](./img/advanced_token_tracking.gif)
 
 ## Training data export
 
@@ -37,13 +45,16 @@ Export agent conversations for fine-tuning pipelines.
 
 ### ATIF (Agent Trajectory Interchange Format)
 
-Structured JSON for agent training: messages, tool calls, reasoning, timestamps, token metrics, feedback, regeneration pairs. Compatible with [Harbor Framework](https://harborframework.com/docs/agents/trajectory-format) workflows.
+Structured JSON: messages, tool calls, reasoning, timestamps, token metrics,
+feedback, and regeneration pairs. Compatible with
+[Harbor Framework](https://harborframework.com/docs/agents/trajectory-format)
+workflows.
 
 ### JSONL
 
-- **SFT** — ChatML format for OpenAI, Anthropic, Together AI, etc.
+- **SFT** — ChatML for OpenAI, Anthropic, Together AI, and similar APIs
 - **DPO** — preference pairs from regenerated responses
-- Auto-deduplication on re-export
+- Re-exporting a conversation replaces the previous entry
 
 | Platform | Export path |
 |----------|-------------|
@@ -55,16 +66,23 @@ Enable auto-export in **Settings → Training Data**.
 
 ## Environment secrets
 
-**Settings → Secrets** — key-value pairs injected into every agent shell session. The agent knows variable names but never sees values.
+**Settings → Secrets** holds key-value pairs injected into every agent shell
+session. The agent sees variable *names* (so it can write
+`os.environ["API_KEY"]`) but never the values. Secrets are masked in tool
+output.
 
 ## Themes & UI
 
-20+ themes with light/dark variants. Configurable font size.
+Twenty-plus themes with light and dark variants. Font size is configurable.
 
 ## Auto-updates
 
-Background checks against GitHub releases with SHA-256 verification. macOS replaces the app bundle and relaunches; Linux refreshes bundled `chatty-tui` on next launch when installed via the desktop app.
+Background checks against GitHub releases, verified with SHA-256. On macOS the
+app bundle is replaced and relaunched. On Linux, a `chatty-tui` installed from
+the desktop app refreshes on the next launch.
 
-## Demos
+## Next
 
-Animated demos live on the **[marketing site](https://github.com/boersmamarcel/chatty)** (`assets/animations/`). GIF placement in docs is pending human review (DOC-15).
+- [Agents](./agents.md)
+- [Agentic tools](./agentic-tools.md)
+- [Terminal interface](./terminal.md)

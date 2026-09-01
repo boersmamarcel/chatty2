@@ -15,7 +15,10 @@ edit the source files and rebuild.
 | `src/dev/reference/*.md` | Regenerate via `make docs-gen` |
 | `src/dev/crates/*.md` | `crates/*/README.md` |
 
-Hand-written pages (edit in place): `src/index.md`, `src/user/*`, `src/dev/guides/*`, `src/dev/where-to-look.md`, `src/dev/crates.md`.
+Hand-written pages (edit in place): `src/index.md`, `src/user/*.md`, `src/dev/guides/*`, `src/dev/where-to-look.md`, `src/dev/crates.md`.
+
+Demo GIFs are copied from `assets/animations/` into `src/user/img/` on
+`make docs-sync` (gitignored). Edit the files under `assets/animations/`.
 
 ## Commands
 

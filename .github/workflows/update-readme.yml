@@ -79,39 +79,41 @@ jobs:
 
             ## Step 2: Decide if README needs updating
 
-            The README is user-facing product documentation. It should be updated ONLY when
-            the merged PR introduces changes that a **user of the application** would notice:
+            After DOC-15 / AGE-97, README.md is a **short landing page** (~80 lines):
+            what Chatty is, marketing + docs + releases links, a download table, and a
+            minimal dev quick-start. It is NOT the product manual.
 
-            **DO update for:**
-            - New user-facing features (new UI elements, new settings, new tools)
-            - Changed behavior (different defaults, renamed options, new workflows)
-            - New provider support or model capabilities
-            - New export formats or integrations
-            - Changed installation or setup steps
-            - New keyboard shortcuts or UI interactions
+            User-facing how-to lives in `docs-site/src/user/` (getting-started, agents,
+            features, terminal, …) and is published at
+            https://boersmamarcel.github.io/chatty2/user/.
+
+            **DO update README.md only for:**
+            - Tagline / one-line product description
+            - Download table (new platform or artifact type)
+            - Broken top-level links (marketing, docs site, releases)
+            - The 5-line Development command block
+
+            **DO NOT put feature docs in README.md.** If the merged PR changes
+            user-visible behavior, update the matching file under `docs-site/src/user/`
+            instead (and only create a PR if that page is actually wrong).
 
             **DO NOT update for:**
-            - Internal refactoring (renaming internal functions, restructuring modules)
-            - Bug fixes (unless they change documented behavior)
-            - CI/CD changes, workflow updates, dependency bumps
-            - Test additions or changes
-            - Code style / formatting changes
-            - Performance optimizations (unless they change user-visible behavior)
+            - New tools, slash commands, settings, or providers (→ user guides / reference)
+            - Internal refactoring, bug fixes, CI, tests, formatting, dependency bumps
             - Changes to CLAUDE.md, .github/, scripts/, or other non-user-facing files
 
-            If no README update is needed, simply output "No README update needed" and stop.
-            Do NOT create a PR or branch.
+            If neither the landing README nor a user-guide page needs a change,
+            output "No README update needed" and stop. Do NOT create a PR or branch.
 
-            ## Step 3: Update README.md
+            ## Step 3: Update the right file
 
             If an update IS needed:
 
-            1. Read the current README.md to understand its structure and style
-            2. Make focused, minimal edits — only add/change what's necessary
-            3. Match the existing tone, formatting, and structure
-            4. Place new content in the appropriate existing section
-            5. Do NOT rewrite sections that weren't affected
-            6. Do NOT add changelog entries — this is product docs, not a changelog
+            1. Read README.md — keep it under ~80 lines. Never re-expand migrated
+               sections (Agents, Tools, Memory, Features, TUI, Security).
+            2. Prefer editing `docs-site/src/user/*.md` for feature/setup changes.
+            3. Make focused, minimal edits. Match the existing tone.
+            4. Do NOT add changelog entries.
 
             ## Step 4: Open a follow-up PR
 
@@ -122,7 +124,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git checkout -b docs/readme-update-pr-${{ github.event.pull_request.number }}
-            git add README.md
+            git add README.md docs-site/src/user
             git commit -m "Update README for #${{ github.event.pull_request.number }}"
             git push -u origin docs/readme-update-pr-${{ github.event.pull_request.number }}
             ```

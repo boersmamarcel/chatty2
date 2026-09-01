@@ -270,6 +270,14 @@ cat > "$OUT/llms.txt" << EOF
 - [CLI flags](${SITE_BASE}/dev/reference/cli-flags.html)
 - [Environment variables](${SITE_BASE}/dev/reference/env-vars.html)
 
+## User guides
+
+- [Getting started](${SITE_BASE}/user/getting-started.html)
+- [Why Chatty?](${SITE_BASE}/user/overview.html)
+- [Agents](${SITE_BASE}/user/agents.html)
+- [Agentic tools](${SITE_BASE}/user/agentic-tools.html)
+- [Terminal interface](${SITE_BASE}/user/terminal.html)
+
 ## How-to guides
 
 - [Add a provider](${SITE_BASE}/dev/guides/add-provider.html)
@@ -285,7 +293,7 @@ cat > "$OUT/llms.txt" << EOF
 ## Optional
 
 - [Full context bundle](${SITE_BASE}/llms-full.txt): concatenated key pages for large-context agents
-- [Marketing site](https://github.com/boersmamarcel/chatty): end-user README and screenshots
+- [Marketing site](https://github.com/boersmamarcel/chatty): product landing and extra demos
 - [Source repo](https://github.com/boersmamarcel/chatty2)
 EOF
 

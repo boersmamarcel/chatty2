@@ -60,4 +60,13 @@ if [[ -d "$ROOT/docs/generated" ]]; then
   done
 fi
 
+# User-guide demo GIFs (source of truth: assets/animations/)
+IMG="$USER/img"
+mkdir -p "$IMG"
+if compgen -G "$ROOT"/assets/animations/*.gif > /dev/null; then
+  for gif in "$ROOT"/assets/animations/*.gif; do
+    copy "$gif" "$IMG/$(basename "$gif")"
+  done
+fi
+
 echo "docs-sync: synced markdown into $SITE_SRC"

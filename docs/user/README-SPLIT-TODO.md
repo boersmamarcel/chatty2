@@ -1,29 +1,47 @@
-# README split — human review checklist (DOC-15 / AGE-97)
+# README split — decisions (DOC-15 / AGE-97)
 
-**Owner:** `owner:human` — Marcel reviews tone and which GIFs move vs stay.
+`owner:human` was lifted for this pass (Marcel: “make a reasonable split”).
+The issue stays open for review; it is not closed by this change.
 
-## AI-completed (this migration)
+## Done
 
-User guide pages now live under `docs-site/src/user/`:
+1. **`README.md` trimmed** to a landing page: what Chatty is, marketing link,
+   docs site, releases, user-guide links, minimal `make` / `cargo run`
+   quick-start.
+2. **GIF placement** (source of truth remains `assets/animations/` in this
+   repo — there was no Linear attachment). `docs-sync` copies them to
+   `docs-site/src/user/img/` (gitignored) so the mdBook can render them.
+3. **Tone pass** on `/user/` pages: instructional voice, “when to read”
+   dropped in favor of a one-line purpose sentence, DOC-15 “pending review”
+   notes removed, developer internals (`ModelConfig`, `ProviderType`) kept
+   out of user pages.
+4. **Duplicated README sections** removed; those topics live only under
+   `/user/` and `/dev/reference/`.
 
-| Page | Source README section |
-|------|----------------------|
-| `getting-started.md` | Getting Started |
-| `overview.md` | Why Chatty? |
-| `agents.md` | Agents |
-| `agentic-tools.md` | Tools & MCP (summary) |
-| `memory-and-skills.md` | Agent Memory & Skills |
-| `sub-agents.md` | Sub-Agent Orchestration |
-| `security.md` | Security & Sandboxing |
-| `features.md` | Features |
-| `terminal.md` | chatty-tui — Terminal Interface |
-| `providers-and-models.md` | Features → Multi-Provider (existing) |
+## GIF map
 
-## Remaining for human
+| Asset | Size (approx.) | Where it renders |
+|-------|----------------|------------------|
+| `hero_high_quality.gif` | 11 MB | README hero + [overview](../../docs-site/src/user/overview.md) |
+| `hero.gif` | 4 MB | Unused (smaller duplicate). Stays in `assets/animations/` |
+| `add_provider_and_model.gif` | 50 MB | [getting-started](../../docs-site/src/user/getting-started.md) |
+| `advanced_math_rendering.gif` | 2 MB | [features](../../docs-site/src/user/features.md) |
+| `mermaid.gif` | 0.5 MB | features |
+| `codehighlighting.gif` | 0.2 MB | features |
+| `advanced_token_tracking.gif` | 2 MB | features |
+| `file_add_edit_delete.gif` | 20 MB | [agentic-tools](../../docs-site/src/user/agentic-tools.md) |
+| `shell_command.gif` | 6 MB | agentic-tools |
+| `webfetch.gif` | 2 MB | agentic-tools |
+| `mcp_add_edit_delete2.gif` | 18 MB | agentic-tools |
+| `advanced_internet_access_settings.gif` | 1 MB | agentic-tools |
 
-1. **Trim `README.md`** to ~80 lines: what Chatty is, marketing link, docs site link, releases, minimal dev quick-start.
-2. **GIF placement** — decide which `assets/animations/*.gif` stay in README vs move to user docs or marketing repo.
-3. **Tone pass** on migrated `/user/` pages (marketing voice vs docs voice).
-4. **Remove duplicated content** from README once links to docs site are in place.
+Nothing was moved to [boersmamarcel/chatty](https://github.com/boersmamarcel/chatty).
+Marketing can keep its own copies; this repo still owns the files.
 
-Published site: GitHub Pages mdBook (`make docs-serve` locally).
+## Still optional (human)
+
+- Re-encode the 18–50 MB GIFs if GitHub Pages or the README feels too heavy.
+- Swap `hero_high_quality.gif` for `hero.gif` on the README if load time
+  matters more than fidelity.
+- A further tone pass if any page still reads too marketing-heavy or too
+  developer-heavy.
