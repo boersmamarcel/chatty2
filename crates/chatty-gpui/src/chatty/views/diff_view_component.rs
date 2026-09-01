@@ -85,7 +85,6 @@ pub struct DiffViewComponent {
     message_index: usize,
     tool_index: usize,
     is_fully_expanded: bool,
-    show_header: bool,
     on_expand: Option<MouseDownCallback>,
 }
 
@@ -105,15 +104,8 @@ impl DiffViewComponent {
             message_index,
             tool_index,
             is_fully_expanded,
-            show_header: true,
             on_expand: None,
         }
-    }
-
-    /// Hide the built-in path/stats header (session review supplies its own).
-    pub fn without_header(mut self) -> Self {
-        self.show_header = false;
-        self
     }
 
     pub fn on_expand(
@@ -227,11 +219,6 @@ pub fn diff_line_stats_fast(old: &str, new: &str) -> (usize, usize) {
     (insertions, deletions)
 }
 
-/// Line-level insertion/deletion counts for a text diff.
-pub fn diff_line_stats(old: &str, new: &str) -> (usize, usize) {
-    diff_line_stats_fast(old, new)
-}
-
 #[derive(IntoElement)]
 pub struct CachedDiffView {
     cache: DiffRenderCache,
@@ -276,32 +263,46 @@ impl CachedDiffView {
 impl RenderOnce for CachedDiffView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         render_diff_from_cache(
-            &self.cache,
-            self.message_index,
-            self.tool_index,
-            self.is_fully_expanded,
-            self.review_mode,
-            false,
-            None,
-            None,
-            self.on_expand,
+            DiffFromCacheArgs {
+                cache: &self.cache,
+                message_index: self.message_index,
+                tool_index: self.tool_index,
+                is_fully_expanded: self.is_fully_expanded,
+                review_mode: self.review_mode,
+                show_header: false,
+                file_label: None,
+                too_large_bytes: None,
+                on_expand: self.on_expand,
+            },
             cx,
         )
     }
 }
 
-fn render_diff_from_cache(
-    cache: &DiffRenderCache,
+struct DiffFromCacheArgs<'a> {
+    cache: &'a DiffRenderCache,
     message_index: usize,
     tool_index: usize,
     is_fully_expanded: bool,
     review_mode: bool,
     show_header: bool,
-    file_label: Option<&str>,
+    file_label: Option<&'a str>,
     too_large_bytes: Option<usize>,
     on_expand: Option<MouseDownCallback>,
-    cx: &App,
-) -> AnyElement {
+}
+
+fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
+    let DiffFromCacheArgs {
+        cache,
+        message_index,
+        tool_index,
+        is_fully_expanded,
+        review_mode,
+        show_header,
+        file_label,
+        too_large_bytes,
+        on_expand,
+    } = args;
     let border_color = cx.theme().border;
     let muted_bg = cx.theme().muted;
     let muted_text = cx.theme().muted_foreground;
@@ -578,15 +579,17 @@ impl RenderOnce for DiffViewComponent {
             prepare_diff_cache(&self.old_content, &self.new_content)
         };
         render_diff_from_cache(
-            &cache,
-            self.message_index,
-            self.tool_index,
-            self.is_fully_expanded,
-            false,
-            self.show_header,
-            Some(&self.file_path),
-            too_large,
-            self.on_expand,
+            DiffFromCacheArgs {
+                cache: &cache,
+                message_index: self.message_index,
+                tool_index: self.tool_index,
+                is_fully_expanded: self.is_fully_expanded,
+                review_mode: false,
+                show_header: true,
+                file_label: Some(&self.file_path),
+                too_large_bytes: too_large,
+                on_expand: self.on_expand,
+            },
             cx,
         )
     }

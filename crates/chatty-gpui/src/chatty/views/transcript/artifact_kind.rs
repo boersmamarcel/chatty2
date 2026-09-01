@@ -118,16 +118,16 @@ pub fn artifact_old_content_from_tool(
 /// Path for UI display: relative to workspace when possible.
 pub fn artifact_display_path(path: &Path, workspace: Option<&Path>) -> String {
     let resolved = resolve_artifact_path(path, workspace);
-    if let Some(ws) = workspace.filter(|w| !w.as_os_str().is_empty()) {
-        if let Ok(rel) = resolved.strip_prefix(ws) {
-            let trimmed = rel
-                .to_string_lossy()
-                .trim_start_matches('/')
-                .trim_start_matches('\\')
-                .to_string();
-            if !trimmed.is_empty() {
-                return trimmed.replace('\\', "/");
-            }
+    if let Some(ws) = workspace.filter(|w| !w.as_os_str().is_empty())
+        && let Ok(rel) = resolved.strip_prefix(ws)
+    {
+        let trimmed = rel
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .trim_start_matches('\\')
+            .to_string();
+        if !trimmed.is_empty() {
+            return trimmed.replace('\\', "/");
         }
     }
     if path.is_relative() {

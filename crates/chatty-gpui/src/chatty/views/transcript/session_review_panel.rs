@@ -228,8 +228,8 @@ impl Render for ReviewFileSection {
                     .px_2()
                     .py_1()
                     .h(px(REVIEW_HEADER_HEIGHT))
-                    .child({
-                        let toggle = div()
+                    .child(
+                        div()
                             .id(("review-file-toggle", file_ix))
                             .flex()
                             .flex_row()
@@ -250,9 +250,8 @@ impl Render for ReviewFileSection {
                                     .flex_shrink_0()
                                     .child(Icon::new(chevron).size_3().text_color(muted)),
                             )
-                            .child(review_path_header(&dir, &base, muted, foreground));
-                        toggle
-                    })
+                            .child(review_path_header(&dir, &base, muted, foreground)),
+                    )
                     .child(
                         div()
                             .flex_shrink_0()
@@ -287,7 +286,7 @@ impl Render for ReviewFileSection {
                             ),
                     ),
             )
-            .when(!self.collapsed, |this| this.children(diff_pane.into_iter()))
+            .when(!self.collapsed, |this| this.children(diff_pane))
     }
 }
 
