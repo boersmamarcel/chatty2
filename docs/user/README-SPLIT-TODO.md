@@ -1,29 +1,46 @@
-# README split — human review checklist (DOC-15 / AGE-97)
+# README split — decisions (DOC-15 / AGE-97)
 
-**Owner:** `owner:human` — Marcel reviews tone and which GIFs move vs stay.
+Marcel asked the agent to continue despite `owner:human` (2026-09-01): trim,
+GIF placement, and tone pass as a reasonable split rather than stalling.
 
-## AI-completed (this migration)
+## Split
 
-User guide pages now live under `docs-site/src/user/`:
+| Surface | Role |
+|---------|------|
+| `README.md` | ~70-line landing: what this repo is, marketing link, docs site, releases, `make` quick-start. Hero GIF only. |
+| `docs-site/src/user/*` | User manual (how-to + explanation). Edit in place. |
+| [boersmamarcel/chatty](https://github.com/boersmamarcel/chatty) | Marketing site. Extra demos can stay there. |
+| `assets/animations/` | Source GIFs in this repo. |
 
-| Page | Source README section |
-|------|----------------------|
-| `getting-started.md` | Getting Started |
-| `overview.md` | Why Chatty? |
-| `agents.md` | Agents |
-| `agentic-tools.md` | Tools & MCP (summary) |
-| `memory-and-skills.md` | Agent Memory & Skills |
-| `sub-agents.md` | Sub-Agent Orchestration |
-| `security.md` | Security & Sandboxing |
-| `features.md` | Features |
-| `terminal.md` | chatty-tui — Terminal Interface |
-| `providers-and-models.md` | Features → Multi-Provider (existing) |
+## GIF placement
 
-## Remaining for human
+`docs-sync` copies **docs-sized** GIFs into `docs-site/src/assets/animations/`
+so mdBook can inline them. Files larger than ~3 MB are **linked**, not copied
+(GitHub Pages and browser cost).
 
-1. **Trim `README.md`** to ~80 lines: what Chatty is, marketing link, docs site link, releases, minimal dev quick-start.
-2. **GIF placement** — decide which `assets/animations/*.gif` stay in README vs move to user docs or marketing repo.
-3. **Tone pass** on migrated `/user/` pages (marketing voice vs docs voice).
-4. **Remove duplicated content** from README once links to docs site are in place.
+| File | Size (approx) | Where |
+|------|---------------|-------|
+| `hero_high_quality.gif` | 11 MB | README only |
+| `hero.gif` | 4 MB | unused duplicate; leave in `assets/` |
+| `add_provider_and_model.gif` | 50 MB | link from getting-started |
+| `mermaid.gif` | 0.5 MB | features.md |
+| `codehighlighting.gif` | 0.2 MB | features.md |
+| `advanced_math_rendering.gif` | 2.3 MB | features.md |
+| `advanced_token_tracking.gif` | 2 MB | features.md |
+| `webfetch.gif` | 1.7 MB | agentic-tools.md |
+| `advanced_internet_access_settings.gif` | 1.2 MB | agentic-tools.md |
+| `file_add_edit_delete.gif` | 19 MB | link from features / agentic-tools |
+| `shell_command.gif` | 6 MB | link from agentic-tools |
+| `mcp_add_edit_delete2.gif` | 18 MB | link from agentic-tools |
 
-Published site: GitHub Pages mdBook (`make docs-serve` locally).
+## Tone
+
+`/user/` pages are docs voice (when to read, numbered steps, tables). Sales
+lines (“no middleman”, “not another Electron wrapper” as a punch) were
+dropped or restated as facts. Overview still explains *why* the product
+exists; it is not a second marketing homepage.
+
+## Follow-up for Marcel (optional)
+
+- Re-encode the three huge walkthrough GIFs if they should play inline.
+- Tone tweaks on `/user/` if anything still reads as README leftover.

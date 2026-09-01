@@ -1,46 +1,55 @@
 # Agents
 
-**When to read this:** Understand how the agent loop works and what agents can do autonomously.
+**When to read this:** How the agent loop works and what it can do once tools
+are enabled.
 
-## How the agent loop works
+## How the loop works
 
-Each message builds a full agent with your configured tools and MCP servers, then runs a streaming multi-turn loop:
+Each message builds an agent with your configured tools and MCP servers, then
+starts a streaming multi-turn loop:
 
 ```
 You send a message
        │
        ▼
-  Agent reasons → calls a tool
+  Agent reasons → decides to call a tool
        │
        ▼
-  Tool executes (with approval if required)
+  Tool executes (with your approval if required)
        │
        ▼
   Agent receives result → reasons again
        │
        ▼
-  ...repeats up to turn limit (default 10)...
+  ...repeats up to the turn limit (default 10; Settings → Code Execution)...
        │
        ▼
-  Final answer streamed to you
+  Agent produces a final answer → streamed to you
 ```
 
-Tool calls, inputs, outputs, and reasoning appear as collapsible trace blocks alongside the response.
+Tool calls, inputs, outputs, and reasoning render as collapsible trace blocks
+beside the response.
 
-For multi-step tasks, the agent creates a **structured plan** (goal + ordered todos). A collapsible **Agent plan** panel shows each step's status and progress before the agent marks steps done and verifies completion.
+For multi-step work the agent writes a **structured plan** first: a goal and an
+ordered todo list. A collapsible **Agent plan** panel shows each step (pending,
+in-progress, done, blocked) and a progress counter. The agent marks steps as it
+goes, then runs a verification step before the final reply.
 
 ## What agents can do
 
-With tools enabled, an agent can:
+With tools on ([Agentic tools](./agentic-tools.md)), an agent can:
 
-- **Explore and edit code** — read files, navigate directories, apply diffs, rename and delete
-- **Execute shell commands** — builds, tests, git, scripts inside a sandbox
-- **Write and run code** — Python, JavaScript, TypeScript, Rust, or Bash (MontySandbox fast path; Docker fallback for packages)
-- **Query data** — SQL over Parquet/CSV/JSON via DuckDB; read/write Excel, Word, PowerPoint
-- **Browse the web** — Tavily, Brave, or DuckDuckGo lite fallback; fetch and parse URLs
-- **Generate outputs** — charts, Typst PDFs, diagrams, inline images
-- **Remember and learn** — persistent memory across conversations ([memory & skills](./memory-and-skills.md))
-- **Delegate** — spawn [sub-agents](./sub-agents.md) for parallel work
+- **Explore and edit a codebase** — read files, list directories, apply diffs, rename, delete
+- **Run shell commands** — builds, tests, git, scripts inside the sandbox
+- **Write and run code** — Python, JavaScript, TypeScript, Rust, or Bash
+  (MontySandbox fast path; Docker fallback for packages and other languages)
+- **Query data** — SQL over Parquet, CSV, and JSON via DuckDB; Excel, Word, PowerPoint
+- **Browse the web** — Tavily or Brave if you set a key; DuckDuckGo lite otherwise; `fetch` any URL
+- **Produce artifacts** — charts, Typst PDFs, diagrams, inline images
+- **Inspect its own tools** — list built-in tools and configured MCP servers
+- **Remember** — store facts and procedures across conversations
+  ([Memory & skills](./memory-and-skills.md))
+- **Delegate** — spawn [sub-agents](./sub-agents.md) for parallel subtasks
 
 ## Slash commands
 
@@ -54,21 +63,25 @@ Type `/` in the chat input:
 | `/add-dir <path>` | Expand workspace to another directory |
 | `/cwd` / `/cd <path>` | Show or change working directory |
 | `/new` / `/clear` | Fresh conversation |
-| `/copy` | Copy latest response to clipboard |
+| `/copy` | Copy latest response to the clipboard |
 | `[skill name]` | Invoke a saved skill from the picker |
 
 Full list: [slash commands reference](../dev/reference/slash-commands.md).
 
 ## Extended thinking
 
-Models with chain-of-thought reasoning (e.g. Claude extended thinking) render `<thinking>` blocks as collapsible sections.
+Models that emit chain-of-thought (e.g. Claude extended thinking) render
+`<thinking>`, `<think>`, and `<thought>` as collapsible sections so the
+reasoning is inspectable without filling the transcript.
 
-## Context window management
+## Context window
 
-- **Fill bar** — segmented footer showing context by component (preamble, tools, history, latest message)
-- **Token popover** — hover for per-segment estimates and provider token counts
-- **`/compact`** — compress older messages when the window fills
-- **Max Context Window** — set per model in Settings → Models → Advanced to enable the fill bar
+Long runs fill the window quickly. Chatty exposes:
+
+- **Fill bar** — footer segments for preamble, tool definitions, history, latest message (green / amber / red)
+- **Token popover** — hover for per-segment estimates and provider input/output counts
+- **`/compact`** — summarize older messages so the run can continue
+- **Max Context Window** — set on the model under Settings → Models → Advanced to turn the bar on
 
 ## Next
 

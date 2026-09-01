@@ -1,7 +1,7 @@
 [book]
-title = "Chatty Developer Documentation"
+title = "Chatty Documentation"
 authors = ["Marcel Boersma"]
-description = "Architecture, reference, and contributor guides for the Chatty agent framework"
+description = "User guides, architecture, reference, and contributor docs for Chatty"
 language = "en"
 src = "src"
 
