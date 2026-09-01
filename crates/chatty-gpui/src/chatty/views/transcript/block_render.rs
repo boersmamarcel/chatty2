@@ -8,7 +8,7 @@ use super::OpenArtifact;
 use super::OpenTable;
 use super::activity::{ActivityGroup, RunTally};
 use super::approval::{ApprovalCard, ErrorBlock};
-use super::artifact::ArtifactCard;
+use super::artifact_card::ArtifactCard;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
 use super::table::render_table_preview_card;
@@ -25,6 +25,7 @@ pub fn render_typed_block(
     plan: Option<&AgentTaskSnapshot>,
     activity_open: Option<bool>,
     on_activity_toggle: Option<ActivityToggle>,
+    open_artifact: Option<&std::path::Path>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -70,7 +71,9 @@ pub fn render_typed_block(
         Block::Artifact {
             path, old_content, ..
         } => {
-            let mut card = ArtifactCard::new(path.clone()).old_content(old_content.clone());
+            let mut card = ArtifactCard::new(path.clone())
+                .old_content(old_content.clone())
+                .open(open_artifact.is_some_and(|open| open == path.as_path()));
             if let Some(on_open) = on_open.clone() {
                 card = card.on_open(move |open, cx| on_open(open, cx));
             }
