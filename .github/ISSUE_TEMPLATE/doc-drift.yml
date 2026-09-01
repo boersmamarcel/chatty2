@@ -1,0 +1,66 @@
+name: Doc drift
+description: A page claims something the repo no longer does.
+title: "docs: stale — "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a published page would send a contributor or agent
+        to the wrong place. Same-PR updates belong on the code PR, not here.
+
+        Policy: `docs/stale-doc-policy.md`
+  - type: input
+    id: page
+    attributes:
+      label: Stale page
+      description: Repo path or GitHub Pages URL
+      placeholder: docs/stream-manager.md
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Docs layer
+      options:
+        - Architecture / explanation (docs/*.md)
+        - How-to (docs-site/src/dev/guides/)
+        - User guide (docs-site/src/user/)
+        - Generated reference (tools, CLI, env, events, settings)
+        - Agent layer (AGENTS.md / CLAUDE.md)
+        - README / CONTRIBUTING
+        - Nav (INDEX.md / SUMMARY.md)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: claimed
+    attributes:
+      label: What the page claims
+      placeholder: "AGENTS.md says make test runs without --test-threads=1"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What the repo actually does
+      description: File path, PR number, or a short quote from source
+    validations:
+      required: true
+  - type: input
+    id: since
+    attributes:
+      label: Since when (optional)
+      description: PR, commit, or release that drifted
+      placeholder: "#529 or v0.3.35"
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched open issues labeled `documentation`
+          required: true
+        - label: This is leftover drift, not a fix I am already making on a PR
+          required: true
+        - label: This page is outside update-agent-docs / update-readme scope, or those workflows did not open a PR
+          required: true
