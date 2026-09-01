@@ -296,22 +296,17 @@ impl RenderOnce for SessionChangeBar {
                                         .justify_start()
                                         .rounded_md()
                                         .cursor_pointer()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |_, _, cx| {
-                                                if let Some(cb) = &on_open {
-                                                    cb(path.clone(), cx);
-                                                }
-                                            },
-                                        )
-                                        .child(
-                                            DiffStatRow::new(
-                                                change.path_display(),
-                                                change.path_display(),
-                                                change.added,
-                                                change.removed,
-                                            ),
-                                        )
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            if let Some(cb) = &on_open {
+                                                cb(path.clone(), cx);
+                                            }
+                                        })
+                                        .child(DiffStatRow::new(
+                                            change.path_display(),
+                                            change.path_display(),
+                                            change.added,
+                                            change.removed,
+                                        ))
                                 })),
                         )
                     }),

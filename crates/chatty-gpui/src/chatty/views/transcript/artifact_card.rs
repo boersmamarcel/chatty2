@@ -79,7 +79,9 @@ pub fn reveal_path_in_os(path: &Path, cx: &App) {
     let resolved = resolve_artifact_path(path, workspace);
     let target = if resolved.exists() {
         resolved
-    } else if let Some(parent) = resolved.parent().filter(|parent| !parent.as_os_str().is_empty())
+    } else if let Some(parent) = resolved
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
     {
         parent.to_path_buf()
     } else {

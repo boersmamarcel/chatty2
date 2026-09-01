@@ -956,17 +956,16 @@ impl Render for ArtifactView {
                                             .p_2()
                                             .child(tabular_rendered_body(&tabular, cx))
                                     } else {
-                                        this.flex_1()
-                                            .min_h_0()
-                                            .h_full()
-                                            .child(artifact_primary_body(
+                                        this.flex_1().min_h_0().h_full().child(
+                                            artifact_primary_body(
                                                 path_ref.as_ref(),
                                                 &rendered,
                                                 &editor,
                                                 full,
                                                 window,
                                                 cx,
-                                            ))
+                                            ),
+                                        )
                                     }
                                 })
                                 .when(visible_tab == 1, |this| {
@@ -1017,11 +1016,7 @@ impl Render for ArtifactView {
         let selected_file_index = self
             .path
             .as_ref()
-            .and_then(|active| {
-                self.files
-                    .iter()
-                    .position(|(path, _, _)| path == active)
-            })
+            .and_then(|active| self.files.iter().position(|(path, _, _)| path == active))
             .unwrap_or(0);
         let file_tab_bar = (self.files.len() > 1).then(|| {
             let files = self.files.clone();
