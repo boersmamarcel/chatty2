@@ -202,9 +202,12 @@ flowchart LR
   Runtime --> Tools[invoke_agent / list_agents]
   Gateway[protocol-gateway] --> Runtime
   External[External HTTP client] --> Gateway
+  Runtime --> LLM[Host llm::complete import]
+  LLM --> Providers[LLM providers]
 ```
 
-See [a2a-and-wasm-modules.md](a2a-and-wasm-modules.md).
+See [build-wasm-module guide](../docs-site/src/dev/guides/build-wasm-module.md)
+(sequence diagrams) and [a2a-and-wasm-modules.md](a2a-and-wasm-modules.md).
 
 ## Persistence map
 
