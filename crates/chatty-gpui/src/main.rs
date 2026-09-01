@@ -376,7 +376,8 @@ fn main() {
         })
         .detach();
 
-        // Initialize models notifier entity for event subscriptions
+        // Initialize models notifier entity for event subscriptions (strong global
+        // keeps it alive for the app lifetime so Settings mutations can notify).
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
         cx.set_global(settings::models::GlobalModelsNotifier::new(models_notifier));
 

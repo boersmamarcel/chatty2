@@ -2,9 +2,9 @@ use anyhow::Result;
 use gpui::{App, AsyncApp, BorrowAppContext};
 use tracing::{debug, info, warn};
 
-use crate::settings::models::emit_models_changed;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderType;
+use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 
 use super::discovery::discover_ollama_models;
 
@@ -70,7 +70,15 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
 
                 // Refresh windows to update UI
                 cx.refresh_windows();
-                emit_models_changed(cx);
+
+                if let Some(notifier) = cx
+                    .try_global::<GlobalModelsNotifier>()
+                    .and_then(|g| g.get())
+                {
+                    notifier.update(cx, |_notifier, cx| {
+                        cx.emit(ModelsNotifierEvent::ModelsChanged);
+                    });
+                }
             })?;
 
             // Save to disk
@@ -108,7 +116,15 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
                 });
 
                 cx.refresh_windows();
-                emit_models_changed(cx);
+
+                if let Some(notifier) = cx
+                    .try_global::<GlobalModelsNotifier>()
+                    .and_then(|g| g.get())
+                {
+                    notifier.update(cx, |_notifier, cx| {
+                        cx.emit(ModelsNotifierEvent::ModelsChanged);
+                    });
+                }
             })?;
 
             Ok(0)

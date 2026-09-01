@@ -1,6 +1,5 @@
 use crate::global_entity::GlobalStrongEntity;
-use gpui::{App, EventEmitter};
-use tracing::warn;
+use gpui::EventEmitter;
 
 /// Events related to model loading and mutation
 #[derive(Clone, Debug)]
@@ -23,22 +22,4 @@ impl ModelsNotifier {
 }
 
 /// Global wrapper — strong so the notifier stays alive for the app lifetime.
-///
-/// Created in `main.rs` before `ChattyApp`, so it cannot be kept alive via a
-/// `ChattyApp` field the way `AgentConfigNotifier` is. Same pattern as
-/// `GlobalStreamManager`.
 pub type GlobalModelsNotifier = GlobalStrongEntity<ModelsNotifier>;
-
-/// Emit `ModelsChanged` so the main window chat-input model picker refreshes.
-pub fn emit_models_changed(cx: &mut App) {
-    if let Some(notifier) = cx
-        .try_global::<GlobalModelsNotifier>()
-        .and_then(|g| g.get())
-    {
-        notifier.update(cx, |_notifier, cx| {
-            cx.emit(ModelsNotifierEvent::ModelsChanged);
-        });
-    } else {
-        warn!("emit_models_changed: GlobalModelsNotifier not found — chat input will not refresh");
-    }
-}

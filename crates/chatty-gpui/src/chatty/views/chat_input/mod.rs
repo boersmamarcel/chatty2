@@ -167,7 +167,10 @@ impl ChatInputState {
         &self.available_skills
     }
 
-    /// Replace the cached model list, repair a deleted selection, and re-render.
+    /// Set available models for selection and notify so the picker re-renders.
+    ///
+    /// If the current selection is missing from the new list (or was unset),
+    /// falls back to `default_id` then the first model.
     pub fn set_available_models(
         &mut self,
         models: Vec<ModelOption>,

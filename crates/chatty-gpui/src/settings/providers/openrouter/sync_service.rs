@@ -7,9 +7,9 @@ use chatty_core::settings::providers::openrouter::discovery::{
     model_supports_images, model_supports_pdf,
 };
 
-use crate::settings::models::emit_models_changed;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderType;
+use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 
 use super::curated_models::{CuratedModel, load_curated_models};
 
@@ -117,7 +117,15 @@ pub async fn sync_openrouter_models(cx: &mut AsyncApp) -> Result<usize> {
         });
 
         cx.refresh_windows();
-        emit_models_changed(cx);
+
+        if let Some(notifier) = cx
+            .try_global::<GlobalModelsNotifier>()
+            .and_then(|g| g.get())
+        {
+            notifier.update(cx, |_notifier, cx| {
+                cx.emit(ModelsNotifierEvent::ModelsChanged);
+            });
+        }
     })?;
 
     // -----------------------------------------------------------------

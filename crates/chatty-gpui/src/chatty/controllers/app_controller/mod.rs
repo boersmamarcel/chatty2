@@ -622,23 +622,58 @@ impl ChattyApp {
         .detach();
     }
 
-    /// Copy the global model list into the chat-input picker.
-    fn refresh_chat_input_models(&self, cx: &mut Context<Self>) {
-        self.chat_view.update(cx, |view, cx| {
-            view.sync_available_models(cx);
-        });
-    }
-
     /// Initialize chat input with available models (and skills for the workspace).
     fn initialize_models(&self, cx: &mut Context<Self>) {
         self.refresh_chat_input_models(cx);
 
-        // Load skills for the initial workspace directory
         let workspace_dir = cx
             .try_global::<ExecutionSettingsModel>()
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
         self.refresh_chat_input_skills(workspace_dir.as_deref(), cx);
+    }
+
+    /// Push the current `ModelsModel` into the chat-input model picker.
+    fn refresh_chat_input_models(&self, cx: &mut Context<Self>) {
+        let chat_view = self.chat_view.clone();
+
+        let Some(models_model) = cx.try_global::<ModelsModel>() else {
+            return;
+        };
+
+        let models_list: Vec<ModelOption> = models_model
+            .models()
+            .iter()
+            .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
+            .collect();
+
+        let default_model_id = models_list.first().map(|model| model.id.clone());
+
+        let selected_capabilities = {
+            let selected_id = chat_view
+                .read(cx)
+                .chat_input_state()
+                .read(cx)
+                .selected_model()
+                .map(|m| m.id.clone());
+            let id_for_caps = selected_id
+                .filter(|id| models_list.iter().any(|m| &m.id == id))
+                .or_else(|| default_model_id.clone());
+            id_for_caps
+                .and_then(|id| {
+                    models_model
+                        .get_model(&id)
+                        .map(|m| (m.supports_images, m.supports_pdf))
+                })
+                .unwrap_or((false, false))
+        };
+
+        chat_view.update(cx, |view, cx| {
+            view.chat_input_state().update(cx, |state, cx| {
+                state.set_available_models(models_list, default_model_id, cx);
+                state.set_capabilities(selected_capabilities.0, selected_capabilities.1);
+            });
+        });
     }
 
     /// Synchronously load filesystem skills for `workspace_dir` (and the global skills dir)

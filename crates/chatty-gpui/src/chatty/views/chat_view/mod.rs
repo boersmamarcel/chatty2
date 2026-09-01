@@ -60,9 +60,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{
-    ChatInput, ChatInputState, ModelOption, resolve_selected_model_id, slash_menu_items_with_skills,
-};
+use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::SystemTrace;
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
@@ -331,39 +329,6 @@ impl ChatView {
     /// Get the chat input state entity (for wiring callbacks)
     pub fn chat_input_state(&self) -> &Entity<ChatInputState> {
         &self.chat_input_state
-    }
-
-    /// Copy `ModelsModel` into the chat-input picker and repair a stale selection.
-    pub fn sync_available_models(&mut self, cx: &mut Context<Self>) {
-        let Some((models_list, capability_by_id)) = cx.try_global::<ModelsModel>().map(|model| {
-            let list: Vec<ModelOption> = model
-                .models()
-                .iter()
-                .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
-                .collect();
-            let caps: HashMap<String, (bool, bool)> = model
-                .models()
-                .iter()
-                .map(|m| (m.id.clone(), (m.supports_images, m.supports_pdf)))
-                .collect();
-            (list, caps)
-        }) else {
-            return;
-        };
-
-        let default_model_id = models_list.first().map(|model| model.id.clone());
-        let current = self.chat_input_state.read(cx).selected_model_id().cloned();
-        let resolved =
-            resolve_selected_model_id(current.as_deref(), &models_list, default_model_id.clone());
-        let capabilities = resolved
-            .as_ref()
-            .and_then(|id| capability_by_id.get(id).copied())
-            .unwrap_or((false, false));
-
-        self.chat_input_state.update(cx, |state, cx| {
-            state.set_available_models(models_list, default_model_id, cx);
-            state.set_capabilities(capabilities.0, capabilities.1);
-        });
     }
 
     /// Get a reference to all displayed messages (for slash-command handlers, etc.).
@@ -1296,18 +1261,22 @@ impl ChatView {
             }
         }
 
-        // Refresh available models from global store (including an empty list).
-        let models_list = cx.try_global::<ModelsModel>().map(|models_model| {
-            models_model
+        // Refresh available models from global store (safety net if a change
+        // notification was missed). Sync even when the list is empty so deletes
+        // clear the picker.
+        if let Some(models_model) = cx.try_global::<ModelsModel>() {
+            let models_list: Vec<ModelOption> = models_model
                 .models()
                 .iter()
                 .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
-                .collect::<Vec<ModelOption>>()
-        });
-        if let Some(models_list) = models_list
-            && self.chat_input_state.read(cx).available_models() != models_list.as_slice()
-        {
-            self.sync_available_models(cx);
+                .collect();
+
+            self.chat_input_state.update(cx, |state, cx| {
+                if state.available_models() != models_list.as_slice() {
+                    let default_model_id = models_list.first().map(|model| model.id.clone());
+                    state.set_available_models(models_list, default_model_id, cx);
+                }
+            });
         }
     }
 
