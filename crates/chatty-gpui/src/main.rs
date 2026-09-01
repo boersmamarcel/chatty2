@@ -376,11 +376,10 @@ fn main() {
         })
         .detach();
 
-        // Initialize models notifier entity for event subscriptions
+        // Initialize models notifier entity for event subscriptions (strong global
+        // keeps it alive for the app lifetime so Settings mutations can notify).
         let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
-        cx.set_global(settings::models::GlobalModelsNotifier::new(
-            models_notifier.downgrade(),
-        ));
+        cx.set_global(settings::models::GlobalModelsNotifier::new(models_notifier));
 
         // Create MCP update channel and spawn listener that updates global + emits event
         let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::channel::<
@@ -655,7 +654,7 @@ fn main() {
                         // Emit ModelsReady event for subscribers
                         if let Some(notifier) = cx
                             .try_global::<settings::models::GlobalModelsNotifier>()
-                            .and_then(|g| g.try_upgrade())
+                            .and_then(|g| g.get())
                         {
                             notifier.update(cx, |_notifier, cx| {
                                 cx.emit(settings::models::ModelsNotifierEvent::ModelsReady);

@@ -118,12 +118,22 @@ impl ModelsListView {
                 .close_button(true)
                 .overlay_closable(true)
                 .w(px(600.))
-                .child(
-                    div()
-                        .id("add-model-form")
-                        .overflow_y_scrollbar()
-                        .max_h(px(350.))
-                        .child(
+                .child({
+                    let current_tab = active_tab.get();
+                    let is_azure = is_azure_cell.get();
+                    let is_openrouter = is_openrouter_cell.get();
+                    // Catalog owns scroll when visible — avoid nested form+catalog scroll.
+                    let show_catalog =
+                        current_tab == 0 && is_openrouter && !catalog_models.is_empty();
+
+                    let form = div().id("add-model-form");
+                    let form = if show_catalog {
+                        form
+                    } else {
+                        form.overflow_y_scrollbar().max_h(px(350.))
+                    };
+
+                    form.child(
                             v_flex()
                                 .gap_3()
                                 .p_4()
@@ -141,9 +151,6 @@ impl ModelsListView {
                                         .child(Tab::new().label("Advanced"))
                                 })
                                 .child({
-                                    let current_tab = active_tab.get();
-                                    let is_azure = is_azure_cell.get();
-                                    let is_openrouter = is_openrouter_cell.get();
                                     if current_tab == 0 {
                                         // Basic tab
                                         let mut root = v_flex()
@@ -162,7 +169,7 @@ impl ModelsListView {
                                                     .child(Select::new(&provider_select)),
                                             );
 
-                                            if is_openrouter && !catalog_models.is_empty() {
+                                            if show_catalog {
                                                 let search_input = search_input.clone();
                                                 let name_input = name_input.clone();
                                                 let model_id_input = model_id_input.clone();
@@ -187,7 +194,7 @@ impl ModelsListView {
                                                                     .cloned()
                                                                     .collect();
                                                             div()
-                                                                .max_h(px(180.0))
+                                                                .max_h(px(240.0))
                                                                 .overflow_y_scrollbar()
                                                                 .border_1()
                                                                 .border_color(theme_border)
@@ -509,7 +516,7 @@ impl ModelsListView {
                                         ),
                                 ),
                         ),
-                )
+                })
         });
     }
 

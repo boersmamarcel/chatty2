@@ -246,7 +246,11 @@ impl ChattyApp {
                         .collect();
 
                     view.chat_input_state().update(cx, |state, cx| {
-                        state.set_available_models(models_list, Some(model_config.id.clone()));
+                        state.set_available_models(
+                            models_list,
+                            Some(model_config.id.clone()),
+                            cx,
+                        );
                         state.set_capabilities(
                             model_config.supports_images,
                             model_config.supports_pdf,
