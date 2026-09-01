@@ -37,7 +37,7 @@ points here.
 | [`component-map.md`](component-map.md) | Need diagrams of how parts connect | Crate/module/entity relationship visuals |
 | [`architecture-overview.md`](architecture-overview.md) | Contributor onboarding | Workspace structure, data flow, persistence |
 | [`workspace-crate-split.md`](workspace-crate-split.md) | Why core/gpui/tui exist | Crate split rationale |
-| [`entity-communication.md`](entity-communication.md) | GPUI event wiring | EventEmitter / `cx.subscribe()` pattern |
+| [`entity-communication.md`](entity-communication.md) | GPUI event wiring | EventEmitter / `cx.subscribe()` pattern. How-to: [add a desktop GPUI view](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/guides/add-gpui-view.md) |
 | [`stream-manager.md`](stream-manager.md) | Stream bugs or cancellation | LLM stream lifecycle, events |
 | [`rendering-system.md`](rendering-system.md) | Markdown/math/mermaid UI | Rendering pipeline |
 | [`token-tracking.md`](token-tracking.md) | Context window / compact | Token budget accounting |
