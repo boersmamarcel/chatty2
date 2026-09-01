@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'README.md'
       - 'docs/**'
       - 'docs-site/**'
       - 'AGENTS.md'
@@ -19,6 +20,7 @@ on:
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
+      - 'README.md'
       - 'docs/**'
       - 'docs-site/**'
       - 'AGENTS.md'

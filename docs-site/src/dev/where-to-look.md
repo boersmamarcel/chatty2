@@ -25,6 +25,7 @@ flowchart TD
 
 | I want to… | Open |
 |------------|------|
+| Read the user manual | [getting-started.md](../user/getting-started.md) · [user guides](../user/overview.md) |
 | Understand the big picture | [system-overview.md](./architecture/system-overview.md) |
 | See component diagrams | [component-map.md](./architecture/component-map.md) |
 | Find a workspace crate | [crates.md](./crates.md) |

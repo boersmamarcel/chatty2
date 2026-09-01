@@ -1,29 +1,44 @@
 # Providers & models
 
-**When to read this:** Configure LLM backends and model capabilities.
+**When to read this:** Connect an LLM backend and pick models.
 
-## Providers
+Developer lookup table: [Provider matrix](../dev/reference/provider-matrix.md).
 
-Open **Settings → Providers → Add Provider**. Supported types include Anthropic,
-OpenAI, Gemini, Ollama, Mistral, Azure OpenAI, and OpenRouter.
+## Add a provider
 
-Ollama connects to your local instance automatically — no API key required.
+**Settings → Providers → Add Provider.** Supported types include OpenRouter,
+Azure OpenAI, Ollama, Anthropic, OpenAI, Gemini, and Mistral.
 
-## Models
+- **OpenRouter** — one key, many upstream models (Claude, GPT, Gemini, Mistral, …)
+- **Azure OpenAI** — API key or Entra ID
+- **Ollama** — local instance, no API key; Chatty probes `localhost:11434`
 
-**Settings → Models → Add Model**: pick a provider and enter a model ID
-(e.g. `claude-sonnet-4-20250514`, `gpt-4o`, `qwen2.5:0.5b`).
+## Add a model
 
-Chatty stores per-model capabilities in `ModelConfig`:
+**Settings → Models → Add Model.** Pick the provider, then enter a model ID
+such as `claude-sonnet-4-20250514`, `gpt-4o`, or `qwen2.5:0.5b`.
 
-| Field | Meaning |
-|-------|---------|
-| `supports_images` | Vision attachments |
-| `supports_pdf` | PDF attachments |
-| `supports_temperature` | Temperature slider (off for reasoning models) |
+Chatty records three capabilities per model and uses them to show or hide
+attachment buttons and the temperature control:
 
-Defaults come from `ProviderType::default_capabilities()`; Ollama models are
-detected per-model via `/api/show`.
+| Capability | What it controls |
+|------------|------------------|
+| Images | Vision attachments in chat |
+| PDF | PDF attachments |
+| Temperature | Temperature slider (off for some reasoning models) |
 
-Developer reference: [Provider matrix](../dev/reference/provider-matrix.md) ·
-[agent_factory](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-core/src/factories/agent_factory).
+Ollama capabilities are detected per model (`/api/show`) and stored with the
+model config so they survive restarts.
+
+### Defaults by provider
+
+| Provider | Images | PDF | Temperature | Notes |
+|----------|:------:|:---:|:-----------:|-------|
+| OpenRouter | Per-model | Per-model | Yes | Routes to many upstreams |
+| Azure OpenAI | Yes | Lossy | Yes | API key or Entra ID |
+| Ollama | Per-model | Per-model | — | Fully local |
+
+## Next
+
+- [Getting started](./getting-started.md)
+- [Features](./features.md)

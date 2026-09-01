@@ -10,13 +10,17 @@ if ! command -v lychee >/dev/null 2>&1; then
 fi
 
 bash scripts/gen-docs-reference.sh
+# User-guide GIFs are copied here; relative image links in src/user/ need them.
+bash scripts/docs-sync.sh
 
-# Source-of-truth paths only. docs-site/src copies rewrite relative paths and
-# would duplicate checks; mdBook HTML pulls in RESERVED via cross-links.
+# Source-of-truth paths only. Synced architecture copies under
+# docs-site/src/dev/architecture rewrite relative paths and would duplicate
+# checks; mdBook HTML pulls in RESERVED via cross-links.
 lychee \
   --config .lychee.toml \
   --offline \
   --no-progress \
+  'README.md' \
   'docs/**/*.md' \
   'AGENTS.md' \
   'CLAUDE.md' \

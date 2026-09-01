@@ -269,7 +269,13 @@ pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px
         Block::Diff { .. } => 120.0,
         Block::Approval { .. } => 72.0,
         Block::Plan { .. } => 40.0 + 32.0 * plan_steps.max(1) as f32,
-        Block::Artifact { .. } => 68.0,
+        Block::Artifact { path, .. } => {
+            if super::artifact_kind::is_image_path(path) {
+                160.0
+            } else {
+                76.0
+            }
+        }
         Block::TablePreview { preview, .. } => inline_table_card_height(preview),
         Block::Error { .. } => 64.0,
     }
