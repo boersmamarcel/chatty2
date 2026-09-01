@@ -121,73 +121,374 @@ cat > "$OUT/settings-schema.md" << 'EOF'
 audience: [contributor, agent]
 source_files:
   - crates/chatty-core/src/settings/repositories/mod.rs
+  - crates/chatty-core/src/settings/repositories/generic_json_repository.rs
+  - crates/chatty-core/src/settings/repositories/oauth_credential_json_repository.rs
+  - crates/chatty-core/src/settings/repositories/module_settings_json_repository.rs
+  - crates/chatty-core/src/services/mcp_token_store.rs
   - crates/chatty-core/src/settings/models/
 related:
-  - ./dev/reference/env-vars.md
-  - ./dev/adrs/settings-integration-map.md
+  - ./env-vars.md
+  - ./provider-matrix.md
+  - ./singleton-inventory.md
+  - ../adrs/settings-integration-map.md
 ---
 
 # Settings schema reference
 
-**When to read this:** Find the JSON file, model, and defaults for a persisted
-setting.
+**When to read this:** Find the JSON file, Rust model, key fields, and defaults
+for a persisted setting. Source of truth:
+`crates/chatty-core/src/settings/repositories/` + `settings/models/`.
 
-> **Pair review pending (DOC-23 / AGE-101):** Tables below are generated from
-> `settings/repositories/` + `settings/models/` as of this commit. Marcel
-> confirms file names, defaults, and which secrets must never appear in docs
-> examples before this page is treated as complete.
+> **Pair review pending (DOC-23 / AGE-101):** Field tables below are transcribed
+> from the settings models as of this commit. Marcel confirms file names,
+> defaults, serde enum spellings, and that secret examples stay redacted
+> before this page is treated as complete. Do not close AGE-101 until that
+> review lands.
 
-## Config directory
+## Config vs data directories
 
-`dirs::config_dir()/chatty` — via `generic_json_repository::chatty_config_dir()`.
+JSON settings live under `dirs::config_dir()/chatty` (used by
+`GenericJsonRepository`). WASM module **binaries** and agent memory live
+under `dirs::data_dir()/chatty`.
 
-| Platform | Typical path |
-|----------|----------------|
-| Linux | `~/.config/chatty/` (`$XDG_CONFIG_HOME/chatty`) |
-| macOS | `~/Library/Application Support/chatty/` (`dirs::config_dir`) |
-| Windows | `%APPDATA%\chatty\` |
+| Kind | Resolver | Linux | macOS | Windows |
+|------|----------|-------|-------|---------|
+| Config (this page) | `dirs::config_dir()/chatty` | `~/.config/chatty/` (`$XDG_CONFIG_HOME/chatty`) | `~/Library/Application Support/chatty/` | `%APPDATA%\chatty\` |
+| Data | `dirs::data_dir()/chatty` | `~/.local/share/chatty/` (`$XDG_DATA_HOME/chatty`) | `~/Library/Application Support/chatty/` | `%APPDATA%\chatty\` |
 
-Missing files load `Default`. Saves are atomic (temp file + rename).
+On macOS and Windows, config and data resolve to the same Application Support /
+AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 
-Module **binaries** (WASM) live under `dirs::data_dir()/chatty/modules/`, not
-the config dir — see `ModuleSettingsModel`.
+## Persistence behaviour
 
-## Single-object files (`load` / `save`)
+- **Single-object files** (`load` / `save`): missing file → `T::default()`.
+- **List files** (`load_all` / `save_all`): missing file → `[]`.
+- **Settings JSON writes** are atomic: pretty-printed JSON to a sibling
+  `*.json.<pid>.tmp`, then rename (`GenericJsonRepository`).
+- Serde field names are snake_case unless a table notes otherwise.
+- `#[serde(skip)]` fields are runtime-only and never written to disk.
 
-| File | Model | Key fields / defaults |
-|------|-------|------------------------|
-| `general_settings.json` | `GeneralSettingsModel` | `font_size` `14.0`; `theme_name` / `dark_mode` `None` |
-| `execution_settings.json` | `ExecutionSettingsModel` | `enabled` `false`; `approval_mode` `AlwaysAsk`; `workspace_dir` `None`; filesystem + fetch default **on**; git / execute_code / docker default **off**; `timeout_seconds` `30`; `max_output_bytes` `51200`; `max_agent_turns` `10`; `memory_enabled` `true` |
-| `search_settings.json` | `SearchSettingsModel` | `enabled` `false`; `active_provider` `Tavily`; API keys `None`; `max_results` `5` |
-| `training_settings.json` | `TrainingSettingsModel` | `atif_auto_export` / `jsonl_auto_export` `false` |
-| `user_secrets.json` | `UserSecretsModel` | secret key/value list — **do not log or paste real values** |
-| `hive_settings.json` | `HiveSettingsModel` | `registry_url` `http://localhost:8080`; `runner_url` `http://localhost:8081`; `token` `None` |
-| `extensions.json` | `ExtensionsModel` | enabled A2A / extension entries |
-| `module_settings.json` | `ModuleSettingsModel` | `enabled` `false`; `gateway_port` `8420`; `module_dir` = platform data dir (`~/Library/Application Support/chatty/modules` on macOS, `~/.local/share/chatty/modules` on Linux) |
+## File inventory
 
-OAuth tokens: `mcp_oauth_<sanitized_name>.json` in the same config dir
-(`oauth_credential_json_repository`).
+| File | Shape | Model | Repository |
+|------|-------|-------|------------|
+| `general_settings.json` | object | `GeneralSettingsModel` | `GeneralSettingsJsonRepository` |
+| `execution_settings.json` | object | `ExecutionSettingsModel` | `ExecutionSettingsJsonRepository` |
+| `search_settings.json` | object | `SearchSettingsModel` | `SearchSettingsJsonRepository` |
+| `training_settings.json` | object | `TrainingSettingsModel` | `TrainingSettingsJsonRepository` |
+| `user_secrets.json` | object | `UserSecretsModel` | `UserSecretsJsonRepository` |
+| `hive_settings.json` | object | `HiveSettingsModel` | `HiveSettingsJsonRepository` |
+| `extensions.json` | object | `ExtensionsModel` | `ExtensionsJsonRepository` |
+| `module_settings.json` | object | `ModuleSettingsModel` | `ModuleSettingsJsonRepository` |
+| `providers.json` | array | `ProviderConfig` | `JsonFileRepository` |
+| `models.json` | array | `ModelConfig` | `JsonModelsRepository` |
+| `mcp_servers.json` | array | `McpServerConfig` | `JsonMcpRepository` |
+| `a2a_agents.json` | array | `A2aAgentConfig` | `A2aJsonRepository` |
+| `mcp_oauth_<sanitized>.json` | object | opaque `StoredCredentials` JSON | live: `FileCredentialStore`; also `JsonOAuthCredentialRepository` |
 
-## List files (`load_all` / `save_all`)
+Secrets in **bold** must never appear in logs, traces, or LLM-facing tool
+output. Docs examples use `"****"` or omit the field.
 
-| File | Item type | Notes |
-|------|-----------|--------|
-| `providers.json` | `ProviderConfig` | API keys live here; never expose to the LLM |
-| `models.json` | `ModelConfig` | per-model capabilities, preamble, temperature |
-| `mcp_servers.json` | `McpServerConfig` | use `masked_env()` on any LLM-facing copy |
-| `a2a_agents.json` | `A2aAgentConfig` | registered A2A agents |
+---
+
+## `general_settings.json` — `GeneralSettingsModel`
+
+Source: `settings/models/general_model.rs`.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `font_size` | `f32` | `14.0` | UI font size (px) |
+| `theme_name` | `Option<String>` | `null` | Theme folder name; `null` = built-in default |
+| `dark_mode` | `Option<bool>` | `null` | `null` = follow OS / theme default |
+
+```json
+{ "font_size": 14.0, "theme_name": null, "dark_mode": null }
+```
+
+---
+
+## `execution_settings.json` — `ExecutionSettingsModel`
+
+Source: `settings/models/execution_settings.rs`. Master toggle `enabled` is
+opt-in (`false`) for security.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `enabled` | `bool` | `false` | Master code-execution toggle |
+| `approval_mode` | `ApprovalMode` | `"AlwaysAsk"` | JSON enum: `AlwaysAsk`, `AutoApproveSandboxed`, `AutoApproveAll` |
+| `workspace_dir` | `Option<String>` | `null` | Absolute path required for filesystem / git tools |
+| `filesystem_read_enabled` | `bool` | `true` | Requires `workspace_dir` |
+| `filesystem_write_enabled` | `bool` | `true` | Requires `workspace_dir` + approval |
+| `fetch_enabled` | `bool` | `true` | Built-in read-only HTTP GET |
+| `git_enabled` | `bool` | `false` | Opt-in; workspace must be a git repo |
+| `execute_code_enabled` | `bool` | `false` | Exposes `execute_code` to the model |
+| `docker_code_execution_enabled` | `bool` | `false` | Docker fallback for non-Monty code |
+| `docker_host` | `Option<String>` | `null` | Socket / URI; `null` = auto-detect |
+| `timeout_seconds` | `u32` | `30` | Execution timeout |
+| `max_output_bytes` | `usize` | `51200` | 50 KiB cap |
+| `network_isolation` | `bool` | `false` | Sandbox network isolation when available |
+| `max_agent_turns` | `u32` | `10` | Tool-call rounds per response |
+| `memory_enabled` | `bool` | `true` | `remember` / `search_memory` |
+| `embedding_enabled` | `bool` | `false` | Semantic memory search |
+| `embedding_provider` | `Option<ProviderType>` | `null` | Independent of chat provider |
+| `embedding_model` | `Option<String>` | `null` | e.g. `text-embedding-3-small` |
+
+`ApprovalMode` has no `rename_all` — JSON uses the Rust variant names above.
+
+---
+
+## `search_settings.json` — `SearchSettingsModel`
+
+Source: `settings/models/search_settings.rs`. Also stores Browser Use and
+Daytona keys (not only web search).
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `enabled` | `bool` | `false` | Master web-search toggle |
+| `active_provider` | `SearchProvider` | `"Tavily"` | JSON: `Tavily` or `Brave` |
+| **`tavily_api_key`** | `Option<String>` | `null` | Secret |
+| **`brave_api_key`** | `Option<String>` | `null` | Secret |
+| `max_results` | `usize` | `5` | Search hit cap |
+| `browser_use_enabled` | `bool` | `true` | Key alone is enough to activate; set `false` to disable without deleting the key |
+| **`browser_use_api_key`** | `Option<String>` | `null` | Secret |
+| `daytona_enabled` | `bool` | `true` | Same pattern as browser-use |
+| **`daytona_api_key`** | `Option<String>` | `null` | Secret |
+
+```json
+{
+  "enabled": false,
+  "active_provider": "Tavily",
+  "max_results": 5,
+  "browser_use_enabled": true,
+  "daytona_enabled": true
+}
+```
+
+---
+
+## `training_settings.json` — `TrainingSettingsModel`
+
+Source: `settings/models/training_settings.rs`. Both flags opt-in.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `atif_auto_export` | `bool` | `false` | ATIF JSON after each completed assistant turn |
+| `jsonl_auto_export` | `bool` | `false` | JSONL (SFT + DPO) after each completed turn |
+
+---
+
+## `user_secrets.json` — `UserSecretsModel`
+
+Source: `settings/models/user_secrets_store.rs`. Injected into shell sessions
+as env vars; **never sent to the LLM**.
+
+| Field | Type | Default | Persisted? |
+|-------|------|---------|------------|
+| **`secrets`** | `[{key, value}]` | `[]` | yes — values are secrets |
+| `revealed_keys` | `HashSet<String>` | empty | **no** (`#[serde(skip)]`; UI-only) |
+
+```json
+{ "secrets": [ { "key": "EXAMPLE_TOKEN", "value": "****" } ] }
+```
+
+---
+
+## `hive_settings.json` — `HiveSettingsModel`
+
+Source: `settings/models/hive_settings.rs`.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `registry_url` | `String` | `http://localhost:8080` | `DEFAULT_REGISTRY_URL` |
+| `runner_url` | `String` | `http://localhost:8081` | `DEFAULT_RUNNER_URL` |
+| **`token`** | `Option<String>` | `null` | JWT (30-day expiry). Secret. `is_logged_in()` = token present |
+| `username` | `Option<String>` | `null` | Cached for UI |
+| `email` | `Option<String>` | `null` | Cached for re-login |
+
+---
+
+## `extensions.json` — `ExtensionsModel`
+
+Source: `settings/models/extensions_store.rs`. Unified install list for MCP,
+WASM, and A2A.
+
+| Field | Type | Default | Persisted? |
+|-------|------|---------|------------|
+| `extensions` | `[InstalledExtension]` | `[]` | yes |
+| `mcp_auth_statuses` | map | empty | **no** (`#[serde(skip)]`) |
+| `a2a_statuses` | map | empty | **no** (`#[serde(skip)]`) |
+
+`InstalledExtension`:
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `id` | `String` | required | Unique slug |
+| `display_name` | `String` | required | UI name |
+| `description` | `String` | required | |
+| `kind` | `ExtensionKind` | required | Internally tagged `kind`: `mcp` (flattened `McpServerConfig`), `wasm`, `a2a` (flattened `A2aAgentConfig`) |
+| `source` | `ExtensionSource` | required | Internally tagged `type`: `hive` (`module_name`, `version`) or `custom` |
+| `pricing_model` | `Option<String>` | `null` | Hive marketplace classification |
+| `enabled` | `bool` | `true` | |
+
+---
+
+## `module_settings.json` — `ModuleSettingsModel`
+
+Source: `settings/models/module_settings.rs`. Load path
+(`ModuleSettingsJsonRepository`) runs `normalize_module_dir()`: empty values
+and the legacy `.chatty/modules` fallback become the platform data-dir default.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `enabled` | `bool` | `false` | WASM module runtime |
+| `module_dir` | `String` | platform data dir + `/chatty/modules` | Linux `~/.local/share/chatty/modules`; macOS `~/Library/Application Support/chatty/modules`; Windows `%APPDATA%\chatty\modules`. Last-resort fallback: `.chatty/modules` |
+| `gateway_port` | `u16` | `8420` | Local protocol gateway |
+
+---
+
+## `providers.json` — `[ProviderConfig]`
+
+Source: `settings/models/providers_store.rs`. See also
+[Provider matrix](./provider-matrix.md).
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `name` | `String` | required | Display name |
+| `provider_type` | `ProviderType` | required | JSON: `open_router`, `ollama`, `azure_openai`. Serde `rename_all = "snake_case"` on the variant `OpenRouter` yields `open_router` — the string `openrouter` **does not** deserialize. Legacy aliases `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter |
+| **`api_key`** | `Option<String>` | omitted if `null` | Secret. Never expose to the LLM |
+| `base_url` | `Option<String>` | omitted if `null` | Ollama / Azure / OpenAI-compat |
+| `extra_config` | `Map<String, String>` | `{}` (omitted if empty) | Azure: `auth_method` = `api_key` (default) or `entra_id` |
+
+`configured_providers()`: Ollama always; Azure needs non-empty `base_url` plus
+API key or Entra ID; others need a non-empty API key.
+
+---
+
+## `models.json` — `[ModelConfig]`
+
+Source: `settings/models/models_store.rs`.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `id` | `String` | required | Internal UUID (not the API model name) |
+| `name` | `String` | required | UI label |
+| `provider_type` | `ProviderType` | required | Same enum as providers (`open_router` / `ollama` / `azure_openai`) |
+| `model_identifier` | `String` | required | API / Ollama model id |
+| `temperature` | `f32` | `1.0` | |
+| `preamble` | `String` | `""` | System prompt / GEPA target |
+| `max_tokens` | `Option<i32>` | omitted if `null` | |
+| `top_p` | `Option<f32>` | omitted if `null` | |
+| `extra_params` | `Map<String, String>` | `{}` (omitted if empty) | Azure: `api_version` (default `2025-03-01-preview`) |
+| `cost_per_million_input_tokens` | `Option<f64>` | omitted if `null` | USD |
+| `cost_per_million_output_tokens` | `Option<f64>` | omitted if `null` | USD |
+| `supports_images` | `bool` | `false` | New models inherit `ProviderType::default_capabilities()` |
+| `supports_pdf` | `bool` | `false` | |
+| `supports_temperature` | `bool` | `true` | Off for some reasoning models |
+| `max_context_window` | `Option<i32>` | omitted if `null` | Token-bar budget |
+
+---
+
+## `mcp_servers.json` — `[McpServerConfig]`
+
+Source: `settings/models/mcp_store.rs`. HTTP MCP endpoints only (the app does
+not spawn stdio servers). Writes are serialized with `MCP_WRITE_LOCK`.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `name` | `String` | required | Unique id |
+| `url` | `String` | required | e.g. `http://localhost:3000/mcp` |
+| **`api_key`** | `Option<String>` | omitted if `null` | Bearer token. Secret. LLM-facing copies must not include the real value |
+| `enabled` | `bool` | `true` | |
+| `is_module` | `bool` | `false` (omitted when false) | Auto-registered WASM gateway entry |
+
+Runtime `McpAuthStatus` is not persisted.
+
+`MASKED_API_KEY_SENTINEL` is `"****"`: on edit, that string means “keep the
+stored key”. There is no `env` map on `McpServerConfig` in current source.
+
+---
+
+## `a2a_agents.json` — `[A2aAgentConfig]`
+
+Source: `settings/models/a2a_store.rs`.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `name` | `String` | required | Also the `/agent <name>` token |
+| `url` | `String` | required | A2A base URL |
+| **`api_key`** | `Option<String>` | omitted if `null` | Bearer token. Secret |
+| `enabled` | `bool` | `true` | |
+| `skills` | `[String]` | `[]` (omitted if empty) | Cached from the remote agent card |
+
+Runtime `A2aAgentStatus` is not persisted.
+
+---
+
+## `mcp_oauth_<sanitized>.json` — OAuth credentials
+
+One file per MCP server name in the **config** dir. Non-alphanumeric
+characters in the server name (except `-` `_`) become `_`.
+Example: server `my server/with:special.chars` →
+`mcp_oauth_my_server_with_special_chars.json`.
+
+The **live writer** is `FileCredentialStore` (`mcp_token_store.rs`), used by
+`McpService`. `JsonOAuthCredentialRepository` uses the same filenames but is
+not registered in `init_repositories()`. `FileCredentialStore` writes the
+JSON directly (not the temp-file rename used by settings repos).
+
+Shape is opaque `rmcp::StoredCredentials` JSON (`client_id`,
+`token_response`, `granted_scopes`, …). **Do not paste real token files
+into issues, PRs, or docs.** Corrupt files are deleted on load.
+
+---
 
 ## Not persisted as JSON (yet)
 
-| Model | Notes |
-|-------|-------|
-| `TokenTrackingSettings` | In-memory global; defaults `enabled` `true`, reserve `4096`, high `0.70`, critical `0.90`, `auto_summarize` `false`. Comment in source says JSON persistence is a follow-up. |
+| Store | Typical path | Notes |
+|-------|--------------|-------|
+| `TokenTrackingSettings` | in-memory GPUI global | Defaults: `enabled` `true`, `response_reserve` `4096`, `high_threshold` `0.70`, `critical_threshold` `0.90`, `auto_summarize` `false`, `summarization_model_id` omitted. Source comment: JSON persistence is a follow-up. |
+| Conversations | config dir `chatty/conversations.db` | SQLite, not settings JSON |
+| Agent memory / skills | data dir `chatty/` | memvid + skill files |
+| WASM module binaries | data dir `chatty/modules/` | See `module_dir` |
+| Pdfium native lib | data dir `chatty/lib/` | See [env-vars](./env-vars.md) |
+| Math SVG cache | data dir `chatty/math_cache/` | |
+
+Planned research settings (`FlowSettingsModel`, playbook store) are **not
+implemented** — see [settings integration map](../adrs/settings-integration-map.md).
+
+`openrouter_curated.json` also lives in the config dir (GPUI OpenRouter catalog
+override: `[{id, name}, …]`). It is **not** a settings repository.
 
 ## Related
 
 - [Settings integration map](../adrs/settings-integration-map.md) — research ↔ settings
 - [Environment variables](./env-vars.md) — `CHATTY_*` / `XDG_*`
+- [Provider matrix](./provider-matrix.md) — auth and default capabilities
+- [Singleton inventory](./singleton-inventory.md) — repository accessors
 EOF
+
+# Fail docs-gen if a repository JSON filename is missing from the schema page.
+python3 - "$ROOT/crates/chatty-core/src/settings/repositories" "$OUT/settings-schema.md" << 'PY'
+import re, sys
+from pathlib import Path
+
+repos_dir, schema = map(Path, sys.argv[1:3])
+filenames = set()
+for path in repos_dir.glob("*.rs"):
+    filenames.update(re.findall(r'"([^"]+\.json)"', path.read_text()))
+schema_text = schema.read_text()
+missing = sorted(f for f in filenames if f not in schema_text)
+# Format strings like mcp_oauth_{sanitized}.json still count if the prefix is documented.
+missing = [
+    f
+    for f in missing
+    if not (f.startswith("mcp_oauth_") and "mcp_oauth_" in schema_text)
+]
+if missing:
+    print("settings-schema.md missing repository files:", ", ".join(missing), file=sys.stderr)
+    sys.exit(1)
+print("settings-schema: checked", len(filenames), "repository JSON filenames")
+PY
 
 # ── Provider matrix ─────────────────────────────────────────────────────────
 cat > "$OUT/provider-matrix.md" << 'EOF'
@@ -209,7 +510,7 @@ Source: `crates/chatty-core/src/settings/models/providers_store.rs`,
 ### OpenRouter
 
 - Gateway to 200+ upstream models (Anthropic, OpenAI, Google, Mistral, Meta, …).
-- Legacy JSON values `open_ai`, `anthropic`, `gemini`, `mistral` deserialize as `openrouter` for backward compatibility.
+- Persisted `ProviderType` JSON is `open_router` (serde snake_case). Legacy values `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter. The string `openrouter` is **not** accepted.
 - `configured_providers()` requires a non-empty `api_key`.
 - Rig client: `rig_core::providers::openrouter::Client`.
 - MCP tools are sanitized for OpenAI-compatible schemas before attachment.
