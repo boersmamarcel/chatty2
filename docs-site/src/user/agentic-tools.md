@@ -47,8 +47,12 @@ Approval `✓` means the call can be gated by the approval mode.
 
 | Tool | What the agent can do | Approval |
 |------|----------------------|:--------:|
-| `bash` | Sandboxed shell with streaming output | ✓ |
+| `shell_execute` | Sandboxed shell with streaming output | ✓ |
+| `shell_cd` / `shell_set_env` / `shell_status` | Working directory, env, session status | — |
 | `execute_code` | Python (MontySandbox or Docker), JS, TS, Rust, or Bash | ✓ |
+
+Git (`git_status`, `git_diff`, `git_commit`, …) and code search (`search_code`,
+`find_files`, `find_definition`) are in the [tools catalog](../dev/reference/tools-catalog.md).
 
 ### Data & documents
 
@@ -76,6 +80,7 @@ Approval `✓` means the call can be gated by the approval mode.
 | `remember` / `search_memory` | Persistent memory | — |
 | `save_skill` / `read_skill` | Named procedures | — |
 | `list_tools` | List tools and schemas | — |
+| `list_agents` / `invoke_agent` | Discover and call configured agents | — |
 | `write_todos` / `update_todo` / `verify_completion` | Plan + verify | — |
 | `sub_agent` | Headless `chatty-tui` child agent | ✓ |
 | `publish_wasm_module` | Publish WASM to Hive (when Hive MCP is configured) | ✓ |
