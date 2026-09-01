@@ -385,6 +385,9 @@ impl ChatView {
                 conversation_id: conv_id.clone(),
             });
         }
+        self.artifact_view.update(cx, |view, cx| {
+            view.exit_full_for_approval(cx);
+        });
 
         // Create approval block with pending state
         let approval = ApprovalBlock {

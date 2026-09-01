@@ -856,10 +856,15 @@ impl ChatView {
             return;
         }
         self.artifact_close_wired = true;
-        cx.subscribe(&self.artifact_view, |this, _, _: &ArtifactViewEvent, cx| {
-            this.artifact_dismissed = true;
-            cx.notify();
-        })
+        cx.subscribe(
+            &self.artifact_view,
+            |this, _, event: &ArtifactViewEvent, cx| {
+                if matches!(event, ArtifactViewEvent::Closed) {
+                    this.artifact_dismissed = true;
+                }
+                cx.notify();
+            },
+        )
         .detach();
     }
 
@@ -1205,7 +1210,10 @@ impl ChatView {
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
+        let artifact_docked = matches!(
+            self.artifact_view.read(cx).mode,
+            ArtifactMode::Docked | ArtifactMode::Full
+        );
         self.transcript_content_width =
             Self::compute_transcript_content_width(window, artifact_docked);
 
@@ -1542,6 +1550,11 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let turns = self.typed_turns(cx);
+        let open_artifact_path = self
+            .artifact_view
+            .read(cx)
+            .current_path()
+            .map(PathBuf::from);
         let last_visible_assistant_idx = turns
             .iter()
             .rev()
@@ -1637,6 +1650,7 @@ impl ChatView {
                             plan.as_ref(),
                             activity_open,
                             Some(on_activity_toggle.clone()),
+                            open_artifact_path.as_deref(),
                             _window,
                             cx,
                         )
@@ -1903,9 +1917,13 @@ impl Render for ChatView {
         self.maybe_open_pdf_artifact(cx);
         self.maybe_open_query_table(cx);
         self.maybe_open_chart_artifact(cx);
-        let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
+        let artifact_mode = self.artifact_view.read(cx).mode;
+        let docked = artifact_mode == ArtifactMode::Docked;
+        let full = artifact_mode == ArtifactMode::Full;
         let artifact = self.artifact_view.clone();
         let split = self.artifact_split.clone();
+        let thinking_visible = self.is_thinking_indicator_visible();
+        let thinking_indicator = self.thinking_indicator.clone();
 
         let has_pending_approval = self.pending_approval.is_some();
         let view_entity_for_keys = cx.entity();
@@ -2019,7 +2037,48 @@ impl Render for ChatView {
             .bg(cx.theme().background)
             .overflow_hidden();
 
-        if docked {
+        if full {
+            let view_entity = cx.entity();
+            root.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                        if event.keystroke.key == "escape" {
+                            view_entity.update(cx, |view, cx| {
+                                view.artifact_view.update(cx, |artifact, cx| {
+                                    artifact.set_mode(ArtifactMode::Docked, cx);
+                                });
+                            });
+                            cx.stop_propagation();
+                        }
+                    })
+                    .when(thinking_visible, |this| this.child(thinking_indicator))
+                    .when_some(self.active_approval_for_display(), |this, pending| {
+                        let view_entity = cx.entity();
+                        let approval = chatty_core::models::message_types::ApprovalBlock {
+                            id: pending.id,
+                            command: pending.command,
+                            is_sandboxed: pending.is_sandboxed,
+                            state: chatty_core::models::message_types::ApprovalState::Pending,
+                            created_at: std::time::SystemTime::now(),
+                        };
+                        this.child(div().px_4().pt_2().child(
+                            ApprovalCard::new(approval).on_decide({
+                                let entity = view_entity.clone();
+                                move |approved, cx| {
+                                    entity.update(cx, |view, cx| {
+                                        view.handle_floating_approval(approved, cx);
+                                    });
+                                }
+                            }),
+                        ))
+                    })
+                    .child(div().flex_1().min_h_0().w_full().child(artifact)),
+            )
+            .into_any_element()
+        } else if docked {
             root.child(
                 div().flex_1().size_full().min_w_0().child(
                     h_resizable("chat-artifact-split")

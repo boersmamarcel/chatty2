@@ -34,7 +34,9 @@ mod activity;
 mod adapter;
 mod approval;
 mod artifact;
+mod artifact_card;
 mod artifact_kind;
+mod artifact_meta;
 mod block_render;
 mod diff;
 mod diff_parse;
@@ -55,9 +57,8 @@ pub use adapter::{
     format_working_for, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
-pub use artifact::{
-    ArtifactCard, ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view,
-};
+pub use artifact::{ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view};
+pub use artifact_card::ArtifactCard;
 pub use artifact_kind::{
     artifact_language_for_path, attachment_image_path, chart_artifact_path,
     inline_chat_attachments, is_chart_artifact_tool, is_code_artifact_path, is_image_artifact_tool,
