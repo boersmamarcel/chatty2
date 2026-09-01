@@ -7,6 +7,7 @@ use chatty_core::settings::providers::openrouter::discovery::{
     model_supports_images, model_supports_pdf,
 };
 
+use crate::settings::models::emit_models_changed;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderType;
 
@@ -116,6 +117,7 @@ pub async fn sync_openrouter_models(cx: &mut AsyncApp) -> Result<usize> {
         });
 
         cx.refresh_windows();
+        emit_models_changed(cx);
     })?;
 
     // -----------------------------------------------------------------

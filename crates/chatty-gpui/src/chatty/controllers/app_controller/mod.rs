@@ -33,6 +33,7 @@ use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 use chatty_core::exporters::atif_exporter::conversation_to_atif;
 use chatty_core::exporters::jsonl_exporter::{
     SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
@@ -458,7 +459,9 @@ impl ChattyApp {
     /// 1. SidebarView emits SidebarEvent → ChattyApp handles
     /// 2. ChatInputState emits ChatInputEvent → ChattyApp handles
     /// 3. AgentConfigNotifier emits AgentConfigEvent → ChattyApp handles
-    /// 4. StreamManager emits StreamManagerEvent → ChattyApp handles
+    /// 4. ModelsNotifier emits ModelsNotifierEvent → ChattyApp refreshes picker
+    /// 5. StreamManager emits StreamManagerEvent → ChattyApp handles
+    /// 6. ChatView emits ChatViewEvent → ChattyApp handles
     fn setup_callbacks(&self, cx: &mut Context<Self>) {
         // SUBSCRIPTION 1: SidebarView events
         cx.subscribe(
@@ -574,7 +577,26 @@ impl ChattyApp {
             .detach();
         }
 
-        // SUBSCRIPTION 4: StreamManager events — decoupled UI updates
+        // SUBSCRIPTION 4: ModelsNotifier — refresh chat-input picker when models change
+        if let Some(notifier) = cx
+            .try_global::<GlobalModelsNotifier>()
+            .and_then(|g| g.get())
+        {
+            cx.subscribe(
+                &notifier,
+                |this, _notifier, event: &ModelsNotifierEvent, cx| {
+                    if matches!(
+                        event,
+                        ModelsNotifierEvent::ModelsReady | ModelsNotifierEvent::ModelsChanged
+                    ) {
+                        this.refresh_chat_input_models(cx);
+                    }
+                },
+            )
+            .detach();
+        }
+
+        // SUBSCRIPTION 5: StreamManager events — decoupled UI updates
         if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
                 app.handle_stream_manager_event(event, cx);
@@ -582,7 +604,7 @@ impl ChattyApp {
             .detach();
         }
 
-        // SUBSCRIPTION 5: ChatView events — feedback persistence
+        // SUBSCRIPTION 6: ChatView events — feedback persistence
         cx.subscribe(
             &self.chat_view,
             |app, _chat_view, event: &ChatViewEvent, cx| match event {
@@ -600,35 +622,16 @@ impl ChattyApp {
         .detach();
     }
 
-    /// Initialize chat input with available models
+    /// Copy the global model list into the chat-input picker.
+    fn refresh_chat_input_models(&self, cx: &mut Context<Self>) {
+        self.chat_view.update(cx, |view, cx| {
+            view.sync_available_models(cx);
+        });
+    }
+
+    /// Initialize chat input with available models (and skills for the workspace).
     fn initialize_models(&self, cx: &mut Context<Self>) {
-        let chat_view = self.chat_view.clone();
-
-        // Get models from global store
-        if let Some(models_model) = cx.try_global::<ModelsModel>() {
-            let models_list: Vec<ModelOption> = models_model
-                .models()
-                .iter()
-                .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
-                .collect();
-
-            let default_model_id = models_list.first().map(|model| model.id.clone());
-
-            // Get capabilities of the default model
-            let default_capabilities = models_model
-                .models()
-                .first()
-                .map(|m| (m.supports_images, m.supports_pdf))
-                .unwrap_or((false, false));
-
-            // Set available models on chat input
-            chat_view.update(cx, |view, cx| {
-                view.chat_input_state().update(cx, |state, _cx| {
-                    state.set_available_models(models_list, default_model_id);
-                    state.set_capabilities(default_capabilities.0, default_capabilities.1);
-                });
-            });
-        }
+        self.refresh_chat_input_models(cx);
 
         // Load skills for the initial workspace directory
         let workspace_dir = cx

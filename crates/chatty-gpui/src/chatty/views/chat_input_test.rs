@@ -252,3 +252,59 @@ fn test_add_dir_prefix_extraction() {
     let msg = "/add-dir ./src";
     assert_eq!(msg.strip_prefix("/add-dir "), Some("./src"));
 }
+
+// -----------------------------------------------------------------------
+// model picker selection repair (AGE-149)
+// -----------------------------------------------------------------------
+
+fn option(id: &str, name: &str) -> super::ModelOption {
+    super::ModelOption::new(
+        id.to_string(),
+        name.to_string(),
+        crate::settings::models::providers_store::ProviderType::OpenRouter,
+    )
+}
+
+#[test]
+fn resolve_selected_clears_when_list_empty() {
+    assert_eq!(
+        super::resolve_selected_model_id(Some("gone"), &[], Some("default".into())),
+        None
+    );
+}
+
+#[test]
+fn resolve_selected_keeps_current_when_still_present() {
+    let models = vec![option("a", "A"), option("b", "B")];
+    assert_eq!(
+        super::resolve_selected_model_id(Some("b"), &models, Some("a".into())),
+        Some("b".into())
+    );
+}
+
+#[test]
+fn resolve_selected_falls_back_when_current_deleted() {
+    let models = vec![option("a", "A"), option("c", "C")];
+    assert_eq!(
+        super::resolve_selected_model_id(Some("b"), &models, Some("c".into())),
+        Some("c".into())
+    );
+}
+
+#[test]
+fn resolve_selected_uses_first_when_default_missing() {
+    let models = vec![option("a", "A"), option("c", "C")];
+    assert_eq!(
+        super::resolve_selected_model_id(Some("b"), &models, Some("gone".into())),
+        Some("a".into())
+    );
+}
+
+#[test]
+fn resolve_selected_picks_default_when_none_selected() {
+    let models = vec![option("a", "A"), option("b", "B")];
+    assert_eq!(
+        super::resolve_selected_model_id(None, &models, Some("b".into())),
+        Some("b".into())
+    );
+}

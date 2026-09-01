@@ -186,9 +186,9 @@ impl ModelsListView {
                                                                     .take(40)
                                                                     .cloned()
                                                                     .collect();
+                                                            // Form is the only scroll owner — do not nest
+                                                            // another scrollbar here (AGE-149).
                                                             div()
-                                                                .max_h(px(180.0))
-                                                                .overflow_y_scrollbar()
                                                                 .border_1()
                                                                 .border_color(theme_border)
                                                                 .rounded_sm()

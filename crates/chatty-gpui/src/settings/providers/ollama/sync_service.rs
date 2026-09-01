@@ -2,6 +2,7 @@ use anyhow::Result;
 use gpui::{App, AsyncApp, BorrowAppContext};
 use tracing::{debug, info, warn};
 
+use crate::settings::models::emit_models_changed;
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderType;
 
@@ -69,6 +70,7 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
 
                 // Refresh windows to update UI
                 cx.refresh_windows();
+                emit_models_changed(cx);
             })?;
 
             // Save to disk
@@ -104,6 +106,9 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
                         model.delete_model(&id);
                     }
                 });
+
+                cx.refresh_windows();
+                emit_models_changed(cx);
             })?;
 
             Ok(0)

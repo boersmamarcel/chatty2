@@ -19,4 +19,6 @@ pub use agent_config_notifier::{AgentConfigEvent, AgentConfigNotifier, GlobalAge
 pub use discovered_modules::{DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus};
 pub use marketplace_state::MarketplaceState;
 pub use memory_browser_state::MemoryBrowserState;
-pub use models_notifier::{GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent};
+pub use models_notifier::{
+    GlobalModelsNotifier, ModelsNotifier, ModelsNotifierEvent, emit_models_changed,
+};
