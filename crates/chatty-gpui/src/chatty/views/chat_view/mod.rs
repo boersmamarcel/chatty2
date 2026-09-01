@@ -311,7 +311,7 @@ impl ChatView {
             plan_overlay_open: false,
             plan_scroll_watch_armed: false,
             last_list_scroll_offset: None,
-            artifact_view: new_artifact_view(cx),
+            artifact_view: new_artifact_view(window, cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
             last_auto_opened_table_id: None,
@@ -856,10 +856,15 @@ impl ChatView {
             return;
         }
         self.artifact_close_wired = true;
-        cx.subscribe(&self.artifact_view, |this, _, _: &ArtifactViewEvent, cx| {
-            this.artifact_dismissed = true;
-            cx.notify();
-        })
+        cx.subscribe(
+            &self.artifact_view,
+            |this, _, event: &ArtifactViewEvent, cx| {
+                if matches!(event, ArtifactViewEvent::Closed) {
+                    this.artifact_dismissed = true;
+                }
+                cx.notify();
+            },
+        )
         .detach();
     }
 
@@ -1209,6 +1214,12 @@ impl ChatView {
         self.transcript_content_width =
             Self::compute_transcript_content_width(window, artifact_docked);
 
+        let running = self.is_thinking_indicator_visible();
+        let pending_approval = self.pending_approval.is_some();
+        self.artifact_view.update(cx, |view, cx| {
+            view.set_chrome(running, pending_approval, cx);
+        });
+
         // Sticky-scroll: re-assert scroll_to_bottom on every render so that
         // async layout changes (image loading, SVG math, code blocks) always
         // converge to the true bottom. Detect user scroll-away to disable.
@@ -1550,6 +1561,7 @@ impl ChatView {
 
         let entity = cx.entity();
         let plan = self.agent_task_snapshot.clone();
+        let open_artifact = self.artifact_view.read(cx).path().cloned();
         let live_elapsed = self.stream_started_at.map(|t| t.elapsed()).or_else(|| {
             self.is_thinking_indicator_visible()
                 .then(|| self.thinking_indicator.read(cx).elapsed())
@@ -1637,6 +1649,7 @@ impl ChatView {
                             plan.as_ref(),
                             activity_open,
                             Some(on_activity_toggle.clone()),
+                            open_artifact.as_deref(),
                             _window,
                             cx,
                         )
@@ -1904,6 +1917,7 @@ impl Render for ChatView {
         self.maybe_open_query_table(cx);
         self.maybe_open_chart_artifact(cx);
         let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
+        let full = self.artifact_view.read(cx).mode == ArtifactMode::Full;
         let artifact = self.artifact_view.clone();
         let split = self.artifact_split.clone();
 
@@ -2019,7 +2033,10 @@ impl Render for ChatView {
             .bg(cx.theme().background)
             .overflow_hidden();
 
-        if docked {
+        if full {
+            root.child(div().flex_1().size_full().min_w_0().child(artifact))
+                .into_any_element()
+        } else if docked {
             root.child(
                 div().flex_1().size_full().min_w_0().child(
                     h_resizable("chat-artifact-split")

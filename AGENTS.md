@@ -198,6 +198,10 @@ examples.
   `chatty-gpui/src/chatty/views/transcript/` render the transcript;
   persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
   chatty-core. Don't leak transcript block types into chatty-core.
+- **Stale docs** — If a change alters a fact a page claims, update that
+  page in the same PR. `update-agent-docs.yml` only safety-nets
+  `AGENTS.md` / `CLAUDE.md`. See
+  [`docs/stale-doc-policy.md`](docs/stale-doc-policy.md).
 
 ## Known gotchas
 

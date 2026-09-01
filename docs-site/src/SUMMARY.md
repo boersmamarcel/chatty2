@@ -50,6 +50,7 @@
 # Operations
 
 - [Release process](./dev/architecture/RELEASE_PROCESS.md)
+- [Stale-doc policy](./dev/architecture/stale-doc-policy.md)
 - [Monty sandbox](./dev/architecture/monty-sandbox.md)
 - [Debug UI](./dev/architecture/debug_ui.md)
 - [Refactor follow-ups](./dev/architecture/refactor-followups.md)
@@ -113,6 +114,9 @@
 
 # How-to guides
 
+- [Build a WASM plugin](./dev/guides/build-wasm-module.md)
+- [Tutorial: echo-agent](./dev/guides/tutorial-echo-agent.md)
+- [Tutorial: benford-agent](./dev/guides/tutorial-benford-agent.md)
 - [Add a new LLM provider](./dev/guides/add-provider.md)
 - [Add a new LLM tool](./dev/guides/add-tool.md)
 - [Add a slash command](./dev/guides/add-slash-command.md)
