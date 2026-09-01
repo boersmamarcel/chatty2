@@ -41,6 +41,7 @@ flowchart TD
 | Look up a tool name | [tools-catalog.md](./reference/tools-catalog.md) |
 | Run tests like CI | `make ci` · [agents.md](./agents.md) |
 | Research / reserved code | [RESERVED.md](https://github.com/boersmamarcel/chatty2/blob/main/RESERVED.md) |
+| Report a stale page | [stale-doc-policy.md](./architecture/stale-doc-policy.md) |
 
 ## Agent reading order
 
