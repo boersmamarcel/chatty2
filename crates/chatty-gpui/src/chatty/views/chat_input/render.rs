@@ -207,7 +207,8 @@ impl RenderOnce for ChatInput {
         let model_popover = Popover::new("model-menu")
             .trigger(model_button)
             .appearance(false)
-            .content(move |_, _window, cx| {
+            .content(move |_popover, _window, cx| {
+                let popover_entity = cx.entity();
                 let state = state_for_model.clone();
                 let models = state.read(cx).available_models.clone();
                 let selected_id = state.read(cx).selected_model_id.clone();
@@ -244,6 +245,7 @@ impl RenderOnce for ChatInput {
                                     let provider_name =
                                         model.provider_type.display_name().to_string();
                                     let state_for_click = state.clone();
+                                    let popover_entity = popover_entity.clone();
                                     let is_selected = selected_id.as_ref() == Some(&model.id);
 
                                     div()
@@ -285,13 +287,16 @@ impl RenderOnce for ChatInput {
                                         )
                                         .on_mouse_down(
                                             MouseButton::Left,
-                                            move |_event, _window, cx| {
+                                            move |_event, window, cx| {
                                                 state_for_click.update(cx, |s, cx| {
                                                     s.selected_model_id = Some(id_clone.clone());
                                                     cx.emit(ChatInputEvent::ModelChanged(
                                                         id_clone.clone(),
                                                     ));
                                                     cx.notify();
+                                                });
+                                                popover_entity.update(cx, |state, cx| {
+                                                    state.dismiss(window, cx);
                                                 });
                                             },
                                         )

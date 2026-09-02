@@ -31,7 +31,7 @@ use gpui_component::{
     ActiveTheme, IndexPath, Sizable, WindowExt as _,
     button::{Button, ButtonVariants},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     list::{List, ListDelegate, ListItem, ListState},
     scroll::ScrollableElement,
     select::{Select, SelectEvent, SelectState},
