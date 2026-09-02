@@ -1,8 +1,13 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
-use chatty_core::services::browser::{BrowserManager, ScreencastFrame, ScreencastUpdate};
+use chatty_core::services::browser::{
+    BrowserManager, BrowserSession, ControlHolder, InputModifiers, KeyInput, MouseAction,
+    MouseButtonKind, MouseInput, ScreencastFrame, ScreencastUpdate,
+};
 use chatty_core::services::pdf_thumbnail::{
     PREVIEW_WIDTH, PdfThumbnailError, pdf_page_count, render_pdf_page,
 };
@@ -11,6 +16,7 @@ use chatty_core::tools::data_query_tool::{
     FILE_PREVIEW_MAX_ROWS, TablePreview, load_file_table_preview,
 };
 use std::ops::Range;
+use tokio::sync::mpsc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -127,6 +133,27 @@ pub struct ArtifactView {
     /// Set while a browser artifact is open — also the idle-teardown handle:
     /// `stop_browser_screencast` takes it and stops the session (AGE-155).
     browser_manager: Option<Arc<BrowserManager>>,
+    /// The live session backing `browser_manager`, cached so input
+    /// forwarding and control-lock toggles (AGE-156) don't have to resolve
+    /// it through the manager on every mouse move.
+    browser_session: Option<Arc<BrowserSession>>,
+    /// Mirrors the session's control holder for the UI badge/button. The
+    /// session is the source of truth; this is a display cache updated on
+    /// open and on every take/release this view initiates.
+    browser_control: ControlHolder,
+    /// Forwarded input drains through a single ordered consumer per stream
+    /// (AGE-156) rather than one spawned task per event — mouse moves are
+    /// too frequent for that, and CDP calls from independent tasks could
+    /// arrive out of order.
+    browser_mouse_tx: Option<mpsc::UnboundedSender<MouseInput>>,
+    browser_key_tx: Option<mpsc::UnboundedSender<KeyInput>>,
+    /// The rendered browser frame's window-space bounds, captured via a
+    /// `canvas()` prepaint each frame so mouse handlers can map a
+    /// window-relative position back into CDP viewport space.
+    browser_frame_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    /// Routes forwarded key events: the frame must hold focus for
+    /// `on_key_down` to fire at all.
+    browser_focus: FocusHandle,
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
@@ -179,6 +206,12 @@ impl ArtifactView {
             chart: None,
             browser: BrowserPreview::Idle,
             browser_manager: None,
+            browser_session: None,
+            browser_control: ControlHolder::Agent,
+            browser_mouse_tx: None,
+            browser_key_tx: None,
+            browser_frame_bounds: Rc::new(RefCell::new(Bounds::default())),
+            browser_focus: cx.focus_handle(),
             workspace_root: None,
             load_gen: 0,
             editor,
@@ -323,6 +356,45 @@ impl ArtifactView {
                     return;
                 }
             };
+
+            // AGE-156: cache the session and stand up ordered input-forwarding
+            // drains before the first frame arrives, so the control button
+            // works from the "Starting…" placeholder onward. One consumer
+            // task per stream, not one spawned task per event — mouse moves
+            // are too frequent for that, and independent tasks racing the
+            // CDP connection could deliver events out of order.
+            let (mouse_tx, mut mouse_rx) = mpsc::unbounded_channel::<MouseInput>();
+            let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyInput>();
+            {
+                let session = session.clone();
+                cx.background_spawn(async move {
+                    while let Some(input) = mouse_rx.recv().await {
+                        let _ = session.dispatch_mouse(input).await;
+                    }
+                })
+                .detach();
+            }
+            {
+                let session = session.clone();
+                cx.background_spawn(async move {
+                    while let Some(input) = key_rx.recv().await {
+                        let _ = session.dispatch_key(input).await;
+                    }
+                })
+                .detach();
+            }
+            let control_holder = session.control_holder();
+            this.update(cx, |this, cx| {
+                if this.load_gen == load_id {
+                    this.browser_session = Some(session.clone());
+                    this.browser_control = control_holder;
+                    this.browser_mouse_tx = Some(mouse_tx);
+                    this.browser_key_tx = Some(key_tx);
+                    cx.notify();
+                }
+            })
+            .ok();
+
             let mut frames = match session
                 .start_screencast(BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT)
                 .await
@@ -393,11 +465,54 @@ impl ArtifactView {
         // channel never fires `changed()` again (a static page sends no
         // further frames, so the loop would otherwise block forever).
         self.load_gen = self.load_gen.wrapping_add(1);
+        self.browser_session = None;
+        self.browser_control = ControlHolder::Agent;
+        // Dropping the senders ends the drain loops (AGE-156) — their
+        // `.recv()` returns `None` once every sender is gone.
+        self.browser_mouse_tx = None;
+        self.browser_key_tx = None;
         if let Some(manager) = self.browser_manager.take() {
             cx.background_spawn(async move {
                 manager.stop_screencast().await;
             })
             .detach();
+        }
+    }
+
+    /// The user takes control (AGE-156) — never requested, granted
+    /// immediately. A no-op if the browser artifact isn't open.
+    pub fn take_browser_control(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.as_ref() else {
+            return;
+        };
+        session.take_control();
+        self.browser_control = ControlHolder::User;
+        cx.notify();
+    }
+
+    /// Hand control back to the agent (AGE-156).
+    pub fn release_browser_control(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.as_ref() else {
+            return;
+        };
+        session.release_control();
+        self.browser_control = ControlHolder::Agent;
+        cx.notify();
+    }
+
+    /// Queue a mouse event for the input-forwarding drain (AGE-156). A
+    /// cheap, synchronous, non-blocking send — the actual CDP call happens
+    /// on the background task started in `open_browser`.
+    fn send_browser_mouse(&self, input: MouseInput) {
+        if let Some(tx) = &self.browser_mouse_tx {
+            let _ = tx.send(input);
+        }
+    }
+
+    /// Queue a keyboard event for the input-forwarding drain (AGE-156).
+    fn send_browser_key(&self, input: KeyInput) {
+        if let Some(tx) = &self.browser_key_tx {
+            let _ = tx.send(input);
         }
     }
 
@@ -886,8 +1001,124 @@ fn render_image_from_rgba(frame: &ScreencastFrame) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
-fn browser_rendered_body(browser: &BrowserPreview, cx: &App) -> AnyElement {
-    match browser {
+/// Map a window-relative position to CDP viewport space (AGE-156), honoring
+/// the same "contain" letterbox math the rendered `img()` uses — the frame
+/// is displayed at `w_full()` with `object_fit(Contain)`, so the actual
+/// image occupies a centered sub-rect of the container whenever the
+/// container's aspect ratio doesn't match the capture's. `None` for a
+/// position that lands in the letterbox padding rather than the image.
+///
+/// Both `gpui::Pixels` and CDP's `x`/`y` are already device-independent
+/// ("CSS") pixels — the screencast is started with `device_scale_factor:
+/// 1.0` — so nothing here needs to know the display's DPI scale factor.
+fn browser_viewport_position(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+) -> Option<(f64, f64)> {
+    let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+    let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    if bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    let (vw, vh) = (
+        BROWSER_VIEWPORT_WIDTH as f32,
+        BROWSER_VIEWPORT_HEIGHT as f32,
+    );
+    let scale = (bw / vw).min(bh / vh);
+    if scale <= 0.0 {
+        return None;
+    }
+    let (dw, dh) = (vw * scale, vh * scale);
+    let (ox, oy) = ((bw - dw) / 2.0, (bh - dh) / 2.0);
+    let local_x = f32::from(position.x) - bx - ox;
+    let local_y = f32::from(position.y) - by - oy;
+    if local_x < 0.0 || local_y < 0.0 || local_x > dw || local_y > dh {
+        return None;
+    }
+    Some(((local_x / scale) as f64, (local_y / scale) as f64))
+}
+
+fn browser_modifiers(modifiers: Modifiers) -> InputModifiers {
+    InputModifiers {
+        alt: modifiers.alt,
+        ctrl: modifiers.control,
+        meta: modifiers.platform,
+        shift: modifiers.shift,
+    }
+}
+
+fn browser_mouse_button(button: MouseButton) -> Option<MouseButtonKind> {
+    match button {
+        MouseButton::Left => Some(MouseButtonKind::Left),
+        MouseButton::Right => Some(MouseButtonKind::Right),
+        MouseButton::Middle => Some(MouseButtonKind::Middle),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+/// CDP wants `deltaX`/`deltaY` in CSS pixels. A precise trackpad delta
+/// converts directly; a coarse line delta gets a standard 16px/line
+/// estimate — an approximation, not a real line-height lookup, but one
+/// wheel ticks and trackpads both land close enough to feel right.
+fn browser_wheel_delta(delta: ScrollDelta) -> (f64, f64) {
+    match delta {
+        ScrollDelta::Pixels(point) => {
+            (f64::from(f32::from(point.x)), f64::from(f32::from(point.y)))
+        }
+        ScrollDelta::Lines(point) => (f64::from(point.x) * 16.0, f64::from(point.y) * 16.0),
+    }
+}
+
+fn browser_rendered_body(
+    browser: &BrowserPreview,
+    control: ControlHolder,
+    frame_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    focus: FocusHandle,
+    entity: Entity<ArtifactView>,
+    cx: &App,
+) -> AnyElement {
+    let control_bar = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(match control {
+                    ControlHolder::Agent => "Agent is driving",
+                    ControlHolder::User => "You're driving",
+                }),
+        )
+        .child(match control {
+            ControlHolder::Agent => Button::new("artifact-browser-take-control")
+                .ghost()
+                .small()
+                .label("Take control")
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.take_browser_control(cx));
+                    }
+                })
+                .into_any_element(),
+            ControlHolder::User => Button::new("artifact-browser-release-control")
+                .ghost()
+                .small()
+                .label("Release control")
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.release_browser_control(cx));
+                    }
+                })
+                .into_any_element(),
+        })
+        .into_any_element();
+
+    let frame = match browser {
         BrowserPreview::Idle | BrowserPreview::Starting => div()
             .flex()
             .flex_1()
@@ -906,20 +1137,171 @@ fn browser_rendered_body(browser: &BrowserPreview, cx: &App) -> AnyElement {
             .text_color(cx.theme().muted_foreground)
             .child(message.clone())
             .into_any_element(),
-        BrowserPreview::Frame(image) => div()
-            .id("artifact-browser-frame")
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_y_scroll()
-            .child(
-                img(image.clone())
-                    .w_full()
-                    .object_fit(ObjectFit::Contain)
-                    .rounded_md(),
-            )
-            .into_any_element(),
-    }
+        BrowserPreview::Frame(image) => {
+            let bounds_for_prepaint = frame_bounds.clone();
+            let mut container = div()
+                .id("artifact-browser-frame")
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_y_scroll()
+                .child(
+                    canvas(
+                        move |bounds, _window, _cx| {
+                            *bounds_for_prepaint.borrow_mut() = bounds;
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(
+                    img(image.clone())
+                        .w_full()
+                        .object_fit(ObjectFit::Contain)
+                        .rounded_md(),
+                );
+
+            // Input forwarding (AGE-156) only listens while the user holds
+            // control — with the agent driving, the frame behaves like a
+            // plain image and never steals the mouse or the keyboard.
+            if control == ControlHolder::User {
+                container = container
+                    .track_focus(&focus)
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        let bounds = frame_bounds.clone();
+                        let focus = focus.clone();
+                        move |event, window, cx| {
+                            window.focus(&focus);
+                            let Some((x, y)) =
+                                browser_viewport_position(*bounds.borrow(), event.position)
+                            else {
+                                return;
+                            };
+                            let Some(button) = browser_mouse_button(event.button) else {
+                                return;
+                            };
+                            let modifiers = browser_modifiers(event.modifiers);
+                            let click_count = event.click_count as i64;
+                            entity.update(cx, |this, _cx| {
+                                this.send_browser_mouse(MouseInput {
+                                    action: MouseAction::Down {
+                                        button,
+                                        click_count,
+                                    },
+                                    x,
+                                    y,
+                                    modifiers,
+                                });
+                            });
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let entity = entity.clone();
+                        let bounds = frame_bounds.clone();
+                        move |event, _window, cx| {
+                            let Some((x, y)) =
+                                browser_viewport_position(*bounds.borrow(), event.position)
+                            else {
+                                return;
+                            };
+                            let Some(button) = browser_mouse_button(event.button) else {
+                                return;
+                            };
+                            let modifiers = browser_modifiers(event.modifiers);
+                            let click_count = event.click_count as i64;
+                            entity.update(cx, |this, _cx| {
+                                this.send_browser_mouse(MouseInput {
+                                    action: MouseAction::Up {
+                                        button,
+                                        click_count,
+                                    },
+                                    x,
+                                    y,
+                                    modifiers,
+                                });
+                            });
+                        }
+                    })
+                    .on_mouse_move({
+                        let entity = entity.clone();
+                        let bounds = frame_bounds.clone();
+                        move |event, _window, cx| {
+                            let Some((x, y)) =
+                                browser_viewport_position(*bounds.borrow(), event.position)
+                            else {
+                                return;
+                            };
+                            let modifiers = browser_modifiers(event.modifiers);
+                            entity.update(cx, |this, _cx| {
+                                this.send_browser_mouse(MouseInput {
+                                    action: MouseAction::Move,
+                                    x,
+                                    y,
+                                    modifiers,
+                                });
+                            });
+                        }
+                    })
+                    .on_scroll_wheel({
+                        let entity = entity.clone();
+                        let bounds = frame_bounds.clone();
+                        move |event, _window, cx| {
+                            let Some((x, y)) =
+                                browser_viewport_position(*bounds.borrow(), event.position)
+                            else {
+                                return;
+                            };
+                            let modifiers = browser_modifiers(event.modifiers);
+                            let (delta_x, delta_y) = browser_wheel_delta(event.delta);
+                            entity.update(cx, |this, _cx| {
+                                this.send_browser_mouse(MouseInput {
+                                    action: MouseAction::Wheel { delta_x, delta_y },
+                                    x,
+                                    y,
+                                    modifiers,
+                                });
+                            });
+                        }
+                    })
+                    .on_key_down({
+                        let entity = entity.clone();
+                        move |event, _window, cx| {
+                            let modifiers = browser_modifiers(event.keystroke.modifiers);
+                            let input = if !modifiers.ctrl
+                                && !modifiers.meta
+                                && !modifiers.alt
+                                && let Some(text) = event.keystroke.key_char.clone()
+                            {
+                                KeyInput::Text(text)
+                            } else {
+                                KeyInput::Special {
+                                    name: event.keystroke.key.clone(),
+                                    modifiers,
+                                }
+                            };
+                            entity.update(cx, |this, _cx| {
+                                this.send_browser_key(input);
+                            });
+                        }
+                    });
+            }
+
+            container.into_any_element()
+        }
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_1()
+        .child(control_bar)
+        .child(frame)
+        .into_any_element()
 }
 
 fn tabular_rendered_body(tabular: &TabularPreview, cx: &App) -> AnyElement {
@@ -1145,6 +1527,9 @@ impl Render for ArtifactView {
         let tabular = self.tabular.clone();
         let chart = self.chart.clone();
         let browser = self.browser.clone();
+        let browser_control = self.browser_control;
+        let browser_frame_bounds = self.browser_frame_bounds.clone();
+        let browser_focus = self.browser_focus.clone();
         let has_diff = !old.is_empty() && old != source;
         let visible_tab = if !has_diff && tab > 1 {
             0
@@ -1198,7 +1583,14 @@ impl Render for ArtifactView {
                 .min_h_0()
                 .w_full()
                 .p_2()
-                .child(browser_rendered_body(&browser, cx))
+                .child(browser_rendered_body(
+                    &browser,
+                    browser_control,
+                    browser_frame_bounds,
+                    browser_focus,
+                    entity.clone(),
+                    cx,
+                ))
                 .into_any_element()
         } else if is_pdf {
             div()

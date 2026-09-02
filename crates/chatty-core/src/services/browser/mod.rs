@@ -15,9 +15,13 @@
 //! - [`screencast`] — live frames for the artifact viewport (AGE-155)
 //! - [`registry`] — per-conversation lookup so the UI can find a running
 //!   session's manager (AGE-155)
+//! - [`control`] — the control lock: who is driving (AGE-156)
+//! - [`input`] — forwarded mouse/keyboard input over CDP (AGE-156)
 
+pub mod control;
 pub mod error;
 pub mod events;
+pub mod input;
 pub mod profile;
 pub mod provisioning;
 pub mod registry;
@@ -31,8 +35,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+pub use control::ControlHolder;
 pub use error::BrowserError;
 pub use events::{ConsoleEntry, EventBuffers, NetworkEntry};
+pub use input::{InputModifiers, KeyInput, MouseAction, MouseButtonKind, MouseInput};
 pub use profile::{BrowserProfile, NavigationPolicy};
 pub use screencast::{ScreencastFrame, ScreencastUpdate};
 pub use session::BrowserSession;

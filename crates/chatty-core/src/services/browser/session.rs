@@ -22,8 +22,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use super::control::{ControlHolder, ControlLock};
 use super::error::BrowserError;
 use super::events::EventBuffers;
+use super::input::{self, KeyInput, MouseInput};
 use super::profile::{BrowserProfile, NavigationPolicy};
 use super::screencast::{self, ScreencastState, ScreencastUpdate};
 
@@ -64,6 +66,9 @@ pub struct BrowserSession {
     /// (AGE-155) is watching this session. `tokio::sync::Mutex` because
     /// starting/retargeting holds the guard across CDP round trips.
     screencast: tokio::sync::Mutex<Option<ScreencastState>>,
+    /// Who is driving (AGE-156). Agent by default; every fresh session
+    /// starts here regardless of what a previous, now-dead session had.
+    control: ControlLock,
     /// Temp user-data dir for an ephemeral profile; removed on drop.
     _user_data: Option<tempfile::TempDir>,
 }
@@ -152,6 +157,7 @@ impl BrowserSession {
             handler: Mutex::new(Some(handler)),
             listeners: Mutex::new(listeners),
             screencast: tokio::sync::Mutex::new(None),
+            control: ControlLock::new(),
             _user_data: user_data,
         }))
     }
@@ -205,6 +211,7 @@ impl BrowserSession {
     /// redirect hop the browser followed to get there.
     pub async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
         self.ensure_alive()?;
+        self.control.ensure_agent()?;
         self.policy.check(url)?;
 
         // Drop the previous page's entries *before* navigating, not after:
@@ -275,6 +282,55 @@ impl BrowserSession {
         if let Some(state) = state {
             screencast::stop(&self.page, state).await;
         }
+    }
+
+    /// Who is driving right now (AGE-156).
+    pub fn control_holder(&self) -> ControlHolder {
+        self.control.holder()
+    }
+
+    /// Err if the user currently holds control. `navigate` already checks
+    /// this; other mutating tools (`browser_resize`) call it directly.
+    pub fn ensure_agent_control(&self) -> Result<(), BrowserError> {
+        self.control.ensure_agent()
+    }
+
+    /// The user takes control — never requested, always granted
+    /// immediately. Returns the holder *before* the transition.
+    pub fn take_control(&self) -> ControlHolder {
+        self.control.take()
+    }
+
+    /// Hand control back to the agent. The page moved underneath whatever
+    /// it last looked at, so every outstanding element ref is invalidated
+    /// the same way a navigation invalidates them.
+    pub fn release_control(&self) -> ControlHolder {
+        let previous = self.control.release();
+        if previous == ControlHolder::User {
+            self.invalidate_snapshot();
+        }
+        previous
+    }
+
+    /// Forward a mouse event. A no-op — not an error — when the agent
+    /// holds control: a stray event racing a handback must not steer a
+    /// session nobody handed to the user.
+    pub async fn dispatch_mouse(&self, event: MouseInput) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        if self.control_holder() != ControlHolder::User {
+            return Ok(());
+        }
+        input::dispatch_mouse(&self.page, event).await
+    }
+
+    /// Forward a keyboard event. Same no-op-when-agent-owns-it rule as
+    /// [`Self::dispatch_mouse`].
+    pub async fn dispatch_key(&self, event: KeyInput) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        if self.control_holder() != ControlHolder::User {
+            return Ok(());
+        }
+        input::dispatch_key(&self.page, event).await
     }
 
     /// Close the browser and stop every task this session owns.

@@ -517,6 +517,7 @@ impl Tool for BrowserResizeTool {
         }
 
         let session = self.manager.session().await?;
+        session.ensure_agent_control()?;
         let page = session.page()?;
 
         with_deadline(DEFAULT_TIMEOUT_SECS, "resizing the viewport", async {
