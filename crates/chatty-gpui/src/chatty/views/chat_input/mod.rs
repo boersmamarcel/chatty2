@@ -177,19 +177,9 @@ impl ChatInputState {
         default_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.selected_model_id =
+            resolve_selected_model_id(self.selected_model_id.as_deref(), &models, default_id);
         self.available_models = models;
-
-        let selection_missing = self
-            .selected_model_id
-            .as_ref()
-            .is_none_or(|id| !self.available_models.iter().any(|m| &m.id == id));
-
-        if selection_missing {
-            self.selected_model_id = default_id
-                .filter(|id| self.available_models.iter().any(|m| &m.id == id))
-                .or_else(|| self.available_models.first().map(|m| m.id.clone()));
-        }
-
         cx.notify();
     }
 
@@ -413,6 +403,29 @@ impl ChatInputState {
             .and_then(|id| self.available_models.iter().find(|model| model.id == *id))
     }
 }
+
+/// Pick a model id after the available list changes.
+///
+/// Empty list clears the selection. A still-present selection is kept.
+/// Otherwise fall back to `default_id` (if it is in the list) or the first model.
+pub(crate) fn resolve_selected_model_id(
+    current: Option<&str>,
+    models: &[ModelOption],
+    default_id: Option<String>,
+) -> Option<String> {
+    if models.is_empty() {
+        return None;
+    }
+    if let Some(id) = current
+        && models.iter().any(|model| model.id == id)
+    {
+        return Some(id.to_string());
+    }
+    default_id
+        .filter(|id| models.iter().any(|model| model.id == *id))
+        .or_else(|| models.first().map(|model| model.id.clone()))
+}
+
 /// Chat input component for rendering
 #[derive(IntoElement)]
 pub struct ChatInput {
