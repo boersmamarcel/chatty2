@@ -131,6 +131,8 @@ impl ChattyApp {
                             app.update(cx, |app, cx| {
                                 app.is_ready = true;
                                 info!("App is now ready (initial conversation created)");
+                                crate::boot_timing::checkpoint("to_is_ready");
+                                crate::boot_timing::log_summary();
                                 cx.notify();
                             })
                             .map_err(|e| debug!(error = ?e, "Failed to mark app ready after initial conversation"))
@@ -142,6 +144,8 @@ impl ChattyApp {
                             let _: Result<(), _> = app.update(cx, |app, cx| {
                                 app.is_ready = true;
                                 info!("App is now ready (metadata loaded, conversations loaded on demand)");
+                                crate::boot_timing::checkpoint("to_is_ready");
+                                crate::boot_timing::log_summary();
                                 cx.notify();
                             });
                         }
@@ -159,6 +163,8 @@ impl ChattyApp {
                         app.update(cx, |app, cx| {
                             app.is_ready = true;
                             info!("App is now ready (started after metadata load error)");
+                            crate::boot_timing::checkpoint("to_is_ready");
+                            crate::boot_timing::log_summary();
                             cx.notify();
                         })
                         .map_err(|warn_e| debug!(error = ?warn_e, "Failed to mark app ready after load error"))

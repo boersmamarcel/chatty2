@@ -60,6 +60,7 @@ jobs:
               - 'wit/**'
               - 'scripts/check-reserved.sh'
               - 'scripts/check-rig-pins.sh'
+              - 'scripts/check-no-core-reexports.sh'
               - 'scripts/check-release-authz.sh'
               - 'scripts/setup-linux.sh'
               - '.github/workflows/ci.yml'
@@ -150,3 +151,7 @@ jobs:
       - name: Check rig exact-minor pins (AGE-26)
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-rig-pins.sh
+
+      - name: Check no chatty_core re-exports (AGE-177)
+        if: needs.changes.outputs.rust == 'true'
+        run: bash scripts/check-no-core-reexports.sh

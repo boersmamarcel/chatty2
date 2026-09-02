@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn};
 
 mod assets;
 mod auto_updater;
+pub mod boot_timing;
 mod chatty;
 pub mod cli_installer;
 pub mod global_entity;
@@ -92,6 +93,8 @@ use actions::set_app_menus;
 use themes::{apply_theme_from_settings, init_themes};
 
 fn main() {
+    boot_timing::mark_process_start();
+
     // Initialize error collector layer
     let (error_layer, error_receiver) = chatty::services::ErrorCollectorLayer::new();
 
@@ -136,6 +139,8 @@ fn main() {
     let app = Application::new().with_assets(ChattyAssets);
 
     app.run(move |cx| {
+        boot_timing::checkpoint("main_to_run");
+
         cx.activate(true);
 
         // Initialize the theme
@@ -1219,6 +1224,8 @@ fn main() {
 
         // Get platform-specific window options for main window
         let options = settings::utils::window_utils::get_main_window_options();
+
+        boot_timing::checkpoint("run_to_open_window");
 
         let repo = conversation_repo.clone();
         cx.open_window(options, |window, cx| {

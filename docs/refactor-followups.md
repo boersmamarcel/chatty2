@@ -186,21 +186,18 @@ mechanically would just shuffle the coupling without removing it. See
 `docs/entity-communication.md` for the event-based pattern the
 migration should follow.
 
-### 2d. Re-export removal follow-ups
+### 2d. Re-export removal follow-ups — done (AGE-177)
 
 Tier 4 removed the `pub use chatty_core::{auth, exporters, factories,
 repositories, tools}` re-exports from `crates/chatty-gpui/src/chatty/mod.rs`,
-so call sites now import from `chatty_core::…` directly. Two
-follow-ups remain:
+so call sites now import from `chatty_core::…` directly. Both follow-ups are
+resolved:
 
-1. **Lint rule.** Add a clippy or
-   `[lints.rust] unused_imports = "deny"`-style guard to prevent
-   re-introduction of the re-exports. The natural place is
-   `crates/chatty-gpui/src/chatty/mod.rs` itself, where a comment
-   already calls out the convention.
-2. **chatty-tui consistency check.** Audit `chatty-tui` for the same
-   re-export anti-pattern; the audit only confirmed `chatty-gpui` was
-   the source of the wildcard re-exports.
+1. **Lint rule.** `scripts/check-no-core-reexports.sh`, wired into CI's
+   `test` job, fails if either `chatty-gpui` or `chatty-tui` re-introduces
+   a `pub use chatty_core::{...}` re-export of those modules.
+2. **chatty-tui consistency check.** Confirmed clean — no re-exports of
+   `chatty_core`'s UI-agnostic modules in `chatty-tui/src`.
 
 ---
 

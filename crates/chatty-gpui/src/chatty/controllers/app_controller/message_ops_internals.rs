@@ -981,7 +981,7 @@ fn already_asked_to_retry(conv_id: &str, cx: &mut AsyncApp) -> bool {
             .rev()
             .find_map(|entry| match &entry.message {
                 rig_core::message::Message::User { content } => {
-                    Some(chatty_core::services::message_orchestrator::extract_user_text(content))
+                    Some(chatty_core::services::extract_user_text(content))
                 }
                 _ => None,
             })

@@ -234,6 +234,7 @@ impl ChatView {
                 input.focus(window, cx);
             });
         });
+        crate::boot_timing::checkpoint("to_composer_focusable");
 
         // Register a keystroke interceptor to handle ↑/↓ navigation in the
         // slash-command picker and the @ mention picker.  This fires *before*

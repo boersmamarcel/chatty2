@@ -5,6 +5,7 @@ use rig_core::message::UserContent;
 use tracing::{debug, info};
 
 use crate::factories::AgentClient;
+use crate::services::extract_user_text;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -189,18 +190,6 @@ fn build_transcript(messages: &[Message]) -> String {
     }
 
     parts.join("\n\n")
-}
-
-/// Extract plain text from `UserContent`, joining multiple text parts with a space.
-fn extract_user_text(content: &[UserContent]) -> String {
-    content
-        .iter()
-        .filter_map(|c| match c {
-            UserContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Extract plain text from `AssistantContent`, joining multiple text parts.

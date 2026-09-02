@@ -20,8 +20,9 @@ Hand-written pages (edit in place): `src/index.md`, `src/user/*`, `src/dev/guide
 Optional YAML frontmatter (`audience`, `source_files`, `related`) is documented in `src/dev/guides/doc-frontmatter.md` and linted by `make docs-check-frontmatter`.
 
 `make docs-sync` also copies docs-sized GIFs from `assets/animations/` into
-`src/assets/animations/` (see `docs/user/README-SPLIT-TODO.md`). Do not commit
-those copies; they are build artifacts like other synced pages.
+`src/assets/animations/`. Files larger than ~3 MB are linked instead of
+copied (GitHub Pages and browser cost). Do not commit those copies; they are
+build artifacts like other synced pages.
 
 ## Commands
 
