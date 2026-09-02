@@ -580,6 +580,10 @@ impl ChatEngine {
             return;
         }
 
+        // Injected protocol follow-ups re-enter here; only a real human turn
+        // resets the todo protocol state (AGE-150).
+        let reset_agent_task = !chatty_core::services::is_protocol_follow_up_text(&message);
+
         // Reset scroll to bottom when sending
         self.pin_to_bottom();
         self.sub_agent_msg_idx = None;
@@ -652,6 +656,7 @@ impl ChatEngine {
                 resolution_rx,
                 max_agent_turns,
                 invoke_agent_progress_slot,
+                reset_agent_task,
             })
             .await;
 
