@@ -180,8 +180,10 @@ examples.
   See [`docs/entity-communication.md`](docs/entity-communication.md).
 - **Optimistic updates** — Update the in-memory global immediately, then
   persist asynchronously with logged errors.
-- **Weak entity refs in globals** — Always `WeakEntity<T>`, never strong
-  refs (avoid circular ownership).
+- **Entity refs in globals** — Default to `GlobalWeakEntity<T>` (avoids
+  circular ownership); use `GlobalStrongEntity<T>` only when the global
+  must keep the entity alive itself (e.g. `StreamManager`,
+  `ModelsNotifier`).
 - **Stream lifecycle** — All LLM streams go through `StreamManager` with
   cancellation tokens; the stream loop never updates UI directly, it
   emits events. See [`docs/stream-manager.md`](docs/stream-manager.md).
