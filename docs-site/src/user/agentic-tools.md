@@ -75,6 +75,9 @@ Git (`git_status`, `git_diff`, `git_commit`, …) and code search (`search_code`
 | `create_chart` | Bar, line, pie, donut, area, candlestick | — |
 | `search_web` | Tavily / Brave / DuckDuckGo lite fallback | — |
 | `fetch` | Fetch a URL as readable text | — |
+| `browser_navigate` / `browser_snapshot` / `browser_screenshot` | Built-in browser: open a local page, read its structure, capture it | — |
+| `browser_console` / `browser_network` | Errors and failed requests from the page | — |
+| `browser_resize` | Check responsive behaviour at a given viewport | — |
 | `browser_use` | [browser-use](https://browser-use.com) cloud browser agent | — |
 | `daytona_run` | Isolated [Daytona](https://app.daytona.io) cloud sandbox | ✓ |
 | `remember` / `search_memory` | Persistent memory | — |
@@ -89,6 +92,34 @@ Git (`git_status`, `git_diff`, `git_commit`, …) and code search (`search_code`
 Access** in Settings → Search. `browser_use` and `daytona_run` also need API
 keys in that page's External Services section. Set the key to activate; use
 the toggle to disable without deleting the key.
+
+### The built-in browser
+
+The `browser_*` tools drive a real Chrome on your machine, so the agent can look
+at what it just built instead of guessing: it renders the page, screenshots it,
+spots the problem, fixes it, and re-checks.
+
+One limit worth knowing: the screenshot reaches the model on its **next** turn,
+not inside the tool result. None of the providers Chatty supports (OpenRouter,
+Ollama, Azure OpenAI) accept images in tool results, so the image is attached the
+same way a chart or rendered PDF page is. In practice the agent captures the
+screenshot, finishes its turn, and reviews the image on the turn after. Say
+"keep going" if it stops after capturing.
+
+They are deliberately limited to **`localhost` and `file://` URLs inside your
+workspace** — this is for reviewing your own work, not for browsing the web. Use
+`search_web` or `fetch` for anything on the internet. Because no site you are
+signed in to is reachable, none of these tools asks for approval.
+
+Turn them on with **Enable Browser Tools** in Settings → Code Execution. They
+need a workspace directory, which is where screenshots and console logs are
+written (`.chatty/browser/`).
+
+Chrome is not bundled with Chatty. If you already have Chrome, Chromium, or Edge
+installed, that is used. Otherwise the first browser tool call downloads a pinned
+[Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing) build
+— roughly 190MB, once — and verifies it before use. Expect the first call to take
+a minute; later ones start immediately.
 
 ## Extensions & MCP
 

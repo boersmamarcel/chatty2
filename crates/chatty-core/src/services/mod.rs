@@ -24,6 +24,8 @@
 pub mod a2a_client;
 pub mod agent_loop_guard;
 pub mod agent_task_controller;
+#[cfg(feature = "browser")]
+pub mod browser;
 pub mod chart_svg_renderer;
 pub mod context_shaper;
 pub mod embedding_service;

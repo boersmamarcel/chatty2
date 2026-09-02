@@ -30,6 +30,7 @@ pub struct ToolAvailability {
     pub memory: bool,
     pub search_web: bool,
     pub sub_agent: bool,
+    pub browser: bool,
     pub browser_use: bool,
     pub daytona: bool,
     pub publish_module: bool,
@@ -165,6 +166,20 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.sub_agent {
         names.insert(String::from("sub_agent"));
+    }
+    if tools.browser {
+        names.extend(
+            [
+                "browser_navigate",
+                "browser_snapshot",
+                "browser_screenshot",
+                "browser_console",
+                "browser_network",
+                "browser_resize",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
     }
     if tools.browser_use {
         names.insert(String::from("browser_use"));
@@ -402,6 +417,26 @@ mod tests {
     }
 
     #[test]
+    fn includes_browser_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            browser: true,
+            ..Default::default()
+        });
+        for tool in [
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_screenshot",
+            "browser_console",
+            "browser_network",
+            "browser_resize",
+        ] {
+            assert!(names.contains(tool), "{tool} missing for browser");
+        }
+        // The cloud tool is a separate flag and must not ride along.
+        assert!(!names.contains("browser_use"));
+    }
+
+    #[test]
     fn all_flags_enabled_produces_superset() {
         let all = ToolAvailability {
             fs_read: true,
@@ -428,6 +463,7 @@ mod tests {
             memory: true,
             search_web: true,
             sub_agent: true,
+            browser: true,
             browser_use: true,
             daytona: true,
             publish_module: true,
@@ -460,6 +496,8 @@ mod tests {
             "search_web",
             "remember",
             "sub_agent",
+            "browser_navigate",
+            "browser_screenshot",
             "browser_use",
             "daytona_run",
             "execute_code",

@@ -201,6 +201,24 @@ pub fn set_docker_host(host: Option<String>, cx: &mut App) {
     .detach();
 }
 
+/// Toggle the built-in browser tools and persist to disk.
+pub fn toggle_browser(cx: &mut App) {
+    let new_enabled = !cx.global::<ExecutionSettingsModel>().browser_enabled;
+    cx.global_mut::<ExecutionSettingsModel>().browser_enabled = new_enabled;
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle Docker code execution enabled/disabled and persist to disk.
 pub fn toggle_execute_code(cx: &mut App) {
     let new_enabled = !cx.global::<ExecutionSettingsModel>().execute_code_enabled;

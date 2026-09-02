@@ -121,12 +121,68 @@ pub fn model_supports_pdf(_model: &OpenRouterModel) -> bool {
     true
 }
 
+/// Tokens per pricing unit. OpenRouter quotes **per token** (Claude Sonnet 4.6
+/// comes back as `"0.000003"`), while every cost field in this app is per
+/// million. Forgetting the conversion made every reported cost 1e6 too small.
+const TOKENS_PER_MILLION: f64 = 1_000_000.0;
+
 /// Prompt cost per 1 000 000 tokens (f64).
 pub fn model_prompt_cost(model: &OpenRouterModel) -> Option<f64> {
-    model.pricing.prompt.parse().ok()
+    model
+        .pricing
+        .prompt
+        .parse::<f64>()
+        .ok()
+        .map(|per_token| per_token * TOKENS_PER_MILLION)
 }
 
 /// Completion cost per 1 000 000 tokens (f64).
 pub fn model_completion_cost(model: &OpenRouterModel) -> Option<f64> {
-    model.pricing.completion.parse().ok()
+    model
+        .pricing
+        .completion
+        .parse::<f64>()
+        .ok()
+        .map(|per_token| per_token * TOKENS_PER_MILLION)
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+
+    fn model_with_pricing(prompt: &str, completion: &str) -> OpenRouterModel {
+        let json = serde_json::json!({
+            "id": "test/model",
+            "name": "Test",
+            "context_length": 1000,
+            "architecture": { "modality": "text", "input_modalities": ["text"] },
+            "pricing": { "prompt": prompt, "completion": completion },
+            "top_provider": {},
+            "supported_parameters": [],
+        });
+        serde_json::from_value(json).expect("fixture parses")
+    }
+
+    /// OpenRouter quotes per token; the app stores per million. Sonnet 4.6 is
+    /// $3.00 / $15.00 per Mtok, which arrives as 0.000003 / 0.000015.
+    #[test]
+    fn converts_per_token_pricing_to_per_million() {
+        let model = model_with_pricing("0.000003", "0.000015");
+        assert_eq!(model_prompt_cost(&model), Some(3.0));
+        assert_eq!(model_completion_cost(&model), Some(15.0));
+    }
+
+    #[test]
+    fn free_models_stay_free() {
+        let model = model_with_pricing("0", "0");
+        assert_eq!(model_prompt_cost(&model), Some(0.0));
+        assert_eq!(model_completion_cost(&model), Some(0.0));
+    }
+
+    #[test]
+    fn unparseable_pricing_is_none_not_zero() {
+        let model = model_with_pricing("", "n/a");
+        assert_eq!(model_prompt_cost(&model), None);
+        assert_eq!(model_completion_cost(&model), None);
+    }
 }

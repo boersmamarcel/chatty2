@@ -70,6 +70,10 @@ pptx_writer = { workspace = true, optional = true }
 # DuckDB (optional — enable with "duckdb" feature)
 duckdb = { workspace = true, optional = true }
 
+# Browser control (optional — enable with "browser" feature)
+chromiumoxide = { workspace = true, optional = true }
+which = { workspace = true, optional = true }
+
 # Math rendering (optional — enable with "math-render" feature)
 typst = { workspace = true, optional = true }
 typst-svg = { workspace = true, optional = true }
@@ -125,5 +129,8 @@ pptx = ["dep:zip", "dep:roxmltree", "dep:pptx_writer"]
 math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:typst-layout", "dep:mitex", "dep:typst-assets", "dep:comemo"]
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]
+# Built-in browser control (AGE-142). Pulls chromiumoxide for CDP, zip for
+# unpacking the provisioned Chrome for Testing build.
+browser = ["dep:chromiumoxide", "dep:which", "dep:zip"]
 # Convenience: enable all optional tool dependencies
-all-tools = ["excel", "docx", "pdf", "pptx", "math-render", "mermaid", "duckdb"]
+all-tools = ["excel", "docx", "pdf", "pptx", "math-render", "mermaid", "duckdb", "browser"]

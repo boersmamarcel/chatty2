@@ -49,12 +49,18 @@ pub fn adapt_message_with_trace(
             if let Some(trace) = trace {
                 push_trace_blocks(&mut blocks, namespace, trace);
                 consolidate_receipt_artifacts(&mut blocks, namespace);
+                // An image already rendered inline under the bubble does not
+                // also need a receipt card. `add_attachment` on a file a tool
+                // already queued (a browser screenshot, say) would otherwise
+                // show the same picture twice.
+                drop_artifact_cards_shown_inline(&mut blocks, &msg.attachments);
             }
             if !msg.content.is_empty() {
                 blocks.push(Block::Text {
                     id: BlockId::from_parts(namespace, "text"),
                     content: msg.content.clone(),
                     streaming: msg.is_streaming,
+                    attachments: msg.attachments.clone(),
                 });
             }
         }
@@ -306,19 +312,136 @@ pub fn transcript_chars_per_line(content_width_px: f32) -> f32 {
 /// turn paint on top of this one (e.g. user prompt + “Worked for…” + artifact).
 pub fn estimate_message_bubble_height(
     content: &str,
-    attachment_count: usize,
+    attachments: &[PathBuf],
     content_width_px: f32,
 ) -> f32 {
     const LINE_HEIGHT: f32 = 22.0;
     const BUBBLE_PADDING: f32 = 28.0;
-    const ATTACHMENT_ROW: f32 = 56.0;
+    /// A non-image attachment renders as a filename chip.
+    const FILE_ATTACHMENT_ROW: f32 = 56.0;
+    /// An image renders as a thumbnail capped at 300x300 by `render_message`,
+    /// plus its border and the row's bottom margin. Estimating a chip here is
+    /// what made screenshots paint over the following turn.
+    const IMAGE_ATTACHMENT_ROW: f32 = 312.0;
 
     let chars_per_line = transcript_chars_per_line(content_width_px);
     let wrapped_lines = (content.len().max(1) as f32 / chars_per_line).ceil();
     let explicit_lines = content.lines().count().max(1) as f32;
     let lines = wrapped_lines.max(explicit_lines);
 
-    BUBBLE_PADDING + lines * LINE_HEIGHT + attachment_count as f32 * ATTACHMENT_ROW
+    let attachment_height: f32 = attachments
+        .iter()
+        .map(|path| {
+            if super::artifact_kind::is_image_path(path) {
+                IMAGE_ATTACHMENT_ROW
+            } else {
+                FILE_ATTACHMENT_ROW
+            }
+        })
+        .sum();
+
+    BUBBLE_PADDING + lines * LINE_HEIGHT + attachment_height
+}
+
+#[cfg(test)]
+mod attachment_height_tests {
+    use super::*;
+
+    fn text_block(attachments: Vec<PathBuf>) -> Block {
+        Block::Text {
+            id: BlockId::from_parts(1, "text"),
+            content: "Here is the screenshot.".to_string(),
+            streaming: false,
+            attachments,
+        }
+    }
+
+    /// An image renders up to 300px tall inside the bubble. The virtual list
+    /// assigns each turn a fixed slot, so an under-estimate here paints the
+    /// image straight over the following turn.
+    #[test]
+    fn assistant_image_attachment_reserves_thumbnail_height() {
+        let bare = block_estimated_height(&text_block(vec![]), 0, 600.0);
+        let with_image =
+            block_estimated_height(&text_block(vec![PathBuf::from("shot.png")]), 0, 600.0);
+
+        assert!(
+            with_image - bare >= 300.0,
+            "an image attachment must reserve at least its 300px thumbnail              (bare={bare}, with_image={with_image})"
+        );
+    }
+
+    #[test]
+    fn non_image_attachment_reserves_only_a_chip() {
+        let bare = block_estimated_height(&text_block(vec![]), 0, 600.0);
+        let with_file =
+            block_estimated_height(&text_block(vec![PathBuf::from("report.pdf")]), 0, 600.0);
+        let delta = with_file - bare;
+        assert!(
+            (40.0..100.0).contains(&delta),
+            "a filename chip should not reserve thumbnail height, got {delta}"
+        );
+    }
+
+    #[test]
+    fn multiple_images_accumulate() {
+        let one = block_estimated_height(&text_block(vec![PathBuf::from("a.png")]), 0, 600.0);
+        let two = block_estimated_height(
+            &text_block(vec![PathBuf::from("a.png"), PathBuf::from("b.png")]),
+            0,
+            600.0,
+        );
+        assert!(two - one >= 300.0, "each image needs its own slot");
+    }
+}
+
+/// Remove artifact cards whose image is already shown inline on this message.
+fn drop_artifact_cards_shown_inline(blocks: &mut Vec<Block>, attachments: &[PathBuf]) {
+    if attachments.is_empty() {
+        return;
+    }
+    blocks.retain(|block| match block {
+        Block::Artifact { path, .. } => !attachments.contains(path),
+        _ => true,
+    });
+}
+
+#[cfg(test)]
+mod duplicate_render_tests {
+    use super::*;
+
+    fn artifact(path: &str) -> Block {
+        Block::Artifact {
+            id: BlockId::from_parts(1, path),
+            path: PathBuf::from(path),
+            old_content: None,
+        }
+    }
+
+    #[test]
+    fn drops_the_card_when_the_image_renders_inline() {
+        let shot = PathBuf::from("/ws/.chatty/browser/shot.png");
+        let mut blocks = vec![artifact("/ws/.chatty/browser/shot.png")];
+        drop_artifact_cards_shown_inline(&mut blocks, &[shot]);
+        assert!(
+            blocks.is_empty(),
+            "the inline image is the only render needed"
+        );
+    }
+
+    #[test]
+    fn keeps_cards_for_files_not_shown_inline() {
+        let mut blocks = vec![artifact("/ws/report.pdf"), artifact("/ws/other.png")];
+        drop_artifact_cards_shown_inline(&mut blocks, &[PathBuf::from("/ws/shot.png")]);
+        assert_eq!(blocks.len(), 2, "unrelated artifacts keep their cards");
+    }
+
+    #[test]
+    fn no_attachments_changes_nothing() {
+        let mut blocks = vec![artifact("/ws/a.png")];
+        drop_artifact_cards_shown_inline(&mut blocks, &[]);
+        assert_eq!(blocks.len(), 1);
+    }
 }
 
 pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px: f32) -> f32 {
@@ -327,8 +450,12 @@ pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px
             content,
             attachments,
             ..
-        } => estimate_message_bubble_height(content, attachments.len(), content_width_px),
-        Block::Text { content, .. } => estimate_message_bubble_height(content, 0, content_width_px),
+        } => estimate_message_bubble_height(content, attachments, content_width_px),
+        Block::Text {
+            content,
+            attachments,
+            ..
+        } => estimate_message_bubble_height(content, attachments, content_width_px),
         Block::Thinking { .. } => 56.0,
         Block::Activity { tools, .. } => {
             if RunTally::has_failure(tools) {
@@ -557,14 +684,18 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
             } => {
                 message_height = message_height.max(estimate_message_bubble_height(
                     content,
-                    attachments.len(),
+                    attachments,
                     content_width_px,
                 ));
             }
-            Block::Text { content, .. } => {
+            Block::Text {
+                content,
+                attachments,
+                ..
+            } => {
                 message_height = message_height.max(estimate_message_bubble_height(
                     content,
-                    0,
+                    attachments,
                     content_width_px,
                 ));
             }
@@ -683,8 +814,8 @@ mod tests {
     #[test]
     fn narrow_width_increases_wrapped_line_estimate() {
         let prompt = "Create a short 2-page PDF report at workspace_notes.pdf using Typst.";
-        let wide = estimate_message_bubble_height(prompt, 0, 520.0);
-        let narrow = estimate_message_bubble_height(prompt, 0, 220.0);
+        let wide = estimate_message_bubble_height(prompt, &[], 520.0);
+        let narrow = estimate_message_bubble_height(prompt, &[], 220.0);
         assert!(narrow > wide);
     }
 

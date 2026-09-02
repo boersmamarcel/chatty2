@@ -55,7 +55,7 @@ flowchart TB
     settings["settings/<br/>ProviderModel, ModelsModel,<br/>McpStore, JSON repos"]
     repositories["repositories/<br/>SQLite conversations"]
     factories["factories/<br/>AgentFactory per provider"]
-    services["services/<br/>LLM, shell, MCP, math,<br/>A2A client, sync"]
+    services["services/<br/>LLM, shell, MCP, math,<br/>browser (CDP), A2A client, sync"]
     tools["tools/<br/>~60 Tool impls"]
     sandbox["sandbox/<br/>Docker + Monty"]
     token_budget["token_budget/<br/>count, summarize, cache"]

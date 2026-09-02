@@ -27,11 +27,47 @@ pub fn is_pdf_path(path: &Path) -> bool {
 
 /// Attachment paths shown inline under a message bubble (images, charts).
 /// PDFs use artifact cards in the typed transcript instead.
+///
+/// Duplicates are dropped, keeping first occurrence. One file can reach the
+/// queue by more than one route — a tool that attaches its own output plus an
+/// explicit `add_attachment` on the same path — and rendering it twice reads
+/// as a bug to the user, not as two results.
 pub fn inline_chat_attachments(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
     paths
         .into_iter()
         .filter(|path| !is_pdf_path(path))
+        .filter(|path| seen.insert(path.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod inline_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn drops_duplicate_paths() {
+        let shot = PathBuf::from("/ws/.chatty/browser/shot.png");
+        let out = inline_chat_attachments(vec![shot.clone(), shot.clone()]);
+        assert_eq!(out, vec![shot], "the same image must render once");
+    }
+
+    #[test]
+    fn keeps_distinct_images_in_order() {
+        let a = PathBuf::from("/ws/a.png");
+        let b = PathBuf::from("/ws/b.png");
+        let out = inline_chat_attachments(vec![a.clone(), b.clone(), a.clone()]);
+        assert_eq!(out, vec![a, b], "distinct screenshots each keep their slot");
+    }
+
+    #[test]
+    fn still_excludes_pdfs() {
+        let out = inline_chat_attachments(vec![
+            PathBuf::from("/ws/report.pdf"),
+            PathBuf::from("/ws/a.png"),
+        ]);
+        assert_eq!(out, vec![PathBuf::from("/ws/a.png")]);
+    }
 }
 
 /// Syntax-highlighter language id for a workspace file (gpui-component names).
