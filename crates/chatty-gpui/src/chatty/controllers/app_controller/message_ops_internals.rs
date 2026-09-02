@@ -16,6 +16,9 @@ pub(super) struct LlmStreamParams {
     pub(super) history: Vec<rig_core::completion::Message>,
     pub(super) user_contents: Vec<rig_core::message::UserContent>,
     pub(super) add_user_message_to_model: bool,
+    /// True when a human turn starts this stream. Injected protocol follow-ups
+    /// pass `false` so they keep the todo state of the turn they belong to.
+    pub(super) reset_agent_task: bool,
     pub(super) attachment_paths: Vec<PathBuf>,
     pub(super) provider_type: chatty_core::settings::models::providers_store::ProviderType,
     pub(super) chat_view: Entity<ChatView>,
@@ -49,6 +52,7 @@ pub(super) async fn run_llm_stream(
         history,
         user_contents,
         add_user_message_to_model,
+        reset_agent_task,
         attachment_paths,
         provider_type,
         chat_view,
@@ -175,6 +179,12 @@ pub(super) async fn run_llm_stream(
 
     // 3b. Call stream_prompt with user contents directly (no auto-context injection)
     let agent_task_controller = agent.task_controller();
+    // A new human turn starts from a clean todo protocol state: the controller
+    // lives on the conversation's agent, so leftover state would otherwise nudge
+    // forever and block a second write_todos (AGE-150).
+    if reset_agent_task {
+        agent_task_controller.reset();
+    }
     let llm_user_contents = user_contents.clone();
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _user_message) = stream_prompt(
@@ -559,6 +569,37 @@ pub(super) async fn run_llm_stream(
         })
         .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
         .ok();
+    }
+
+    // 6b. If the follow-up budget ran out with verification still pending, push
+    // the snapshot so the To-dos card can say verification was skipped instead
+    // of silently freezing on the last todo.
+    let final_task_snapshot = agent_task_controller.snapshot();
+    if final_task_snapshot.verification_skipped {
+        let snapshot = final_task_snapshot;
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                conv.set_agent_task_snapshot(Some(snapshot.clone()));
+            }
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to persist skipped-verification snapshot"))
+        .ok();
+        chat_view
+            .update(cx, |view, cx| {
+                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                    view.set_agent_task_snapshot(snapshot, cx);
+                }
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to show skipped verification in plan UI"))
+            .ok();
+        weak_ctrl
+            .update(&mut *cx, |app, cx| {
+                app.persist_conversation(&conv_id, cx);
+            })
+            .map_err(
+                |e| warn!(error = ?e, "Failed to persist conversation after skipped verification"),
+            )
+            .ok();
     }
 
     // 7. Protocol / loop-guard follow-up: inject after finalization so the UI

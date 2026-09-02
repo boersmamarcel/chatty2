@@ -24,6 +24,9 @@ pub(super) struct StreamParams {
     pub resolution_rx: mpsc::UnboundedReceiver<ApprovalResolution>,
     pub max_agent_turns: usize,
     pub invoke_agent_progress_slot: InvokeAgentProgressSlot,
+    /// True when a human turn starts this stream. Injected protocol follow-ups
+    /// pass `false` so they keep the todo state of the turn they belong to.
+    pub reset_agent_task: bool,
 }
 
 /// Maps [`StreamChunk`] and [`InvokeAgentProgress`] events to [`AppEvent`]s.
@@ -170,8 +173,15 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         resolution_rx,
         max_agent_turns,
         invoke_agent_progress_slot,
+        reset_agent_task,
     } = params;
     let task_controller = agent.task_controller();
+    // A new human turn starts from a clean todo protocol state: the controller
+    // lives on the conversation's agent, so leftover state would otherwise nudge
+    // forever and block a second write_todos (AGE-150).
+    if reset_agent_task {
+        task_controller.reset();
+    }
     let (mut stream, _user_message) = stream_prompt(
         &agent,
         &history,
