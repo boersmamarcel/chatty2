@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::message::AssistantContent;
+#[cfg(test)]
+use rig_core::completion::message::UserContent;
 
 use crate::models::conversation::RegenerationRecord;
 use crate::models::message_types::{SystemTrace, TraceItem};

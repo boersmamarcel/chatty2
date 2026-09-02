@@ -50,7 +50,7 @@ Runs BPE token counting off the UI thread:
 
 - **Preamble** — counted via BPE if cache cold; reused if hash matches
 - **Tool definitions** — estimated as `tool_count × tokens_per_sample_schema` (BPE-counted once on a representative schema)
-- **Conversation history** — full BPE count of all `rig::completion::Message` entries serialised to JSON; counted fresh every turn
+- **Conversation history** — full BPE count of all `rig_core::completion::Message` entries serialised to JSON; counted fresh every turn
 - **Latest user message** — plain text extracted from `UserContent::Text` variants; images/PDFs skipped
 
 Publishes the completed `TokenBudgetSnapshot` to `GlobalTokenBudget::sender`.

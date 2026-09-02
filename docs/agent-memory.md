@@ -74,8 +74,8 @@ crates/chatty-core/src/
 ├── services/
 │   └── memory_service.rs    # MemoryService, MemoryHit, MemoryStats
 └── tools/
-    ├── remember_tool.rs     # RememberTool (rig::Tool impl)
-    └── search_memory_tool.rs # SearchMemoryTool (rig::Tool impl)
+    ├── remember_tool.rs     # RememberTool (rig_agent::tool::Tool impl)
+    └── search_memory_tool.rs # SearchMemoryTool (rig_agent::tool::Tool impl)
 ```
 
 **`MemoryService`** — the core service, wraps `memvid-core` in `Arc<Mutex<>>` for async-safe access:

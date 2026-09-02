@@ -6,33 +6,33 @@ This document catalogs public APIs that are defined but not yet wired to callers
 
 **Location**: `crates/chatty-core/src/models/write_approval_store.rs`
 
-The write approval flow mirrors the execution approval system but for filesystem write operations (file creation, overwrite, delete, move, diff application). The store and types are fully implemented; what's missing is the UI for presenting write approval prompts.
+The write approval flow mirrors the execution approval system for filesystem write operations (file creation, overwrite, delete, move, diff application), and — unlike when this doc was last accurate — it now shares the *same* floating approval bar as execution approvals end to end: `filesystem_write_tool::request_write_approval()` calls the same `notify_approval_via_global()` used by bash approvals, which drives `ChatView::handle_approval_requested()`; resolving it calls `WriteApprovalStore::resolve()` as a fallback in `ChatView::handle_floating_approval()` (`chat_view/handlers.rs`). No new prompt bar needs to be built. What's still missing is a *richer* preview: the bar only shows the flat `description` string passed to `notify_approval_via_global()`, not the structured preview fields below.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| `WriteApprovalStore::resolve()` | Implemented, not called | Resolves a pending write approval by ID |
+| `WriteApprovalStore::resolve()` | Implemented, called | Fallback branch of `ChatView::handle_floating_approval()` |
 | `WriteOperation::is_destructive()` | Implemented, not called | Returns true for delete/overwrite operations |
-| `WriteApprovalRequest.id` | Written, not read | Will be displayed in approval UI |
-| `WriteApprovalRequest.operation` | Written, not read | Will be displayed in approval UI |
-| `WriteOperation::WriteFile.content_preview` | Written, not read | Preview text for the approval dialog |
-| `WriteOperation::ApplyDiff.old_preview/new_preview` | Written, not read | Diff preview for the approval dialog |
+| `WriteApprovalRequest.id` | Written, not read | Not surfaced beyond the id used to resolve |
+| `WriteApprovalRequest.operation` | Written, not read | Would drive a richer, operation-specific prompt |
+| `WriteOperation::WriteFile.content_preview` | Written, not read | Preview text for a richer approval dialog |
+| `WriteOperation::ApplyDiff.old_preview/new_preview` | Written, not read | Diff preview for a richer approval dialog |
 
-**To wire**: Create a write approval prompt bar (similar to `ApprovalPromptBar`) and subscribe to `WriteApprovalStore` pending requests in `ChattyApp`.
+**To wire**: Surface `WriteApprovalRequest.operation` and its preview fields in the floating approval bar (e.g. an operation-specific detail row) instead of the current flat description string.
 
 ## Thinking Block Lifecycle (ChatView)
 
-**Location**: `crates/chatty-gpui/src/chatty/views/chat_view.rs`
+**Location**: `crates/chatty-gpui/src/chatty/views/chat_view/handlers.rs`
 
-Methods for displaying LLM "thinking" / chain-of-thought blocks in the UI. The StreamManager emits thinking events but ChatView doesn't yet process them.
+Methods for displaying LLM "thinking" / chain-of-thought blocks in the UI. The StreamManager doesn't emit thinking events yet, so ChatView never calls these.
 
 | Method | Line | Purpose |
 |--------|------|---------|
-| `handle_thinking_started()` | 697 | Initialize a thinking block in the live trace |
-| `handle_thinking_delta()` | 773 | Append content to the active thinking block |
-| `handle_thinking_ended()` | 784 | Finalize the thinking block |
-| `update_thinking_trace()` | 735 | Helper to mutate the active thinking trace |
+| `handle_thinking_started()` | 487 | Initialize a thinking block in the live trace |
+| `handle_thinking_delta()` | 559 | Append content to the active thinking block |
+| `handle_thinking_ended()` | 570 | Finalize the thinking block |
+| `update_thinking_trace()` | 525 | Helper to mutate the active thinking trace |
 
-**To wire**: Add `StreamManagerEvent::ThinkingStarted/Delta/Ended` handling in `handle_stream_manager_event()`.
+**To wire**: Add `StreamManagerEvent::ThinkingStarted/Delta/Ended` variants (StreamManager doesn't have them today) and handle them in `handle_stream_manager_event()`.
 
 ## Trace Session Methods
 
@@ -40,11 +40,11 @@ Methods for displaying LLM "thinking" / chain-of-thought blocks in the UI. The S
 
 | Method | Line | Purpose |
 |--------|------|---------|
-| `TraceSession::add_thinking()` | 181 | Add a thinking block to the trace |
-| `TraceSession::add_approval()` | 201 | Add an approval prompt to the trace |
-| `TraceSession::update_approval_state()` | 207 | Update approval state by ID |
+| `TraceSession::add_thinking()` | 233 | Add a thinking block to the trace |
+| `TraceSession::add_approval()` | 252 | Add an approval prompt to the trace |
+| `TraceSession::update_approval_state()` | 257 | Update approval state by ID |
 
-**To wire**: Called by the thinking block lifecycle methods above and the write approval UI.
+**To wire**: `add_approval()`/`update_approval_state()` are already called by the execution/write approval flow above; `add_thinking()` is still called only by the dead thinking block lifecycle methods above.
 
 ## Message Event Variants
 
