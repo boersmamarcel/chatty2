@@ -268,6 +268,7 @@ impl ChattyApp {
                                     gateway_port,
                                     remote_agents,
                                     available_model_ids,
+                                    conversation_id: Some(conv_id.clone()),
                                 },
                             )
                             .await?;
@@ -403,6 +404,10 @@ impl ChattyApp {
         let repo = self.conversation_repo.clone();
         let sidebar = self.sidebar_view.clone();
         let chat_view = self.chat_view.clone();
+
+        // Drop the browser-manager registration (AGE-155) — a deleted
+        // conversation's screencast, if any, has nothing left to be shown in.
+        chatty_core::services::browser::registry::unregister(&conv_id);
 
         // Remove from global store
         cx.update_global::<ConversationsStore, _>(|store, _cx| {

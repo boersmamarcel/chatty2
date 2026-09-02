@@ -458,6 +458,7 @@ impl ChatEngine {
                     .then_some(self.module_settings.gateway_port),
                 remote_agents: self.remote_agents.clone(),
                 available_model_ids: self.available_model_ids(),
+                conversation_id: None, // browser feature isn't enabled in the TUI
             },
         )
         .await
@@ -543,6 +544,7 @@ impl ChatEngine {
                         .then_some(module_settings.gateway_port),
                     remote_agents,
                     available_model_ids,
+                    conversation_id: None, // browser feature isn't enabled in the TUI
                 },
             )
             .await;

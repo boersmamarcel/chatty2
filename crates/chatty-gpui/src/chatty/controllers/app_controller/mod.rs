@@ -345,6 +345,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 gateway_port,
                 remote_agents,
                 available_model_ids,
+                conversation_id: Some(conv_id.clone()),
             },
         )
         .await?;

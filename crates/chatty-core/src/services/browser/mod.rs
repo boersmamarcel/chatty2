@@ -13,11 +13,14 @@
 //! - [`events`] — bounded console and network capture
 //! - [`snapshot`] — accessibility tree with generation-guarded element refs
 //! - [`screencast`] — live frames for the artifact viewport (AGE-155)
+//! - [`registry`] — per-conversation lookup so the UI can find a running
+//!   session's manager (AGE-155)
 
 pub mod error;
 pub mod events;
 pub mod profile;
 pub mod provisioning;
+pub mod registry;
 pub mod screencast;
 pub mod session;
 pub mod snapshot;
@@ -107,6 +110,16 @@ impl BrowserManager {
     /// The most recent snapshot, if one was taken.
     pub async fn snapshot(&self) -> Option<Snapshot> {
         self.snapshot.lock().await.clone()
+    }
+
+    /// Stop the screencast if a session is running (AGE-155 idle handling).
+    /// Never launches a browser — closing an artifact window that never
+    /// showed one must not start a session just to immediately stop it.
+    pub async fn stop_screencast(&self) {
+        let session = self.session.lock().await.clone();
+        if let Some(session) = session {
+            session.stop_screencast().await;
+        }
     }
 
     /// Close the browser if one is running. Called on app shutdown.

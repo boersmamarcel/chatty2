@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use chatty_core::services::browser::{BrowserManager, ScreencastFrame, ScreencastUpdate};
 use chatty_core::services::pdf_thumbnail::{
     PREVIEW_WIDTH, PdfThumbnailError, pdf_page_count, render_pdf_page,
 };
@@ -43,6 +45,13 @@ const PDF_PAGE_DISPLAY_WIDTH: f32 = 348.0;
 const IMAGE_DISPLAY_WIDTH: f32 = PDF_PAGE_DISPLAY_WIDTH;
 const DOCUMENT_MEASURE_PX: f32 = 680.0;
 const OUTLINE_WIDTH: f32 = 220.0;
+
+/// Fixed CDP viewport the browser artifact screencasts at. Matches how the
+/// PDF/image previews already work in this file: fetch one canonical
+/// resolution, let the flex layout scale it to fit rather than re-requesting
+/// a new capture on every layout pass.
+const BROWSER_VIEWPORT_WIDTH: u32 = 960;
+const BROWSER_VIEWPORT_HEIGHT: u32 = 600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ArtifactMode {
@@ -91,6 +100,17 @@ enum TabularPreview {
     Error(String),
 }
 
+/// Live screencast state (AGE-155). `Arc<RenderImage>` clones cheaply — it's
+/// just a refcount bump, not a pixel copy.
+#[derive(Clone, Default)]
+enum BrowserPreview {
+    #[default]
+    Idle,
+    Starting,
+    Frame(Arc<RenderImage>),
+    Error(String),
+}
+
 /// One artifact workbench entity: Closed | Docked | Full. Reparent, do not rebuild.
 pub struct ArtifactView {
     pub mode: ArtifactMode,
@@ -103,6 +123,10 @@ pub struct ArtifactView {
     pdf: PdfPreview,
     tabular: TabularPreview,
     chart: Option<ChartSpec>,
+    browser: BrowserPreview,
+    /// Set while a browser artifact is open — also the idle-teardown handle:
+    /// `stop_browser_screencast` takes it and stops the session (AGE-155).
+    browser_manager: Option<Arc<BrowserManager>>,
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
@@ -153,6 +177,8 @@ impl ArtifactView {
             pdf: PdfPreview::Idle,
             tabular: TabularPreview::Idle,
             chart: None,
+            browser: BrowserPreview::Idle,
+            browser_manager: None,
             workspace_root: None,
             load_gen: 0,
             editor,
@@ -209,6 +235,7 @@ impl ArtifactView {
     pub fn open_table(&mut self, preview: TablePreview, cx: &mut Context<Self>) {
         self.session_review = false;
         self.review_sections.clear();
+        self.stop_browser_screencast(cx);
         let next_path = match &preview.source {
             chatty_core::tools::data_query_tool::TableSource::File { path } => {
                 Some(PathBuf::from(path))
@@ -230,6 +257,7 @@ impl ArtifactView {
     pub fn open_chart(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
         self.session_review = false;
         self.review_sections.clear();
+        self.stop_browser_screencast(cx);
         let next_path = spec.saved_path.as_ref().map(PathBuf::from);
         self.mode = presentation_on_open(self.mode, next_path.as_ref() == self.path.as_ref());
         self.path = next_path;
@@ -246,6 +274,133 @@ impl ArtifactView {
         cx.notify();
     }
 
+    /// Open the live browser viewport (AGE-155): the browser is another
+    /// artifact the agent produced, opened the same way as a diff or a
+    /// generated file — just backed by a screencast instead of a path.
+    pub fn open_browser(&mut self, manager: Arc<BrowserManager>, cx: &mut Context<Self>) {
+        self.session_review = false;
+        self.review_sections.clear();
+        let already_open = self
+            .browser_manager
+            .as_ref()
+            .is_some_and(|existing| Arc::ptr_eq(existing, &manager));
+        self.mode = presentation_on_open(self.mode, already_open);
+        if !already_open {
+            self.stop_browser_screencast(cx);
+        }
+        self.path = None;
+        self.pdf = PdfPreview::Idle;
+        self.tabular = TabularPreview::Idle;
+        self.chart = None;
+        self.source.clear();
+        self.rendered.clear();
+        self.old.clear();
+        self.tab = 0;
+        self.stale = false;
+        self.headings.clear();
+        cx.emit(ArtifactViewEvent::PresentationChanged);
+
+        if already_open {
+            cx.notify();
+            return;
+        }
+
+        self.browser_manager = Some(manager.clone());
+        self.browser = BrowserPreview::Starting;
+        self.load_gen = self.load_gen.wrapping_add(1);
+        let load_id = self.load_gen;
+        cx.spawn(async move |this, cx| {
+            let session = match manager.session().await {
+                Ok(session) => session,
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        if this.load_gen == load_id {
+                            this.browser = BrowserPreview::Error(e.to_string());
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let mut frames = match session
+                .start_screencast(BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        if this.load_gen == load_id {
+                            this.browser = BrowserPreview::Error(e.to_string());
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            loop {
+                if frames.changed().await.is_err() {
+                    // The sender dropped — either `stop_screencast` tore it
+                    // down (`load_gen` will already have moved on, so the
+                    // stale check below is what actually silences this) or
+                    // the browser crashed out from under a still-active view.
+                    this.update(cx, |this, cx| {
+                        if this.load_gen == load_id {
+                            this.browser =
+                                BrowserPreview::Error("browser session ended".to_string());
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                    return;
+                }
+                let update = frames.borrow_and_update().clone();
+                let next = match update {
+                    // Nothing changed from our own initial state — keep
+                    // waiting rather than repainting for no reason.
+                    ScreencastUpdate::Starting => continue,
+                    ScreencastUpdate::Frame(frame) => {
+                        BrowserPreview::Frame(render_image_from_rgba(&frame))
+                    }
+                    ScreencastUpdate::Error(message) => BrowserPreview::Error(message),
+                };
+                let superseded = this
+                    .update(cx, |this, cx| {
+                        if this.load_gen != load_id {
+                            return true;
+                        }
+                        this.browser = next;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if superseded {
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Stop the screencast this view started, if any — called whenever the
+    /// browser stops being the active artifact (AGE-155's idle handling): a
+    /// screencast nobody is watching is pure CPU.
+    fn stop_browser_screencast(&mut self, cx: &mut Context<Self>) {
+        self.browser = BrowserPreview::Idle;
+        // Bump so the pump loop above notices it's stale even if the
+        // channel never fires `changed()` again (a static page sends no
+        // further frames, so the loop would otherwise block forever).
+        self.load_gen = self.load_gen.wrapping_add(1);
+        if let Some(manager) = self.browser_manager.take() {
+            cx.background_spawn(async move {
+                manager.stop_screencast().await;
+            })
+            .detach();
+        }
+    }
+
     pub fn open(
         &mut self,
         path: PathBuf,
@@ -256,6 +411,7 @@ impl ArtifactView {
     ) {
         self.session_review = false;
         self.review_sections.clear();
+        self.stop_browser_screencast(cx);
         let same_path = self.path.as_ref() == Some(&path);
         self.mode = presentation_on_open(self.mode, same_path);
         let old_snapshot = old.clone();
@@ -326,6 +482,7 @@ impl ArtifactView {
         if files.is_empty() {
             return;
         }
+        self.stop_browser_screencast(cx);
         self.session_review = true;
         self.files = files;
         self.workspace_root = workspace_root;
@@ -423,6 +580,13 @@ impl ArtifactView {
     pub fn set_mode(&mut self, mode: ArtifactMode, cx: &mut Context<Self>) {
         if self.mode != mode {
             self.mode = mode;
+            // Centralized rather than at each caller — `history.rs` closes
+            // the panel directly on conversation switch, bypassing
+            // `close_panel`, and a screencast nobody is watching (AGE-155)
+            // must not keep running regardless of which path closed it.
+            if mode == ArtifactMode::Closed {
+                self.stop_browser_screencast(cx);
+            }
             cx.emit(if mode == ArtifactMode::Closed {
                 ArtifactViewEvent::Closed
             } else {
@@ -709,6 +873,55 @@ fn headings_to_tree_items(headings: &[ArtifactHeading]) -> Vec<TreeItem> {
     roots
 }
 
+/// Decode a screencast frame into what `img()` wants. gpui's own image
+/// loader does the same channel swap for a plain decoded raster (see
+/// `elements/img.rs`) — BGRA, straight alpha, no premultiply/divide, that's
+/// only needed for the SVG path.
+fn render_image_from_rgba(frame: &ScreencastFrame) -> Arc<RenderImage> {
+    let mut buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec())
+        .expect("screencast frame dimensions match its own buffer length");
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+fn browser_rendered_body(browser: &BrowserPreview, cx: &App) -> AnyElement {
+    match browser {
+        BrowserPreview::Idle | BrowserPreview::Starting => div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("Starting browser…")
+            .into_any_element(),
+        BrowserPreview::Error(message) => div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(message.clone())
+            .into_any_element(),
+        BrowserPreview::Frame(image) => div()
+            .id("artifact-browser-frame")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .child(
+                img(image.clone())
+                    .w_full()
+                    .object_fit(ObjectFit::Contain)
+                    .rounded_md(),
+            )
+            .into_any_element(),
+    }
+}
+
 fn tabular_rendered_body(tabular: &TabularPreview, cx: &App) -> AnyElement {
     match tabular {
         TabularPreview::Idle | TabularPreview::Loading => div()
@@ -921,8 +1134,9 @@ impl Render for ArtifactView {
         let old = self.old.clone();
         let full = self.mode == ArtifactMode::Full;
         let entity = cx.entity();
-        let is_pdf = self.path.as_ref().is_some_and(|path| is_pdf_path(path));
-        let is_chart = self.chart.is_some();
+        let is_browser = self.browser_manager.is_some();
+        let is_pdf = !is_browser && self.path.as_ref().is_some_and(|path| is_pdf_path(path));
+        let is_chart = !is_browser && self.chart.is_some();
         let is_image = !is_chart && self.path.as_ref().is_some_and(|path| is_image_path(path));
         let is_tabular = matches!(self.tabular, TabularPreview::Ready(_))
             || self.path.as_ref().is_some_and(|path| is_tabular_path(path));
@@ -930,6 +1144,7 @@ impl Render for ArtifactView {
         let pdf = self.pdf.clone();
         let tabular = self.tabular.clone();
         let chart = self.chart.clone();
+        let browser = self.browser.clone();
         let has_diff = !old.is_empty() && old != source;
         let visible_tab = if !has_diff && tab > 1 {
             0
@@ -954,7 +1169,8 @@ impl Render for ArtifactView {
                 })
                 .unwrap_or("Preview")
         };
-        let show_outline = full && !self.headings.is_empty() && !is_pdf && !is_image && !is_chart;
+        let show_outline =
+            full && !self.headings.is_empty() && !is_pdf && !is_image && !is_chart && !is_browser;
         let editor = self.editor.clone();
         let outline = self.outline.clone();
         let run_visible = self.run_visible || self.pending_approval;
@@ -974,6 +1190,16 @@ impl Render for ArtifactView {
                 self.review_scroll.clone(),
             )
             .into_any_element()
+        } else if is_browser {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .p_2()
+                .child(browser_rendered_body(&browser, cx))
+                .into_any_element()
         } else if is_pdf {
             div()
                 .flex()
@@ -1110,6 +1336,8 @@ impl Render for ArtifactView {
 
         let title = if session_review {
             format!("Review · {} files", self.files.len())
+        } else if is_browser {
+            "Browser".to_string()
         } else {
             self.chart
                 .as_ref()

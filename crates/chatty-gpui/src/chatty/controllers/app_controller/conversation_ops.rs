@@ -389,6 +389,7 @@ impl ChattyApp {
                             gateway_port,
                             remote_agents,
                             available_model_ids,
+                            conversation_id: Some(conv_id.clone()),
                         },
                     )
                     .await?;
@@ -540,6 +541,7 @@ impl ChattyApp {
                                 gateway_port,
                                 remote_agents,
                                 available_model_ids,
+                                conversation_id: Some(conv_id.clone()),
                             },
                         )
                         .await

@@ -76,6 +76,11 @@ pub struct AgentBuildContext {
     pub gateway_port: Option<u16>,
     pub remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
     pub available_model_ids: Vec<String>,
+    /// Conversation this turn belongs to. Only consulted when the `browser`
+    /// feature is on, to register the built `BrowserManager` where the
+    /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
+    /// else (e.g. chatty-tui, which doesn't enable that feature).
+    pub conversation_id: Option<String>,
 }
 
 /// Provider-agnostic agent wrapper.
@@ -132,7 +137,13 @@ impl AgentClient {
             gateway_port,
             remote_agents,
             available_model_ids,
+            conversation_id,
         } = ctx;
+
+        // Only consulted when browser tools are built below; avoids an
+        // unused-variable warning on builds without the `browser` feature.
+        #[cfg(not(feature = "browser"))]
+        let _ = &conversation_id;
 
         // Extract secret key names before user_secrets is moved into ShellSession.
         let secret_key_names: Vec<String> = user_secrets.iter().map(|(k, _)| k.clone()).collect();
@@ -510,6 +521,12 @@ impl AgentClient {
                     let manager = std::sync::Arc::new(
                         crate::services::browser::BrowserManager::lane_a(Some(workspace)),
                     );
+                    // So the artifact viewport (AGE-155) can find this turn's
+                    // session and screencast it — the tool structs below hold
+                    // their own clone but never expose it back to the caller.
+                    if let Some(id) = conversation_id.as_deref() {
+                        crate::services::browser::registry::register(id, manager.clone());
+                    }
                     Some(crate::tools::browser_tools::build_browser_tools(
                         manager,
                         pending_artifacts,
