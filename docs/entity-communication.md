@@ -20,11 +20,12 @@ All entity-to-entity communication in Chatty uses GPUI's `EventEmitter`/`cx.subs
 ChatInputState  ──emit ChatInputEvent──────►  ChattyApp (subscriber)
 SidebarView     ──emit SidebarEvent────────►  ChattyApp (subscriber)
 StreamManager   ──emit StreamManagerEvent──►  ChattyApp (subscriber)
-McpNotifier     ──emit McpNotifierEvent────►  ChattyApp (subscriber)
+AgentConfigNotifier ──emit AgentConfigEvent─►  ChattyApp (subscriber)
+ModelsNotifier  ──emit ModelsNotifierEvent─►  ChattyApp (subscriber)
 SystemTraceView ──emit TraceEvent──────────►  ChatView  (subscriber)
 ```
 
-4 subscriptions are set up in `ChattyApp::setup_callbacks()`, 1 in `ChatView::new()`.
+5 subscriptions are set up in `ChattyApp::setup_callbacks()`, 1 in `ChatView::new()`.
 
 ## Adding a New Event
 

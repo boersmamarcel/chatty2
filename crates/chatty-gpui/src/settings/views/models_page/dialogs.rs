@@ -110,6 +110,20 @@ impl ModelsListView {
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search OpenRouter models..."));
 
+        // Catalog list starts open; a pick dismisses it so the dialog can take
+        // focus back. Typing in the search field reopens the list.
+        let catalog_list_open = std::rc::Rc::new(std::cell::Cell::new(true));
+        cx.subscribe(&search_input, {
+            let catalog_list_open = catalog_list_open.clone();
+            move |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    catalog_list_open.set(true);
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+
         window.open_dialog(cx, move |dialog, _window, cx| {
             dialog
                 .title("Add New Model")
@@ -122,9 +136,10 @@ impl ModelsListView {
                     let current_tab = active_tab.get();
                     let is_azure = is_azure_cell.get();
                     let is_openrouter = is_openrouter_cell.get();
-                    // Catalog owns scroll when visible — avoid nested form+catalog scroll.
+                    // Catalog owns scroll when its list is open — avoid nested form+catalog scroll.
                     let show_catalog =
                         current_tab == 0 && is_openrouter && !catalog_models.is_empty();
+                    let catalog_list_visible = show_catalog && catalog_list_open.get();
 
                     let form_body = v_flex()
                                 .gap_3()
@@ -168,12 +183,15 @@ impl ModelsListView {
                                                 let max_context_window_input = max_context_window_input.clone();
                                                 let cost_input_input = cost_input_input.clone();
                                                 let cost_output_input = cost_output_input.clone();
+                                                let catalog_list_open = catalog_list_open.clone();
+                                                let view_for_catalog = view.clone();
                                                 root = root.child(
                                                     v_flex()
                                                         .gap_1()
                                                         .child(div().text_sm().child("OpenRouter Catalog"))
                                                         .child(Input::new(&search_input))
-                                                        .child({
+                                                        .when(catalog_list_visible, |this| {
+                                                            this.child({
                                                             let query = search_input.read(cx).value().to_lowercase();
                                                             let filtered: Vec<_> = catalog_models
                                                                     .iter()
@@ -213,6 +231,8 @@ impl ModelsListView {
                                                                         let mci = max_context_window_input.clone();
                                                                         let cii = cost_input_input.clone();
                                                                         let coi = cost_output_input.clone();
+                                                                        let catalog_list_open = catalog_list_open.clone();
+                                                                        let view_for_catalog = view_for_catalog.clone();
                                                                         div()
                                                                             .px_3()
                                                                             .py_2()
@@ -220,22 +240,36 @@ impl ModelsListView {
                                                                             .hover(|style| style.bg(theme_secondary))
                                                                             .text_sm()
                                                                             .child(display_name_val.clone())
-                                                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                                                ni.update(cx, |state, _cx| { state.set_value(display_name_val.clone(), _window, _cx); });
-                                                                                mi.update(cx, |state, _cx| { state.set_value(model_id_val.clone(), _window, _cx); });
-                                                                                mci.update(cx, |state, _cx| { state.set_value(ctx_len_val.to_string(), _window, _cx); });
+                                                                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                                                                ni.update(cx, |state, cx| {
+                                                                                    state.set_value(display_name_val.clone(), window, cx);
+                                                                                });
+                                                                                mi.update(cx, |state, cx| {
+                                                                                    state.set_value(model_id_val.clone(), window, cx);
+                                                                                    state.focus(window, cx);
+                                                                                });
+                                                                                mci.update(cx, |state, cx| {
+                                                                                    state.set_value(ctx_len_val.to_string(), window, cx);
+                                                                                });
                                                                                 if let Some(cost) = prompt_cost_val {
                                                                                     let cost_per_million = cost * 1_000_000.0;
-                                                                                    cii.update(cx, |state, _cx| { state.set_value(format!("{:.4}", cost_per_million), _window, _cx); });
+                                                                                    cii.update(cx, |state, cx| {
+                                                                                        state.set_value(format!("{:.4}", cost_per_million), window, cx);
+                                                                                    });
                                                                                 }
                                                                                 if let Some(cost) = completion_cost_val {
                                                                                     let cost_per_million = cost * 1_000_000.0;
-                                                                                    coi.update(cx, |state, _cx| { state.set_value(format!("{:.4}", cost_per_million), _window, _cx); });
+                                                                                    coi.update(cx, |state, cx| {
+                                                                                        state.set_value(format!("{:.4}", cost_per_million), window, cx);
+                                                                                    });
                                                                                 }
+                                                                                catalog_list_open.set(false);
+                                                                                view_for_catalog.update(cx, |_, cx| cx.notify());
                                                                             })
                                                                             .into_any_element()
                                                                     }).collect::<Vec<_>>()
                                                                 })
+                                                            })
                                                         })
                                                 );
                                             }
@@ -508,7 +542,7 @@ impl ModelsListView {
                                         ),
                                 );
 
-                    if show_catalog {
+                    if catalog_list_visible {
                         form_body.into_any_element()
                     } else {
                         div()
