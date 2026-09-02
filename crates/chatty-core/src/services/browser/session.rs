@@ -18,12 +18,14 @@ use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 use chromiumoxide::page::Page;
 use futures::StreamExt;
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::error::BrowserError;
 use super::events::EventBuffers;
 use super::profile::{BrowserProfile, NavigationPolicy};
+use super::screencast::{self, ScreencastState, ScreencastUpdate};
 
 /// Default deadline for a CDP round trip.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -58,6 +60,10 @@ pub struct BrowserSession {
     handler: Mutex<Option<JoinHandle<()>>>,
     /// Pumps CDP events into `events`.
     listeners: Mutex<Vec<JoinHandle<()>>>,
+    /// Live `Page.startScreencast` state, when the artifact viewport
+    /// (AGE-155) is watching this session. `tokio::sync::Mutex` because
+    /// starting/retargeting holds the guard across CDP round trips.
+    screencast: tokio::sync::Mutex<Option<ScreencastState>>,
     /// Temp user-data dir for an ephemeral profile; removed on drop.
     _user_data: Option<tempfile::TempDir>,
 }
@@ -145,6 +151,7 @@ impl BrowserSession {
             dead,
             handler: Mutex::new(Some(handler)),
             listeners: Mutex::new(listeners),
+            screencast: tokio::sync::Mutex::new(None),
             _user_data: user_data,
         }))
     }
@@ -240,8 +247,39 @@ impl BrowserSession {
         Ok(final_url)
     }
 
+    /// Start (or resize) the live screencast the artifact viewport watches
+    /// (AGE-155), returning a channel of frame updates.
+    ///
+    /// Backpressure is handled inside `screencast`: a slow receiver only
+    /// ever sees the latest frame, never a backlog. Calling this again while
+    /// a screencast is already running retargets it to the new size rather
+    /// than starting a second one.
+    pub async fn start_screencast(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
+        self.ensure_alive()?;
+        let mut guard = self.screencast.lock().await;
+        let existing = guard.take();
+        let (state, rx) = screencast::start(&self.page, existing, width, height).await?;
+        *guard = Some(state);
+        Ok(rx)
+    }
+
+    /// Stop the screencast. Idle handling (AGE-155) calls this when the
+    /// artifact window closes or the browser artifact stops being the
+    /// active one — a screencast nobody is watching is pure CPU.
+    pub async fn stop_screencast(&self) {
+        let state = self.screencast.lock().await.take();
+        if let Some(state) = state {
+            screencast::stop(&self.page, state).await;
+        }
+    }
+
     /// Close the browser and stop every task this session owns.
     pub async fn shutdown(&self) {
+        self.stop_screencast().await;
         for handle in self.listeners.lock().drain(..) {
             handle.abort();
         }
@@ -272,6 +310,13 @@ impl Drop for BrowserSession {
         }
         if let Some(handle) = self.handler.lock().take() {
             handle.abort();
+        }
+        // No CDP round trip here — `try_lock` is sync, and stopping the
+        // task is enough; the browser process going away ends the cast.
+        if let Ok(mut guard) = self.screencast.try_lock()
+            && let Some(state) = guard.take()
+        {
+            state.abort();
         }
     }
 }

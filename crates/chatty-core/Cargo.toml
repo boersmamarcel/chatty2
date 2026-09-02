@@ -130,7 +130,8 @@ math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:typst-layout"
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]
 # Built-in browser control (AGE-142). Pulls chromiumoxide for CDP, zip for
-# unpacking the provisioned Chrome for Testing build.
-browser = ["dep:chromiumoxide", "dep:which", "dep:zip"]
+# unpacking the provisioned Chrome for Testing build, and image to decode
+# Page.startScreencast JPEG frames for the artifact viewport (AGE-155).
+browser = ["dep:chromiumoxide", "dep:which", "dep:zip", "dep:image"]
 # Convenience: enable all optional tool dependencies
 all-tools = ["excel", "docx", "pdf", "pptx", "math-render", "mermaid", "duckdb", "browser"]

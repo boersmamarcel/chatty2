@@ -12,11 +12,13 @@
 //! - [`session`] — CDP session lifecycle
 //! - [`events`] — bounded console and network capture
 //! - [`snapshot`] — accessibility tree with generation-guarded element refs
+//! - [`screencast`] — live frames for the artifact viewport (AGE-155)
 
 pub mod error;
 pub mod events;
 pub mod profile;
 pub mod provisioning;
+pub mod screencast;
 pub mod session;
 pub mod snapshot;
 
@@ -29,6 +31,7 @@ use tracing::{info, warn};
 pub use error::BrowserError;
 pub use events::{ConsoleEntry, EventBuffers, NetworkEntry};
 pub use profile::{BrowserProfile, NavigationPolicy};
+pub use screencast::{ScreencastFrame, ScreencastUpdate};
 pub use session::BrowserSession;
 pub use snapshot::{Snapshot, SnapshotNode};
 
