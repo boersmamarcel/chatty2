@@ -47,6 +47,24 @@ pub fn execution_settings_page() -> SettingPage {
                          (commit, branch) require user confirmation.",
                     ),
                     SettingItem::new(
+                        "Enable Browser Tools",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().browser_enabled,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_browser(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Let the agent open pages in a real browser to review its own work — \
+                         navigate, read the page, screenshot it, check the console. Limited to \
+                         localhost and file:// URLs inside the workspace, so no site you are \
+                         signed in to is reachable. Requires a workspace directory. If no Chrome, \
+                         Chromium or Edge is installed, the first use downloads a pinned Chrome \
+                         build (~190MB, once).",
+                    ),
+                    SettingItem::new(
                         "Enable Code Execution Tool",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().execute_code_enabled,

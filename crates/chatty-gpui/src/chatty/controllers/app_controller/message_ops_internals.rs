@@ -215,6 +215,9 @@ pub(super) async fn run_llm_stream(
     // If loop detection fires, we cancel the stream and inject this follow-up.
     let mut pending_follow_up: Option<String> = None;
     let mut text_overflow_stop_requested = false;
+    // Set when the stream terminated via StreamChunk::Error, which already
+    // emitted StreamEnded and removed the stream from the manager.
+    let mut stream_errored = false;
 
     // 6. Stream processing loop
     debug!(conv_id = %conv_id, "Entering stream processing loop");
@@ -451,6 +454,20 @@ pub(super) async fn run_llm_stream(
                 match chunk_result {
                     Ok(chunk) => {
                         let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+                        if matches!(chunk, StreamChunk::Error(_)) {
+                            // Same terminal path as the Err arm below: the manager
+                            // drops the stream, so keep the trace and skip the
+                            // redundant finalize afterwards.
+                            let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
+                            stream_errored = true;
+                            if let Some(ref sm) = stream_manager {
+                                sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, _cx| {
+                                    sm.set_trace(&conv_id, trace_json);
+                                })
+                                .map_err(|e| warn!(error = ?e, "Failed to set trace before error"))
+                                .ok();
+                            }
+                        }
                         if let Some(ref sm) = stream_manager {
                             sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
                                 sm.handle_chunk(&conv_id, chunk, cx)
@@ -463,9 +480,32 @@ pub(super) async fn run_llm_stream(
                         }
                     }
                     Err(e) => {
+                        let message = e.to_string();
+
+                        // A truncated tool call is a model defect, not a dead
+                        // connection: hand the parse error back and let it retry.
+                        //
+                        // The cap has to live in conversation history, not in a
+                        // local: this function is re-entered fresh for every
+                        // injected follow-up, so a local flag would reset each
+                        // time and the retry would never terminate. That is
+                        // AGE-150 Defect 2, and it is easy to rebuild by accident.
+                        if is_malformed_tool_call_error(&message)
+                            && pending_follow_up.is_none()
+                            && !already_asked_to_retry(&conv_id, cx)
+                        {
+                            warn!(conv_id = %conv_id, error = %message,
+                                "Malformed tool-call JSON; asking the model to retry");
+                            pending_follow_up = Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
+                        }
+
+                        // Keep the failed turn's tool calls in the transcript.
+                        let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
+                        stream_errored = true;
                         if let Some(ref sm) = stream_manager {
                             sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.handle_chunk(&conv_id, StreamChunk::Error(e.to_string()), cx);
+                                sm.set_trace(&conv_id, trace_json);
+                                sm.handle_chunk(&conv_id, StreamChunk::Error(message), cx);
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
                             .ok();
@@ -526,39 +566,21 @@ pub(super) async fn run_llm_stream(
     // 6. Extract trace and finalize via StreamManager
     debug!(conv_id = %conv_id, "Stream loop finished, finalizing via StreamManager");
 
-    // Try to extract trace from ChatView first (if this conversation is displayed).
-    // Fall back to the streaming_trace from the Conversation model (if user switched away).
-    let trace_from_view = chat_view
-        .update(cx, |view, _cx| view.extract_current_trace())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    // A stream that ended in error already emitted StreamEnded and removed
+    // itself from the manager (see `handle_chunk`'s Error arm), and its trace
+    // was attached there. Calling finalize_stream again would only log
+    // "no stream found" and drop the trace we just built.
+    if !stream_errored {
+        let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
 
-    let trace = trace_from_view.or_else(|| {
-        cx.try_read_global::<ConversationsStore, _>(|store, _| {
-            store
-                .get_conversation(&conv_id)
-                .and_then(|conv| conv.streaming_trace().cloned())
-        })
-        .flatten()
-    });
-
-    let trace_json = trace.and_then(|trace| match serde_json::to_value(&trace) {
-        Ok(val) => {
-            debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
-            Some(val)
+        if let Some(ref sm) = stream_manager {
+            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                sm.set_trace(&conv_id, trace_json);
+                sm.finalize_stream(&conv_id, cx);
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
+            .ok();
         }
-        Err(e) => {
-            error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
-            None
-        }
-    });
-
-    if let Some(ref sm) = stream_manager {
-        sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-            sm.set_trace(&conv_id, trace_json);
-            sm.finalize_stream(&conv_id, cx);
-        })
-        .map_err(|e| warn!(error = ?e, "Failed to finalize stream in StreamManager"))
-        .ok();
     }
 
     // 7. Protocol / loop-guard follow-up: inject after finalization so the UI
@@ -852,5 +874,137 @@ mod tests {
         ];
         let result = select_recent_assistant_attachments(&entries, false, true);
         assert_eq!(result, vec![PathBuf::from("/tmp/report.PDF")]);
+    }
+}
+
+/// Serialize the current trace for `conv_id`, preferring the live ChatView and
+/// falling back to the Conversation model when the user has switched away.
+///
+/// Both the normal and the errored stream paths need this: a turn that died
+/// mid-flight still has tool calls worth keeping in the transcript.
+fn extract_trace_json(
+    chat_view: &gpui::Entity<crate::chatty::views::ChatView>,
+    conv_id: &str,
+    cx: &mut AsyncApp,
+) -> Option<serde_json::Value> {
+    let trace_from_view = chat_view
+        .update(cx, |view, _cx| view.extract_current_trace())
+        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to read trace from ChatView"))
+        .ok()
+        .flatten();
+
+    let trace = trace_from_view.or_else(|| {
+        cx.try_read_global::<ConversationsStore, _>(|store, _| {
+            store
+                .get_conversation(conv_id)
+                .and_then(|conv| conv.streaming_trace().cloned())
+        })
+        .flatten()
+    });
+
+    trace.and_then(|trace| match serde_json::to_value(&trace) {
+        Ok(val) => {
+            debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
+            Some(val)
+        }
+        Err(e) => {
+            error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
+            None
+        }
+    })
+}
+
+/// Injected once when a provider rejects a tool call for malformed JSON.
+///
+/// The `Agent protocol follow-up:` prefix is what
+/// `chatty_core::services::is_protocol_follow_up_text` matches on, which keeps
+/// this hidden from the transcript like every other injected nudge, and is what
+/// [`already_asked_to_retry`] looks for in history.
+pub(super) const MALFORMED_TOOL_CALL_FOLLOW_UP: &str = "Agent protocol follow-up: your last tool call was rejected because its JSON arguments \
+     were malformed or truncated. Make the same call again, keeping the arguments small and \
+     fully closed. If the arguments were large, write the content to a file in smaller steps \
+     instead.";
+
+/// Whether we already asked this conversation to retry a malformed tool call.
+///
+/// Bounds the retry to one attempt. Protocol follow-ups are appended to
+/// conversation history even though they are filtered from the transcript, so
+/// the last user message is a reliable place to look.
+fn already_asked_to_retry(conv_id: &str, cx: &mut AsyncApp) -> bool {
+    cx.try_read_global::<ConversationsStore, _>(|store, _| {
+        let Some(conv) = store.get_conversation(conv_id) else {
+            return false;
+        };
+        conv.entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.message {
+                rig_core::message::Message::User { content } => {
+                    Some(chatty_core::services::message_orchestrator::extract_user_text(content))
+                }
+                _ => None,
+            })
+            .is_some_and(|text| text.trim_start().starts_with(MALFORMED_TOOL_CALL_FOLLOW_UP))
+    })
+    .unwrap_or(false)
+}
+
+/// Whether a stream error is the provider handing us a tool call whose JSON
+/// arguments were truncated or otherwise unparseable.
+///
+/// This is a model output defect, not a transport failure: the right response
+/// is to tell the model what broke and let it retry, rather than ending the
+/// conversation on a dead stream.
+fn is_malformed_tool_call_error(error: &str) -> bool {
+    let error = error.to_lowercase();
+    error.contains("malformed json input")
+        || (error.contains("tool call") && error.contains("malformed"))
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    use super::{MALFORMED_TOOL_CALL_FOLLOW_UP, is_malformed_tool_call_error};
+
+    /// The retry is bounded by spotting this text in history, and hidden from
+    /// the transcript by the same prefix. Both depend on chatty-core's matcher
+    /// recognising it — if the text drifts, the retry silently becomes
+    /// unbounded and visible at once.
+    #[test]
+    fn retry_follow_up_is_recognised_as_a_protocol_nudge() {
+        assert!(
+            chatty_core::services::agent_task_controller::is_protocol_follow_up_text(
+                MALFORMED_TOOL_CALL_FOLLOW_UP
+            ),
+            "the retry nudge must be filtered from the transcript like the others"
+        );
+    }
+
+    #[test]
+    fn retry_follow_up_explains_what_to_do_differently() {
+        let text = MALFORMED_TOOL_CALL_FOLLOW_UP;
+        assert!(text.contains("malformed or truncated"), "names the cause");
+        assert!(text.contains("smaller steps"), "offers a way out");
+    }
+
+    #[test]
+    fn detects_truncated_tool_call_arguments() {
+        assert!(is_malformed_tool_call_error(
+            "CompletionError: ResponseError: tool call `shell_execute` arrived with \
+             malformed JSON input: EOF while parsing a string at line 1 column 308"
+        ));
+    }
+
+    #[test]
+    fn ignores_transport_and_auth_failures() {
+        for other in [
+            "CompletionError: ProviderError: Http client error: error decoding response body",
+            "401 Unauthorized",
+            "SSE error: connection reset",
+        ] {
+            assert!(
+                !is_malformed_tool_call_error(other),
+                "{other} should not be treated as a malformed tool call"
+            );
+        }
     }
 }

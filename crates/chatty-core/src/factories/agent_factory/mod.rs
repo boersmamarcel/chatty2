@@ -488,6 +488,48 @@ impl AgentClient {
             None
         };
 
+        // Create the built-in browser tools (Lane A: localhost and workspace
+        // file:// only). Deliberately not gated on `fetch_enabled` — this lane
+        // never leaves the machine. A workspace is required because screenshots
+        // and console dumps have to be written somewhere.
+        #[cfg(feature = "browser")]
+        let browser_tools: Option<crate::tools::browser_tools::BrowserTools> = {
+            let enabled = exec_settings
+                .as_ref()
+                .map(|s| s.browser_enabled)
+                .unwrap_or(false);
+            let workspace = exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.clone())
+                .map(std::path::PathBuf::from);
+            // Screenshots need somewhere to be queued for display; without the
+            // artifact sink the tool would capture images nobody ever sees.
+            match (enabled, workspace, pending_artifacts.clone()) {
+                (true, Some(workspace), Some(pending_artifacts)) => {
+                    tracing::info!(workspace = %workspace.display(), "Browser tools enabled");
+                    let manager = std::sync::Arc::new(
+                        crate::services::browser::BrowserManager::lane_a(Some(workspace)),
+                    );
+                    Some(crate::tools::browser_tools::build_browser_tools(
+                        manager,
+                        pending_artifacts,
+                    ))
+                }
+                (true, None, _) => {
+                    tracing::info!("Browser tools disabled (no workspace directory configured)");
+                    None
+                }
+                (true, _, None) => {
+                    tracing::info!("Browser tools disabled (no artifact sink available)");
+                    None
+                }
+                (false, ..) => {
+                    tracing::info!("Browser tools disabled (toggle is off)");
+                    None
+                }
+            }
+        };
+
         // Create browser-use tool
         let browser_use_tool: Option<BrowserUseTool> = if exec_settings
             .as_ref()
@@ -854,6 +896,10 @@ impl AgentClient {
             memory: remember_tool.is_some(),
             search_web: search_web_tool.is_some(),
             sub_agent: sub_agent_enabled,
+            #[cfg(feature = "browser")]
+            browser: browser_tools.is_some(),
+            #[cfg(not(feature = "browser"))]
+            browser: false,
             browser_use: browser_use_tool.is_some(),
             daytona: daytona_tool.is_some(),
             publish_module: false, // set below after publish_module_tool is created
@@ -958,6 +1004,7 @@ impl AgentClient {
             read_skill_tool: read_skill_tool,
             search_web_tool: search_web_tool,
             sub_agent_tool: sub_agent_tool,
+            browser_tools: browser_tools,
             browser_use_tool: browser_use_tool,
             daytona_tool: daytona_tool,
             list_agents_tool: list_agents_tool,

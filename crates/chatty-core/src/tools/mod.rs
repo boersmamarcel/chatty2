@@ -14,6 +14,8 @@ impl From<anyhow::Error> for ToolError {
 
 pub mod add_attachment_tool;
 pub mod agent_todo_tool;
+#[cfg(feature = "browser")]
+pub mod browser_tools;
 pub mod browser_use_tool;
 pub mod chart_tool;
 #[cfg(feature = "duckdb")]

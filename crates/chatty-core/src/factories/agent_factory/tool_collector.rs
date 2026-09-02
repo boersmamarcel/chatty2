@@ -2,6 +2,8 @@ use rig_agent::agent::{AgentBuilder, WithBuilderTools};
 
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
+#[cfg(feature = "browser")]
+use crate::tools::browser_tools::BrowserTools;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
     DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
@@ -128,6 +130,8 @@ pub(super) struct NativeTools {
     pub read_skill_tool: ReadSkillTool,
     pub search_web_tool: Option<SearchWebTool>,
     pub sub_agent_tool: Option<SubAgentTool>,
+    #[cfg(feature = "browser")]
+    pub browser_tools: Option<BrowserTools>,
     pub browser_use_tool: Option<BrowserUseTool>,
     pub daytona_tool: Option<DaytonaTool>,
     pub list_agents_tool: ListAgentsTool,
@@ -247,6 +251,16 @@ impl NativeTools {
         if let Some(t) = self.sub_agent_tool {
             b = b.tool(t);
         }
+        #[cfg(feature = "browser")]
+        if let Some((nav, snap, shot, console, net, resize)) = self.browser_tools {
+            b = b
+                .tool(nav)
+                .tool(snap)
+                .tool(shot)
+                .tool(console)
+                .tool(net)
+                .tool(resize);
+        }
         if let Some(t) = self.browser_use_tool {
             b = b.tool(t);
         }
@@ -298,6 +312,7 @@ macro_rules! native_tools {
         read_skill_tool: $read_skill_tool:expr,
         search_web_tool: $search_web_tool:expr,
         sub_agent_tool: $sub_agent_tool:expr,
+        browser_tools: $browser_tools:expr,
         browser_use_tool: $browser_use_tool:expr,
         daytona_tool: $daytona_tool:expr,
         list_agents_tool: $list_agents_tool:expr,
@@ -348,6 +363,8 @@ macro_rules! native_tools {
             read_skill_tool: $read_skill_tool,
             search_web_tool: $search_web_tool,
             sub_agent_tool: $sub_agent_tool,
+            #[cfg(feature = "browser")]
+            browser_tools: $browser_tools,
             browser_use_tool: $browser_use_tool,
             daytona_tool: $daytona_tool,
             list_agents_tool: $list_agents_tool,

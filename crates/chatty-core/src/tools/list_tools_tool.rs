@@ -381,6 +381,41 @@ impl ListToolsTool {
             });
         }
 
+        if tools.browser {
+            for (name, description) in [
+                (
+                    "browser_navigate",
+                    "Open a URL in the built-in browser. Localhost and workspace-local file:// URLs only — this is for reviewing pages you built, not for browsing the web.",
+                ),
+                (
+                    "browser_snapshot",
+                    "Read the current page as an accessibility tree with stable [eN] element refs.",
+                ),
+                (
+                    "browser_screenshot",
+                    "Capture the page as a PNG; it is shown in chat and attached to your next turn.",
+                ),
+                (
+                    "browser_console",
+                    "Drain console output and uncaught exceptions since the last call.",
+                ),
+                (
+                    "browser_network",
+                    "Drain network activity since the last call, highlighting failures and 4xx/5xx.",
+                ),
+                (
+                    "browser_resize",
+                    "Resize the viewport to check responsive behaviour.",
+                ),
+            ] {
+                native_tools.push(ToolInfo {
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    source: "native".to_string(),
+                });
+            }
+        }
+
         if tools.browser_use {
             native_tools.push(ToolInfo {
                 name: "browser_use".to_string(),
@@ -539,6 +574,7 @@ mod tests {
             memory: false,
             search_web: false,
             sub_agent: false,
+            browser: false,
             browser_use: false,
             daytona: false,
             publish_module: false,
@@ -571,6 +607,7 @@ mod tests {
             memory: true,
             search_web: true,
             sub_agent: true,
+            browser: true,
             browser_use: true,
             daytona: true,
             publish_module: true,

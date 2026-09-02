@@ -129,6 +129,12 @@ tiktoken-rs = "0.12.0"
 # Agent memory
 memvid-core = { version = "2.0.139", default-features = false, features = ["lex", "temporal_track"] }
 
+# Browser control (AGE-142 / AGE-152) — CDP client over the generated protocol types.
+# 0.9.1 lines up with the workspace pins (tokio 1, reqwest 0.13, thiserror 2, serde 1).
+chromiumoxide = "0.9.1"
+# Locating an installed Chrome on PATH (also a chromiumoxide dep, kept in sync).
+which = "8"
+
 # GPUI (UI only)
 gpui = "0.2.2"
 gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }

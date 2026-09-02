@@ -36,6 +36,14 @@ pub struct ExecutionSettingsModel {
     /// Requires workspace_dir to be set and the workspace to be a git repository.
     #[serde(default)]
     pub git_enabled: bool,
+    /// Expose the built-in browser tools (navigate, snapshot, screenshot,
+    /// console, network, resize) to the model.
+    ///
+    /// Requires workspace_dir to be set — screenshots and console dumps are
+    /// written there. Opt-in: the first use downloads a pinned Chrome build if
+    /// no suitable system Chrome is installed.
+    #[serde(default)]
+    pub browser_enabled: bool,
     /// Expose the execute_code tool to the model.
     /// Python may run via Monty; other languages require Docker fallback.
     #[serde(default)]
@@ -94,6 +102,7 @@ impl Default for ExecutionSettingsModel {
             filesystem_write_enabled: true, // Enabled by default when workspace is set
             fetch_enabled: true,           // Enabled by default for zero-config web access
             git_enabled: false,            // Opt-in: requires workspace with git repo
+            browser_enabled: false,        // Opt-in: may download a Chrome build on first use
             execute_code_enabled: false,   // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
             docker_host: None,
