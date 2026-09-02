@@ -264,27 +264,31 @@ if !cx.has_global::<ConversationsStore>() {
 }
 ```
 
-**Entity references in globals**: Store `WeakEntity<T>` to avoid circular references:
+**Entity references in globals**: Use the generic wrappers in `global_entity.rs` — `GlobalWeakEntity<T>` (default; entity's lifetime is owned elsewhere) or `GlobalStrongEntity<T>` (the global itself keeps the entity alive, e.g. `StreamManager`, `ModelsNotifier`):
 
 ```rust
-// Create entity and store weak reference
-let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
-cx.set_global(settings::models::GlobalModelsNotifier {
-    entity: Some(models_notifier.downgrade()),
-});
+// Weak — entity owned elsewhere, caller must upgrade before use
+pub type GlobalMyNotifier = GlobalWeakEntity<MyNotifier>;
+cx.set_global(GlobalMyNotifier::new(entity.downgrade()));
 
-// Access later
-if let Some(weak_notifier) = cx.try_global::<GlobalModelsNotifier>()
-    .and_then(|g| g.entity.clone())
-    && let Some(notifier) = weak_notifier.upgrade()
-{
+if let Some(notifier) = cx.try_global::<GlobalMyNotifier>().and_then(|g| g.try_upgrade()) {
+    notifier.update(cx, |_notifier, cx| {
+        // Use notifier
+    });
+}
+
+// Strong — global owns the entity for the app's lifetime (no downgrade)
+pub type GlobalModelsNotifier = GlobalStrongEntity<ModelsNotifier>;
+cx.set_global(GlobalModelsNotifier::new(models_notifier));
+
+if let Some(notifier) = cx.try_global::<GlobalModelsNotifier>().and_then(|g| g.get()) {
     notifier.update(cx, |_notifier, cx| {
         // Use notifier
     });
 }
 ```
 
-**Gotcha**: Always use `WeakEntity` when storing entities in globals to prevent memory leaks.
+**Gotcha**: Default to `GlobalWeakEntity` to avoid circular references. Only reach for `GlobalStrongEntity` when the global must be the sole thing keeping the entity alive (e.g. a notifier with no other owner that must outlive individual windows).
 
 ### 2. Event-Subscribe Patterns
 
@@ -305,8 +309,8 @@ pub struct ModelsNotifier;
 
 impl EventEmitter<ModelsNotifierEvent> for ModelsNotifier {}
 
-// Emit events (app_controller.rs)
-if let Some(notifier) = weak_notifier.upgrade() {
+// Emit events (models_controller.rs)
+if let Some(notifier) = cx.try_global::<GlobalModelsNotifier>().and_then(|g| g.get()) {
     notifier.update(cx, |_notifier, cx| {
         cx.emit(ModelsNotifierEvent::ModelsReady);
     });
