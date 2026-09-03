@@ -1276,6 +1276,7 @@ fn normalize_address_bar_url(input: &str) -> String {
     format!("https://{trimmed}")
 }
 
+#[allow(clippy::too_many_arguments)] // Rendering function threading per-frame view state
 fn browser_rendered_body(
     browser: &BrowserPreview,
     control: ControlHolder,
@@ -1423,9 +1424,11 @@ fn browser_rendered_body(
                         let focus = focus.clone();
                         move |event, window, cx| {
                             window.focus(&focus);
-                            let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
-                            else {
+                            let Some((x, y)) = browser_viewport_position(
+                                *bounds.borrow(),
+                                event.position,
+                                viewport,
+                            ) else {
                                 return;
                             };
                             let Some(button) = browser_mouse_button(event.button) else {
@@ -1450,9 +1453,11 @@ fn browser_rendered_body(
                         let entity = entity.clone();
                         let bounds = frame_bounds.clone();
                         move |event, _window, cx| {
-                            let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
-                            else {
+                            let Some((x, y)) = browser_viewport_position(
+                                *bounds.borrow(),
+                                event.position,
+                                viewport,
+                            ) else {
                                 return;
                             };
                             let Some(button) = browser_mouse_button(event.button) else {
@@ -1477,9 +1482,11 @@ fn browser_rendered_body(
                         let entity = entity.clone();
                         let bounds = frame_bounds.clone();
                         move |event, _window, cx| {
-                            let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
-                            else {
+                            let Some((x, y)) = browser_viewport_position(
+                                *bounds.borrow(),
+                                event.position,
+                                viewport,
+                            ) else {
                                 return;
                             };
                             let modifiers = browser_modifiers(event.modifiers);
@@ -1497,9 +1504,11 @@ fn browser_rendered_body(
                         let entity = entity.clone();
                         let bounds = frame_bounds.clone();
                         move |event, _window, cx| {
-                            let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
-                            else {
+                            let Some((x, y)) = browser_viewport_position(
+                                *bounds.borrow(),
+                                event.position,
+                                viewport,
+                            ) else {
                                 return;
                             };
                             let modifiers = browser_modifiers(event.modifiers);
