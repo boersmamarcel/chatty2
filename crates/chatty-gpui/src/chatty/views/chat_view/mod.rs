@@ -976,9 +976,12 @@ impl ChatView {
 
     fn maybe_open_browser_artifact(&mut self, cx: &mut Context<Self>) {
         self.ensure_artifact_close_wired(cx);
-        if self.artifact_dismissed {
-            return;
-        }
+        // Deliberately not gated on `artifact_dismissed`, unlike the other
+        // artifact kinds: this is a live session the human-takeover feature
+        // (AGE-156) depends on being reachable, not a one-shot file preview.
+        // Closing the panel hides it for now; the next browser tool call
+        // (a fresh `tool_id`, deduped below) brings it back rather than
+        // leaving the take-control lock permanently unreachable.
         let Some(tool_id) = self.last_browser_tool_call(cx) else {
             return;
         };
