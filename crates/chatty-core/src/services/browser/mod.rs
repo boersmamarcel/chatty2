@@ -1,9 +1,12 @@
 //! Built-in browser control (AGE-142).
 //!
 //! One CDP session with three eventual consumers: the agent's tools, the artifact
-//! viewport (AGE-155), and forwarded user input (AGE-156). Stage 1 wires only the
-//! first — the layer is headless and the tools are restricted to Lane A
-//! (localhost and workspace-local `file://` URLs, no credentials in play).
+//! viewport (AGE-155), and forwarded user input (AGE-156). The layer is headless.
+//! Tools default to Lane A (localhost and workspace-local `file://` URLs, no
+//! credentials in play); when the app's internet-access setting is on, the
+//! agent factory instead builds an open-web manager (`BrowserManager::open_web`)
+//! that also allows any public http(s) host, gated by the same SSRF denylist
+//! `fetch_tool` uses.
 //!
 //! Layout:
 //! - [`error`] — every failure the agent can observe
@@ -68,6 +71,25 @@ impl BrowserManager {
             session: Mutex::new(None),
             snapshot: Mutex::new(None),
         }
+    }
+
+    /// An ephemeral manager with the open-web policy: everything Lane A allows,
+    /// plus any public http(s) host. Gated by the caller on the app's
+    /// internet-access setting — this constructor itself does not check it.
+    pub fn open_web(workspace: Option<PathBuf>) -> Self {
+        Self {
+            profile: BrowserProfile::Ephemeral,
+            policy: NavigationPolicy::open(workspace.clone()),
+            workspace,
+            session: Mutex::new(None),
+            snapshot: Mutex::new(None),
+        }
+    }
+
+    /// Whether this manager's policy allows navigating off-machine, so tool
+    /// descriptions can tell the model what is actually allowed right now.
+    pub fn allows_open_web(&self) -> bool {
+        matches!(self.policy, NavigationPolicy::Open { .. })
     }
 
     /// The configured workspace, which the tools need somewhere to write into.

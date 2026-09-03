@@ -1,8 +1,11 @@
-//! Lane A browser tools: the self-review loop.
+//! Browser tools: the self-review loop, plus reading the open web.
 //!
 //! The agent renders what it built, looks at it, critiques it, edits, reloads.
-//! Localhost and workspace-local `file://` only at this stage — no credentials
-//! are in play, so none of these tools needs an approval gate.
+//! Localhost and workspace-local `file://` by default (Lane A); with internet
+//! access on, navigation also allows public http(s) hosts (still refusing
+//! private/internal network targets via the shared SSRF guard). Either way
+//! the profile is ephemeral — no stored credentials are ever in play, so
+//! none of these tools needs an approval gate.
 //!
 //! Two deliberate choices about tokens, made here rather than retrofitted:
 //!
@@ -103,12 +106,21 @@ impl Tool for BrowserNavigateTool {
     type Output = NavigateOutput;
 
     fn description(&self) -> String {
-        "Open a URL in the built-in browser. Only localhost URLs (http://localhost:PORT, \
-         http://127.0.0.1:PORT) and file:// URLs inside the workspace are allowed — this \
-         browser is for reviewing pages you built, not for browsing the web. Use search_web \
-         or fetch for anything on the internet. Navigating invalidates every element ref \
-         from a previous browser_snapshot."
-            .to_string()
+        if self.manager.allows_open_web() {
+            "Open a URL in the built-in browser. Internet access is enabled, so any public \
+             http(s) URL is allowed, plus localhost URLs (http://localhost:PORT, \
+             http://127.0.0.1:PORT) and file:// URLs inside the workspace — private/internal \
+             network targets (RFC-1918, link-local, cloud metadata) stay refused either way. \
+             Navigating invalidates every element ref from a previous browser_snapshot."
+                .to_string()
+        } else {
+            "Open a URL in the built-in browser. Only localhost URLs (http://localhost:PORT, \
+             http://127.0.0.1:PORT) and file:// URLs inside the workspace are allowed — enable \
+             internet access in Settings to browse the open web here too. Until then, use \
+             search_web or fetch for anything on the internet. Navigating invalidates every \
+             element ref from a previous browser_snapshot."
+                .to_string()
+        }
     }
 
     fn parameters(&self) -> serde_json::Value {

@@ -2,7 +2,6 @@
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -397,110 +396,11 @@ fn unique_path(path: PathBuf) -> PathBuf {
 
 /// Validate that a URL does not target private, internal, or reserved network hosts.
 ///
-/// Blocks loopback (127.x.x.x, ::1), RFC-1918 private ranges (10.x, 172.16-31.x, 192.168.x),
-/// link-local (169.254.x.x, fe80::), cloud metadata endpoints (169.254.169.254), and other
-/// reserved addresses to prevent SSRF attacks.
+/// Delegates to the shared SSRF guard (`services::ssrf_guard`) so this tool and the
+/// browser's internet-enabled navigation policy enforce the same denylist.
 fn validate_url_host(url: &str) -> Result<(), ToolError> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| ToolError::OperationFailed(format!("Invalid URL: {}", e)))?;
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ToolError::OperationFailed("URL has no host".to_string()))?;
-
-    // Check hostname-based blocklist first (catches localhost even without DNS)
-    if is_blocked_hostname(host) {
-        return Err(ToolError::OperationFailed(format!(
-            "Access denied: requests to '{}' are blocked for security (SSRF protection)",
-            host
-        )));
-    }
-
-    // Try to parse as IP address directly.
-    // Strip brackets for IPv6: host_str() returns "[::1]" but IpAddr expects "::1".
-    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = ip_str.parse::<IpAddr>()
-        && is_private_ip(&ip)
-    {
-        return Err(ToolError::OperationFailed(format!(
-            "Access denied: requests to private/internal IP '{}' are blocked for security (SSRF protection)",
-            ip
-        )));
-    }
-
-    // For hostnames, resolve to IP and check the resolved address.
-    // This catches DNS rebinding / split-horizon attacks where a public hostname
-    // resolves to a private IP.
-    if ip_str.parse::<IpAddr>().is_err() {
-        // Use std::net for synchronous resolution (sufficient for validation)
-        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
-            for addr in addrs {
-                if is_private_ip(&addr.ip()) {
-                    warn!(
-                        host = %host,
-                        resolved_ip = %addr.ip(),
-                        "Blocked DNS-resolved private IP"
-                    );
-                    return Err(ToolError::OperationFailed(format!(
-                        "Access denied: '{}' resolves to private/internal IP {} (SSRF protection)",
-                        host,
-                        addr.ip()
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Check if a hostname string is a known-blocked name (case-insensitive).
-fn is_blocked_hostname(host: &str) -> bool {
-    let h = host.to_lowercase();
-    h == "localhost"
-        || h == "metadata.google.internal"  // GCP metadata
-        || h.ends_with(".internal")
-        || h.ends_with(".local")
-}
-
-/// Check if an IP address belongs to a private, loopback, link-local, or otherwise
-/// reserved network range that should not be accessible from the fetch tool.
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 127.0.0.0/8 — loopback
-            octets[0] == 127
-            // 10.0.0.0/8 — RFC-1918 private
-            || octets[0] == 10
-            // 172.16.0.0/12 — RFC-1918 private
-            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-            // 192.168.0.0/16 — RFC-1918 private
-            || (octets[0] == 192 && octets[1] == 168)
-            // 169.254.0.0/16 — link-local (includes AWS/GCP/Azure metadata at 169.254.169.254)
-            || (octets[0] == 169 && octets[1] == 254)
-            // 0.0.0.0/8 — "this" network
-            || octets[0] == 0
-            // 100.64.0.0/10 — shared address space (CGN, often internal)
-            || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-            // 198.18.0.0/15 — benchmarking
-            || (octets[0] == 198 && (18..=19).contains(&octets[1]))
-            // 224.0.0.0/4 — multicast
-            || octets[0] >= 224
-        }
-        IpAddr::V6(v6) => {
-            // ::1 — loopback
-            v6.is_loopback()
-            // fe80::/10 — link-local
-            || (v6.segments()[0] & 0xffc0) == 0xfe80
-            // fc00::/7 — unique local (ULA, RFC-4193)
-            || (v6.segments()[0] & 0xfe00) == 0xfc00
-            // :: — unspecified
-            || v6.is_unspecified()
-            // ::ffff:x.x.x.x — IPv4-mapped, check the embedded v4 address
-            || v6.to_ipv4_mapped().map(|v4| is_private_ip(&IpAddr::V4(v4))).unwrap_or(false)
-        }
-    }
+    crate::services::ssrf_guard::check_public_host(url)
+        .map_err(|reason| ToolError::OperationFailed(format!("Access denied: {reason}")))
 }
 
 /// Simple heuristic to detect HTML content when content-type is missing or ambiguous
@@ -781,76 +681,8 @@ mod tests {
     }
 
     // --- SSRF protection tests ---
-
-    #[test]
-    fn test_is_private_ip_loopback() {
-        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"127.0.0.2".parse().unwrap()));
-        assert!(is_private_ip(&"::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_rfc1918() {
-        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"10.255.255.255".parse().unwrap()));
-        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"172.31.255.255".parse().unwrap()));
-        assert!(is_private_ip(&"192.168.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"192.168.255.255".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_link_local_and_metadata() {
-        // AWS/GCP/Azure metadata endpoint
-        assert!(is_private_ip(&"169.254.169.254".parse().unwrap()));
-        assert!(is_private_ip(&"169.254.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_public() {
-        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
-        assert!(!is_private_ip(&"93.184.216.34".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_other_reserved() {
-        assert!(is_private_ip(&"0.0.0.0".parse().unwrap()));
-        assert!(is_private_ip(&"100.64.0.1".parse().unwrap())); // CGN
-        assert!(is_private_ip(&"224.0.0.1".parse().unwrap())); // multicast
-        assert!(is_private_ip(&"255.255.255.255".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_v6() {
-        // ULA
-        assert!(is_private_ip(&"fd00::1".parse().unwrap()));
-        // Link-local
-        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
-        // Unspecified
-        assert!(is_private_ip(&"::".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_v4_mapped_v6() {
-        // ::ffff:127.0.0.1 should be blocked
-        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
-        // ::ffff:169.254.169.254 (metadata via v6)
-        assert!(is_private_ip(&"::ffff:169.254.169.254".parse().unwrap()));
-        // ::ffff:8.8.8.8 should be allowed
-        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_blocked_hostname() {
-        assert!(is_blocked_hostname("localhost"));
-        assert!(is_blocked_hostname("LOCALHOST"));
-        assert!(is_blocked_hostname("metadata.google.internal"));
-        assert!(is_blocked_hostname("foo.internal"));
-        assert!(is_blocked_hostname("printer.local"));
-        assert!(!is_blocked_hostname("example.com"));
-        assert!(!is_blocked_hostname("my-internal-api.com")); // "internal" in domain name is fine
-    }
+    // Low-level is_private_ip/is_blocked_hostname coverage lives in
+    // services::ssrf_guard, which this tool's validate_url_host delegates to.
 
     #[test]
     fn test_validate_url_host_blocks_private() {

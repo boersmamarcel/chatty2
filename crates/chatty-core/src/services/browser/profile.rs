@@ -39,6 +39,12 @@ impl BrowserProfile {
 pub enum NavigationPolicy {
     /// Lane A: loopback HTTP(S) plus `file://` under the workspace. Nothing else.
     LocalOnly { workspace: Option<PathBuf> },
+    /// Open web access, gated by the same internet-access setting that already
+    /// gates `fetch_tool`/`search_web`. A superset of `LocalOnly` — loopback and
+    /// workspace `file://` still work — plus any public http(s) host. Uses the
+    /// same SSRF denylist as `fetch_tool` so private/internal network targets
+    /// (RFC-1918, link-local, cloud metadata) stay refused either way.
+    Open { workspace: Option<PathBuf> },
     /// Lane B (AGE-158): a per-task origin allowlist. Not constructed yet.
     #[allow(dead_code)]
     Allowlist { origins: Vec<String> },
@@ -50,6 +56,11 @@ impl NavigationPolicy {
         NavigationPolicy::LocalOnly { workspace }
     }
 
+    /// Open-web policy anchored at the configured workspace directory.
+    pub fn open(workspace: Option<PathBuf>) -> Self {
+        NavigationPolicy::Open { workspace }
+    }
+
     /// Check a single URL against the policy.
     ///
     /// Returns `NavigationRefused` naming the policy, never a bare bool — the
@@ -59,6 +70,7 @@ impl NavigationPolicy {
             NavigationPolicy::LocalOnly { workspace } => {
                 check_local_only(url, workspace.as_deref())
             }
+            NavigationPolicy::Open { workspace } => check_open(url, workspace.as_deref()),
             NavigationPolicy::Allowlist { origins } => check_allowlist(url, origins),
         }
     }
@@ -110,25 +122,57 @@ fn check_local_only(url: &str, workspace: Option<&Path>) -> Result<(), BrowserEr
                 )))
             }
         }
-        "file" => {
-            let workspace = workspace.ok_or(BrowserError::NoWorkspace)?;
-            let path = parsed.to_file_path().map_err(|_| {
-                BrowserError::NavigationRefused(format!("{url} is not a usable file path"))
-            })?;
-            if path_is_within(&path, workspace) {
-                Ok(())
-            } else {
-                Err(BrowserError::NavigationRefused(format!(
-                    "{} is outside the workspace directory {}",
-                    path.display(),
-                    workspace.display()
-                )))
-            }
-        }
+        "file" => check_workspace_file_url(url, &parsed, workspace),
         other => Err(BrowserError::NavigationRefused(format!(
             "scheme {other}: is not allowed; this browser profile only allows \
              http(s) to localhost and file:// URLs under the workspace"
         ))),
+    }
+}
+
+/// Open-web policy: loopback and workspace `file://` still work (same as
+/// [`check_local_only`]), plus any public http(s) host that clears the
+/// shared SSRF denylist.
+fn check_open(url: &str, workspace: Option<&Path>) -> Result<(), BrowserError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| BrowserError::NavigationRefused(format!("invalid URL {url}: {e}")))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| BrowserError::NavigationRefused(format!("{url} has no host")))?;
+            if is_loopback_host(host) {
+                return Ok(());
+            }
+            crate::services::ssrf_guard::check_public_host(url)
+                .map_err(BrowserError::NavigationRefused)
+        }
+        "file" => check_workspace_file_url(url, &parsed, workspace),
+        other => Err(BrowserError::NavigationRefused(format!(
+            "scheme {other}: is not allowed; only http(s) and workspace file:// URLs \
+             are permitted"
+        ))),
+    }
+}
+
+fn check_workspace_file_url(
+    url: &str,
+    parsed: &reqwest::Url,
+    workspace: Option<&Path>,
+) -> Result<(), BrowserError> {
+    let workspace = workspace.ok_or(BrowserError::NoWorkspace)?;
+    let path = parsed
+        .to_file_path()
+        .map_err(|_| BrowserError::NavigationRefused(format!("{url} is not a usable file path")))?;
+    if path_is_within(&path, workspace) {
+        Ok(())
+    } else {
+        Err(BrowserError::NavigationRefused(format!(
+            "{} is outside the workspace directory {}",
+            path.display(),
+            workspace.display()
+        )))
     }
 }
 
@@ -304,5 +348,64 @@ mod tests {
             .label(),
             "default"
         );
+    }
+
+    fn open() -> NavigationPolicy {
+        NavigationPolicy::open(Some(PathBuf::from("/ws")))
+    }
+
+    #[test]
+    fn open_allows_public_hosts() {
+        let policy = open();
+        for url in ["http://example.com/", "https://example.com/page"] {
+            assert!(policy.check(url).is_ok(), "{url} should be allowed");
+        }
+    }
+
+    #[test]
+    fn open_still_allows_loopback_and_workspace_files() {
+        let policy = open();
+        assert!(policy.check("http://localhost:3000/").is_ok());
+        assert!(policy.check("http://127.0.0.1:5173/").is_ok());
+        assert!(policy.check("file:///ws/index.html").is_ok());
+    }
+
+    #[test]
+    fn open_refuses_private_and_internal_targets() {
+        let policy = open();
+        for url in [
+            "http://192.168.1.10/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/internal",
+            "http://metadata.google.internal/computeMetadata/v1/",
+        ] {
+            assert!(
+                matches!(policy.check(url), Err(BrowserError::NavigationRefused(_))),
+                "{url} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn open_refuses_file_urls_outside_workspace() {
+        let policy = open();
+        assert!(
+            matches!(
+                policy.check("file:///etc/passwd"),
+                Err(BrowserError::NavigationRefused(_))
+            ),
+            "traversal outside the workspace must be refused"
+        );
+    }
+
+    #[test]
+    fn open_refuses_non_http_schemes() {
+        let policy = open();
+        for url in ["ftp://example.com/x", "chrome://settings"] {
+            assert!(
+                matches!(policy.check(url), Err(BrowserError::NavigationRefused(_))),
+                "{url} should be refused"
+            );
+        }
     }
 }
