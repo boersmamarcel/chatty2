@@ -30,6 +30,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+pub mod at_mention;
 pub mod auth;
 pub mod curated_mcp;
 pub mod exporters;
@@ -41,6 +42,7 @@ pub mod repositories;
 pub mod sandbox;
 pub mod services;
 pub mod settings;
+pub mod slash_commands;
 pub mod token_budget;
 pub mod tools;
 
