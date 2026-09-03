@@ -176,6 +176,10 @@ pub struct ArtifactView {
     /// instead of just scaling a static-size capture up. `(0, 0)` before
     /// the first screencast frame's bounds are known.
     browser_requested_size: (u32, u32),
+    /// The in-flight debounced CDP retarget, if any (AGE-156). Replacing
+    /// this drops (and so cancels, per GPUI's `Task`) whatever retarget
+    /// was previously scheduled — see `sync_browser_viewport_size`.
+    browser_resize_task: Option<Task<()>>,
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
@@ -249,6 +253,7 @@ impl ArtifactView {
             browser_current_url: String::new(),
             browser_address_dirty: false,
             browser_requested_size: (0, 0),
+            browser_resize_task: None,
             workspace_root: None,
             load_gen: 0,
             editor,
@@ -591,6 +596,7 @@ impl ArtifactView {
         self.browser_current_url.clear();
         self.browser_address_dirty = true;
         self.browser_requested_size = (0, 0);
+        self.browser_resize_task = None;
         // Dropping the senders ends the drain loops (AGE-156) — their
         // `.recv()` returns `None` once every sender is gone.
         self.browser_mouse_tx = None;
@@ -1150,14 +1156,26 @@ impl ArtifactView {
     /// just letterboxes a static-resolution image instead of showing more
     /// of the real page.
     ///
-    /// Debounced against `RESIZE_THRESHOLD_PX` so ordinary per-frame
-    /// repaints (this runs on every `render()`) don't spam CDP with resize
-    /// calls over sub-pixel layout jitter — only a real size change
-    /// retargets. `browser_frame_bounds` is one paint behind `render()`
-    /// (the `canvas()` prepaint that fills it runs after layout), which
-    /// just means the retarget lags a frame; harmless for a live view.
+    /// Debounced two ways: `RESIZE_THRESHOLD_PX` skips sub-pixel layout
+    /// jitter outright, and a real size change schedules the actual CDP
+    /// call `RESIZE_DEBOUNCE` out rather than firing immediately. A window
+    /// drag re-renders (and so calls this) many times a second; without the
+    /// delay, each intermediate size fires its own `start_screencast`, and
+    /// those calls race — nothing guarantees they land at Chrome in the
+    /// order they were sent, so a fast shrink-then-expand can have the
+    /// shrink arrive *last* and the panel gets stuck showing (or, worse,
+    /// briefly has no valid frame for) the wrong resolution. Storing the
+    /// scheduled retarget in `browser_resize_task` and replacing it on
+    /// every call means only the size that's still current once the drag
+    /// settles ever reaches CDP — GPUI cancels a `Task` when it's dropped,
+    /// so superseded retargets never fire at all.
+    ///
+    /// `browser_frame_bounds` is one paint behind `render()` (the
+    /// `canvas()` prepaint that fills it runs after layout), which just
+    /// means the retarget lags a frame further; harmless for a live view.
     fn sync_browser_viewport_size(&mut self, cx: &mut Context<Self>) {
         const RESIZE_THRESHOLD_PX: u32 = 24;
+        const RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
         let Some(session) = self.browser_session.clone() else {
             return;
         };
@@ -1174,20 +1192,18 @@ impl ArtifactView {
         {
             return;
         }
-        tracing::debug!(
-            from_width = last_width,
-            from_height = last_height,
-            to_width = width,
-            to_height = height,
-            "browser: retargeting screencast to panel size"
-        );
         self.browser_requested_size = (width, height);
-        cx.background_spawn(async move {
+        self.browser_resize_task = Some(cx.background_spawn(async move {
+            tokio::time::sleep(RESIZE_DEBOUNCE).await;
+            tracing::debug!(
+                width,
+                height,
+                "browser: retargeting screencast to panel size"
+            );
             if let Err(e) = session.start_screencast(width, height).await {
                 tracing::warn!(error = %e, width, height, "browser: viewport retarget failed");
             }
-        })
-        .detach();
+        }));
     }
 
     fn sync_outline(&mut self, cx: &mut Context<Self>) {
